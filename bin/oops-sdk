@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# oops-sdk - the dev CLI for the shared target-side C library.
+#
+# The same verbs every OOPS repository carries, so `oops build oops-sdk` and
+# `./bin/oops-sdk build` are one command reached two ways:
+#
+#   ./bin/oops-sdk build          # build the static archive
+#   ./bin/oops-sdk check          # what CI checks: a clean build at -Werror
+#   ./bin/oops-sdk clean          # remove build output
+#
+# # Why there is no test, lint or fmt verb yet
+#
+# There is nothing behind them, and a verb that runs nothing and exits 0 is worse than a
+# missing one: `oops all` would report this repository green without having checked anything,
+# which is the failure OOPS conventions section 3 exists to prevent. They fail loudly below
+# with what would have to be built first, and they become real verbs the day that exists.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# The build is a cross-compile even on Linux: freestanding, no standard library, targeting the
+# platform's FreeBSD-derived ABI. `make` carries the flags; they are not repeated here, so
+# there is one place to change them. docs/BUILDING.md says what each one is for.
+build() { make all; }
+clean() { make clean; }
+
+# CI's check is a clean build. Every source is compiled at `-Wall -Wextra -Werror`, so a
+# warning anywhere is a failure - which is the whole of the check today, and this file says so
+# rather than implying a suite that does not exist.
+check() {
+    make clean
+    make all
+}
+
+# Loudly, with what is missing. See the header.
+unwired() {
+    cat >&2 <<MSG
+oops-sdk: no '$1' verb.
+
+Nothing implements it yet, and this script will not exit 0 as though it had:
+
+  test   needs a host-side harness. The library cross-compiles to the target, so a test
+         binary cannot run on the build machine as things stand - the host display backend
+         is the seam a harness would be built on.
+  lint   needs a linter chosen and wired. obSCEne runs clang-tidy through its own scripts.
+  fmt    needs a .clang-format in this repository. There is none, so formatting is whatever
+         each contributor's editor did.
+
+Run './bin/oops-sdk check' for what is actually checked: a clean build at -Werror.
+MSG
+    exit 1
+}
+
+usage() {
+    sed -n '2,10p' "$0" | sed 's|^# \{0,1\}||'
+    exit "${1:-0}"
+}
+
+cmd="${1:-check}"
+shift || true
+case "$cmd" in
+    check) check ;;
+    build) build ;;
+    clean) clean ;;
+    test | lint | fmt | doc) unwired "$cmd" ;;
+    -h | --help | help) usage ;;
+    *)
+        echo "unknown verb: $cmd" >&2
+        usage 1
+        ;;
+esac

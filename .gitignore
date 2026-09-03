@@ -1,5 +1,36 @@
+# Build output. The archive is built, not shipped: nothing under build/ is tracked, and a
+# consumer either links what it built here or compiles OOPS_SDK_C_SRCS itself.
 build/
 *.o
-!lib/*.a
-.DS_Store
+*.a
+*.elf
 
+# There is deliberately no `!lib/*.a` negation here, and no `lib/` directory.
+#
+# The first version of this file carried one, and the README documented a slot for a vendor
+# tiler archive beside it. Neither the directory nor the archive ever existed - but a
+# documented slot plus a rule that un-ignores exactly the file that would fill it is how a
+# vendor binary gets committed by somebody moving quickly. This repository links weak
+# declarations against symbols the platform already exports; it does not carry the vendor's
+# code, and there is nowhere for it to land. See OOPS conventions section 1.
+
+# No `__pycache__/` or `*.pyc` rule, deliberately. There is no Python in this repository and
+# there is not meant to be - the build is make and the scripts are shell. An ignore rule for
+# bytecode is a quiet accommodation for a language that is not allowed here: it would hide the
+# first stray file rather than let `git status` show it.
+
+# Claude Code's per-person overrides. A `settings.json` beside it would be shared; the
+# `.local` one is whoever is sitting here, and tracking it means their overrides arrive in
+# everybody else's clone.
+.claude/settings.local.json
+
+# Whatever the person editing this happens to run. None of it is anybody else's business,
+# and every one of these has been committed to some repository by accident at least once.
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

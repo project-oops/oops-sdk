@@ -1,0 +1,10 @@
+# Line endings are pinned, not left to whoever clones this.
+#
+# `core.autocrlf` is a per-machine setting, so without this file the same commit checks out
+# differently on two machines and the difference shows up as a diff nobody made. The rest of
+# the collection carries this file for that reason; this repository is built under WSL from a
+# Windows checkout, which is exactly the case that produces it.
+#
+# `text=auto` rather than a list of extensions: git detects binary content itself, and a list
+# only protects the extensions somebody remembered.
+* text=auto eol=lf
