@@ -1,0 +1,57 @@
+name: check
+
+# Every job begins the same three steps: check out the collection, check this repository
+# out *into* it, and ask `oops bootstrap` for the siblings this project needs. See
+# docs/BUILDING.md.
+#
+# oops-sdk needs no siblings - it is the bottom of the target-side stack and depends on
+# nothing. The bootstrap step is kept anyway: one shape, so that reading any workflow in the
+# collection teaches you all of them, and so the day this grows a dependency is not also the
+# day somebody discovers the preamble was special here.
+#
+# **This repository is linked into what obSCEne ships.** A change here reaches a consumer's
+# binaries without touching a line of the consumer, which is exactly the arrangement that
+# went unchecked in oops-libs until it had a workflow of its own.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: a clean build at -Werror
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/oops-sdk
+
+      # clang is on the runner image already; this fails loudly if that ever stops being
+      # true, rather than at the first compile with a message about a missing program.
+      - name: Toolchain
+        run: clang --version && ar --version | head -1
+
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap oops-sdk
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
+
+      # One step, because there is one dev command. `oops check oops-sdk` relays to
+      # `./bin/oops-sdk check`, which cleans and then rebuilds every source at
+      # `-Wall -Wextra -Werror`.
+      #
+      # That compile is the whole of the check, and this file says so rather than implying a
+      # suite that does not exist. There is no test verb here: the library cross-compiles to
+      # the target, so nothing it produces can be run on this runner. `./bin/oops-sdk test`
+      # exits 1 with what would have to be built first.
+      - name: oops check oops-sdk
+        run: OOPS/bin/oops check oops-sdk

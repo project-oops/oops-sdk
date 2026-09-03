@@ -1,0 +1,86 @@
+name: Deploy docs to GitHub Pages
+
+# The same shape oops-libs uses, and for the same reason: this is not one of the four, so it
+# publishes its documentation and nothing else. `/` redirects straight to it rather than
+# inventing a front page for a library that does not want one.
+#
+# `paths-ignore` rather than a `paths` allowlist. An allowlist that forgot `docs/**` is how
+# three of the sibling sites silently lagged their own documentation - the deploy went green
+# and published the previous commit's pages. Naming what cannot possibly change the site is
+# the safe direction to be wrong in.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "LICENSE-*"
+      - ".gitignore"
+      - ".gitattributes"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build site bundle
+    runs-on: ubuntu-latest
+    steps:
+      # The standard OOPS preamble, the same three steps every workflow in the collection
+      # begins with. See docs/BUILDING.md.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/oops-sdk
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap oops-sdk
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
+
+      - name: Assemble bundle
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          # The shared renderer, the same one the others call, so every set of docs in the
+          # collection looks alike. Grey rather than a project accent: this is not one of the
+          # four, and borrowing one of their colours would suggest it is.
+          bash ../tools/build-docs.sh . site "#8b9096" "oops-sdk"
+          cat > site/index.html <<'HTML'
+          <!DOCTYPE html>
+          <meta charset="utf-8">
+          <meta http-equiv="refresh" content="0; url=docs/">
+          <title>oops-sdk</title>
+          <a href="docs/">oops-sdk documentation</a>
+          HTML
+          du -sh site
+        working-directory: OOPS/oops-sdk
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: OOPS/oops-sdk/site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
