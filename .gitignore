@@ -1,0 +1,5 @@
+build/
+*.o
+!lib/*.a
+.DS_Store
+
