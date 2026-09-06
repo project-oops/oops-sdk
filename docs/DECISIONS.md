@@ -17,6 +17,8 @@ decisions made with the reasoning to hand.
 |---|---|---|---|---|
 | 🟢 | D001 | [A verb with nothing behind it fails, rather than passing](decisions/D001-a-verb-with-nothing-behind-it-fails.md) | decided | 2026-09-03 |
 | 🟢 | D002 | [There is no slot for a vendor archive](decisions/D002-there-is-no-slot-for-a-vendor-archive.md) | decided | 2026-09-03 |
+| 🟢 | D003 | [Source inclusion over static archives for freestanding consumers](decisions/D003-source-inclusion-over-static-archives-for-freestanding-consumers.md) | decided | 2026-09-04 |
+| 🟢 | D004 | [Privilege escalation, kernel offsets provenance, and explicit opt-in](decisions/D004-privilege-escalation-and-kernel-offsets-provenance.md) | decided | 2026-09-04 |
 
 | | meaning |
 |---|---|

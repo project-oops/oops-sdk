@@ -32,6 +32,10 @@ check() {
     make all
 }
 
+test() {
+    make test
+}
+
 # Loudly, with what is missing. See the header.
 unwired() {
     cat >&2 <<MSG
@@ -39,14 +43,11 @@ oops-sdk: no '$1' verb.
 
 Nothing implements it yet, and this script will not exit 0 as though it had:
 
-  test   needs a host-side harness. The library cross-compiles to the target, so a test
-         binary cannot run on the build machine as things stand - the host display backend
-         is the seam a harness would be built on.
   lint   needs a linter chosen and wired. obSCEne runs clang-tidy through its own scripts.
   fmt    needs a .clang-format in this repository. There is none, so formatting is whatever
          each contributor's editor did.
 
-Run './bin/oops-sdk check' for what is actually checked: a clean build at -Werror.
+Run './bin/oops-sdk check' for what is actually checked: a clean build and unit/integration tests.
 MSG
     exit 1
 }
@@ -62,7 +63,8 @@ case "$cmd" in
     check) check ;;
     build) build ;;
     clean) clean ;;
-    test | lint | fmt | doc) unwired "$cmd" ;;
+    test)  test ;;
+    lint | fmt | doc) unwired "$cmd" ;;
     -h | --help | help) usage ;;
     *)
         echo "unknown verb: $cmd" >&2

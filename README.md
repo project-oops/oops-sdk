@@ -8,24 +8,20 @@ time. Every project that has done it has written that layer again. This is that 
 written once.
 
 > **Status: in progress, and honest about which parts.** The display path is developed and
-> exercised on hardware. The other seven subsystems are thin wrappers over the platform
+> exercised on hardware. The other subsystems are thin wrappers over the platform
 > entry points, written to the shape of the interface rather than to a measured behaviour.
 > Treat anything outside display as a declaration of intent that compiles.
 
 ## The subsystems
 
-One header each, all of them behind `<oops/oops.h>` if you want the lot.
+One header each, all of them behind `<oops/oops.h>` if you want the lot. **Display is the one
+with real depth** (below); the rest are thin wrappers over the platform's own entry points -
+the controller, an audio output port, direct memory the GPU can address, the clock, threads
+and mutexes, and sockets enough for a payload to answer on a port - with more added as
+payloads need them.
 
-| header | what it covers |
-|---|---|
-| **`<oops/display.h>`** | Framebuffer and presentation, with a backend chosen at open time |
-| **`<oops/input.h>`** | Controller state, rumble, lightbar |
-| **`<oops/audio.h>`** | Opening an output port and writing frames to it |
-| **`<oops/memory.h>`** | Direct memory the GPU can address, and mapping it |
-| **`<oops/system.h>`** | The initial user, system notifications, what generation this is |
-| **`<oops/time.h>`** | Tick counter, frequency, sleeping |
-| **`<oops/thread.h>`** | Threads and mutexes over the platform's pthread entry points |
-| **`<oops/net.h>`** | Sockets, enough for a payload to answer on a port |
+**`include/` is the authority for the current set**, not this paragraph: the list grows, and a
+table here would lag it. Point a newcomer at the headers rather than at prose that goes stale.
 
 ### Display, and the two backends
 
@@ -52,27 +48,25 @@ thing you have to say is where it is:
 OOPS_SDK ?= $(abspath ../oops-sdk)
 include $(OOPS_SDK)/oops-sdk.mk
 
-INCLUDE  += $(OOPS_SDK_INCLUDE)
-LDOBJS   += $(OOPS_SDK_LIBS)
+INCLUDE += $(OOPS_SDK_INCLUDE)
+# Compile the SDK's sources alongside your own - see below for why source, not an archive.
+MY_SRCS += $(OOPS_SDK_C_SRCS)
 ```
 
-The helper defines these and nothing else:
+The helper defines just these:
 
 | variable | what it is |
 |---|---|
 | `OOPS_SDK_INCLUDE` | the `-I` flags for `include/` and the repository root |
-| `OOPS_SDK_LIB` | the archive the link needs, as a path - useful as a make prerequisite |
-| `OOPS_SDK_LIBS` | what to put on the link line |
-| `OOPS_SDK_C_SRCS` | the sources, for a consumer that compiles them rather than linking the archive |
+| `OOPS_SDK_C_SRCS` | the SDK's source files, to compile with your own |
 
-Then a target that builds the archive on demand:
-
-```makefile
-$(OOPS_SDK_LIB):
-	@$(MAKE) -C $(OOPS_SDK)
-```
-
-obSCEne is the first consumer and does exactly this; its `Makefile` is the worked example.
+**The consumer compiles the sources; there is no archive.** A prebuilt `.a` would freeze the
+SDK's compile flags, and on a freestanding target the SDK and the consumer must agree on the
+target triple, `-ffreestanding`, stack-protector and the rest - so the consumer's flags are
+made authoritative by compiling the sources under them. It also means a subsystem the consumer
+never calls is simply never compiled in. obSCEne is the first consumer and does exactly this -
+it compiles `$(OOPS_SDK_C_SRCS)` into its module and eboot objects; its `Makefile` is the
+worked example.
 
 ```c
 #include <oops/display.h>

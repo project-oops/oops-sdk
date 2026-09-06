@@ -31,51 +31,50 @@ for the target:
 | `-std=c11` | the language, stated rather than inherited from whatever clang defaults to this year |
 | `-Wall -Wextra -Werror` | see below |
 
-**`-Werror` is the check.** There is no test suite, so a clean compile of every source is the
-whole of what `check` verifies. That is a real gate rather than a formality - the eleven
-sources build with no warnings today, and a new one that does not is a failure rather than a
-line of output somebody scrolls past.
+**`-Werror` is the first gate.** A clean compile of every source, at `-Wall -Wextra -Werror`,
+is a real check rather than a formality: the sources build with no warnings today, and a new
+one that does not is a failure rather than a line of output somebody scrolls past.
+
+**There is now a second gate: a host test suite.** `make test` builds the subsystems for the
+build machine (not the target) and runs unit and integration tests against them - the seam the
+`host` display backend exists to make possible. A subsystem that cross-compiles but computes
+the wrong answer is caught here rather than on hardware.
 
 ## The verbs
 
 | verb | what it does |
 |---|---|
-| `build` | `make all` - the objects, then `liboops.a` |
-| `check` | `make clean` then `make all`, so the result is a full compile rather than whatever was already built |
+| `build` | `make all` - the objects, then the `liboops.a` archive that proves they link |
+| `test` | `make test` - the host unit and integration suite |
+| `check` | a clean build at `-Werror`; run before anything is called done |
 | `clean` | `make clean` |
 
-`test`, `lint`, `fmt` and `doc` **fail loudly** rather than exiting 0. Nothing implements
-them, and a verb that runs nothing and reports success would make `oops all` call this
-repository green without having checked it - the failure
+`lint`, `fmt` and `doc` **fail loudly** rather than exiting 0. Nothing implements them yet, and
+a verb that runs nothing and reports success would make `oops all` call this repository green
+without having checked it - the failure
 [conventions section 3](https://github.com/project-oops/OOPS/blob/main/docs/CONVENTIONS.md#3-honest-failure-over-plausible-output)
 exists to prevent. Running one prints what would have to be built first.
 
-## What a consumer has to do
+## What a consumer has to do: Source Inclusion (`.mk`)
 
-A payload does not check this repository out and copy files. It includes the makefile helper,
-which works out its own location:
+A payload or application includes the makefile helper, which provides `OOPS_SDK_INCLUDE` and `OOPS_SDK_C_SRCS`:
 
 ```makefile
 OOPS_SDK ?= $(abspath ../oops-sdk)
 include $(OOPS_SDK)/oops-sdk.mk
 
-INCLUDE += $(OOPS_SDK_INCLUDE)
+CFLAGS += $(OOPS_SDK_INCLUDE)
 
-# Build the archive on demand rather than requiring a separate step.
-$(OOPS_SDK_LIB):
-	@$(MAKE) -C $(OOPS_SDK)
-
-mypayload: $(MY_OBJS) $(OOPS_SDK_LIB)
-	$(CC) $(LINK_FLAGS) -o $@ $(MY_OBJS) $(OOPS_SDK_LIBS)
+mypayload: $(MY_OBJS) $(OOPS_SDK_C_SRCS)
+	$(CC) $(CFLAGS) $(LINK_FLAGS) -o $@ $(MY_OBJS) $(OOPS_SDK_C_SRCS)
 ```
 
-Four variables, and the helper defines no others: `OOPS_SDK_INCLUDE`, `OOPS_SDK_LIB`,
-`OOPS_SDK_LIBS`, `OOPS_SDK_C_SRCS`. **Make does not warn about an undefined variable** - it
-expands to nothing and the compile carries on without the include path - so a typo here fails
-as a missing header several steps later rather than at the line that caused it.
+### Why Source Inclusion over Static Archives (`.a`)
+1. **Freestanding Flag-Matching**: The consumer's codegen flags (`-target`, `-ffreestanding`, `-fno-builtin`, `-fno-stack-protector`, `-fPIC`, optimization levels) are authoritative across the entire codebase. A `.a` freezes them at SDK build time, risking ABI drift and subtle runtime breakage.
+2. **Weak-Symbol Safety**: Every platform entry point in `oops-sdk` is `__attribute__((weak))` and dynamically checked. Compiling sources directly ensures the linker does not drop weak members during archive symbol resolution.
+3. **Dead-Code Stripping**: The consumer retains full dead-code stripping via `-ffunction-sections -fdata-sections -Wl,--gc-sections`.
 
-obSCEne's `Makefile` is the worked example, and links the archive into both the module and the
-eboot.
+The `Makefile`'s `all` target builds `liboops.a` strictly as a local compile gate (`-Werror`) for `./bin/oops-sdk check`, while consumers link directly via `$(OOPS_SDK_C_SRCS)`.
 
 ## From the collection
 

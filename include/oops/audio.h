@@ -11,7 +11,9 @@ extern "C" {
 typedef struct oops_audio_port oops_audio_port_t;
 
 oops_audio_port_t *oops_audio_open(int sample_rate, int channels, int buffer_frames);
+int oops_audio_get_last_error(void);
 int oops_audio_write(oops_audio_port_t *port, const int16_t *pcm_samples, size_t frame_count);
+int oops_audio_set_volume(oops_audio_port_t *port, float left, float right);
 void oops_audio_close(oops_audio_port_t *port);
 
 #ifdef __cplusplus

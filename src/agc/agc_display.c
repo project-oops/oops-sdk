@@ -3,10 +3,10 @@
 #include "agc/display.h"
 #include "agc/tiler.h"
 
-/* PS5 Kernel / VideoOut stubs */
+/* Prospero-generation Kernel / VideoOut stubs */
 typedef int64_t sce_off_t;
 
-/* Exactly 32 bytes matching PS5 kernel batch-map descriptor */
+/* Exactly 32 bytes matching Prospero-generation kernel batch-map descriptor */
 struct obs_batch_map_entry {
     void *vaddr;
     sce_off_t paddr;
@@ -16,7 +16,7 @@ struct obs_batch_map_entry {
     uint32_t flags;
 };
 
-/* Exactly 32 bytes matching PS5 kernel video buffer descriptor */
+/* Exactly 32 bytes matching Prospero-generation kernel video buffer descriptor */
 struct SceVideoOutBuffer {
     void *data;
     void *metadata;

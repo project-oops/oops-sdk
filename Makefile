@@ -13,28 +13,113 @@ OBJS := \
     $(BUILD)/agc/agc_tiler.o \
     $(BUILD)/gnm/gnm_display.o \
     $(BUILD)/input/input.o \
+    $(BUILD)/input/keyboard.o \
+    $(BUILD)/input/mouse.o \
     $(BUILD)/audio/audio.o \
+    $(BUILD)/audio/audiodec.o \
+    $(BUILD)/videodec/videodec.o \
     $(BUILD)/memory/memory.o \
     $(BUILD)/system/system.o \
+    $(BUILD)/system/offsets.o \
+    $(BUILD)/system/sysmodule.o \
+    $(BUILD)/system/dialog.o \
+    $(BUILD)/system/savedata.o \
+    $(BUILD)/system/escalate.o \
     $(BUILD)/time/time.o \
     $(BUILD)/thread/thread.o \
-    $(BUILD)/net/net.o
+    $(BUILD)/net/net.o \
+    $(BUILD)/net/netctl.o \
+    $(BUILD)/draw/draw.o \
+    $(BUILD)/system/pkg.o \
+    $(BUILD)/system/freestd.o \
+    $(BUILD)/system/syscall.o \
+    $(BUILD)/system/krw.o \
+    $(BUILD)/system/procctl.o \
+    $(BUILD)/system/loader.o \
+    $(BUILD)/system/target.o \
+    $(BUILD)/system/inject.o
 
-.PHONY: all clean
+TEST_SRCS := \
+    tests/test_runner.c \
+    tests/unit/test_agc_tiler.c \
+    tests/unit/test_draw.c \
+    tests/unit/test_input.c \
+    tests/unit/test_audio.c \
+    tests/unit/test_videodec.c \
+    tests/unit/test_audiodec.c \
+    tests/unit/test_memory.c \
+    tests/unit/test_system.c \
+    tests/unit/test_offsets.c \
+    tests/unit/test_sysmodule.c \
+    tests/unit/test_dialog.c \
+    tests/unit/test_netctl.c \
+    tests/unit/test_savedata.c \
+    tests/unit/test_escalate.c \
+    tests/unit/test_pkg.c \
+    tests/unit/test_time.c \
+    tests/unit/test_thread.c \
+    tests/unit/test_net.c \
+    tests/unit/test_freestd.c \
+    tests/unit/test_krw.c \
+    tests/unit/test_inject.c \
+    tests/integration/test_pipeline_draw_tile.c \
+    tests/integration/test_memory_surface.c \
+    tests/integration/test_thread_worker_pool.c \
+    tests/integration/test_net_loopback.c \
+    src/agc/agc_tiler.c \
+    src/draw/draw.c \
+    src/input/input.c \
+    src/input/keyboard.c \
+    src/input/mouse.c \
+    src/audio/audio.c \
+    src/audio/audiodec.c \
+    src/videodec/videodec.c \
+    src/memory/memory.c \
+    src/system/system.c \
+    src/system/offsets.c \
+    src/system/sysmodule.c \
+    src/system/dialog.c \
+    src/system/savedata.c \
+    src/system/escalate.c \
+    src/system/pkg.c \
+    src/system/freestd.c \
+    src/system/syscall.c \
+    src/system/krw.c \
+    src/system/procctl.c \
+    src/system/loader.c \
+    src/system/target.c \
+    src/system/inject.c \
+    src/time/time.c \
+    src/thread/thread.c \
+    src/net/net.c \
+    src/net/netctl.c
 
-all: $(BUILD)/liboops.a $(BUILD)/liboops_display.a
+HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -DOOPS_HOST_BUILD
+
+.PHONY: all clean test test-unit test-int
+
+all: $(BUILD)/liboops.a
 
 $(BUILD)/liboops.a: $(OBJS)
 	@mkdir -p $(@D)
 	$(AR) rcs $@ $(OBJS)
 
-$(BUILD)/liboops_display.a: $(BUILD)/liboops.a
-	@mkdir -p $(@D)
-	cp $< $@
-
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD)/tests/test_runner: all $(TEST_SRCS)
+	@mkdir -p $(BUILD)/tests
+	$(CC) $(HOST_CFLAGS) -o $@ $(TEST_SRCS)
+
+test: $(BUILD)/tests/test_runner
+	$(BUILD)/tests/test_runner
+
+test-unit: $(BUILD)/tests/test_runner
+	$(BUILD)/tests/test_runner unit
+
+test-int: $(BUILD)/tests/test_runner
+	$(BUILD)/tests/test_runner int
 
 clean:
 	rm -rf $(BUILD)

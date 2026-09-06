@@ -13,8 +13,8 @@ extern "C" {
 
 typedef enum oops_display_backend {
     OOPS_DISPLAY_BACKEND_AUTO = 0,
-    OOPS_DISPLAY_BACKEND_GNM  = 4, /* Orbis / GCN (PS4) */
-    OOPS_DISPLAY_BACKEND_AGC  = 5  /* Prospero / RDNA2 (PS5) */
+    OOPS_DISPLAY_BACKEND_GNM  = 4, /* Orbis-generation / GCN */
+    OOPS_DISPLAY_BACKEND_AGC  = 5  /* Prospero-generation / RDNA2 */
 } oops_display_backend_t;
 
 typedef struct oops_display oops_display_t;

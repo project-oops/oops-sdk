@@ -15,22 +15,36 @@ struct SceVideoOutBufferAttribute {
 
 struct SceVideoOutFlipStatus {
     uint64_t count;
-    uint64_t flip_arg;
+    uint64_t process_time;
     uint64_t submit_time;
-    uint64_t flip_time;
-    uint32_t current_buffer;
-    uint32_t status;
+    int64_t  flip_arg;
+    uint64_t reserved[2];
+    int32_t  num_gpu_flip_pending;
+    int32_t  num_flip_pending;
+    int32_t  current_buffer;
+    uint32_t reserved1;
 };
 
+typedef int sce_equeue_t;
+
+__attribute__((weak)) int sceUserServiceInitialize(const void *param);
+__attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceVideoOutOpen(int userId, int type, int index, const void *param);
 __attribute__((weak)) int sceVideoOutClose(int handle);
 __attribute__((weak)) void sceVideoOutSetBufferAttribute(struct SceVideoOutBufferAttribute *attr,
                                                          uint32_t pixelformat, uint32_t tiling_mode,
+                                                         uint32_t aspect_ratio,
                                                          uint32_t width, uint32_t height, uint32_t pitch);
 __attribute__((weak)) int sceVideoOutRegisterBuffers(int handle, int startIndex, void * const *addresses,
                                                      int bufferCount, const struct SceVideoOutBufferAttribute *attribute);
 __attribute__((weak)) int sceVideoOutSubmitFlip(int handle, int index, unsigned int flipMode, int64_t flipArg);
 __attribute__((weak)) int sceVideoOutGetFlipStatus(int handle, struct SceVideoOutFlipStatus *status);
+__attribute__((weak)) int sceVideoOutSetFlipRate(int handle, int rate);
+__attribute__((weak)) int sceVideoOutAddFlipEvent(sce_equeue_t eq, int handle, void *arg);
+__attribute__((weak)) int sceVideoOutIsFlipPending(int handle);
+__attribute__((weak)) int sceKernelCreateEqueue(sce_equeue_t *eq, const char *name);
+__attribute__((weak)) int sceKernelDeleteEqueue(sce_equeue_t eq);
+__attribute__((weak)) int sceKernelWaitEqueue(sce_equeue_t eq, void *ev, int num, int *out, void *tmo);
 __attribute__((weak)) size_t sceKernelGetDirectMemorySize(void);
 __attribute__((weak)) int sceKernelAllocateDirectMemory(sce_off_t searchStart, sce_off_t searchEnd,
                                                         size_t len, size_t alignment, int memoryType, sce_off_t *paddr);
@@ -39,17 +53,21 @@ __attribute__((weak)) int sceKernelMapDirectMemory(void **addr, size_t len, int 
                                                    sce_off_t paddr, size_t alignment);
 __attribute__((weak)) int sceKernelMunmap(void *addr, size_t len);
 
-#define GNM_STRIDE_BYTES       0x800000u /* 8 MB per 1080p linear buffer */
-#define GNM_TOTAL_ALLOC_BYTES  0x1000000u /* 16 MB double-buffered */
+#define GNM_FB_ALIGN           0x10000u
+#define GNM_FB_BYTES           (((1920u * 1080u * 4u) + GNM_FB_ALIGN - 1u) & ~(size_t)(GNM_FB_ALIGN - 1u))
+#define GNM_TOTAL_ALLOC_BYTES  (GNM_FB_BYTES * 2u)
 
 struct gnm_display {
     int handle;
+    sce_equeue_t flip_queue;
+    int has_flip_queue;
     unsigned int width;
     unsigned int height;
     sce_off_t physical;
     void *mapped_base;
     uint32_t *buffers[2];
     unsigned int fb_index;
+    uint64_t flip_seq;
     int ready;
     int last_error;
 };
@@ -68,7 +86,17 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
         return disp;
     }
 
-    int vh = sceVideoOutOpen(0, 0, 0, 0);
+    int32_t user = 0;
+    if (sceUserServiceGetInitialUser) {
+        if (sceUserServiceGetInitialUser(&user) != 0) {
+            if (sceUserServiceInitialize) {
+                (void)sceUserServiceInitialize(0);
+                (void)sceUserServiceGetInitialUser(&user);
+            }
+        }
+    }
+
+    int vh = sceVideoOutOpen(user, 0, 0, 0);
     if (vh < 0) {
         disp->last_error = vh;
         return disp;
@@ -77,7 +105,7 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
 
     size_t pool_size = sceKernelGetDirectMemorySize ? sceKernelGetDirectMemorySize() : 0x80000000u;
     sce_off_t physical = 0;
-    int arc = sceKernelAllocateDirectMemory(0, (sce_off_t)pool_size, GNM_TOTAL_ALLOC_BYTES, 0x200000u, 3, &physical);
+    int arc = sceKernelAllocateDirectMemory(0, (sce_off_t)pool_size, GNM_TOTAL_ALLOC_BYTES, GNM_FB_ALIGN, 3, &physical);
     if (arc != 0) {
         disp->last_error = arc;
         (void)sceVideoOutClose(disp->handle);
@@ -87,7 +115,7 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
     disp->physical = physical;
 
     void *mapped = 0;
-    int mrc = sceKernelMapDirectMemory(&mapped, GNM_TOTAL_ALLOC_BYTES, 0x33, 0, physical, 0x200000u);
+    int mrc = sceKernelMapDirectMemory(&mapped, GNM_TOTAL_ALLOC_BYTES, 0x33, 0, physical, GNM_FB_ALIGN);
     if (mrc != 0 || !mapped) {
         disp->last_error = mrc;
         (void)sceKernelReleaseDirectMemory(physical, GNM_TOTAL_ALLOC_BYTES);
@@ -97,12 +125,12 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
     }
     disp->mapped_base = mapped;
     disp->buffers[0] = (uint32_t *)mapped;
-    disp->buffers[1] = (uint32_t *)((unsigned char *)mapped + GNM_STRIDE_BYTES);
+    disp->buffers[1] = (uint32_t *)((unsigned char *)mapped + GNM_FB_BYTES);
 
     struct SceVideoOutBufferAttribute attr;
     for (size_t i = 0; i < sizeof(attr); i++) ((unsigned char *)&attr)[i] = 0;
     if (sceVideoOutSetBufferAttribute) {
-        sceVideoOutSetBufferAttribute(&attr, 0x80220000u, 0, width, height, width);
+        sceVideoOutSetBufferAttribute(&attr, 0x80000000u, 1 /* linear */, 0 /* 16:9 */, width, height, width);
     }
 
     void *addresses[2];
@@ -119,8 +147,24 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
         return disp;
     }
 
+    disp->flip_queue = -1;
+    disp->has_flip_queue = 0;
+    if (sceKernelCreateEqueue && sceVideoOutAddFlipEvent) {
+        sce_equeue_t eq = -1;
+        if (sceKernelCreateEqueue(&eq, "gnmFlipQueue") == 0 && eq >= 0) {
+            disp->flip_queue = eq;
+            if (sceVideoOutAddFlipEvent(eq, disp->handle, 0) == 0) {
+                disp->has_flip_queue = 1;
+            }
+        }
+    }
+    if (sceVideoOutSetFlipRate) {
+        sceVideoOutSetFlipRate(disp->handle, 0); /* 0 = 60Hz */
+    }
+
     disp->ready = 1;
     disp->fb_index = 0;
+    disp->flip_seq = 0;
     gnm_display_clear(disp, 0);
 
     return disp;
@@ -169,16 +213,44 @@ int gnm_display_flip(gnm_display_t *disp) {
     if (!disp || !disp->ready || disp->handle < 0) return -1;
     unsigned int shown = disp->fb_index;
     disp->fb_index = (disp->fb_index + 1u) % 2u;
+    disp->flip_seq++;
 
-    int rc = sceVideoOutSubmitFlip(disp->handle, (int)shown, 1, 0);
+    int rc = sceVideoOutSubmitFlip(disp->handle, (int)shown, 1, (int64_t)disp->flip_seq);
     if (rc != 0) {
         disp->last_error = rc;
+        return rc;
     }
-    return rc;
+
+    if (disp->has_flip_queue && sceVideoOutIsFlipPending && sceKernelWaitEqueue) {
+        uint8_t ev[32];
+        int out = 0;
+        while (sceVideoOutIsFlipPending(disp->handle) > 0) {
+            if (sceKernelWaitEqueue(disp->flip_queue, ev, 1, &out, 0) != 0) {
+                break;
+            }
+        }
+    }
+
+    return 0;
+}
+
+int gnm_display_set_flip_rate(gnm_display_t *disp, unsigned int rate) {
+    if (!disp || disp->handle < 0) return -1;
+    if (sceVideoOutSetFlipRate) {
+        int rc = sceVideoOutSetFlipRate(disp->handle, (int)rate);
+        if (rc != 0) disp->last_error = rc;
+        return rc;
+    }
+    return -1;
 }
 
 void gnm_display_close(gnm_display_t *disp) {
     if (!disp) return;
+    if (disp->has_flip_queue && sceKernelDeleteEqueue) {
+        sceKernelDeleteEqueue(disp->flip_queue);
+        disp->flip_queue = -1;
+        disp->has_flip_queue = 0;
+    }
     if (disp->handle > 0 && sceVideoOutClose) {
         (void)sceVideoOutClose(disp->handle);
         disp->handle = -1;

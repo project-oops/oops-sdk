@@ -1,0 +1,160 @@
+# oops-sdk Kernel Offsets Configuration
+# Externalized runtime offsets for Orbis & Prospero firmwares.
+#
+# Provenance: SharpProspero / PS5SDK / FreeBSD 9.0/11.0 kernel headers.
+# This file allows supporting new firmware versions at runtime without recompiling.
+
+[common]
+# Process (struct proc) field offsets
+p_ucred          = 0x40
+p_fd             = 0x48
+p_pid            = 0xBC
+p_titleid        = 0x470
+p_comm           = 0x5DC
+
+# File descriptor (struct filedesc) field offsets
+fd_rdir          = 0x10
+fd_jdir          = 0x18
+
+# Credentials (struct ucred) field offsets
+cr_uid           = 0x04
+cr_ruid          = 0x08
+cr_svuid         = 0x0C
+cr_ngroups       = 0x10
+cr_rgid          = 0x14
+cr_svgid         = 0x18
+cr_prison        = 0x30
+cr_sceauthid     = 0x58
+cr_scecaps       = 0x60
+cr_sceattrs      = 0x80
+cr_sceattr0      = 0x83
+
+# Prison (struct prison) field offsets
+pr_ref           = 0x14
+
+[01.00]
+kdata_base       = 0xFFFFFFFF80D40000
+allproc          = 0x26D1C18
+rootvnode        = 0x6565540
+security_flags   = 0x6241074
+qa_flags         = 0x6241098
+utoken_flags     = 0x6646710
+
+[02.00]
+kdata_base       = 0xFFFFFFFF80D60000
+allproc          = 0x2701C28
+rootvnode        = 0x67134C0
+security_flags   = 0x63E1274
+qa_flags         = 0x6241098
+utoken_flags     = 0x6646710
+
+[03.00]
+kdata_base       = 0xFFFFFFFF80D70000
+allproc          = 0x276DC58
+rootvnode        = 0x67AB4C0
+security_flags   = 0x6466474
+qa_flags         = 0x6241098
+utoken_flags     = 0x6646710
+sysents          = 0x16F720
+sysentvec        = 0xCA0CD8
+
+[03.20]
+kdata_base       = 0xFFFFFFFF80D70000
+allproc          = 0x276DC58
+rootvnode        = 0x67AB4C0
+security_flags   = 0x6466474
+qa_flags         = 0x6241098
+utoken_flags     = 0x6646710
+sysents          = 0x16F720
+sysentvec        = 0xCA0CD8
+
+[04.03]
+kdata_base       = 0xFFFFFFFF80E10000
+allproc          = 0x27EDCB8
+rootvnode        = 0x66E74C0
+security_flags   = 0x6505474
+qa_flags         = 0x6241098
+utoken_flags     = 0x6646710
+sysents          = 0x1709C0
+sysentvec        = 0xD11BB8
+
+[04.50]
+kdata_base       = 0xFFFFFFFF80E10000
+allproc          = 0x27EDCB8
+rootvnode        = 0x66E74C0
+security_flags   = 0x6505474
+qa_flags         = 0x6241098
+utoken_flags     = 0x6646710
+sysents          = 0x1709C0
+sysentvec        = 0xD11BB8
+
+[05.00]
+kdata_base       = 0xFFFFFFFF80E10000
+allproc          = 0x291DD00
+rootvnode        = 0x6853510
+security_flags   = 0x66466EC
+qa_flags         = 0x6241098
+utoken_flags     = 0x6646710
+sysents          = 0x1B1EF0
+sysentvec        = 0xE00BE8
+
+[06.00]
+kdata_base       = 0xFFFFFFFF80E10000
+allproc          = 0x2869D20
+rootvnode        = 0x679F510
+security_flags   = 0x65968EC
+sysents          = 0x1B49A0
+sysentvec        = 0xE210A8
+
+[07.00]
+kdata_base       = 0xFFFFFFFF80E10000
+allproc          = 0x2859D50
+rootvnode        = 0x30C7510
+security_flags   = 0x0AC8064
+qa_flags         = 0x0AC8088
+utoken_flags     = 0x0AC80F0
+sysents          = 0x1B7030
+sysentvec        = 0xE21AB8
+
+[08.00]
+kdata_base       = 0xFFFFFFFF80E10000
+allproc          = 0x2875D50
+rootvnode        = 0x30FB510
+security_flags   = 0x0AC3064
+qa_flags         = 0x0AC3088
+utoken_flags     = 0x0AC30F0
+sysents          = 0x1A7DB0
+sysentvec        = 0xE21CA8
+
+[09.00]
+kdata_base       = 0xFFFFFFFF80ED0000
+allproc          = 0x2755D50
+rootvnode        = 0x2FDB510
+security_flags   = 0x0D72064
+qa_flags         = 0x0D72088
+utoken_flags     = 0x0D720F0
+sysents          = 0x1AAC10
+sysentvec        = 0xDBA648
+
+[10.01]
+kdata_base       = 0xFFFFFFFF80ED0000
+allproc          = 0x2765D70
+rootvnode        = 0x2FA3510
+security_flags   = 0x0D79064
+qa_flags         = 0x0D79088
+utoken_flags     = 0x0D790F0
+sysents          = 0x1AD100
+sysentvec        = 0xDBA6D8
+
+[11.00]
+kdata_base       = 0xFFFFFFFF80ED0000
+allproc          = 0x2875D70
+sysents          = 0x1B0B70
+sysentvec        = 0xDCBC78
+
+[12.00]
+kdata_base       = 0xFFFFFFFF80ED0000
+allproc          = 0x2885E00
+sysents          = 0x1AF4D0
+sysentvec        = 0xDCC978
+
