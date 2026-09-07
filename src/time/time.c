@@ -6,9 +6,22 @@ __attribute__((weak)) uint64_t sceKernelGetProcessTimeCounter(void);
 __attribute__((weak)) uint64_t sceKernelGetProcessTimeCounterFrequency(void);
 __attribute__((weak)) uint64_t sceKernelGetTscFrequency(void);
 
+/*
+ * One origin for every reading. On hardware the microsecond and nanosecond clocks both derive
+ * from the process clock - the microsecond call and its high-resolution counter share a base -
+ * so a nanosecond reading divided by 1000 agrees with a microsecond one. Off hardware, with
+ * no platform call resolved, both fall back to the TSC and a calibrated or assumed frequency,
+ * which keeps that agreement. Mixing the two must never produce a delta from two origins.
+ */
 static uint64_t s_tsc_frequency = 0;
 static uint64_t s_counter_frequency = 0;
 static int s_time_initialized = 0;
+
+/* ticks * per_second / freq without overflowing the intermediate. */
+static uint64_t scale(uint64_t ticks, uint64_t per_second, uint64_t freq) {
+    if (freq == 0) return 0;
+    return (uint64_t)(((unsigned __int128)ticks * per_second) / freq);
+}
 
 uint64_t oops_time_get_ticks(void) {
     uint32_t lo, hi;
@@ -79,17 +92,20 @@ uint64_t oops_time_get_us(void) {
     if (sceKernelGetProcessTime) {
         return sceKernelGetProcessTime();
     }
-    uint64_t ticks = oops_time_get_ticks();
-    uint64_t freq = oops_time_get_frequency();
-    if (freq == 0) return 0;
-    return (uint64_t)(((unsigned __int128)ticks * 1000000ULL) / freq);
+    if (sceKernelGetProcessTimeCounter) {
+        return scale(oops_time_get_counter(), 1000000ULL, oops_time_get_counter_frequency());
+    }
+    return scale(oops_time_get_ticks(), 1000000ULL, oops_time_get_frequency());
 }
 
 uint64_t oops_time_get_ns(void) {
-    uint64_t ticks = oops_time_get_ticks();
-    uint64_t freq = oops_time_get_frequency();
-    if (freq == 0) return 0;
-    return (uint64_t)(((unsigned __int128)ticks * 1000000000ULL) / freq);
+    if (sceKernelGetProcessTimeCounter) {
+        return scale(oops_time_get_counter(), 1000000000ULL, oops_time_get_counter_frequency());
+    }
+    if (sceKernelGetProcessTime) {
+        return sceKernelGetProcessTime() * 1000ULL;
+    }
+    return scale(oops_time_get_ticks(), 1000000000ULL, oops_time_get_frequency());
 }
 
 uint64_t oops_time_get_ms(void) {
@@ -112,5 +128,10 @@ void oops_time_sleep_us(uint32_t microseconds) {
 }
 
 void oops_time_sleep_ms(uint32_t milliseconds) {
+    /* In chunks: milliseconds * 1000 wraps past 71 minutes. */
+    while (milliseconds > 4000000u) {
+        oops_time_sleep_us(4000000000u);
+        milliseconds -= 4000000u;
+    }
     oops_time_sleep_us(milliseconds * 1000u);
 }

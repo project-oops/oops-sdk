@@ -16,6 +16,10 @@ FreeBSD-derived target, and the Windows shell has no `clang` on `PATH` here. A n
 `make` gets as far as the first compile and stops with `CreateProcess ... failed`, which
 looks like a broken makefile and is not.
 
+**A Linux container is the same route without WSL.** Mount the checkout and run
+`./bin/oops-sdk check` and `make test` inside any image that has `clang`, `make` and
+`binutils`; the checkout is all the build needs.
+
 ## Why the build is a cross-compile even on Linux
 
 Nothing this repository produces runs on the machine that built it. Every object is compiled
@@ -36,9 +40,9 @@ is a real check rather than a formality: the sources build with no warnings toda
 one that does not is a failure rather than a line of output somebody scrolls past.
 
 **There is now a second gate: a host test suite.** `make test` builds the subsystems for the
-build machine (not the target) and runs unit and integration tests against them - the seam the
-`host` display backend exists to make possible. A subsystem that cross-compiles but computes
-the wrong answer is caught here rather than on hardware.
+build machine (not the target) and runs unit and integration tests against them, with the
+display getters stubbed so the draw canvas and the tiler run on plain memory. A subsystem
+that cross-compiles but computes the wrong answer is caught here rather than on hardware.
 
 ## The verbs
 

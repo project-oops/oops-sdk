@@ -11,28 +11,38 @@ struct oops_display {
 };
 
 static struct oops_display s_unified_display;
+static int s_opened = 0;   /* a backend has been handed out since the last close */
 
 oops_display_t *oops_display_open(oops_display_backend_t backend, unsigned int width, unsigned int height) {
     struct oops_display *disp = &s_unified_display;
+    /* A second open without a close would overwrite the pointer to a live backend and leak it.
+     * Closing a backend whose open failed is a no-op, so this is safe on every path. */
+    if (s_opened) {
+        oops_display_close(disp);
+    }
     disp->backend = backend;
 
     if (backend == OOPS_DISPLAY_BACKEND_AUTO) {
         disp->backend = OOPS_DISPLAY_BACKEND_AGC;
         disp->u.agc = agc_display_open(width, height);
         if (disp->u.agc && agc_display_is_ready(disp->u.agc)) {
+            s_opened = 1;
             return disp;
         }
         /* Fall back to GNM if AGC open was refused */
         disp->backend = OOPS_DISPLAY_BACKEND_GNM;
         disp->u.gnm = gnm_display_open(width, height);
+        s_opened = 1;
         return disp;
     } else if (backend == OOPS_DISPLAY_BACKEND_AGC) {
         disp->backend = OOPS_DISPLAY_BACKEND_AGC;
         disp->u.agc = agc_display_open(width, height);
+        s_opened = 1;
         return disp;
     } else {
         disp->backend = OOPS_DISPLAY_BACKEND_GNM;
         disp->u.gnm = gnm_display_open(width, height);
+        s_opened = 1;
         return disp;
     }
 }
@@ -47,7 +57,7 @@ int oops_display_is_ready(const oops_display_t *disp) {
 }
 
 uint32_t *oops_display_get_framebuffer(oops_display_t *disp) {
-    if (!disp) return 0;
+    if (!disp) return NULL;
     if (disp->backend == OOPS_DISPLAY_BACKEND_AGC) {
         return agc_display_get_framebuffer(disp->u.agc);
     } else {
@@ -121,4 +131,5 @@ void oops_display_close(oops_display_t *disp) {
     } else {
         gnm_display_close(disp->u.gnm);
     }
+    s_opened = 0;
 }

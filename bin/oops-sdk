@@ -6,9 +6,10 @@
 #
 #   ./bin/oops-sdk build          # build the static archive
 #   ./bin/oops-sdk check          # what CI checks: a clean build at -Werror
+#   ./bin/oops-sdk test           # the host unit and integration suite
 #   ./bin/oops-sdk clean          # remove build output
 #
-# # Why there is no test, lint or fmt verb yet
+# # Why there is no lint or fmt verb yet
 #
 # There is nothing behind them, and a verb that runs nothing and exits 0 is worse than a
 # missing one: `oops all` would report this repository green without having checked anything,
@@ -47,13 +48,13 @@ Nothing implements it yet, and this script will not exit 0 as though it had:
   fmt    needs a .clang-format in this repository. There is none, so formatting is whatever
          each contributor's editor did.
 
-Run './bin/oops-sdk check' for what is actually checked: a clean build and unit/integration tests.
+Run './bin/oops-sdk check' for the build gate and './bin/oops-sdk test' for the host suite.
 MSG
     exit 1
 }
 
 usage() {
-    sed -n '2,10p' "$0" | sed 's|^# \{0,1\}||'
+    sed -n '2,11p' "$0" | sed 's|^# \{0,1\}||'
     exit "${1:-0}"
 }
 

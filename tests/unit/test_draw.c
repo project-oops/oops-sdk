@@ -1,5 +1,6 @@
 #include "tests/test_common.h"
 #include "oops/draw.h"
+#include <limits.h>
 
 static void test_draw_surface_clear_and_pixel(void) {
     uint32_t buf[32 * 32];
@@ -39,6 +40,34 @@ static void test_draw_rect_clipping(void) {
     /* Fully out of bounds rect */
     oops_draw_rect(&surf, -50, -50, 10, 10, OOPS_COLOR_RED);
     oops_draw_rect(&surf, 50, 50, 10, 10, OOPS_COLOR_RED);
+}
+
+/* Absurd extents clamp instead of overflowing: INT_MAX wide from x = 10 fills to the edge,
+ * a rectangle that starts past the edge draws nothing, and one that ends before 0 too. */
+static void test_draw_rect_extreme_extents(void) {
+    uint32_t buf[20 * 20];
+    oops_surface_t surf = { buf, 20, 20, 20 };
+    oops_draw_clear(&surf, OOPS_COLOR_BLACK);
+
+    oops_draw_rect(&surf, 10, 0, INT_MAX, 1, OOPS_COLOR_RED);
+    ASSERT_EQ(buf[9], OOPS_COLOR_BLACK);
+    ASSERT_EQ(buf[10], OOPS_COLOR_RED);
+    ASSERT_EQ(buf[19], OOPS_COLOR_RED);
+    ASSERT_EQ(buf[20], OOPS_COLOR_BLACK);   /* row 1 untouched */
+
+    oops_draw_rect(&surf, INT_MAX - 5, 0, 100, 1, OOPS_COLOR_GREEN);
+    ASSERT_EQ(buf[19], OOPS_COLOR_RED);
+    oops_draw_rect(&surf, INT_MIN, INT_MIN, INT_MAX, INT_MAX, OOPS_COLOR_BLUE);
+    ASSERT_EQ(buf[0], OOPS_COLOR_BLACK);
+
+    oops_draw_rect_blend(&surf, 5, 5, INT_MAX, INT_MAX, OOPS_RGBA(255, 255, 255, 128));
+    ASSERT_NE(buf[5 * 20 + 5], OOPS_COLOR_BLACK);
+    ASSERT_EQ(buf[4 * 20 + 4], OOPS_COLOR_BLACK);
+
+    /* A source rectangle entirely past the edge blits nothing. */
+    uint32_t before = buf[0];
+    oops_draw_blit(&surf, 0, 0, &surf, INT_MAX - 1, 0, INT_MAX, 1);
+    ASSERT_EQ(buf[0], before);
 }
 
 static void test_draw_alpha_blend(void) {
@@ -93,10 +122,27 @@ static void test_draw_text_and_blit(void) {
     ASSERT_EQ(buf[27 * 64 + 27], OOPS_COLOR_MAGENTA);
 }
 
+/* A surface whose pitch exceeds its width is a window onto a wider buffer. Clear must touch
+ * only the visible columns of each row, never the pixels between rows. */
+static void test_draw_clear_respects_pitch(void) {
+    uint32_t buf[8 * 16];
+    for (int i = 0; i < 8 * 16; i++) buf[i] = OOPS_COLOR_BLACK;
+    oops_surface_t surf = { buf, 8, 8, 16 };  /* 8 wide, 8 tall, rows 16 apart */
+
+    oops_draw_clear(&surf, OOPS_COLOR_RED);
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 16; x++) {
+            ASSERT_EQ(buf[y * 16 + x], (x < 8) ? OOPS_COLOR_RED : OOPS_COLOR_BLACK);
+        }
+    }
+}
+
 void run_unit_tests_draw(void) {
     TEST_SUITE_BEGIN("2D Graphics Canvas & Primitives");
     RUN_TEST(test_draw_surface_clear_and_pixel);
+    RUN_TEST(test_draw_clear_respects_pitch);
     RUN_TEST(test_draw_rect_clipping);
+    RUN_TEST(test_draw_rect_extreme_extents);
     RUN_TEST(test_draw_alpha_blend);
     RUN_TEST(test_draw_line_and_circle);
     RUN_TEST(test_draw_text_and_blit);

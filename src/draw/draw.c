@@ -88,9 +88,12 @@ oops_surface_t oops_display_get_surface(oops_display_t *disp) {
 
 void oops_draw_clear(oops_surface_t *surf, oops_color_t color) {
     if (!surf || !surf->pixels) return;
-    size_t count = (size_t)surf->width * (size_t)surf->height;
-    for (size_t i = 0; i < count; i++) {
-        surf->pixels[i] = color;
+    /* Row by row: a surface can be a window onto a wider buffer, so pitch is not width. */
+    for (uint32_t y = 0; y < surf->height; y++) {
+        uint32_t *row = surf->pixels + (size_t)y * surf->pitch;
+        for (uint32_t x = 0; x < surf->width; x++) {
+            row[x] = color;
+        }
     }
 }
 
@@ -100,15 +103,25 @@ void oops_draw_pixel(oops_surface_t *surf, int x, int y, oops_color_t color) {
     surf->pixels[(size_t)y * surf->pitch + (size_t)x] = color;
 }
 
+/* Clip [pos, pos + len) to [0, limit) in 64-bit, so absurd arguments clamp instead of
+ * overflowing int. Returns 0 when nothing is left. */
+static int oops_clip_span(int pos, int len, uint32_t limit, int *out0, int *out1) {
+    int64_t a = pos;
+    int64_t b = (int64_t)pos + (int64_t)len;
+    if (a < 0) a = 0;
+    if (b > (int64_t)limit) b = (int64_t)limit;
+    if (a >= b) return 0;
+    *out0 = (int)a;
+    *out1 = (int)b;
+    return 1;
+}
+
 void oops_draw_rect(oops_surface_t *surf, int x, int y, int w, int h, oops_color_t color) {
     if (!surf || !surf->pixels || w <= 0 || h <= 0) return;
 
-    int x0 = (x < 0) ? 0 : x;
-    int y0 = (y < 0) ? 0 : y;
-    int x1 = (x + w > (int)surf->width) ? (int)surf->width : (x + w);
-    int y1 = (y + h > (int)surf->height) ? (int)surf->height : (y + h);
-
-    if (x0 >= x1 || y0 >= y1) return;
+    int x0, x1, y0, y1;
+    if (!oops_clip_span(x, w, surf->width, &x0, &x1)) return;
+    if (!oops_clip_span(y, h, surf->height, &y0, &y1)) return;
 
     for (int py = y0; py < y1; py++) {
         uint32_t *row = surf->pixels + (size_t)py * surf->pitch;
@@ -133,12 +146,9 @@ void oops_draw_rect_blend(oops_surface_t *surf, int x, int y, int w, int h, oops
     uint32_t sb = color & 0xFF;
     uint32_t inv_a = 255 - sa;
 
-    int x0 = (x < 0) ? 0 : x;
-    int y0 = (y < 0) ? 0 : y;
-    int x1 = (x + w > (int)surf->width) ? (int)surf->width : (x + w);
-    int y1 = (y + h > (int)surf->height) ? (int)surf->height : (y + h);
-
-    if (x0 >= x1 || y0 >= y1) return;
+    int x0, x1, y0, y1;
+    if (!oops_clip_span(x, w, surf->width, &x0, &x1)) return;
+    if (!oops_clip_span(y, h, surf->height, &y0, &y1)) return;
 
     for (int py = y0; py < y1; py++) {
         uint32_t *row = surf->pixels + (size_t)py * surf->pitch;
@@ -258,15 +268,15 @@ void oops_draw_blit(oops_surface_t *dst, int dx, int dy,
     /* Clip source bounds */
     if (sx < 0) { sw += sx; dx -= sx; sx = 0; }
     if (sy < 0) { sh += sy; dy -= sy; sy = 0; }
-    if (sx + sw > (int)src->width) sw = (int)src->width - sx;
-    if (sy + sh > (int)src->height) sh = (int)src->height - sy;
+    if ((int64_t)sx + sw > (int64_t)src->width) sw = (int)src->width - sx;
+    if ((int64_t)sy + sh > (int64_t)src->height) sh = (int)src->height - sy;
     if (sw <= 0 || sh <= 0) return;
 
     /* Clip destination bounds */
     if (dx < 0) { sw += dx; sx -= dx; dx = 0; }
     if (dy < 0) { sh += dy; sy -= dy; dy = 0; }
-    if (dx + sw > (int)dst->width) sw = (int)dst->width - dx;
-    if (dy + sh > (int)dst->height) sh = (int)dst->height - dy;
+    if ((int64_t)dx + sw > (int64_t)dst->width) sw = (int)dst->width - dx;
+    if ((int64_t)dy + sh > (int64_t)dst->height) sh = (int)dst->height - dy;
     if (sw <= 0 || sh <= 0) return;
 
     for (int y = 0; y < sh; y++) {

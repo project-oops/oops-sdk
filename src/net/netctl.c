@@ -1,5 +1,6 @@
 #include "oops/netctl.h"
 #include "oops/sysmodule.h"
+#include <stdbool.h>
 
 __attribute__((weak)) int sceNetCtlInit(void);
 __attribute__((weak)) int sceNetCtlGetInfo(int code, void *info);
@@ -16,6 +17,8 @@ __attribute__((weak)) void sceNetCtlTerm(void);
 #define SCE_NET_CTL_INFO_PRIMARY_DNS   17
 #define SCE_NET_CTL_INFO_SECONDARY_DNS 18
 
+#define NETCTL_QUERY_BYTES 256
+
 static bool s_netctl_initialized = false;
 static bool s_netctl_module_loaded = false;
 
@@ -29,6 +32,18 @@ static void safe_strcpy(char *dst, const char *src, size_t max_len) {
         }
     }
     dst[i] = '\0';
+}
+
+/* The integer answers arrive as four little-endian bytes at the start of the query buffer.
+ * Assembled by hand rather than cast: a byte buffer carries no int alignment. */
+static int read_int_le(const uint8_t *b) {
+    return (int)((uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24));
+}
+
+/* One query into a zeroed buffer. 1 if the platform answered, 0 if not. */
+static int query(int code, uint8_t *buffer) {
+    for (size_t i = 0; i < NETCTL_QUERY_BYTES; i++) buffer[i] = 0;
+    return (sceNetCtlGetInfo(code, buffer) == 0) ? 1 : 0;
 }
 
 int oops_net_ctl_init(void) {
@@ -67,65 +82,46 @@ int oops_net_ctl_get_info(oops_net_info_t *out_info) {
         return -1;
     }
 
-    uint8_t buffer[256];
+    uint8_t buffer[NETCTL_QUERY_BYTES];
+    int answered = 0;   /* a field the platform did not answer stays empty or zero */
 
-    /* IP Address */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_IP_ADDRESS, buffer) == 0) {
+    if (query(SCE_NET_CTL_INFO_IP_ADDRESS, buffer)) {
         safe_strcpy(out_info->ip_address, (const char *)buffer, sizeof(out_info->ip_address));
+        answered++;
     }
-
-    /* Netmask */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_NETMASK, buffer) == 0) {
+    if (query(SCE_NET_CTL_INFO_NETMASK, buffer)) {
         safe_strcpy(out_info->netmask, (const char *)buffer, sizeof(out_info->netmask));
+        answered++;
     }
-
-    /* Default Gateway / Route */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_DEFAULT_ROUTE, buffer) == 0) {
+    if (query(SCE_NET_CTL_INFO_DEFAULT_ROUTE, buffer)) {
         safe_strcpy(out_info->default_gateway, (const char *)buffer, sizeof(out_info->default_gateway));
+        answered++;
     }
-
-    /* Primary DNS */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_PRIMARY_DNS, buffer) == 0) {
+    if (query(SCE_NET_CTL_INFO_PRIMARY_DNS, buffer)) {
         safe_strcpy(out_info->primary_dns, (const char *)buffer, sizeof(out_info->primary_dns));
+        answered++;
     }
-
-    /* Secondary DNS */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_SECONDARY_DNS, buffer) == 0) {
+    if (query(SCE_NET_CTL_INFO_SECONDARY_DNS, buffer)) {
         safe_strcpy(out_info->secondary_dns, (const char *)buffer, sizeof(out_info->secondary_dns));
+        answered++;
     }
-
-    /* Device Type */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_DEVICE, buffer) == 0) {
-        out_info->device_type = *(int *)buffer;
+    if (query(SCE_NET_CTL_INFO_DEVICE, buffer)) {
+        out_info->device_type = read_int_le(buffer);
+        answered++;
     }
-
-    /* Link Status */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_LINK, buffer) == 0) {
-        out_info->link_status = *(int *)buffer;
+    if (query(SCE_NET_CTL_INFO_LINK, buffer)) {
+        out_info->link_status = read_int_le(buffer);
+        answered++;
     }
-
-    /* SSID */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_SSID, buffer) == 0) {
+    if (query(SCE_NET_CTL_INFO_SSID, buffer)) {
         safe_strcpy(out_info->ssid, (const char *)buffer, sizeof(out_info->ssid));
+        answered++;
     }
-
-    /* RSSI Percentage */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_RSSI_PERCENT, buffer) == 0) {
-        out_info->rssi_percentage = *(int *)buffer;
+    if (query(SCE_NET_CTL_INFO_RSSI_PERCENT, buffer)) {
+        out_info->rssi_percentage = read_int_le(buffer);
+        answered++;
     }
-
-    /* MAC Address */
-    for (size_t i = 0; i < sizeof(buffer); i++) buffer[i] = 0;
-    if (sceNetCtlGetInfo(SCE_NET_CTL_INFO_ETHER_ADDR, buffer) == 0) {
+    if (query(SCE_NET_CTL_INFO_ETHER_ADDR, buffer)) {
         static const char hex[] = "0123456789ABCDEF";
         for (int i = 0; i < 6; i++) {
             out_info->mac_address[i * 3]     = hex[(buffer[i] >> 4) & 0xF];
@@ -135,9 +131,11 @@ int oops_net_ctl_get_info(oops_net_info_t *out_info) {
             }
         }
         out_info->mac_address[17] = '\0';
+        answered++;
     }
 
-    return 0;
+    /* Nothing answered is a failure, not an interface with no address. */
+    return (answered > 0) ? 0 : -1;
 }
 
 void oops_net_ctl_term(void) {
@@ -150,4 +148,3 @@ void oops_net_ctl_term(void) {
         s_netctl_module_loaded = false;
     }
 }
-

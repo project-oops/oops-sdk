@@ -138,11 +138,10 @@ int oops_cond_wait(oops_cond_t *cond, oops_mutex_t *mutex) {
 }
 
 int oops_cond_timedwait(oops_cond_t *cond, oops_mutex_t *mutex, uint32_t timeout_us) {
-    if (!cond || !mutex) return -1;
-    if (scePthreadCondTimedwait) {
-        return scePthreadCondTimedwait(&cond->handle, &mutex->handle, (uint64_t)timeout_us);
-    }
-    return oops_cond_wait(cond, mutex);
+    if (!cond || !mutex || !scePthreadCondTimedwait) return -1;
+    /* No fallback to the untimed wait: a caller who asked for a timeout is relying on coming
+     * back, and a wait that never returns is not a degraded version of that. */
+    return scePthreadCondTimedwait(&cond->handle, &mutex->handle, (uint64_t)timeout_us);
 }
 
 int oops_cond_signal(oops_cond_t *cond) {

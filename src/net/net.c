@@ -51,22 +51,26 @@ int oops_net_inet_pton(const char *src, uint32_t *dst) {
 
     uint32_t octets[4] = {0, 0, 0, 0};
     int cur = 0;
+    int digits = 0;   /* in the current octet: an empty or over-long one is malformed */
     const char *p = src;
 
     while (*p != '\0') {
         if (*p >= '0' && *p <= '9') {
             octets[cur] = octets[cur] * 10 + (uint32_t)(*p - '0');
-            if (octets[cur] > 255) return -1;
+            digits++;
+            if (octets[cur] > 255 || digits > 3) return -1;
         } else if (*p == '.') {
+            if (digits == 0) return -1;
             cur++;
             if (cur > 3) return -1;
+            digits = 0;
         } else {
             return -1;
         }
         p++;
     }
 
-    if (cur != 3) return -1;
+    if (cur != 3 || digits == 0) return -1;
 
     /* Network byte order (big-endian wire format) */
     *dst = (octets[0]) | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
@@ -143,6 +147,8 @@ int oops_listen(int sock, int backlog) {
 int oops_accept(int sock, char *client_ip, size_t ip_len, uint16_t *client_port) {
     if (!sceNetAccept || sock < 0) return -1;
 
+    /* An address the caller asked for is empty until the platform fills it in. */
+    if (client_ip && ip_len > 0) client_ip[0] = '\0';
     struct sce_net_sockaddr_in addr;
     unsigned int addrlen = (unsigned int)sizeof(addr);
     for (size_t i = 0; i < sizeof(addr); i++) ((uint8_t *)&addr)[i] = 0;
@@ -205,6 +211,7 @@ long oops_recvfrom(int sock, void *buf, size_t len, int flags, char *from_ip, si
     unsigned int addrlen = (unsigned int)sizeof(addr);
     for (size_t i = 0; i < sizeof(addr); i++) ((uint8_t *)&addr)[i] = 0;
 
+    if (from_ip && ip_len > 0) from_ip[0] = '\0';
     long rc = (long)sceNetRecvfrom(sock, buf, len, flags, &addr, &addrlen);
     if (rc >= 0) {
         if (from_ip && ip_len > 0) {

@@ -14,7 +14,9 @@ struct obs_batch_map_entry {
 __attribute__((weak)) int sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int memoryType, sce_off_t *paddr);
 __attribute__((weak)) int sceKernelAllocateDirectMemory(sce_off_t searchStart, sce_off_t searchEnd,
                                                         size_t len, size_t alignment, int memoryType, sce_off_t *paddr);
-__attribute__((weak)) int sceKernelGetDirectMemorySize(void);
+/* size_t, not int: the direct memory pool is larger than 2 GB, and an int prototype truncates
+ * the search end that bounds the fallback allocation. */
+__attribute__((weak)) size_t sceKernelGetDirectMemorySize(void);
 __attribute__((weak)) int sceKernelReleaseDirectMemory(sce_off_t paddr, size_t len);
 __attribute__((weak)) int sceKernelMapDirectMemory(void **addr, size_t len, int prot, int flags,
                                                    sce_off_t directMemoryStart, size_t alignment);
@@ -22,7 +24,7 @@ __attribute__((weak)) int sceKernelBatchMap(struct obs_batch_map_entry *entries,
 __attribute__((weak)) int sceKernelMunmap(void *addr, size_t len);
 
 int oops_mem_alloc_direct(size_t size, size_t alignment, oops_mem_type_t type, int64_t *out_phys) {
-    if (!out_phys) return -1;
+    if (!out_phys || size == 0) return -1;
     sce_off_t p = 0;
     int rc = -1;
     if (sceKernelAllocateMainDirectMemory) {
@@ -52,7 +54,7 @@ int oops_mem_map_direct(void **out_vaddr, size_t size, int prot, int flags, int6
 }
 
 int oops_mem_batch_map(void *vaddr_base, int64_t phys_base, size_t total_size, size_t page_size, uint8_t prot) {
-    if (!sceKernelBatchMap || page_size == 0) return -1;
+    if (!sceKernelBatchMap || !vaddr_base || page_size == 0 || total_size == 0) return -1;
     size_t total_pages = (total_size + page_size - 1) / page_size;
     size_t page_idx = 0;
 
@@ -73,6 +75,9 @@ int oops_mem_batch_map(void *vaddr_base, int64_t phys_base, size_t total_size, s
         int completed = 0;
         int rc = sceKernelBatchMap(entries, (int)batch, &completed);
         if (rc != 0) return rc;
+        /* The kernel says how many entries it mapped. Fewer than asked is a failure even when
+         * the call itself returned 0: the rest of the range is not there. */
+        if (completed != (int)batch) return -1;
         page_idx += batch;
     }
     return 0;
@@ -83,7 +88,8 @@ int oops_mem_unmap(void *vaddr, size_t size) {
     return sceKernelMunmap(vaddr, size);
 }
 
-/* Allocation tracking for high-level allocator */
+/* Allocation tracking for high-level allocator. Not thread-safe: a caller that allocates
+ * from more than one thread serialises these calls itself. */
 #define OOPS_MAX_ALLOCS 512
 
 struct oops_alloc_slot {
@@ -99,8 +105,9 @@ static struct oops_alloc_slot s_alloc_slots[OOPS_MAX_ALLOCS];
 void *oops_mem_alloc(size_t size, size_t alignment, oops_mem_type_t type) {
     if (size == 0) return NULL;
 
-    /* Align to standard page boundary (64KB) */
+    /* Align to standard page boundary (64KB); a size that would wrap when rounded is refused. */
     size_t page_mask = 0xFFFF;
+    if (size > SIZE_MAX - page_mask) return NULL;
     size_t aligned_size = (size + page_mask) & ~page_mask;
     size_t align = (alignment < 0x10000) ? 0x10000 : alignment;
 
@@ -152,7 +159,7 @@ void oops_mem_free(void *ptr) {
 }
 
 int64_t oops_mem_get_phys(const void *ptr) {
-    if (!ptr) return 0;
+    if (!ptr) return -1;
     uintptr_t addr = (uintptr_t)ptr;
 
     for (int i = 0; i < OOPS_MAX_ALLOCS; i++) {
@@ -163,5 +170,6 @@ int64_t oops_mem_get_phys(const void *ptr) {
             }
         }
     }
-    return 0;
+    /* Not inside a managed allocation. 0 is a valid physical offset, so it cannot mean this. */
+    return -1;
 }

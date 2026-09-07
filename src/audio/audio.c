@@ -1,4 +1,5 @@
 #include "oops/audio.h"
+#include "audio_port.h"
 #include <stddef.h>
 
 /* Platform symbols from libSceAudioOut and libSceUserService */
@@ -10,30 +11,43 @@ __attribute__((weak)) int sceAudioOutSetVolume(int handle, int flag, int *volume
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
-#define OOPS_AUDIO_MAX_CHUNK 2048
-#define OOPS_AUDIO_DEFAULT_FRAMES 512
+/*
+ * The sample-format selector handed to the platform's open call. The write path produces
+ * 16-bit signed interleaved stereo and nothing else, so this value must select exactly that
+ * on hardware. It is the value this wrapper has always passed and it is not yet confirmed
+ * from a capture: if the first sound out of a payload is at the wrong speed or missing a
+ * channel, this is the first thing to check.
+ */
+#define OOPS_AUDIO_FORMAT_PARAM 0u
 
-struct oops_audio_port {
-    int handle;
-    int channels;
-    int sample_rate;
-    int chunk_frames;
-    /* Aligned staging buffer for hardware output */
-    int16_t staging[OOPS_AUDIO_MAX_CHUNK * 2] __attribute__((aligned(64)));
+static struct oops_audio_port s_default_audio = {
+    -1, OOPS_AUDIO_CHANNELS, 48000, OOPS_AUDIO_DEFAULT_FRAMES, 0, NULL, {0}
 };
-
-static struct oops_audio_port s_default_audio = { -1, 2, 48000, OOPS_AUDIO_DEFAULT_FRAMES, {0} };
 static int s_audio_initialized = 0;
-
-static int s_last_audio_error = 0;
+static int s_last_audio_error = OOPS_AUDIO_OK;
 
 int oops_audio_get_last_error(void) {
     return s_last_audio_error;
 }
 
+int oops_audio_get_chunk_frames(const oops_audio_port_t *port) {
+    return port ? port->chunk_frames : 0;
+}
+
 oops_audio_port_t *oops_audio_open(int sample_rate, int channels, int buffer_frames) {
-    if (!sceAudioOutOpen) {
-        s_last_audio_error = -1001;
+    /* Arguments first, so a host without the platform still reports a bad call as bad. */
+    int ch = (channels <= 0) ? OOPS_AUDIO_CHANNELS : channels;
+    if (ch != OOPS_AUDIO_CHANNELS) {
+        s_last_audio_error = OOPS_AUDIO_EPARAM;
+        return NULL;
+    }
+    if (s_default_audio.handle >= 0) {
+        s_last_audio_error = OOPS_AUDIO_EBUSY;
+        return NULL;
+    }
+    /* A port that opens but can never output is not a port. */
+    if (!sceAudioOutOpen || !sceAudioOutOutput) {
+        s_last_audio_error = OOPS_AUDIO_EUNAVAIL;
         return NULL;
     }
 
@@ -61,16 +75,15 @@ oops_audio_port_t *oops_audio_open(int sample_rate, int channels, int buffer_fra
     if (frames > OOPS_AUDIO_MAX_CHUNK) frames = OOPS_AUDIO_MAX_CHUNK;
 
     int rate = (sample_rate <= 0) ? 48000 : sample_rate;
-    int ch = (channels <= 0) ? 2 : channels;
 
     int handle = -1;
     /* Try with resolved user first */
     if (user >= 0) {
-        handle = sceAudioOutOpen(user, 0, 0, (unsigned int)frames, (unsigned int)rate, 0);
+        handle = sceAudioOutOpen(user, 0, 0, (unsigned int)frames, (unsigned int)rate, OOPS_AUDIO_FORMAT_PARAM);
     }
     /* Fallback with system user 0xFF if failed */
     if (handle < 0) {
-        handle = sceAudioOutOpen(0xFF, 0, 0, (unsigned int)frames, (unsigned int)rate, 0);
+        handle = sceAudioOutOpen(0xFF, 0, 0, (unsigned int)frames, (unsigned int)rate, OOPS_AUDIO_FORMAT_PARAM);
     }
     if (handle < 0) {
         s_last_audio_error = handle;
@@ -81,40 +94,73 @@ oops_audio_port_t *oops_audio_open(int sample_rate, int channels, int buffer_fra
     s_default_audio.channels = ch;
     s_default_audio.sample_rate = rate;
     s_default_audio.chunk_frames = frames;
+    s_default_audio.pending = 0;
+    s_default_audio.sink = sceAudioOutOutput;
+    s_last_audio_error = OOPS_AUDIO_OK;
 
     return &s_default_audio;
 }
 
+/* One chunk to the sink; the platform's negative code passes through, anything else is 0. */
+static int oops_audio_emit(struct oops_audio_port *port, const int16_t *chunk) {
+    int rc = port->sink(port->handle, chunk);
+    return (rc < 0) ? rc : 0;
+}
+
 int oops_audio_write(oops_audio_port_t *port, const int16_t *pcm_samples, size_t frame_count) {
-    if (!port || port->handle < 0 || !sceAudioOutOutput || !pcm_samples || frame_count == 0) {
+    if (!port || port->handle < 0 || !port->sink || !pcm_samples || frame_count == 0) {
+        return -1;
+    }
+    if (port->chunk_frames <= 0 || port->chunk_frames > OOPS_AUDIO_MAX_CHUNK) {
         return -1;
     }
 
-    size_t frames_left = frame_count;
+    const size_t chunk = (size_t)port->chunk_frames;
     const int16_t *src = pcm_samples;
-    int chunk = port->chunk_frames;
+    size_t left = frame_count;
 
-    while (frames_left > 0) {
-        size_t to_write = (frames_left > (size_t)chunk) ? (size_t)chunk : frames_left;
-        if (to_write == (size_t)chunk) {
-            int rc = sceAudioOutOutput(port->handle, src);
+    while (left > 0) {
+        if (port->pending == 0 && left >= chunk) {
+            /* A whole chunk straight from the caller: no copy. */
+            int rc = oops_audio_emit(port, src);
             if (rc < 0) return rc;
-        } else {
-            /* Zero-pad partial chunk */
-            for (size_t i = 0; i < (size_t)chunk * 2; i++) {
-                port->staging[i] = 0;
-            }
-            for (size_t i = 0; i < to_write * 2; i++) {
-                port->staging[i] = src[i];
-            }
-            int rc = sceAudioOutOutput(port->handle, port->staging);
+            src += chunk * OOPS_AUDIO_CHANNELS;
+            left -= chunk;
+            continue;
+        }
+
+        /* Fill the held tail; hand it over when it becomes a whole chunk. */
+        size_t room = chunk - (size_t)port->pending;
+        size_t n = (left < room) ? left : room;
+        int16_t *dst = port->staging + (size_t)port->pending * OOPS_AUDIO_CHANNELS;
+        for (size_t i = 0; i < n * OOPS_AUDIO_CHANNELS; i++) {
+            dst[i] = src[i];
+        }
+        port->pending += (int)n;
+        src += n * OOPS_AUDIO_CHANNELS;
+        left -= n;
+
+        if ((size_t)port->pending == chunk) {
+            int rc = oops_audio_emit(port, port->staging);
+            port->pending = 0;
             if (rc < 0) return rc;
         }
-        frames_left -= to_write;
-        src += to_write * 2;
     }
 
     return 0;
+}
+
+int oops_audio_flush(oops_audio_port_t *port) {
+    if (!port || port->handle < 0 || !port->sink) return -1;
+    if (port->pending == 0) return 0;
+
+    size_t chunk_samples = (size_t)port->chunk_frames * OOPS_AUDIO_CHANNELS;
+    for (size_t i = (size_t)port->pending * OOPS_AUDIO_CHANNELS; i < chunk_samples; i++) {
+        port->staging[i] = 0;
+    }
+    int rc = oops_audio_emit(port, port->staging);
+    port->pending = 0;
+    return rc;
 }
 
 int oops_audio_set_volume(oops_audio_port_t *port, float left, float right) {
@@ -134,8 +180,14 @@ int oops_audio_set_volume(oops_audio_port_t *port, float left, float right) {
 }
 
 void oops_audio_close(oops_audio_port_t *port) {
-    if (port && port->handle >= 0 && sceAudioOutClose) {
-        sceAudioOutClose(port->handle);
+    if (!port) return;
+    if (port->handle >= 0) {
+        (void)oops_audio_flush(port);
+        if (sceAudioOutClose) {
+            sceAudioOutClose(port->handle);
+        }
         port->handle = -1;
     }
+    port->pending = 0;
+    port->sink = NULL;
 }

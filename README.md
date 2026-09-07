@@ -32,7 +32,9 @@ Display is the one subsystem with real depth, because it is the one that had to 
 |---|---|---|
 | **agc** | `<agc/display.h>`, `<agc/tiler.h>` | Prospero-generation: display handle on bus 0, write-combined direct memory, a batch map into the GPU's address space, and 64 KB hardware tile swizzling |
 | **gnm** | `<gnm/display.h>` | Orbis-generation: display handle on bus 0, direct memory at 64 KB page alignment, linear scanout |
-| **host** | - | An in-memory linear buffer, so the interface can be exercised off hardware |
+
+Off hardware there is no third backend. `make test` stubs the display getters and drives the
+draw canvas and the tiler on plain memory, which is how the interface is exercised without one.
 
 `agc` and `gnm` are the platform's own driver families and are ABI facts rather than brand
 names - the same reason obSCEne reports which of them resolves rather than guessing a

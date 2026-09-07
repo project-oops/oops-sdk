@@ -39,6 +39,13 @@ static void test_net_ipv4_parsing_invalid(void) {
     ASSERT_NE(oops_net_inet_pton("192.168.1.-1", &ip), 0);
     ASSERT_NE(oops_net_inet_pton("abc.def.ghi.jkl", &ip), 0);
     ASSERT_NE(oops_net_inet_pton("", &ip), 0);
+    /* Empty, over-long, or trailing-dot octets are malformed, not silently zero. */
+    ASSERT_NE(oops_net_inet_pton("1..2.3", &ip), 0);
+    ASSERT_NE(oops_net_inet_pton(".1.2.3", &ip), 0);
+    ASSERT_NE(oops_net_inet_pton("1.2.3.", &ip), 0);
+    ASSERT_NE(oops_net_inet_pton("1.2.3.0004", &ip), 0);
+    ASSERT_NE(oops_net_inet_pton("1.2.3.4 ", &ip), 0);
+    ASSERT_NE(oops_net_inet_pton("1.2.3.4.", &ip), 0);
 }
 
 void run_unit_tests_net(void) {

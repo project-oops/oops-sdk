@@ -8,7 +8,12 @@ static uint32_t s_lut_y[128];
 static int s_lut_initialized = 0;
 
 static void init_tiler_lut(void) {
-    /* RDNA2 GFX10.3 basis vectors for 32bpp (4 bytes/pixel) in 64KB blocks */
+    /* RDNA2 GFX10.3 basis vectors for 32bpp (4 bytes/pixel) in 64KB blocks.
+     * Each entry is the byte-address contribution of one x (or y) bit inside a tile; a
+     * pixel's tile-relative byte address is the XOR of the entries for its set bits. The 14
+     * vectors are linearly independent across the 14 address bits above the 4-byte pixel,
+     * which is what makes a tile a permutation of its 16,384 pixels. The unit test pins one
+     * address per basis bit, so an edit here fails there before it reaches a display. */
     static const uint32_t x_basis[7] = {
         0x000004u, 0x000008u, 0x000080u, 0x000100u, 0x002200u, 0x000800u, 0x008400u
     };
@@ -30,14 +35,27 @@ static void init_tiler_lut(void) {
     s_lut_initialized = 1;
 }
 
+void agc_tile_init(void) {
+    if (!s_lut_initialized) {
+        init_tiler_lut();
+    }
+}
+
+size_t agc_tile_surface_bytes(uint32_t width, uint32_t height) {
+    if (width == 0 || height == 0) {
+        return 0;
+    }
+    size_t tiles_x = ((size_t)width + AGC_TILE_DIM - 1u) / AGC_TILE_DIM;
+    size_t tiles_y = ((size_t)height + AGC_TILE_DIM - 1u) / AGC_TILE_DIM;
+    return tiles_x * tiles_y * (size_t)AGC_TILE_BYTES;
+}
+
 void agc_tile_surface(void *dest, const void *src, uint32_t width, uint32_t height) {
     if (!dest || !src || width == 0 || height == 0) {
         return;
     }
 
-    if (!s_lut_initialized) {
-        init_tiler_lut();
-    }
+    agc_tile_init();
 
     uint32_t *dst32 = (uint32_t *)dest;
     const uint32_t *src32 = (const uint32_t *)src;
@@ -50,7 +68,8 @@ void agc_tile_surface(void *dest, const void *src, uint32_t width, uint32_t heig
         for (uint32_t tx = 0; tx < width; tx += 128u) {
             uint32_t block_w = (tx + 128u <= width) ? 128u : (width - tx);
             uint32_t tile_idx = row_tile_idx + (tx >> 7);
-            uint32_t *tile_dest = dst32 + (tile_idx << 14); /* 16,384 pixels per 64KB block */
+            /* 16,384 pixels per 64KB block */
+            uint32_t *tile_dest = dst32 + (size_t)tile_idx * (AGC_TILE_BYTES / 4u);
 
             for (uint32_t ly = 0; ly < block_h; ly++) {
                 uint32_t y_off = s_lut_y[ly];

@@ -41,7 +41,8 @@ __attribute__((weak)) int sceVideoOutSubmitFlip(int handle, int index, unsigned 
 __attribute__((weak)) int sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int memoryType, sce_off_t *paddr);
 __attribute__((weak)) int sceKernelAllocateDirectMemory(sce_off_t searchStart, sce_off_t searchEnd,
                                                         size_t len, size_t alignment, int memoryType, sce_off_t *paddr);
-__attribute__((weak)) int sceKernelGetDirectMemorySize(void);
+/* size_t, as gnm and memory declare it: the pool is larger than 2 GB and an int truncates it. */
+__attribute__((weak)) size_t sceKernelGetDirectMemorySize(void);
 __attribute__((weak)) int sceKernelReleaseDirectMemory(sce_off_t paddr, size_t len);
 __attribute__((weak)) int sceKernelBatchMap(struct obs_batch_map_entry *entries, int num_entries, int *completed);
 __attribute__((weak)) int sceKernelMunmap(void *addr, size_t len);
@@ -86,6 +87,19 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
     disp->handle = -1;
     disp->width = width;
     disp->height = height;
+
+    /* The mapping is fixed at 32 MB: two 10 MB tiled buffers and a linear scratch in the
+     * remaining 12 MB. A surface that does not fit would be tiled straight over its
+     * neighbour, so refuse it here, before the hardware is opened. */
+    if (width == 0 || height == 0 ||
+        agc_tile_surface_bytes(width, height) > AGC_STRIDE_BYTES ||
+        (uint64_t)width * (uint64_t)height * 4u > AGC_TOTAL_ALLOC_BYTES - 2u * AGC_STRIDE_BYTES) {
+        disp->last_error = -3;
+        return disp;
+    }
+
+    /* The swizzle table, built once here rather than by whichever tiling call comes first. */
+    agc_tile_init();
 
     if (!sceVideoOutOpen || !sceVideoOutRegisterBuffers2) {
         disp->last_error = -1;
@@ -191,11 +205,12 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
     agc_log("agc-b1-addr", "buffer 1 addr", (uint64_t)(uintptr_t)disp->target_gpu_fb[1]);
     agc_log("agc-lin-addr", "scratch addr", (uint64_t)(uintptr_t)disp->linear_scratch_fb);
 
-    /* 4. Configure buffer attribute: 256-byte buffer, 64-bit SDR format, 1920x1080, pitch 0 */
+    /* 4. Configure buffer attribute: a 256-byte attribute block, 64-bit SDR format, the requested
+     * width x height, pitch 0 */
     unsigned char attr[256];
     for (size_t i = 0; i < sizeof(attr); i++) attr[i] = 0;
     if (sceVideoOutSetBufferAttribute2) {
-        sceVideoOutSetBufferAttribute2(attr, 0x8000000000000000ULL, 0 /* kLinear */,
+        sceVideoOutSetBufferAttribute2(attr, 0x8000000000000000ULL, 0 /* tiled: written by agc_tile_surface(), not linear */,
                                        width, height, 0, 0, 0);
     }
     agc_log("agc-attr-0", "attr word 0", *(const uint64_t *)(attr + 0));

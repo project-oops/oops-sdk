@@ -28,8 +28,9 @@ typedef struct oops_net_info {
 int oops_net_ctl_init(void);
 
 /**
- * Query active network interface information.
- * Returns: 0 on success, -1 on failure.
+ * Query active network interface information. A field the platform does not answer is left
+ * empty (strings) or zero (integers).
+ * Returns: 0 if at least one field was answered, -1 if the service is absent or nothing was.
  */
 int oops_net_ctl_get_info(oops_net_info_t *out_info);
 

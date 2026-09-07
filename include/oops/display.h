@@ -19,7 +19,11 @@ typedef enum oops_display_backend {
 
 typedef struct oops_display oops_display_t;
 
-/* Open the primary display output using the specified backend (or auto-detected from compile target). */
+/*
+ * Open the primary display output. OOPS_DISPLAY_BACKEND_AUTO probes at runtime: the agc
+ * backend first, then gnm if agc did not become ready. Check oops_display_is_ready() - a
+ * backend that could not open is returned, not hidden.
+ */
 oops_display_t *oops_display_open(oops_display_backend_t backend, unsigned int width, unsigned int height);
 
 /* Query state */

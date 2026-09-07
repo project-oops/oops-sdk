@@ -53,9 +53,13 @@ __attribute__((weak)) int sceKernelMapDirectMemory(void **addr, size_t len, int 
                                                    sce_off_t paddr, size_t alignment);
 __attribute__((weak)) int sceKernelMunmap(void *addr, size_t len);
 
-#define GNM_FB_ALIGN           0x10000u
-#define GNM_FB_BYTES           (((1920u * 1080u * 4u) + GNM_FB_ALIGN - 1u) & ~(size_t)(GNM_FB_ALIGN - 1u))
-#define GNM_TOTAL_ALLOC_BYTES  (GNM_FB_BYTES * 2u)
+#define GNM_FB_ALIGN  0x10000u   /* 64 KB page alignment for scanout memory */
+#define GNM_MAX_DIM   0xFFFFu    /* beyond any scanout mode; keeps width * height * 4 in range */
+
+/* Two buffers, each the requested surface rounded up to the page, sized at open. */
+static size_t gnm_align_up(size_t value, size_t align) {
+    return (value + align - 1u) & ~(align - 1u);
+}
 
 struct gnm_display {
     int handle;
@@ -65,6 +69,9 @@ struct gnm_display {
     unsigned int height;
     sce_off_t physical;
     void *mapped_base;
+    size_t fb_bytes;      /* one buffer, page-aligned */
+    size_t total_bytes;   /* both buffers: what was allocated and mapped */
+    int has_memory;
     uint32_t *buffers[2];
     unsigned int fb_index;
     uint64_t flip_seq;
@@ -80,6 +87,15 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
     disp->handle = -1;
     disp->width = width;
     disp->height = height;
+
+    /* Dimensions are bounded so the byte count cannot overflow; beyond that the direct memory
+     * allocator is the judge of what fits, and its refusal is reported as it is. */
+    if (width == 0 || height == 0 || width > GNM_MAX_DIM || height > GNM_MAX_DIM) {
+        disp->last_error = -2;
+        return disp;
+    }
+    disp->fb_bytes = gnm_align_up((size_t)width * (size_t)height * 4u, GNM_FB_ALIGN);
+    disp->total_bytes = disp->fb_bytes * 2u;
 
     if (!sceVideoOutOpen || !sceVideoOutRegisterBuffers || !sceKernelAllocateDirectMemory || !sceKernelMapDirectMemory) {
         disp->last_error = -1;
@@ -105,7 +121,7 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
 
     size_t pool_size = sceKernelGetDirectMemorySize ? sceKernelGetDirectMemorySize() : 0x80000000u;
     sce_off_t physical = 0;
-    int arc = sceKernelAllocateDirectMemory(0, (sce_off_t)pool_size, GNM_TOTAL_ALLOC_BYTES, GNM_FB_ALIGN, 3, &physical);
+    int arc = sceKernelAllocateDirectMemory(0, (sce_off_t)pool_size, disp->total_bytes, GNM_FB_ALIGN, 3, &physical);
     if (arc != 0) {
         disp->last_error = arc;
         (void)sceVideoOutClose(disp->handle);
@@ -115,17 +131,18 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
     disp->physical = physical;
 
     void *mapped = 0;
-    int mrc = sceKernelMapDirectMemory(&mapped, GNM_TOTAL_ALLOC_BYTES, 0x33, 0, physical, GNM_FB_ALIGN);
+    int mrc = sceKernelMapDirectMemory(&mapped, disp->total_bytes, 0x33, 0, physical, GNM_FB_ALIGN);
     if (mrc != 0 || !mapped) {
         disp->last_error = mrc;
-        (void)sceKernelReleaseDirectMemory(physical, GNM_TOTAL_ALLOC_BYTES);
+        (void)sceKernelReleaseDirectMemory(physical, disp->total_bytes);
         (void)sceVideoOutClose(disp->handle);
         disp->handle = -1;
         return disp;
     }
     disp->mapped_base = mapped;
+    disp->has_memory = 1;
     disp->buffers[0] = (uint32_t *)mapped;
-    disp->buffers[1] = (uint32_t *)((unsigned char *)mapped + GNM_FB_BYTES);
+    disp->buffers[1] = (uint32_t *)((unsigned char *)mapped + disp->fb_bytes);
 
     struct SceVideoOutBufferAttribute attr;
     for (size_t i = 0; i < sizeof(attr); i++) ((unsigned char *)&attr)[i] = 0;
@@ -140,8 +157,8 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
     int rrc = sceVideoOutRegisterBuffers(disp->handle, 0, addresses, 2, &attr);
     if (rrc != 0) {
         disp->last_error = rrc;
-        (void)sceKernelMunmap(mapped, GNM_TOTAL_ALLOC_BYTES);
-        (void)sceKernelReleaseDirectMemory(physical, GNM_TOTAL_ALLOC_BYTES);
+        (void)sceKernelMunmap(mapped, disp->total_bytes);
+        (void)sceKernelReleaseDirectMemory(physical, disp->total_bytes);
         (void)sceVideoOutClose(disp->handle);
         disp->handle = -1;
         return disp;
@@ -254,6 +271,14 @@ void gnm_display_close(gnm_display_t *disp) {
     if (disp->handle > 0 && sceVideoOutClose) {
         (void)sceVideoOutClose(disp->handle);
         disp->handle = -1;
+    }
+    /* Release what open took: the scanout handle is gone, so the memory behind it can go. */
+    if (disp->has_memory) {
+        if (sceKernelMunmap) (void)sceKernelMunmap(disp->mapped_base, disp->total_bytes);
+        if (sceKernelReleaseDirectMemory) (void)sceKernelReleaseDirectMemory(disp->physical, disp->total_bytes);
+        disp->mapped_base = 0;
+        disp->physical = 0;
+        disp->has_memory = 0;
     }
     disp->ready = 0;
 }

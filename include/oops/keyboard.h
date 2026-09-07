@@ -21,8 +21,16 @@ extern "C" {
  * points resolve at all (a presence census, as 107/108 did for decode), and the layout of the
  * platform's key record (documented at 96 bytes, unconfirmed here). Capability detection
  * below is real *once the symbol names are confirmed*; the read path is capture-gated and
- * returns 0 events rather than parse a record whose layout is a guess.
+ * refuses with OOPS_KEYBOARD_ELAYOUT rather than parse a record whose layout is a guess. A
+ * distinct code, not zero events, so a caller can tell "no keys" from "no reader".
  */
+
+enum {
+    OOPS_KEYBOARD_OK       = 0,
+    OOPS_KEYBOARD_EUNAVAIL = -1, /* the library, its entry points or a signed-in user did not resolve */
+    OOPS_KEYBOARD_ELAYOUT  = -2, /* the read is real but the platform record layout is unconfirmed */
+    OOPS_KEYBOARD_EPARAM   = -3, /* a caller argument was rejected before any platform call */
+};
 
 /* Key transition kind. */
 enum {
@@ -48,7 +56,11 @@ typedef struct oops_key_event {
 
 #define OOPS_MAX_KEY_EVENTS 32
 
-/* Open the keyboard for the signed-in user. Returns 0 on success, negative on failure. */
+/*
+ * Open the keyboard for the signed-in user. 0 on success, OOPS_KEYBOARD_EUNAVAIL when the
+ * library or the user is absent, otherwise the platform's own negative code from the open.
+ * The result is remembered and repeated by later calls until oops_keyboard_close().
+ */
 int oops_keyboard_init(void);
 
 /* Whether keyboard input is reachable: the library and its entry points resolve. 1/0. */
@@ -56,10 +68,10 @@ int oops_keyboard_available(void);
 
 /*
  * Drain up to `max_events` (cap OOPS_MAX_KEY_EVENTS) key transitions, oldest first, and return
- * the count.
+ * the count. Negative is one of the codes above.
  *
- * NOTE: capture-gated. The platform key-record layout is unconfirmed, so this returns 0 until
- * the obSCEne capture lands rather than parse a guessed record.
+ * NOTE: capture-gated. The platform key-record layout is unconfirmed, so this returns
+ * OOPS_KEYBOARD_ELAYOUT until the obSCEne capture lands, never a fabricated count.
  */
 int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events);
 

@@ -30,9 +30,15 @@ typedef int64_t ssize_t;
 #define _SSIZE_T_DECLARED
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 void *memset(void *dest, int value, size_t len);
 void *memcpy(void *dest, const void *src, size_t len);
 int memcmp(const void *s1, const void *s2, size_t len);
+#ifdef __cplusplus
+}
+#endif
 #endif
 
 #define OBS_NUM_MAX 24

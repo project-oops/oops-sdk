@@ -1,5 +1,6 @@
 #include "oops/input.h"
 #include <stddef.h>
+#include "pad_layout.h"
 
 /* Platform symbols from libScePad and libSceUserService */
 __attribute__((weak)) int scePadInit(void);
@@ -14,45 +15,13 @@ __attribute__((weak)) int scePadResetOrientation(int handle);
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
-/* Hardware ScePadTouch and ScePadData layout */
-typedef struct {
-    uint16_t x;
-    uint16_t y;
-    uint8_t  finger;
-    uint8_t  pad[3];
-} ScePadTouch;
-
-typedef struct {
-    uint8_t     fingers;
-    uint8_t     pad1[3];
-    uint32_t    pad2;
-    ScePadTouch touch[2];
-} ScePadTouchData;
-
-typedef struct {
-    uint32_t buttons;                              /* offset  0 */
-    struct { uint8_t x; uint8_t y; } leftStick;    /* offset  4 */
-    struct { uint8_t x; uint8_t y; } rightStick;   /* offset  6 */
-    struct { uint8_t l2; uint8_t r2; } analogButtons; /* offset  8 */
-    uint16_t    padding;                           /* offset 10 */
-    struct { float x, y, z, w; } quat;            /* offset 12 (orientation) */
-    struct { float x, y, z; }    accel;           /* offset 28 (acceleration) */
-    struct { float x, y, z; }    vel;             /* offset 40 (angular velocity) */
-    ScePadTouchData touchData;                     /* offset 52 */
-    uint8_t     connected;                         /* offset 76 */
-    uint8_t     _align[3];                         /* offset 77 */
-    uint64_t    timestamp;                         /* offset 80 */
-    uint8_t     reserved[64];                      /* oversize for safety */
-} ScePadDataInternal;
-
 static int s_pad_handles[OOPS_MAX_PADS] = { -1, -1, -1, -1 };
 static int32_t s_user_id = -1;
 static int s_initialized = 0;
+static int s_init_rc = -1;  /* what the first init reported; repeated until close */
 
-/* Map one raw platform record into the SDK's pad-state shape. Shared by the single-state
- * poll and the batched read, so the layout lives in exactly one place. Does not clear
- * out_state - every field it reports is written here, and callers zero first. */
-static void oops_fill_pad_state(oops_pad_state_t *out_state, const ScePadDataInternal *raw) {
+/* Declared in pad_layout.h; shared by the single-state poll and the batched read. */
+void oops_input_map_record(oops_pad_state_t *out_state, const ScePadDataInternal *raw) {
     out_state->buttons = raw->buttons;
     out_state->left_stick_x  = (int8_t)((int)raw->leftStick.x - 128);
     out_state->left_stick_y  = (int8_t)((int)raw->leftStick.y - 128);
@@ -89,7 +58,7 @@ static void oops_fill_pad_state(oops_pad_state_t *out_state, const ScePadDataInt
 }
 
 int oops_input_init(void) {
-    if (s_initialized) return 0;
+    if (s_initialized) return s_init_rc;
 
     if (scePadInit) {
         scePadInit();
@@ -106,8 +75,11 @@ int oops_input_init(void) {
         s_pad_handles[0] = scePadOpen(s_user_id, 0, 0, NULL);
     }
 
+    /* A failed init stays failed: later calls report this result, not a success because a
+     * flag was set on the way out. */
     s_initialized = 1;
-    return (s_pad_handles[0] >= 0) ? 0 : -1;
+    s_init_rc = (s_pad_handles[0] >= 0) ? 0 : -1;
+    return s_init_rc;
 }
 
 int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
@@ -135,7 +107,7 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
         return -1;
     }
 
-    oops_fill_pad_state(out_state, &raw);
+    oops_input_map_record(out_state, &raw);
     return 0;
 }
 
@@ -146,6 +118,12 @@ int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
     }
     if (max_samples > OOPS_MAX_PAD_SAMPLES) {
         max_samples = OOPS_MAX_PAD_SAMPLES;
+    }
+
+    /* Capture-gated until OOPS_PAD_RECORD_BYTES is known: a batch parsed at the wrong stride
+     * is plausible garbage, not a result. The single-record oops_input_poll() is unaffected. */
+    if (OOPS_PAD_RECORD_BYTES == 0) {
+        return -1;
     }
 
     /* Lazy-open port if uninitialized but requested */
@@ -174,7 +152,7 @@ int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
         for (size_t b = 0; b < sizeof(out_states[i]); b++) {
             ((unsigned char *)&out_states[i])[b] = 0;
         }
-        oops_fill_pad_state(&out_states[i], &raw[i]);
+        oops_input_map_record(&out_states[i], &raw[i]);
     }
     return count;
 }
@@ -247,4 +225,5 @@ void oops_input_close(void) {
         }
     }
     s_initialized = 0;
+    s_init_rc = -1;
 }

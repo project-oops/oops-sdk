@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* Standard controller button bitmasks (matching ScePad layout) */
+/* Standard controller button bitmasks (matching ScePad layout; CREATE excepted, see its note) */
 #define OOPS_BUTTON_L3        (1u << 1)
 #define OOPS_BUTTON_R3        (1u << 2)
 #define OOPS_BUTTON_OPTIONS   (1u << 3)
@@ -23,6 +23,7 @@ extern "C" {
 #define OOPS_BUTTON_CIRCLE    (1u << 13)
 #define OOPS_BUTTON_CROSS     (1u << 14)
 #define OOPS_BUTTON_SQUARE    (1u << 15)
+/* Capture-gated: bit 16 is not in the public layout and is unconfirmed from hardware. */
 #define OOPS_BUTTON_CREATE    (1u << 16)  /* Prospero Create / Orbis Share */
 #define OOPS_BUTTON_TOUCHPAD  (1u << 20)
 
@@ -72,6 +73,11 @@ enum {
     OOPS_TRIGGER_R2 = 1u << 1,
 };
 
+/*
+ * Open pad 0 for the initial user. Returns 0 on success. A failure is remembered and
+ * reported again by later calls until oops_input_close(); it does not turn into success
+ * because the first call ran.
+ */
 int oops_input_init(void);
 int oops_input_poll(unsigned int port, oops_pad_state_t *out_state);
 
@@ -80,6 +86,10 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state);
  * the driver in one request, oldest first, and returns the count. Processing every returned
  * record is what preserves a press-and-release that falls between two per-frame polls; the
  * last record is the current state. Reuses the same pad-state layout as oops_input_poll.
+ *
+ * NOTE: capture-gated. The driver's per-record size sets the stride of the batch, and it is
+ * not yet confirmed from hardware, so this returns a negative code rather than parse every
+ * record after the first at a guessed offset. oops_input_poll() is the working path meanwhile.
  */
 int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
                           unsigned int max_samples);
