@@ -20,6 +20,7 @@ unsigned int agc_display_get_width(const agc_display_t *disp);
 unsigned int agc_display_get_height(const agc_display_t *disp);
 uint64_t agc_display_get_flip_count(const agc_display_t *disp);
 int agc_display_get_last_error(const agc_display_t *disp);
+int agc_display_get_video_handle(const agc_display_t *disp);
 void agc_display_clear(agc_display_t *disp, uint32_t color);
 int agc_display_flip(agc_display_t *disp);
 void agc_display_close(agc_display_t *disp);

@@ -15,6 +15,13 @@ extern "C" {
 #define OOPS_SOCK_STREAM 1
 #define OOPS_SOCK_DGRAM  2
 
+/* Message flags (send/recv). MSG_DONTWAIT = 0x80: a single non-blocking receive without
+ * putting the socket in non-blocking mode, measured on this console (obSCEne, 12.40).
+ * MSG_PEEK = 0x2 is the stable FreeBSD ABI value, the same derivation the AF/SOCK/IPPROTO
+ * constants below already rely on; read a datagram without consuming it. */
+#define OOPS_MSG_DONTWAIT 0x80
+#define OOPS_MSG_PEEK     0x2
+
 /* IP protocols */
 #define OOPS_IPPROTO_IP   0
 #define OOPS_IPPROTO_TCP  6
@@ -65,6 +72,9 @@ long oops_sendto(int sock, const void *buf, size_t len, int flags, const char *t
 long oops_recvfrom(int sock, void *buf, size_t len, int flags, char *from_ip, size_t ip_len, uint16_t *from_port);
 int  oops_setsockopt(int sock, int level, int optname, const void *optval, size_t optlen);
 int  oops_set_nonblocking(int sock, int nonblocking);
+/* Whether a socket result means "try again": reads errno via __error() (EAGAIN 35) for the
+ * POSIX path, or the sceNet-encoded 0x80410123 where that layer is the one in use. */
+int  oops_net_would_block(long rc);
 void oops_close(int sock);
 
 #ifdef __cplusplus

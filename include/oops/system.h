@@ -49,6 +49,60 @@ int oops_system_get_cpu_freq(uint64_t *out_freq_hz);
 int oops_system_get_hw_serial(char *out_serial, size_t max_len);
 int oops_system_get_hw_model(char *out_model, size_t max_len);
 
+/**
+ * Application Category Types (applicationCategoryType in param.json / param.sfo).
+ *
+ * Dictates direct memory (DMEM) allocation budget, HDMI video out bus ownership
+ * via SceSysAvControl, and process lifecycle / multitasking behavior.
+ * Category is orthogonal to process privilege (paid / authority ID).
+ */
+typedef enum oops_app_category {
+    /**
+     * Big App / Native Game (0x00000000).
+     * - Direct Memory (DMEM): Full budget (~12.5 GB on PS5, ~5.5 GB on PS4).
+     * - Display: Exclusive ownership of primary HDMI scanout (OBS_VIDEO_BUS_MAIN = 0).
+     * - Multitasking: Foreground exclusive; launching another Big App suspends or terminates.
+     * - Linker / Auth: Requires /app0/sce_module/libc.prx; gated by PFAuthClient
+     *   (/dev/pltauth patch required).
+     */
+    OOPS_APP_CATEGORY_BIG_APP    = 0,
+
+    /**
+     * System App (0x00010000 / 65536).
+     * - Direct Memory (DMEM): 0 bytes granted by ResourceArbitrator (userland mmap/malloc only).
+     * - Display: Denied primary HDMI scanout (sceVideoOutOpen returns 0x80290001).
+     * - Multitasking: Background utility / daemon / standalone tool.
+     * - Linker / Auth: libc.prx not enforced by rtld; bypasses PFAuthClient.
+     */
+    OOPS_APP_CATEGORY_SYSTEM_APP = 0x00010000,
+
+    /**
+     * Mini App (0x00020000 / 131072).
+     * - Direct Memory (DMEM): Severely constrained budget (~256 MB - 512 MB).
+     * - Display: Secondary overlay / system compositor layer (not raw exclusive HDMI).
+     * - Multitasking: Concurrent; runs alongside an active Big App without preempting it.
+     */
+    OOPS_APP_CATEGORY_MINI_APP   = 0x00020000,
+
+    /**
+     * Daemon (0x00000003 / 3).
+     * - Direct Memory (DMEM): Minimal / system pool.
+     * - Display: None (headless background daemon).
+     */
+    OOPS_APP_CATEGORY_DAEMON     = 0x00000003,
+
+    /**
+     * Media App (0x00040000 / 262144).
+     * - Direct Memory (DMEM): Custom media streaming budget.
+     * - Display: Dedicated HDCP / protected video path.
+     */
+    OOPS_APP_CATEGORY_MEDIA_APP  = 0x00040000,
+} oops_app_category_t;
+
+/* Checks if /dev/pltauth is patched for native Prospero category 0 execution.
+ * Returns 1 if pltauth is patched (or on PS4/host), 0 if unpatched/failing. */
+int oops_system_check_pltauth(void);
+
 #ifdef __cplusplus
 }
 #endif

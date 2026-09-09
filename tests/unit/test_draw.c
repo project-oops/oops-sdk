@@ -137,7 +137,82 @@ static void test_draw_clear_respects_pitch(void) {
     }
 }
 
+/* A sprite wrapped from a const array blits without copying; blit_blend honours the source's
+ * per-pixel alpha so a transparent pixel shows the destination through. */
+static void test_draw_sprite_and_blit_blend(void) {
+    static const uint32_t sprite_px[4] = {
+        OOPS_COLOR_RED, OOPS_RGBA(0, 0, 0, 0),          /* opaque red, fully transparent */
+        OOPS_RGBA(255, 255, 255, 128), OOPS_COLOR_BLUE  /* 50% white, opaque blue */
+    };
+    oops_sprite_t sprite = { 2, 2, sprite_px };
+    oops_surface_t src = oops_surface_from_sprite(&sprite);
+    ASSERT_TRUE(src.pixels != NULL);
+    ASSERT_EQ(src.width, 2);
+    ASSERT_EQ(src.pitch, 2);
+
+    uint32_t buf[4 * 4];
+    oops_surface_t dst = { buf, 4, 4, 4 };
+    oops_draw_clear(&dst, OOPS_COLOR_BLACK);
+
+    oops_draw_blit_blend(&dst, 1, 1, &src, 0, 0, 2, 2);
+    ASSERT_EQ(buf[1 * 4 + 1], OOPS_COLOR_RED);          /* opaque source wins */
+    ASSERT_EQ(buf[1 * 4 + 2], OOPS_COLOR_BLACK);        /* transparent: destination shows */
+    ASSERT_EQ(buf[2 * 4 + 2], OOPS_COLOR_BLUE);         /* opaque blue */
+    uint32_t blended = buf[2 * 4 + 1];                  /* 50% white over black -> ~128 grey */
+    ASSERT_TRUE(((blended >> 16) & 0xFF) >= 127 && ((blended >> 16) & 0xFF) <= 129);
+
+    /* A straight blit ignores alpha and stamps the raw pixel. */
+    oops_draw_clear(&dst, OOPS_COLOR_BLACK);
+    oops_draw_blit(&dst, 0, 0, &src, 0, 0, 2, 2);
+    ASSERT_EQ(buf[0 * 4 + 1], OOPS_RGBA(0, 0, 0, 0));   /* copied verbatim, not composited */
+}
+
+static void test_draw_gradient(void) {
+    uint32_t buf[1 * 16];
+    oops_surface_t s = { buf, 16, 1, 16 };
+    oops_draw_clear(&s, OOPS_COLOR_BLACK);
+    /* Horizontal black->white across 16 px: left end black, right end white, monotonic. */
+    oops_draw_rect_gradient(&s, 0, 0, 16, 1, OOPS_RGB(0, 0, 0), OOPS_RGB(255, 255, 255), 0);
+    ASSERT_EQ(buf[0] & 0xFF, 0);
+    ASSERT_EQ(buf[15] & 0xFF, 255);
+    ASSERT_TRUE((buf[8] & 0xFF) > (buf[4] & 0xFF));
+}
+
+static void test_draw_text_width_and_lowercase(void) {
+    /* Longest line drives the width; \n resets. "AB\nCDE" -> 3 glyphs * 8 = 24 at scale 1. */
+    ASSERT_EQ(oops_draw_text_width("AB\nCDE", 1), 24);
+    ASSERT_EQ(oops_draw_text_width("hi", 2), 2 * 8 * 2);
+    ASSERT_EQ(oops_draw_text_width(NULL, 1), 0);
+
+    /* Lower case is no longer folded to upper: 'a' and 'A' render differently, and 'a' is not
+     * the blank glyph. */
+    uint32_t a[8 * 8], A[8 * 8];
+    oops_surface_t sa = { a, 8, 8, 8 }, sA = { A, 8, 8, 8 };
+    oops_draw_clear(&sa, OOPS_COLOR_BLACK);
+    oops_draw_clear(&sA, OOPS_COLOR_BLACK);
+    oops_draw_text(&sa, 0, 0, "a", OOPS_COLOR_WHITE, 1);
+    oops_draw_text(&sA, 0, 0, "A", OOPS_COLOR_WHITE, 1);
+    int lit_a = 0, differ = 0;
+    for (int i = 0; i < 8 * 8; i++) {
+        if (a[i] == OOPS_COLOR_WHITE) lit_a = 1;
+        if (a[i] != A[i]) differ = 1;
+    }
+    ASSERT_TRUE(lit_a);
+    ASSERT_TRUE(differ);
+
+    /* And 'a' must be its own glyph, not the '?' substitution an out-of-range char would give. */
+    uint32_t q[8 * 8];
+    oops_surface_t sq = { q, 8, 8, 8 };
+    oops_draw_clear(&sq, OOPS_COLOR_BLACK);
+    oops_draw_text(&sq, 0, 0, "?", OOPS_COLOR_WHITE, 1);
+    int not_qmark = 0;
+    for (int i = 0; i < 8 * 8; i++) if (a[i] != q[i]) not_qmark = 1;
+    ASSERT_TRUE(not_qmark);
+
+}
+
 void run_unit_tests_draw(void) {
+
     TEST_SUITE_BEGIN("2D Graphics Canvas & Primitives");
     RUN_TEST(test_draw_surface_clear_and_pixel);
     RUN_TEST(test_draw_clear_respects_pitch);
@@ -146,5 +221,8 @@ void run_unit_tests_draw(void) {
     RUN_TEST(test_draw_alpha_blend);
     RUN_TEST(test_draw_line_and_circle);
     RUN_TEST(test_draw_text_and_blit);
+    RUN_TEST(test_draw_sprite_and_blit_blend);
+    RUN_TEST(test_draw_gradient);
+    RUN_TEST(test_draw_text_width_and_lowercase);
 }
 

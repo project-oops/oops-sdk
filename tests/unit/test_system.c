@@ -53,10 +53,17 @@ static void test_system_services_and_multiuser(void) {
     ASSERT_EQ(oops_system_get_enter_button(&button), -1);
 }
 
+static void test_system_pltauth_check(void) {
+    int status = oops_system_check_pltauth();
+    /* On host or PS4 it returns 1; on PS5 it returns 0 or 1 */
+    ASSERT_TRUE(status == 0 || status == 1);
+}
+
 void run_unit_tests_system(void) {
     TEST_SUITE_BEGIN("System & User Services");
     RUN_TEST(test_system_info_query);
     RUN_TEST(test_system_null_safety);
     RUN_TEST(test_system_hw_telemetry);
     RUN_TEST(test_system_services_and_multiuser);
+    RUN_TEST(test_system_pltauth_check);
 }

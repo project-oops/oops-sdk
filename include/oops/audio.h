@@ -11,13 +11,18 @@ extern "C" {
 /*
  * PCM output. One port, 16-bit signed interleaved stereo: a frame is one left sample then one
  * right sample. The hardware consumes fixed chunks of `buffer_frames` frames (rounded to a
- * multiple of 256 within 256..2048). A write hands over whole chunks, blocking on each until
- * the hardware has room, and holds a partial tail until the next write completes it or
- * oops_audio_flush() pads it with silence. A stream written in any sizes therefore plays
- * without a gap; a one-shot sound needs a flush to hear its end.
+ * multiple of 256 within 256..2048; every size in that range is accepted at 48000 Hz on
+ * 12.40, and 44100 Hz is refused). A write hands over whole chunks and holds a partial tail
+ * until the next write completes it or oops_audio_flush() pads it with silence, so a stream
+ * written in any sizes plays without a gap and a one-shot sound needs a flush to hear its end.
+ *
+ * Writes block once the hardware queue is full. Measured on 12.40: eight outputs of 512
+ * frames took 57 ms against 85 ms of audio, so the queue holds about two chunks and each
+ * output past that waits a chunk's duration. Write from a thread that can afford the wait.
  *
  * Only stereo is honoured. The write path has one shape, so a channel count it would then
- * ignore is refused rather than stored. See audio.c on the platform's format selector.
+ * ignore is refused rather than stored. The platform's format selector for stereo is
+ * measured, not assumed; see audio.c.
  */
 
 enum {
@@ -45,7 +50,9 @@ int oops_audio_flush(oops_audio_port_t *port);
 
 int oops_audio_set_volume(oops_audio_port_t *port, float left, float right);
 
-/* Flushes, then releases the platform handle. Safe on NULL. */
+/* Flushes the held tail, then drains the queued chunks and releases the handle. The platform
+ * refuses to close while audio is still queued, so close plays it out first; a one-shot sound
+ * is heard to its end without the caller waiting. Safe on NULL. */
 void oops_audio_close(oops_audio_port_t *port);
 
 #ifdef __cplusplus

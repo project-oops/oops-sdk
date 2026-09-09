@@ -56,6 +56,33 @@ int  oops_sem_poll(oops_sem_t *sem, int count);
 int  oops_sem_signal(oops_sem_t *sem, int count);
 int  oops_sem_destroy(oops_sem_t *sem);
 
+/*
+ * Exception handling (Prospero, hardware-confirmed - obSCEne sweep 20260909-151910, payload
+ * leg; libkernel sceKernelInstallExceptionHandler/RemoveExceptionHandler/RaiseException).
+ *
+ * Delivery is synchronous: the handler runs to completion on the raising thread before
+ * oops_thread_raise_exception returns. A handler is registered per signal; installing a second
+ * for the same signal without removing the first is refused. The handler receives the signal
+ * number and two platform pointer arguments.
+ */
+#define OOPS_EXCEPTION_SIGNAL 30          /* 0x1e: the primary exception signal the platform accepts */
+
+/* Raw platform codes the exception calls return (0x8002xxxx is the kernel errno encoding). */
+#define OOPS_EXC_EAGAIN 0x80020023        /* 35: a handler is already installed, or removing with none */
+#define OOPS_EXC_EINVAL 0x80020016        /* 22: invalid or inverted arguments, or an unhandled signal */
+#define OOPS_EXC_ESRCH  0x80020003        /* 3: no such thread for the target handle */
+
+typedef void (*oops_exception_handler_t)(int signum, void *arg1, void *arg2);
+
+/* Install/remove a per-signal handler. Return 0, a negative code when the entry point is
+ * absent, or the platform's raw code above. */
+int  oops_thread_install_exception_handler(int signum, oops_exception_handler_t handler);
+int  oops_thread_remove_exception_handler(int signum);
+
+/* Raise `signum` on `thread`; the handler runs before this returns. 0 on success, a negative
+ * code when the entry point is absent, or the platform's raw code (ESRCH/EINVAL). */
+int  oops_thread_raise_exception(oops_thread_t thread, int signum);
+
 #ifdef __cplusplus
 }
 #endif

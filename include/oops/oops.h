@@ -1,6 +1,7 @@
 #ifndef OOPS_H
 #define OOPS_H
 
+#include "oops/target.h"
 #include "oops/display.h"
 #include "oops/draw.h"
 #include "oops/input.h"

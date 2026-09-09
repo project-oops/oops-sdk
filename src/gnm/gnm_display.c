@@ -13,6 +13,9 @@ struct SceVideoOutBufferAttribute {
     uint8_t reserved[44];
 };
 
+/* 64 bytes, confirmed on 12.40 in the app context (obSCEne 080-video/flip-status): a fresh
+ * handle reads flip_arg = -1 at offset 24 and current_buffer = -1 at offset 56, everything
+ * else zero, which is exactly this shape. */
 struct SceVideoOutFlipStatus {
     uint64_t count;
     uint64_t process_time;
@@ -259,6 +262,10 @@ int gnm_display_set_flip_rate(gnm_display_t *disp, unsigned int rate) {
         return rc;
     }
     return -1;
+}
+
+int gnm_display_get_video_handle(const gnm_display_t *disp) {
+    return disp ? disp->handle : -1;
 }
 
 void gnm_display_close(gnm_display_t *disp) {

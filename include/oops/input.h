@@ -23,8 +23,15 @@ extern "C" {
 #define OOPS_BUTTON_CIRCLE    (1u << 13)
 #define OOPS_BUTTON_CROSS     (1u << 14)
 #define OOPS_BUTTON_SQUARE    (1u << 15)
-/* Capture-gated: bit 16 is not in the public layout and is unconfirmed from hardware. */
-#define OOPS_BUTTON_CREATE    (1u << 16)  /* Prospero Create / Orbis Share */
+/*
+ * Capture-gated and contested. Bit 16 is not in the public ScePad button layout. This SDK holds
+ * it unconfirmed; Prosperous (pros-link/src/pad.rs) maps the same bit to Home and its enum claims
+ * the bit was confirmed empirically on a target. obSCEne has not settled it - its button-bits
+ * probe needs a controller attached and resolved not-possible on the test rig - so which of
+ * Create / Home bit 16 carries is genuinely open. Do not bind it as a shell or system button
+ * until an obSCEne button-bits sweep with a controller confirms it.
+ */
+#define OOPS_BUTTON_CREATE    (1u << 16)  /* Prospero Create / Orbis Share; bit contested with Prosperous's Home */
 #define OOPS_BUTTON_TOUCHPAD  (1u << 20)
 
 #define OOPS_MAX_PADS 4
@@ -87,9 +94,10 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state);
  * record is what preserves a press-and-release that falls between two per-frame polls; the
  * last record is the current state. Reuses the same pad-state layout as oops_input_poll.
  *
- * NOTE: capture-gated. The driver's per-record size sets the stride of the batch, and it is
- * not yet confirmed from hardware, so this returns a negative code rather than parse every
- * record after the first at a guessed offset. oops_input_poll() is the working path meanwhile.
+ * The stride is the driver's record: 120 bytes on 12.40, measured by obSCEne's write-extent
+ * probes of both the single and the batched read (sweep 20260909-110725), which also showed
+ * the batched read returning one record when nothing is attached. Returns the driver's count,
+ * or -1 when the port is not open or the read did not resolve.
  */
 int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
                           unsigned int max_samples);
@@ -99,8 +107,10 @@ int oops_input_set_lightbar(unsigned int port, uint8_t r, uint8_t g, uint8_t b);
 int oops_input_reset_orientation(unsigned int port);
 
 /*
- * Whether adaptive triggers can be driven on this port (a DualSense on a firmware that
- * exposes the effect entry point). Real capability detection; returns 1/0.
+ * Whether the adaptive-trigger effect entry point resolves and this port is open. Real
+ * detection - the entry point is confirmed present in the app context on 12.40 and absent
+ * in the eboot and payload contexts - but it does not check that the pad is a DualSense.
+ * Returns 1/0.
  */
 int oops_input_adaptive_triggers_available(unsigned int port);
 
@@ -109,9 +119,9 @@ int oops_input_adaptive_triggers_available(unsigned int port);
  * R2). `mode` is one of OOPS_TRIGGER_*; `position`/`position_end` are 0..255 along the pull,
  * `strength` 0..255, `frequency` 0..255 (used by VIBRATION).
  *
- * NOTE: capture-gated. The DualSense trigger-effect parameter layout is not yet confirmed
- * from hardware, so this returns a negative code rather than pass a guessed struct. Completing
- * it needs the obSCEne capture spec'd alongside this subsystem.
+ * NOTE: capture-gated. The entry point is confirmed; its parameter layout is not, so this
+ * returns a negative code rather than pass a guessed struct. A write-extent capture of the
+ * parameter is what completes it.
  */
 int oops_input_set_trigger_effect(unsigned int port, unsigned int triggers, int mode,
                                   uint8_t position, uint8_t position_end, uint8_t strength,

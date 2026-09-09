@@ -38,6 +38,23 @@ __attribute__((weak)) int sceVideoOutRegisterBuffers2(int handle, int startIndex
                                                       const void *attribute,
                                                       int category, void *reserved);
 __attribute__((weak)) int sceVideoOutSubmitFlip(int handle, int index, unsigned int flipMode, int64_t flipArg);
+
+/* 64 bytes, confirmed on 12.40 in the app context (obSCEne 080-video/flip-status): a fresh
+ * handle reads flip_arg = -1 at offset 24 and current_buffer = -1 at offset 56, everything
+ * else zero, which is exactly this shape. */
+struct agc_flip_status {
+    uint64_t count;
+    uint64_t process_time;
+    uint64_t submit_time;
+    int64_t  flip_arg;
+    uint64_t reserved[2];
+    int32_t  num_gpu_flip_pending;
+    int32_t  num_flip_pending;
+    int32_t  current_buffer;
+    uint32_t reserved1;
+};
+_Static_assert(sizeof(struct agc_flip_status) == 64, "flip status is 64 bytes on hardware");
+__attribute__((weak)) int sceVideoOutGetFlipStatus(int handle, struct agc_flip_status *status);
 __attribute__((weak)) int sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int memoryType, sce_off_t *paddr);
 __attribute__((weak)) int sceKernelAllocateDirectMemory(sce_off_t searchStart, sce_off_t searchEnd,
                                                         size_t len, size_t alignment, int memoryType, sce_off_t *paddr);
@@ -47,6 +64,7 @@ __attribute__((weak)) int sceKernelReleaseDirectMemory(sce_off_t paddr, size_t l
 __attribute__((weak)) int sceKernelBatchMap(struct obs_batch_map_entry *entries, int num_entries, int *completed);
 __attribute__((weak)) int sceKernelMunmap(void *addr, size_t len);
 __attribute__((weak)) int sceKernelOpen(const char *path, int flags, int mode);
+__attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
 
 #define AGC_STRIDE_BYTES       0xa00000u   /* 10 MB per tiled buffer (2MB-aligned) */
 #define AGC_TOTAL_ALLOC_BYTES  0x2000000u  /* 32 MB (16 x 2MB pages) */
@@ -142,7 +160,7 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
     sce_off_t physical = 0;
     int arc = -1;
     if (sceKernelAllocateMainDirectMemory) {
-        arc = sceKernelAllocateMainDirectMemory(AGC_TOTAL_ALLOC_BYTES, 0x200000u, 3 /* WC_GARLIC */, &physical);
+        arc = sceKernelAllocateMainDirectMemory(AGC_TOTAL_ALLOC_BYTES, 0x200000u, 3 /* write-combined GPU memory: 3, confirmed (obSCEne 130-layout/memory-type, 12.40) */, &physical);
         agc_log("agc-alloc-main", "AllocateMainDirectMemory", (uint64_t)(uint32_t)arc);
     } else if (sceKernelAllocateDirectMemory && sceKernelGetDirectMemorySize) {
         arc = sceKernelAllocateDirectMemory(0, (sce_off_t)sceKernelGetDirectMemorySize(),
@@ -206,7 +224,9 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
     agc_log("agc-lin-addr", "scratch addr", (uint64_t)(uintptr_t)disp->linear_scratch_fb);
 
     /* 4. Configure buffer attribute: a 256-byte attribute block, 64-bit SDR format, the requested
-     * width x height, pitch 0 */
+     * width x height, pitch 0. The call writes the first 80 bytes of the block: tiling mode
+     * at 4, width at 12, height at 16, the format word at 32 (obSCEne 080-video/attribute-block
+     * on 12.40). */
     unsigned char attr[256];
     for (size_t i = 0; i < sizeof(attr); i++) attr[i] = 0;
     if (sceVideoOutSetBufferAttribute2) {
@@ -264,11 +284,34 @@ unsigned int agc_display_get_height(const agc_display_t *disp) {
     return disp ? disp->height : 0;
 }
 
+/* Poll the flip status until nothing is pending, or give up after about 100 ms. Both entry
+ * points are linked in the eboot context and present in the app context on 12.40; where
+ * either is missing there is nothing to wait on and the caller proceeds as it always did. */
+static void agc_wait_for_flips(struct agc_display *disp) {
+    if (disp->handle <= 0 || !sceVideoOutGetFlipStatus || !sceKernelUsleep) return;
+    for (int i = 0; i < 100; i++) {
+        struct agc_flip_status status;
+        for (size_t k = 0; k < sizeof(status); k++) ((unsigned char *)&status)[k] = 0;
+        if (sceVideoOutGetFlipStatus(disp->handle, &status) != 0) return;
+        if (status.num_flip_pending <= 0) return;
+        sceKernelUsleep(1000);
+    }
+}
+
 int agc_display_flip(agc_display_t *disp) {
     if (!disp || !disp->ready) return -1;
 
     unsigned int shown = disp->fb_index;
     disp->fb_index = (disp->fb_index + 1) % 2;
+
+    /* The buffer about to be written was submitted two flips ago. On prospero (measured; the agc path also serves trinity) the
+     * submit call queues and returns in microseconds - eight back-to-back all returned 0 in
+     * 3 to 12 us, leaving pending flips that
+     * present over the next frames (obSCEne 080-video/visual-flip; a later 32-submit burst put
+     * the hardware queue capacity at exactly 26, submit 27 refused with QUEUE_FULL 0x80290012) - so without a wait the tiler
+     * could write into a buffer that is still queued or on screen. Drain the queue first: with
+     * two buffers, pending == 0 means the other one is on screen and this one is free. */
+    agc_wait_for_flips(disp);
 
     /* Tile the linear scratch buffer into the targeted display buffer */
     agc_tile_surface(disp->target_gpu_fb[shown], disp->linear_scratch_fb, disp->width, disp->height);
@@ -293,11 +336,24 @@ void agc_display_clear(agc_display_t *disp, uint32_t color) {
 
 uint64_t agc_display_get_flip_count(const agc_display_t *disp) {
     if (!disp) return 0;
+    /* The hardware's count of completed flips where the status call resolves; the count of
+     * submits where it does not. The two differ by however many flips are still pending. */
+    if (disp->handle > 0 && sceVideoOutGetFlipStatus) {
+        struct agc_flip_status status;
+        for (size_t i = 0; i < sizeof(status); i++) ((unsigned char *)&status)[i] = 0;
+        if (sceVideoOutGetFlipStatus(disp->handle, &status) == 0) {
+            return status.count;
+        }
+    }
     return disp->flip_count;
 }
 
 int agc_display_get_last_error(const agc_display_t *disp) {
     return disp ? disp->last_error : -1;
+}
+
+int agc_display_get_video_handle(const agc_display_t *disp) {
+    return disp ? disp->handle : -1;
 }
 
 void agc_display_close(agc_display_t *disp) {

@@ -47,8 +47,26 @@ static void test_thread_host_contract(void) {
     oops_thread_yield();
 }
 
+/* Exception handling: the constants are the confirmed raw platform codes, the handler type
+ * compiles, and on a host with no libkernel every call fails rather than pretending, install
+ * refuses a NULL handler locally. */
+static void handler_probe(int signum, void *a1, void *a2) { (void)signum; (void)a1; (void)a2; }
+
+static void test_thread_exception_contract(void) {
+    ASSERT_EQ(OOPS_EXCEPTION_SIGNAL, 30);
+    ASSERT_EQ((int)OOPS_EXC_EAGAIN, (int)0x80020023);
+    ASSERT_EQ((int)OOPS_EXC_EINVAL, (int)0x80020016);
+    ASSERT_EQ((int)OOPS_EXC_ESRCH,  (int)0x80020003);
+
+    ASSERT_EQ(oops_thread_install_exception_handler(OOPS_EXCEPTION_SIGNAL, NULL), -1);
+    ASSERT_EQ(oops_thread_install_exception_handler(OOPS_EXCEPTION_SIGNAL, handler_probe), -1);
+    ASSERT_EQ(oops_thread_remove_exception_handler(OOPS_EXCEPTION_SIGNAL), -1);
+    ASSERT_EQ(oops_thread_raise_exception(NULL, OOPS_EXCEPTION_SIGNAL), -1);
+}
+
 void run_unit_tests_thread(void) {
     TEST_SUITE_BEGIN("Threading & Synchronization");
     RUN_TEST(test_thread_primitives_null_safety);
     RUN_TEST(test_thread_host_contract);
+    RUN_TEST(test_thread_exception_contract);
 }

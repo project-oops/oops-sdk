@@ -5,8 +5,9 @@
 /*
  * Platform symbols from libSceMouse and libSceUserService.
  *
- * Names are a documented expectation pending an obSCEne presence census (100-input measures
- * only scePad today). Weak binding resolves to null where absent; availability reports honestly.
+ * Confirmed on 12.40 by obSCEne 101-input-ext: libSceMouse loads and all four entry points
+ * resolve in the app context, none in the eboot or payload contexts, which the weak binding
+ * reports as unavailable rather than guessing.
  */
 __attribute__((weak)) int sceMouseInit(void);
 __attribute__((weak)) int sceMouseOpen(int userId, int type, int index, const void *param);
@@ -16,8 +17,10 @@ __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
 /*
- * The platform mouse record. Documented at 40 bytes, unconfirmed here, so 0 keeps the read
- * refusing with OOPS_MOUSE_ELAYOUT. When the obSCEne capture lands: set the size, define the
+ * The platform mouse record. Documented at 40 bytes and still unconfirmed: the 12.40 capture
+ * called sceMouseRead with no mouse attached and it wrote nothing, so no extent was measured.
+ * A run with a mouse plugged in is the capture that lands this; 0 keeps the read refusing
+ * with OOPS_MOUSE_ELAYOUT. When the obSCEne capture lands: set the size, define the
  * record beside it, and translate it in oops_mouse_read - the only place that reads it. The
  * batched read strides by this size, so it must be exact, not oversized.
  */

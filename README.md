@@ -8,9 +8,31 @@ time. Every project that has done it has written that layer again. This is that 
 written once.
 
 > **Status: in progress, and honest about which parts.** The display path is developed and
-> exercised on hardware. The other subsystems are thin wrappers over the platform
-> entry points, written to the shape of the interface rather than to a measured behaviour.
-> Treat anything outside display as a declaration of intent that compiles.
+> exercised on hardware, and a few more paths have now run there too - the table below says
+> which, and in which context. Everything not in it is a thin wrapper over the platform's
+> entry points, written to the shape of the interface rather than to a measured behaviour:
+> a declaration of intent that compiles.
+
+### What has run on hardware
+
+Measured by obSCEne's hardware sweeps on firmware 12.40, on prospero (the current-generation PS5 base), 2026-09-08. A
+sweep runs three legs: a title launched as an **eboot**, a bare **payload**, and an installed
+**pkg** (the app context). Which libraries resolve differs by leg, and that split is a finding
+in itself, so each row says where a thing worked. The probe ids are obSCEne's, for the reader
+who wants the bytes.
+
+| subsystem | what ran | where | probe |
+|---|---|---|---|
+| display (agc) | opened, registered two tiled buffers, presented frames | eboot, pkg | obSCEne's own display path |
+| input, pad | `oops_input_init` and `oops_input_poll` returned a record cleanly; the driver record is 120 bytes, so the batched read strides on a measured size | eboot, pkg | `100-input/oops-sdk-poll`, `read-extent`, `batched-read` |
+| input, adaptive triggers | the effect entry point resolves; its parameter is unconfirmed, so the call still refuses | pkg only | `100-input/dualsense-symbols` |
+| audio | `oops_audio_open`, `oops_audio_set_volume`, `oops_audio_write` of 512 frames all returned 0; the stereo format selector, the accepted chunk sizes and rate, and the blocking depth are measured | eboot, pkg | `090-audio/oops-sdk-pcm`, `090-audio/format-selector`, `open-shapes`, `blocking` |
+| keyboard, mouse | both libraries and all four entry points resolve; the keyboard record is 96 bytes, fields unconfirmed, so both reads still refuse | pkg only | `101-input-ext` |
+| video out | the flip-status record is 64 bytes in the shape the gnm path declares; the submit call queues without blocking, five deep after a burst and drained within 200 ms, so the agc path now drains the queue before reusing a buffer | pkg, eboot | `080-video/flip-status`, `visual-flip` |
+| net (payload) | an unsigned payload's weak references to the POSIX socket exports bind at load, and a payload opened, bound, listened, accepted, received and echoed on a socket end to end | payload | `102-net`, `080-video/visual-flip` sweep 20260909-144348 |
+
+Where a row says a read "still refuses", the header for that subsystem says what capture
+would open it and the code returns a distinct negative code rather than a plausible zero.
 
 ## The subsystems
 

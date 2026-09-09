@@ -13,12 +13,18 @@ __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
 /*
  * The sample-format selector handed to the platform's open call. The write path produces
- * 16-bit signed interleaved stereo and nothing else, so this value must select exactly that
- * on hardware. It is the value this wrapper has always passed and it is not yet confirmed
- * from a capture: if the first sound out of a payload is at the wrong speed or missing a
- * channel, this is the first thing to check.
+ * 16-bit signed interleaved stereo and nothing else, so this must select exactly that.
+ *
+ * Measured, not assumed: obSCEne 090-audio/format-selector on 12.40 opened a port with each
+ * selector and read the port state back (16 bytes; byte 2 is the channel count). Selector 0
+ * gave 1 channel, selector 1 gave 2, in both the eboot and app contexts. Until that capture
+ * this wrapper passed 0, so it opened a mono port and fed it stereo frames.
+ *
+ * The same run settled the rest of the open call: 48000 Hz is accepted with chunks of 256,
+ * 512, 1024 and 2048 frames, and 44100 Hz is refused with 0x80260008 at every chunk size, so
+ * the platform code a caller sees for a rejected rate is that one.
  */
-#define OOPS_AUDIO_FORMAT_PARAM 0u
+#define OOPS_AUDIO_FORMAT_PARAM 1u
 
 static struct oops_audio_port s_default_audio = {
     -1, OOPS_AUDIO_CHANNELS, 48000, OOPS_AUDIO_DEFAULT_FRAMES, 0, NULL, {0}
@@ -182,8 +188,20 @@ int oops_audio_set_volume(oops_audio_port_t *port, float left, float right) {
 void oops_audio_close(oops_audio_port_t *port) {
     if (!port) return;
     if (port->handle >= 0) {
+        /* Emit any held partial chunk first, then drain what is queued. The platform refuses
+         * sceAudioOutClose with SCE_AUDIO_OUT_ERROR_BUSY (0x80260002) while unplayed chunks
+         * remain, and sceAudioOutOutput(handle, NULL) blocks until one queued chunk finishes
+         * (obSCEne 090-audio/drain, 12.40). So close by playing the queue out: try to close,
+         * and on BUSY drain one chunk and retry. The bound is the hardware queue depth (26
+         * frames of headroom, measured), so a handful of chunks at most. */
         (void)oops_audio_flush(port);
-        if (sceAudioOutClose) {
+        if (sceAudioOutClose && sceAudioOutOutput) {
+            for (int i = 0; i < 32; i++) {
+                int rc = sceAudioOutClose(port->handle);
+                if (rc != (int)0x80260002) break;   /* closed, or a different error */
+                (void)sceAudioOutOutput(port->handle, (const void *)0);
+            }
+        } else if (sceAudioOutClose) {
             sceAudioOutClose(port->handle);
         }
         port->handle = -1;

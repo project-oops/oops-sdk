@@ -4,9 +4,9 @@
 /*
  * Platform symbols from libSceKeyboard and libSceUserService.
  *
- * These names are a documented expectation, not yet confirmed on hardware (100-input measures
- * only scePad today). obSCEne's keyboard presence census will confirm or correct them; until
- * then the weak binding simply resolves to null where absent, and availability reports honestly.
+ * Confirmed on 12.40 by obSCEne 101-input-ext: libSceKeyboard loads and all four entry points
+ * resolve in the app context; in the eboot and payload contexts the library loads but nothing
+ * resolves, which the weak binding reports as unavailable rather than guessing.
  */
 __attribute__((weak)) int sceKeyboardInit(void);
 __attribute__((weak)) int sceKeyboardOpen(int userId, int type, int index, const void *param);
@@ -16,11 +16,16 @@ __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
 /*
- * The platform key record. Documented at 96 bytes, unconfirmed here, so 0 keeps the read
- * refusing with OOPS_KEYBOARD_ELAYOUT. When the obSCEne capture lands: set the size, define
- * the record beside it, and translate it in oops_keyboard_read - the only place that reads it.
+ * The platform key record is 96 bytes: obSCEne 101-input-ext/kbd-read on 12.40 handed
+ * sceKeyboardReadState a 4 KB fill and it rewrote exactly 96 bytes, in two runs. The record
+ * came back all zero except a 1 at bytes 16 and 20, and in the second run at byte 8 as well;
+ * no key was held in either. The size is confirmed; which bytes mean what is not, so the read
+ * still refuses. When a capture with a
+ * keyboard attached lands: define the record beside this, set the fields flag, and translate
+ * it in oops_keyboard_read - the only place that reads it.
  */
-#define OOPS_KEY_RECORD_BYTES 0
+#define OOPS_KEY_RECORD_BYTES 96
+#define OOPS_KEY_RECORD_FIELDS_CONFIRMED 0
 
 static int s_kbd_handle = -1;
 static int s_kbd_inited = 0;
@@ -75,7 +80,7 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
     }
     /* Capture-gated: a distinct code rather than zero events, so a caller can tell "no keys"
      * from "no reader". Checked before the handle because it is true on every firmware. */
-    if (OOPS_KEY_RECORD_BYTES == 0) {
+    if (!OOPS_KEY_RECORD_FIELDS_CONFIRMED) {
         return OOPS_KEYBOARD_ELAYOUT;
     }
     if (s_kbd_handle < 0 || !sceKeyboardReadState) {

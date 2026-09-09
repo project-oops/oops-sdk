@@ -4,11 +4,11 @@
 
 /* Embedded 8x8 bitmap font (ASCII 0x20 ' ' through 0x5F '_') */
 #define FONT_FIRST 0x20
-#define FONT_LAST  0x5F
+#define FONT_LAST  0x7E
 #define FONT_WIDTH  8
 #define FONT_HEIGHT 8
 
-static const uint8_t s_font[64][8] = {
+static const uint8_t s_font[95][8] = {
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, /* ' ' */
     {0x30, 0x30, 0x30, 0x30, 0x30, 0x00, 0x30, 0x00}, /* '!' */
     {0x6C, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, /* '"' */
@@ -72,7 +72,39 @@ static const uint8_t s_font[64][8] = {
     {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x00}, /* '\' */
     {0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00}, /* ']' */
     {0x18, 0x3C, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00}, /* '^' */
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00}  /* '_' */
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00}, /* '_' */
+    {0xC0, 0x60, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00}, /* '`' */
+    {0x00, 0x00, 0x78, 0x0C, 0x7C, 0xCC, 0x76, 0x00}, /* 'a' */
+    {0xE0, 0x60, 0x60, 0x7C, 0x66, 0x66, 0xDC, 0x00}, /* 'b' */
+    {0x00, 0x00, 0x78, 0xCC, 0xC0, 0xCC, 0x78, 0x00}, /* 'c' */
+    {0x1C, 0x0C, 0x0C, 0x7C, 0xCC, 0xCC, 0x76, 0x00}, /* 'd' */
+    {0x00, 0x00, 0x78, 0xCC, 0xFC, 0xC0, 0x78, 0x00}, /* 'e' */
+    {0x38, 0x6C, 0x60, 0xF0, 0x60, 0x60, 0xF0, 0x00}, /* 'f' */
+    {0x00, 0x00, 0x76, 0xCC, 0xCC, 0x7C, 0x0C, 0xF8}, /* 'g' */
+    {0xE0, 0x60, 0x60, 0x6C, 0x76, 0x66, 0xE6, 0x00}, /* 'h' */
+    {0x30, 0x00, 0x70, 0x30, 0x30, 0x30, 0x78, 0x00}, /* 'i' */
+    {0x18, 0x00, 0x78, 0x18, 0x18, 0x18, 0xD8, 0x70}, /* 'j' */
+    {0xE0, 0x60, 0x66, 0x6C, 0x78, 0x6C, 0xE6, 0x00}, /* 'k' */
+    {0x70, 0x30, 0x30, 0x30, 0x30, 0x30, 0x78, 0x00}, /* 'l' */
+    {0x00, 0x00, 0xEC, 0xFE, 0xD6, 0xD6, 0xD6, 0x00}, /* 'm' */
+    {0x00, 0x00, 0xDC, 0x66, 0x66, 0x66, 0x66, 0x00}, /* 'n' */
+    {0x00, 0x00, 0x78, 0xCC, 0xCC, 0xCC, 0x78, 0x00}, /* 'o' */
+    {0x00, 0x00, 0xDC, 0x66, 0x66, 0x7C, 0x60, 0xF0}, /* 'p' */
+    {0x00, 0x00, 0x76, 0xCC, 0xCC, 0x7C, 0x0C, 0x1E}, /* 'q' */
+    {0x00, 0x00, 0xDC, 0x76, 0x66, 0x60, 0xF0, 0x00}, /* 'r' */
+    {0x00, 0x00, 0x7C, 0xC0, 0x78, 0x0C, 0xF8, 0x00}, /* 's' */
+    {0x30, 0x30, 0xFC, 0x30, 0x30, 0x36, 0x1C, 0x00}, /* 't' */
+    {0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0x76, 0x00}, /* 'u' */
+    {0x00, 0x00, 0xCC, 0xCC, 0xCC, 0x78, 0x30, 0x00}, /* 'v' */
+    {0x00, 0x00, 0xC6, 0xD6, 0xD6, 0xFE, 0x6C, 0x00}, /* 'w' */
+    {0x00, 0x00, 0xC6, 0x6C, 0x38, 0x6C, 0xC6, 0x00}, /* 'x' */
+    {0x00, 0x00, 0xCC, 0xCC, 0xCC, 0x7C, 0x0C, 0xF8}, /* 'y' */
+    {0x00, 0x00, 0xFC, 0x98, 0x30, 0x64, 0xFC, 0x00}, /* 'z' */
+    {0x1C, 0x30, 0x30, 0xE0, 0x30, 0x30, 0x1C, 0x00}, /* '{' */
+    {0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00}, /* '|' */
+    {0xE0, 0x30, 0x30, 0x1C, 0x30, 0x30, 0xE0, 0x00}, /* '}' */
+    {0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}  /* '~' */
+
 };
 
 oops_surface_t oops_display_get_surface(oops_display_t *disp) {
@@ -84,6 +116,31 @@ oops_surface_t oops_display_get_surface(oops_display_t *disp) {
     surf.height = oops_display_get_height(disp);
     surf.pitch = surf.width;
     return surf;
+}
+
+/* Straight-alpha source-over of one pixel: out = src.rgb * a + dst.rgb * (1 - a), opaque. */
+static inline uint32_t oops_src_over(uint32_t src, uint32_t dst) {
+    uint32_t sa = (src >> 24) & 0xFF;
+    if (sa == 0) return dst;
+    if (sa == 255) return src;
+    uint32_t inv = 255 - sa;
+    uint32_t sr = (src >> 16) & 0xFF, sg = (src >> 8) & 0xFF, sb = src & 0xFF;
+    uint32_t dr = (dst >> 16) & 0xFF, dg = (dst >> 8) & 0xFF, db = dst & 0xFF;
+    uint32_t r = (sr * sa + dr * inv) / 255;
+    uint32_t g = (sg * sa + dg * inv) / 255;
+    uint32_t b = (sb * sa + db * inv) / 255;
+    return (0xFFu << 24) | (r << 16) | (g << 8) | b;
+}
+
+oops_surface_t oops_surface_from_sprite(const oops_sprite_t *sprite) {
+    oops_surface_t s = { NULL, 0, 0, 0 };
+    if (!sprite || !sprite->pixels) return s;
+    /* Read-only alias: the surface is a blit source only, never a draw target. */
+    s.pixels = (uint32_t *)sprite->pixels;
+    s.width = sprite->width;
+    s.height = sprite->height;
+    s.pitch = sprite->width;
+    return s;
 }
 
 void oops_draw_clear(oops_surface_t *surf, oops_color_t color) {
@@ -141,11 +198,6 @@ void oops_draw_rect_blend(oops_surface_t *surf, int x, int y, int w, int h, oops
         return;
     }
 
-    uint32_t sr = (color >> 16) & 0xFF;
-    uint32_t sg = (color >> 8) & 0xFF;
-    uint32_t sb = color & 0xFF;
-    uint32_t inv_a = 255 - sa;
-
     int x0, x1, y0, y1;
     if (!oops_clip_span(x, w, surf->width, &x0, &x1)) return;
     if (!oops_clip_span(y, h, surf->height, &y0, &y1)) return;
@@ -153,16 +205,41 @@ void oops_draw_rect_blend(oops_surface_t *surf, int x, int y, int w, int h, oops
     for (int py = y0; py < y1; py++) {
         uint32_t *row = surf->pixels + (size_t)py * surf->pitch;
         for (int px = x0; px < x1; px++) {
-            uint32_t dst = row[px];
-            uint32_t dr = (dst >> 16) & 0xFF;
-            uint32_t dg = (dst >> 8) & 0xFF;
-            uint32_t db = dst & 0xFF;
+            row[px] = oops_src_over(color, row[px]);
+        }
+    }
+}
 
-            uint32_t out_r = (sr * sa + dr * inv_a) / 255;
-            uint32_t out_g = (sg * sa + dg * inv_a) / 255;
-            uint32_t out_b = (sb * sa + db * inv_a) / 255;
+void oops_draw_rect_gradient(oops_surface_t *surf, int x, int y, int w, int h,
+                             oops_color_t color_a, oops_color_t color_b, int vertical) {
+    if (!surf || !surf->pixels || w <= 0 || h <= 0) return;
 
-            row[px] = (0xFFu << 24) | (out_r << 16) | (out_g << 8) | out_b;
+    int x0, x1, y0, y1;
+    if (!oops_clip_span(x, w, surf->width, &x0, &x1)) return;
+    if (!oops_clip_span(y, h, surf->height, &y0, &y1)) return;
+
+    int aa = (int)((color_a >> 24) & 0xFF), ar = (int)((color_a >> 16) & 0xFF);
+    int ag = (int)((color_a >> 8) & 0xFF), ab = (int)(color_a & 0xFF);
+    int ba = (int)((color_b >> 24) & 0xFF), br = (int)((color_b >> 16) & 0xFF);
+    int bg = (int)((color_b >> 8) & 0xFF), bb = (int)(color_b & 0xFF);
+
+    /* Interpolate over the full requested span, not the clipped one, so a clipped rectangle
+     * shows the same slice of the gradient it would unclipped. */
+    int span = (vertical ? h : w) - 1;
+    if (span < 1) span = 1;
+
+    for (int py = y0; py < y1; py++) {
+        uint32_t *rowp = surf->pixels + (size_t)py * surf->pitch;
+        for (int px = x0; px < x1; px++) {
+            int t = vertical ? (py - y) : (px - x);
+            if (t < 0) t = 0;
+            if (t > span) t = span;
+            uint32_t ca = (uint32_t)(aa + (ba - aa) * t / span);
+            uint32_t cr = (uint32_t)(ar + (br - ar) * t / span);
+            uint32_t cg = (uint32_t)(ag + (bg - ag) * t / span);
+            uint32_t cb = (uint32_t)(ab + (bb - ab) * t / span);
+            uint32_t c = (ca << 24) | (cr << 16) | (cg << 8) | cb;
+            rowp[px] = oops_src_over(c, rowp[px]);
         }
     }
 }
@@ -240,9 +317,6 @@ int oops_draw_text(oops_surface_t *surf, int x, int y, const char *text, oops_co
             continue;
         }
 
-        /* Fold lowercase to uppercase */
-        if (c >= 'a' && c <= 'z') c -= 32;
-
         if (c < FONT_FIRST || c > FONT_LAST) {
             c = '?';
         }
@@ -259,6 +333,22 @@ int oops_draw_text(oops_surface_t *surf, int x, int y, const char *text, oops_co
         cur_x += FONT_WIDTH * scale;
     }
     return cur_x;
+}
+
+int oops_draw_text_width(const char *text, int scale) {
+    if (!text) return 0;
+    if (scale < 1) scale = 1;
+    int cur = 0, max = 0;
+    for (const char *p = text; *p != '\0'; p++) {
+        if (*p == '\n') {
+            if (cur > max) max = cur;
+            cur = 0;
+            continue;
+        }
+        cur += FONT_WIDTH * scale;
+    }
+    if (cur > max) max = cur;
+    return max;
 }
 
 void oops_draw_blit(oops_surface_t *dst, int dx, int dy,
@@ -284,6 +374,31 @@ void oops_draw_blit(oops_surface_t *dst, int dx, int dy,
         uint32_t *dst_row = dst->pixels + (size_t)(dy + y) * dst->pitch + (size_t)dx;
         for (int x = 0; x < sw; x++) {
             dst_row[x] = src_row[x];
+        }
+    }
+}
+
+void oops_draw_blit_blend(oops_surface_t *dst, int dx, int dy,
+                          const oops_surface_t *src, int sx, int sy, int sw, int sh) {
+    if (!dst || !dst->pixels || !src || !src->pixels || sw <= 0 || sh <= 0) return;
+
+    if (sx < 0) { sw += sx; dx -= sx; sx = 0; }
+    if (sy < 0) { sh += sy; dy -= sy; sy = 0; }
+    if ((int64_t)sx + sw > (int64_t)src->width) sw = (int)src->width - sx;
+    if ((int64_t)sy + sh > (int64_t)src->height) sh = (int)src->height - sy;
+    if (sw <= 0 || sh <= 0) return;
+
+    if (dx < 0) { sw += dx; sx -= dx; dx = 0; }
+    if (dy < 0) { sh += dy; sy -= dy; dy = 0; }
+    if ((int64_t)dx + sw > (int64_t)dst->width) sw = (int)dst->width - dx;
+    if ((int64_t)dy + sh > (int64_t)dst->height) sh = (int)dst->height - dy;
+    if (sw <= 0 || sh <= 0) return;
+
+    for (int y = 0; y < sh; y++) {
+        const uint32_t *src_row = src->pixels + (size_t)(sy + y) * src->pitch + (size_t)sx;
+        uint32_t *dst_row = dst->pixels + (size_t)(dy + y) * dst->pitch + (size_t)dx;
+        for (int x = 0; x < sw; x++) {
+            dst_row[x] = oops_src_over(src_row[x], dst_row[x]);
         }
     }
 }

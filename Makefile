@@ -3,15 +3,45 @@
 
 CC := clang
 AR := ar
+
+# Target mode: orbis | neo | prospero | trinity
+# Default: prospero
+TARGET ?= prospero
+
+ifeq ($(TARGET),orbis)
+    OOPS_TARGET_NUM := 1
+else ifeq ($(TARGET),neo)
+    OOPS_TARGET_NUM := 2
+else ifeq ($(TARGET),prospero)
+    OOPS_TARGET_NUM := 3
+else ifeq ($(TARGET),trinity)
+    OOPS_TARGET_NUM := 4
+else
+    $(error Unknown oops-sdk TARGET '$(TARGET)': expected orbis, neo, prospero, or trinity)
+endif
+
+OOPS_TARGET_FLAGS := -DOOPS_TARGET=$(OOPS_TARGET_NUM)
 TARGET_FLAGS := -target x86_64-unknown-freebsd -ffreestanding -fno-builtin -nostdlib -fPIC -fno-stack-protector
-CFLAGS := $(TARGET_FLAGS) -std=c11 -Wall -Wextra -Werror -Iinclude
-BUILD := build
+CFLAGS := $(TARGET_FLAGS) $(OOPS_TARGET_FLAGS) -std=c11 -Wall -Wextra -Werror -Iinclude
+BUILD := build/$(TARGET)
+
+# Graphics backend source segregation:
+# Orbis / Neo (PS4) targets compile GNM only
+# Prospero / Trinity (PS5 native) targets compile AGC only
+ifeq ($(filter 1 2,$(OOPS_TARGET_NUM)),)
+    # PS5 native (Prospero / Trinity)
+    GRAPHICS_OBJS := \
+        $(BUILD)/agc/agc_display.o \
+        $(BUILD)/agc/agc_tiler.o
+else
+    # PS4 (Orbis / Neo)
+    GRAPHICS_OBJS := \
+        $(BUILD)/gnm/gnm_display.o
+endif
 
 OBJS := \
     $(BUILD)/display.o \
-    $(BUILD)/agc/agc_display.o \
-    $(BUILD)/agc/agc_tiler.o \
-    $(BUILD)/gnm/gnm_display.o \
+    $(GRAPHICS_OBJS) \
     $(BUILD)/input/input.o \
     $(BUILD)/input/keyboard.o \
     $(BUILD)/input/mouse.o \
@@ -94,7 +124,7 @@ TEST_SRCS := \
     src/net/net.c \
     src/net/netctl.c
 
-HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -DOOPS_HOST_BUILD
+HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -DOOPS_HOST_BUILD $(OOPS_TARGET_FLAGS)
 
 .PHONY: all clean test test-unit test-int
 
@@ -122,4 +152,4 @@ test-int: $(BUILD)/tests/test_runner
 	$(BUILD)/tests/test_runner int
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf build

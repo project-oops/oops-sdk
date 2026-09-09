@@ -38,7 +38,7 @@ typedef struct {
     uint8_t     connected;                         /* offset 76 */
     uint8_t     _align[3];                         /* offset 77 */
     uint64_t    timestamp;                         /* offset 80 */
-    uint8_t     reserved[64];                      /* oversize for safety */
+    uint8_t     reserved[32];                      /* offset 88: the tail to 120, not read */
 } ScePadDataInternal;
 
 /* The offsets the comments promise, enforced: a field moved by an edit fails here. */
@@ -53,18 +53,17 @@ _Static_assert(offsetof(ScePadDataInternal, connected) == 76, "connected at 76")
 _Static_assert(offsetof(ScePadDataInternal, timestamp) == 80, "timestamp at 80");
 
 /*
- * scePadRead() writes `num` consecutive driver records, so the batched read stride is the
- * record size the driver uses. ScePadDataInternal carries an oversized tail, which is safe
- * for the single-record read and wrong for a batch: every record after the first would be
- * parsed at the wrong offset. That size is not yet captured, so 0 keeps the batched read
- * refusing. When obSCEne confirms it, set it here; the assert then forces the layout to
- * match before the batch is trusted.
+ * The driver record is 120 bytes: obSCEne handed scePadReadState and scePadRead a 4 KB 0xC7
+ * fill on 12.40 and each rewrote exactly 120 (100-input/read-extent and batched-read, sweep
+ * 20260909-110725, app context, nothing attached). The batched read returned one record. In
+ * that record the sticks read 128, orientation w and acceleration y read 1.0, and the connected
+ * byte at 76 read 0 - written, not left as fill. scePadRead() writes `num` consecutive records,
+ * so this size is the batch stride, and the asserts hold the struct to it.
  */
-#define OOPS_PAD_RECORD_BYTES 0
-#if OOPS_PAD_RECORD_BYTES
+#define OOPS_PAD_RECORD_BYTES 120
 _Static_assert(sizeof(ScePadDataInternal) == OOPS_PAD_RECORD_BYTES,
                "ScePadDataInternal must be exactly one driver record for the batched read");
-#endif
+_Static_assert(offsetof(ScePadDataInternal, reserved) == 88, "tail at 88");
 
 /* Map one raw platform record into the SDK's pad-state shape. Shared by the single-state
  * poll and the batched read, so the mapping lives in exactly one place. Does not clear

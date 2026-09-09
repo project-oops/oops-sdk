@@ -12,6 +12,10 @@ __attribute__((weak)) int scePadSetVibration(int handle, const void *param);
 __attribute__((weak)) int scePadSetLightBar(int handle, const void *param);
 __attribute__((weak)) int scePadResetLightBar(int handle);
 __attribute__((weak)) int scePadResetOrientation(int handle);
+/* Present in the app context on 12.40 (obSCEne 100-input/dualsense-symbols resolved all seven
+ * DualSense entry points there) and absent in the eboot and payload contexts, so whether it
+ * resolves is the availability check. Its parameter layout is still unconfirmed. */
+__attribute__((weak)) int scePadSetTriggerEffect(int handle, const void *param);
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
@@ -30,9 +34,10 @@ void oops_input_map_record(oops_pad_state_t *out_state, const ScePadDataInternal
     out_state->l2_trigger    = raw->analogButtons.l2;
     out_state->r2_trigger    = raw->analogButtons.r2;
 
-    /* Connection heuristic: explicit flag, non-zero buttons, or sticks active */
-    out_state->connected = raw->connected ? 1 :
-        (raw->buttons != 0 || raw->leftStick.x != 0 || raw->leftStick.y != 0) ? 1 : 0;
+    /* The driver's flag, alone. The old fallback took a non-zero stick byte as a sign of life,
+     * but a centred stick reads 128, so it reported a pad on every successful read: obSCEne
+     * 100-input/oops-sdk-poll on 12.40 showed connected=1 with nothing attached. */
+    out_state->connected = raw->connected ? 1 : 0;
 
     /* Touchpad touch points */
     for (int t = 0; t < 2; t++) {
@@ -120,12 +125,7 @@ int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
         max_samples = OOPS_MAX_PAD_SAMPLES;
     }
 
-    /* Capture-gated until OOPS_PAD_RECORD_BYTES is known: a batch parsed at the wrong stride
-     * is plausible garbage, not a result. The single-record oops_input_poll() is unaffected. */
-    if (OOPS_PAD_RECORD_BYTES == 0) {
-        return -1;
-    }
-
+    /* The stride is the driver's 120-byte record, held to that size in pad_layout.h. */
     /* Lazy-open port if uninitialized but requested */
     if (s_pad_handles[port] < 0 && s_user_id >= 0 && scePadOpen) {
         s_pad_handles[port] = scePadOpen(s_user_id, 0, (int)port, NULL);
@@ -190,12 +190,10 @@ int oops_input_adaptive_triggers_available(unsigned int port) {
     if (port >= OOPS_MAX_PADS || s_pad_handles[port] < 0) {
         return 0;
     }
-    /* Honestly 0 until the capture below lands: which libScePad entry point drives the
-     * DualSense adaptive triggers on this firmware is not yet confirmed, so there is no symbol
-     * to resolve against and no way to claim the capability without guessing. When obSCEne
-     * confirms the entry point, this resolves it (as videodec/audiodec do) and the check
-     * becomes real. */
-    return 0;
+    /* Real detection: the effect entry point resolved here. Whether the pad on this port is a
+     * DualSense is not asked - the controller-information call that would say so returned an
+     * error and wrote nothing in the same capture. */
+    return scePadSetTriggerEffect ? 1 : 0;
 }
 
 int oops_input_set_trigger_effect(unsigned int port, unsigned int triggers, int mode,
@@ -211,9 +209,9 @@ int oops_input_set_trigger_effect(unsigned int port, unsigned int triggers, int 
     if (mode < OOPS_TRIGGER_OFF || mode > OOPS_TRIGGER_VIBRATION) {
         return -1;
     }
-    /* Capture-gated: the effect entry point and its parameter layout are unconfirmed. Passing
-     * a guessed output-report struct corrupts state rather than failing, so this refuses.
-     * Completing it needs the obSCEne adaptive-trigger capture. */
+    /* Capture-gated: the entry point is confirmed (see its declaration) but its parameter
+     * layout is not. Passing a guessed struct corrupts state rather than failing, so this
+     * refuses. A write-extent capture of the parameter is what completes it. */
     return -1;
 }
 

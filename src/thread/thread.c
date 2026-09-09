@@ -34,6 +34,12 @@ __attribute__((weak)) int sceKernelPollSema(int32_t sema, int need);
 __attribute__((weak)) int sceKernelSignalSema(int32_t sema, int signal);
 __attribute__((weak)) int sceKernelDeleteSema(int32_t sema);
 
+/* Exception handling (libkernel; addresses 0x800028660/0x8000287b0/0x8000288e0 in the payload
+ * leg, resolved here by name). The handler receives (signum, arg1, arg2) as measured. */
+__attribute__((weak)) int sceKernelInstallExceptionHandler(int signo, void (*handler)(int, void *, void *));
+__attribute__((weak)) int sceKernelRemoveExceptionHandler(int signo);
+__attribute__((weak)) int sceKernelRaiseException(void *thread, int signo);
+
 oops_thread_t oops_thread_create(const char *name, void *(*entry)(void *), void *arg, int priority, size_t stack_size) {
     if (!scePthreadCreate) return NULL;
 
@@ -197,4 +203,24 @@ int oops_sem_destroy(oops_sem_t *sem) {
     int rc = sceKernelDeleteSema(sem->handle);
     sem->handle = -1;
     return rc;
+}
+
+/*
+ * Exception handling. Thin wrappers over the confirmed libkernel entry points; where one does
+ * not resolve the call fails rather than pretending. A NULL handler on install is refused
+ * locally (the platform reports 0x80020023 for it, but there is nothing to install).
+ */
+int oops_thread_install_exception_handler(int signum, oops_exception_handler_t handler) {
+    if (!sceKernelInstallExceptionHandler || !handler) return -1;
+    return sceKernelInstallExceptionHandler(signum, handler);
+}
+
+int oops_thread_remove_exception_handler(int signum) {
+    if (!sceKernelRemoveExceptionHandler) return -1;
+    return sceKernelRemoveExceptionHandler(signum);
+}
+
+int oops_thread_raise_exception(oops_thread_t thread, int signum) {
+    if (!sceKernelRaiseException) return -1;
+    return sceKernelRaiseException(thread, signum);
 }

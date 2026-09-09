@@ -16,13 +16,13 @@ extern "C" {
  *
  * # State of this subsystem, honestly
  *
- * Unlike the pad, libSceKeyboard has not yet been measured on hardware - obSCEne's 100-input
- * covers scePad only. So two things await an obSCEne probe: whether the library and its entry
- * points resolve at all (a presence census, as 107/108 did for decode), and the layout of the
- * platform's key record (documented at 96 bytes, unconfirmed here). Capability detection
- * below is real *once the symbol names are confirmed*; the read path is capture-gated and
- * refuses with OOPS_KEYBOARD_ELAYOUT rather than parse a record whose layout is a guess. A
- * distinct code, not zero events, so a caller can tell "no keys" from "no reader".
+ * obSCEne's 101-input-ext measured it on 12.40. The library and its four entry points resolve
+ * in the app context; in the eboot and payload contexts the library loads but nothing in it
+ * resolves, so a payload cannot reach the keyboard on this firmware, and availability below
+ * says so honestly. A read writes a 96-byte record, so the size is confirmed; what the bytes mean is
+ * not, because no keyboard was attached. The read path is therefore capture-gated and refuses
+ * with OOPS_KEYBOARD_ELAYOUT rather than parse a record whose fields are a guess - a distinct
+ * code, not zero events, so a caller can tell "no keys" from "no reader".
  */
 
 enum {

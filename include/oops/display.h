@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "oops/target.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,8 +21,8 @@ typedef enum oops_display_backend {
 typedef struct oops_display oops_display_t;
 
 /*
- * Open the primary display output. OOPS_DISPLAY_BACKEND_AUTO probes at runtime: the agc
- * backend first, then gnm if agc did not become ready. Check oops_display_is_ready() - a
+ * Open the primary display output. OOPS_DISPLAY_BACKEND_AUTO defers to the compiled target mode:
+ * AGC for Prospero/Trinity (PS5 native) and GNM for Orbis/Neo (PS4). Check oops_display_is_ready() - a
  * backend that could not open is returned, not hidden.
  */
 oops_display_t *oops_display_open(oops_display_backend_t backend, unsigned int width, unsigned int height);
@@ -31,9 +32,12 @@ int oops_display_is_ready(const oops_display_t *disp);
 uint32_t *oops_display_get_framebuffer(oops_display_t *disp);
 unsigned int oops_display_get_width(const oops_display_t *disp);
 unsigned int oops_display_get_height(const oops_display_t *disp);
+/* Completed flips as the hardware counts them, or submitted flips on a backend where the
+ * status query is unavailable. */
 uint64_t oops_display_get_flip_count(const oops_display_t *disp);
 int oops_display_get_last_error(const oops_display_t *disp);
 const char *oops_display_get_backend_name(const oops_display_t *disp);
+int oops_display_get_video_handle(const oops_display_t *disp);
 
 /* Drawing and presentation */
 void oops_display_clear(oops_display_t *disp, uint32_t color);

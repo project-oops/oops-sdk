@@ -15,11 +15,12 @@ extern "C" {
  *
  * # State of this subsystem, honestly
  *
- * As with the keyboard, libSceMouse has not been measured on hardware yet (100-input covers
- * scePad only). The presence census and the platform mouse-record layout (documented at 40
- * bytes) both await an obSCEne probe. Capability detection is real once the symbol names are
- * confirmed; the read path is capture-gated and refuses with OOPS_MOUSE_ELAYOUT rather than
- * parse a guess. A distinct code, not zero samples, so a caller can tell "no motion" from
+ * obSCEne's 101-input-ext measured it on 12.40. The library and its four entry points resolve
+ * in the app context. In the payload context the mouse symbols in libkernel are unlinked stubs
+ * (obSCEne 101-input-ext, sweep 20260909-090807), and in the eboot context nothing resolves.
+ * So availability below is real detection, and a payload should expect it to say no. The record (documented at 40 bytes) is still unconfirmed: with no mouse attached
+ * the read wrote nothing, so its extent was not measured. The read path is capture-gated and
+ * refuses with OOPS_MOUSE_ELAYOUT rather than parse a guess. A distinct code, not zero samples, so a caller can tell "no motion" from
  * "no reader".
  */
 

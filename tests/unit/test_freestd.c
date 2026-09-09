@@ -35,10 +35,28 @@ static void test_freestd_formatting(void) {
     ASSERT_EQ(obs_strcmp(buf, "0x1a2b"), 0);
 }
 
+/* NID hashing, pinned against SELFish (the format authority): SHA-1(name || 16-byte suffix
+ * 518D64A635DED8C1E6B039B1C3E55230), first 8 digest bytes read little-endian, shifted left 2,
+ * emitted as 11 six-bit groups MSB-first through base64 with + and - as the last two symbols.
+ * The length-only check could not fail on a wrong suffix, byte order or alphabet; these values
+ * can. sceKernelGetProcessId is the string obSCEne has not found the platform to export, but
+ * the hash of the string is still well-defined and is what this pins.
+ * (SELFish commit 6aa50c8, crates/selfish-nid/tests/depended_on.rs) */
 static void test_freestd_nid(void) {
     char nid[12];
-    obs_compute_nid("sceKernelGetProcessId", nid);
+
+    obs_compute_nid("sceKernelLoadStartModule", nid);
     ASSERT_EQ(obs_strlen(nid), 11);
+    ASSERT_STR_EQ(nid, "wzvqT4UqKX8");   /* one pair that breaks on any of the four mistakes */
+
+    obs_compute_nid("sceKernelGetProcessId", nid);
+    ASSERT_STR_EQ(nid, "ciYaJofC6tg");
+
+    obs_compute_nid("sceKernelWrite", nid);
+    ASSERT_STR_EQ(nid, "4wSze92BhLI");
+
+    obs_compute_nid("scePadReadState", nid);
+    ASSERT_STR_EQ(nid, "YndgXqQVV7c");
 }
 
 void run_unit_tests_freestd(void) {

@@ -1,4 +1,6 @@
 #include "oops/system.h"
+#include "oops/target.h"
+#include "oops/syscall.h"
 
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
@@ -304,3 +306,21 @@ int oops_system_get_hw_info(oops_hw_info_t *out_hw) {
 
     return 0;
 }
+
+int oops_system_check_pltauth(void) {
+#if defined(OOPS_HOST_BUILD) || OOPS_TARGET_IS_PS4
+    return 1;
+#else
+    int fd = (int)sys_call(SYS_open, (long)"/dev/pltauth", 0 /* O_RDONLY */, 0, 0, 0, 0);
+    if (fd < 0) {
+        fd = (int)sys_call(SYS_open, (long)"/dev/pltauth", 2 /* O_RDWR */, 0, 0, 0, 0);
+    }
+    if (fd < 0) {
+        return 0;
+    }
+    long ret = sys_call(SYS_ioctl, (long)fd, 0xdeadbeef, 0, 0, 0, 0);
+    sys_call(SYS_close, (long)fd, 0, 0, 0, 0, 0);
+    return (ret == 0) ? 1 : 0;
+#endif
+}
+

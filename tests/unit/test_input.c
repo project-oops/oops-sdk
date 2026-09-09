@@ -52,15 +52,15 @@ static void test_input_motion_telemetry(void) {
     ASSERT_EQ(oops_input_reset_orientation(0), -1);
 }
 
-/* Batched low-latency read: argument rejection, and the capture gate. The stride of a batch
- * is the driver's record size, unconfirmed, so valid arguments are refused too rather than
- * parsed at a guessed offset (OOPS_PAD_RECORD_BYTES in input.c). */
+/* Batched low-latency read: argument rejection, and on a host with no driver the valid call is
+ * unavailable rather than a fabricated count. The stride is pinned to the driver's 120-byte
+ * record by the static asserts in pad_layout.h. */
 static void test_input_batch_bounds(void) {
     oops_pad_state_t batch[OOPS_MAX_PAD_SAMPLES];
     ASSERT_EQ(oops_input_poll_batch(0, NULL, 8), -1);   /* null buffer */
     ASSERT_EQ(oops_input_poll_batch(99, batch, 8), -1); /* bad port */
     ASSERT_EQ(oops_input_poll_batch(0, batch, 0), -1);  /* zero samples */
-    ASSERT_EQ(oops_input_poll_batch(0, batch, OOPS_MAX_PAD_SAMPLES), -1); /* valid, gated */
+    ASSERT_EQ(oops_input_poll_batch(0, batch, OOPS_MAX_PAD_SAMPLES), -1); /* valid, no driver */
 }
 
 /* Adaptive triggers are capture-gated: no false-positive availability, and the effect call
@@ -109,6 +109,7 @@ static void test_input_mouse_contract(void) {
 static void test_input_record_mapping(void) {
     ScePadDataInternal raw;
     oops_pad_state_t st;
+    ASSERT_EQ(sizeof(ScePadDataInternal), OOPS_PAD_RECORD_BYTES);   /* the measured 120 */
     for (size_t i = 0; i < sizeof(raw); i++) ((unsigned char *)&raw)[i] = 0;
     for (size_t i = 0; i < sizeof(st); i++) ((unsigned char *)&st)[i] = 0xAA;
 
@@ -143,15 +144,16 @@ static void test_input_record_mapping(void) {
     ASSERT_TRUE(st.orientation[0] == 0.1f && st.orientation[3] == 0.4f);
     ASSERT_TRUE(st.acceleration[1] == -1.0f && st.angular_velocity[2] == -4.0f);
 
-    /* Connection heuristic without the flag: an all-zero record is not connected, a record
-     * with any button held is. */
+    /* Connected follows the driver's flag alone: centred sticks read 128 and a held button is
+     * not a pad, so neither may stand in for it. */
     raw.connected = 0;
-    raw.buttons = 0;
-    raw.leftStick.x = 0;
-    raw.leftStick.y = 0;
+    raw.buttons = OOPS_BUTTON_OPTIONS;
+    raw.leftStick.x = 128;
+    raw.leftStick.y = 128;
     oops_input_map_record(&st, &raw);
     ASSERT_EQ(st.connected, 0);
-    raw.buttons = OOPS_BUTTON_OPTIONS;
+    raw.connected = 1;
+    raw.buttons = 0;
     oops_input_map_record(&st, &raw);
     ASSERT_EQ(st.connected, 1);
 }

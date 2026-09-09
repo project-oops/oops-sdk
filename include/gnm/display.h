@@ -17,6 +17,7 @@ unsigned int gnm_display_get_width(const gnm_display_t *disp);
 unsigned int gnm_display_get_height(const gnm_display_t *disp);
 uint64_t gnm_display_get_flip_count(const gnm_display_t *disp);
 int gnm_display_get_last_error(const gnm_display_t *disp);
+int gnm_display_get_video_handle(const gnm_display_t *disp);
 void gnm_display_clear(gnm_display_t *disp, uint32_t color);
 int gnm_display_flip(gnm_display_t *disp);
 int gnm_display_set_flip_rate(gnm_display_t *disp, unsigned int rate);
