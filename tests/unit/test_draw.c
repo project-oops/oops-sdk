@@ -211,7 +211,34 @@ static void test_draw_text_width_and_lowercase(void) {
 
 }
 
+/* Blended pixel/line/circle composite source-over; a transparent colour leaves the destination,
+ * a 50% colour blends toward it, and the filled circle never double-composites its centre. */
+static void test_draw_blend_primitives(void) {
+    uint32_t buf[16 * 16];
+    oops_surface_t s = { buf, 16, 16, 16 };
+    oops_draw_clear(&s, OOPS_COLOR_BLACK);
+
+    oops_draw_pixel_blend(&s, 1, 1, OOPS_RGBA(255, 255, 255, 0));   /* transparent: no change */
+    ASSERT_EQ(buf[1 * 16 + 1], OOPS_COLOR_BLACK);
+    oops_draw_pixel_blend(&s, 2, 2, OOPS_RGBA(255, 255, 255, 128)); /* 50% white over black */
+    ASSERT_TRUE(((buf[2 * 16 + 2] >> 16) & 0xFF) >= 127 && ((buf[2 * 16 + 2] >> 16) & 0xFF) <= 129);
+
+    /* A 50% line over black: every touched pixel is ~grey, none left black on the path ends. */
+    oops_draw_line_blend(&s, 0, 0, 15, 15, OOPS_RGBA(255, 255, 255, 128));
+    ASSERT_TRUE(((buf[0] >> 16) & 0xFF) >= 127 && ((buf[0] >> 16) & 0xFF) <= 129);
+    ASSERT_TRUE(((buf[15 * 16 + 15] >> 16) & 0xFF) >= 127);
+
+    /* Filled 50% circle: centre composites exactly once (a double-blend would over-darken it
+     * below ~128); one clean blend leaves ~128. */
+    oops_draw_clear(&s, OOPS_COLOR_BLACK);
+    oops_draw_circle_blend(&s, 8, 8, 4, OOPS_RGBA(255, 255, 255, 128), 1);
+    uint32_t centre = buf[8 * 16 + 8];
+    ASSERT_TRUE(((centre >> 16) & 0xFF) >= 127 && ((centre >> 16) & 0xFF) <= 129);
+    ASSERT_EQ(buf[0], OOPS_COLOR_BLACK);   /* corner outside the circle untouched */
+}
+
 void run_unit_tests_draw(void) {
+
 
     TEST_SUITE_BEGIN("2D Graphics Canvas & Primitives");
     RUN_TEST(test_draw_surface_clear_and_pixel);
@@ -224,5 +251,6 @@ void run_unit_tests_draw(void) {
     RUN_TEST(test_draw_sprite_and_blit_blend);
     RUN_TEST(test_draw_gradient);
     RUN_TEST(test_draw_text_width_and_lowercase);
+    RUN_TEST(test_draw_blend_primitives);
 }
 

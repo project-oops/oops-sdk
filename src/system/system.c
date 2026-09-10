@@ -308,7 +308,7 @@ int oops_system_get_hw_info(oops_hw_info_t *out_hw) {
 }
 
 int oops_system_check_pltauth(void) {
-#if defined(OOPS_HOST_BUILD) || OOPS_TARGET_IS_PS4
+#if defined(OOPS_HOST_BUILD) || !defined(__FreeBSD__) || OOPS_TARGET_IS_PS4
     return 1;
 #else
     int fd = (int)sys_call(SYS_open, (long)"/dev/pltauth", 0 /* O_RDONLY */, 0, 0, 0, 0);

@@ -39,9 +39,9 @@ __attribute__((weak)) int sceVideoOutRegisterBuffers2(int handle, int startIndex
                                                       int category, void *reserved);
 __attribute__((weak)) int sceVideoOutSubmitFlip(int handle, int index, unsigned int flipMode, int64_t flipArg);
 
-/* 64 bytes, confirmed on 12.40 in the app context (obSCEne 080-video/flip-status): a fresh
- * handle reads flip_arg = -1 at offset 24 and current_buffer = -1 at offset 56, everything
- * else zero, which is exactly this shape. */
+/* Flip status descriptor. The base fields occupy the first 64 bytes (confirmed on 12.40).
+ * On native Prospero libSceVideoOut writes between 96 and 128+ bytes. Sized to 256 bytes
+ * with trailing padding to prevent sceVideoOutGetFlipStatus from smashing the caller's stack frame. */
 struct agc_flip_status {
     uint64_t count;
     uint64_t process_time;
@@ -52,8 +52,9 @@ struct agc_flip_status {
     int32_t  num_flip_pending;
     int32_t  current_buffer;
     uint32_t reserved1;
+    uint8_t  reserved2[192];
 };
-_Static_assert(sizeof(struct agc_flip_status) == 64, "flip status is 64 bytes on hardware");
+_Static_assert(sizeof(struct agc_flip_status) == 256, "flip status buffer must be 256 bytes");
 __attribute__((weak)) int sceVideoOutGetFlipStatus(int handle, struct agc_flip_status *status);
 __attribute__((weak)) int sceKernelAllocateMainDirectMemory(size_t len, size_t alignment, int memoryType, sce_off_t *paddr);
 __attribute__((weak)) int sceKernelAllocateDirectMemory(sce_off_t searchStart, sce_off_t searchEnd,
@@ -311,7 +312,9 @@ int agc_display_flip(agc_display_t *disp) {
      * the hardware queue capacity at exactly 26, submit 27 refused with QUEUE_FULL 0x80290012) - so without a wait the tiler
      * could write into a buffer that is still queued or on screen. Drain the queue first: with
      * two buffers, pending == 0 means the other one is on screen and this one is free. */
-    agc_wait_for_flips(disp);
+    if (disp->flip_count > 0) {
+        agc_wait_for_flips(disp);
+    }
 
     /* Tile the linear scratch buffer into the targeted display buffer */
     agc_tile_surface(disp->target_gpu_fb[shown], disp->linear_scratch_fb, disp->width, disp->height);

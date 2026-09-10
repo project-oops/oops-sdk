@@ -66,3 +66,28 @@ OOPS_SDK_C_SRCS := \
     $(OOPS_SDK_DIR)/src/net/net.c \
     $(OOPS_SDK_DIR)/src/net/netctl.c \
     $(OOPS_SDK_DIR)/src/draw/draw.c
+
+# Four-axis release artifact enforcement (OOPS/docs/CONVENTIONS.md section 2).
+# Asserts that:
+#   1. Every artifact in $(DIST) includes the target generation (-$(TARGET)).
+#   2. Native title directories are packaged as archives (.zip or .pkg), never unzipped folders.
+#   3. No bare uninformative filenames (e.g. eboot.bin, myapp.elf) are shipped.
+define oops_verify_dist
+	@if [ -d "$(1)" ]; then \
+	    for f in "$(1)"/*; do \
+	        [ -e "$$f" ] || continue; \
+	        if [ -d "$$f" ]; then \
+	            echo "error: $$f in $(1) is a directory; title directories must be packaged as .zip per OOPS CONVENTIONS.md section 2" >&2; \
+	            exit 1; \
+	        fi; \
+	        fname=$$(basename "$$f"); \
+	        case "$$fname" in \
+	            *-$(TARGET).*|*-$(TARGET)) ;; \
+	            *) \
+	                echo "error: artifact '$$fname' in $(1) violates OOPS CONVENTIONS.md section 2 (must encode target generation -$(TARGET))" >&2; \
+	                exit 1; \
+	                ;; \
+	        esac; \
+	    done; \
+	fi
+endef

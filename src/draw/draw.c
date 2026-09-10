@@ -335,6 +335,60 @@ int oops_draw_text(oops_surface_t *surf, int x, int y, const char *text, oops_co
     return cur_x;
 }
 
+void oops_draw_pixel_blend(oops_surface_t *surf, int x, int y, oops_color_t color) {
+    if (!surf || !surf->pixels) return;
+    if (x < 0 || (uint32_t)x >= surf->width || y < 0 || (uint32_t)y >= surf->height) return;
+    uint32_t *p = surf->pixels + (size_t)y * surf->pitch + (size_t)x;
+    *p = oops_src_over(color, *p);
+}
+
+void oops_draw_line_blend(oops_surface_t *surf, int x0, int y0, int x1, int y1, oops_color_t color) {
+    if (!surf || !surf->pixels) return;
+    int dx = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
+    int dy = (y1 >= y0) ? (y1 - y0) : (y0 - y1);
+    int sx = (x0 < x1) ? 1 : -1;
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx - dy;
+    for (;;) {
+        oops_draw_pixel_blend(surf, x0, y0, color);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx)  { err += dx; y0 += sy; }
+    }
+}
+
+void oops_draw_circle_blend(oops_surface_t *surf, int cx, int cy, int radius, oops_color_t color, int filled) {
+    if (!surf || !surf->pixels || radius <= 0) return;
+    if (filled) {
+        /* Scanline fill: one composited span per row, so no pixel is blended twice. */
+        for (int dy = -radius; dy <= radius; dy++) {
+            int rr = radius * radius - dy * dy;
+            int hw = 0;
+            while ((hw + 1) * (hw + 1) <= rr) hw++;
+            int y = cy + dy;
+            for (int x = cx - hw; x <= cx + hw; x++) oops_draw_pixel_blend(surf, x, y, color);
+        }
+        return;
+    }
+    /* Outline: 8-way midpoint. A translucent outline may composite twice at its four cardinal
+     * and four diagonal extremes (a handful of pixels); negligible for a 1px stroke. */
+    int x = 0, y = radius, d = 3 - 2 * radius;
+    while (y >= x) {
+        oops_draw_pixel_blend(surf, cx + x, cy + y, color);
+        oops_draw_pixel_blend(surf, cx - x, cy + y, color);
+        oops_draw_pixel_blend(surf, cx + x, cy - y, color);
+        oops_draw_pixel_blend(surf, cx - x, cy - y, color);
+        oops_draw_pixel_blend(surf, cx + y, cy + x, color);
+        oops_draw_pixel_blend(surf, cx - y, cy + x, color);
+        oops_draw_pixel_blend(surf, cx + y, cy - x, color);
+        oops_draw_pixel_blend(surf, cx - y, cy - x, color);
+        x++;
+        if (d > 0) { y--; d = d + 4 * (x - y) + 10; }
+        else       { d = d + 4 * x + 6; }
+    }
+}
+
 int oops_draw_text_width(const char *text, int scale) {
     if (!text) return 0;
     if (scale < 1) scale = 1;

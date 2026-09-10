@@ -26,6 +26,7 @@ struct SceVideoOutFlipStatus {
     int32_t  num_flip_pending;
     int32_t  current_buffer;
     uint32_t reserved1;
+    uint8_t  reserved2[192];
 };
 
 typedef int sce_equeue_t;

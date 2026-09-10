@@ -81,6 +81,13 @@ void oops_draw_rect_gradient(oops_surface_t *surf, int x, int y, int w, int h,
 void oops_draw_line(oops_surface_t *surf, int x0, int y0, int x1, int y1, oops_color_t color);
 void oops_draw_circle(oops_surface_t *surf, int cx, int cy, int radius, oops_color_t color, int filled);
 
+/* Blended variants: composite `color` over the destination with its alpha (source-over),
+ * for translucent overlays. A blended circle outline may composite twice at its symmetry
+ * extremes (a few pixels); the filled blend does not. */
+void oops_draw_pixel_blend(oops_surface_t *surf, int x, int y, oops_color_t color);
+void oops_draw_line_blend(oops_surface_t *surf, int x0, int y0, int x1, int y1, oops_color_t color);
+void oops_draw_circle_blend(oops_surface_t *surf, int cx, int cy, int radius, oops_color_t color, int filled);
+
 /*
  * Text with the embedded console font (8x8, ASCII 0x20 through 0x7E, upper and lower case).
  * `scale` multiplies the cell. Returns the x after the last glyph.
