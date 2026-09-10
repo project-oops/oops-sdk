@@ -1,8 +1,8 @@
 #ifndef OOPS_AGC_DISPLAY_H
 #define OOPS_AGC_DISPLAY_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,6 +15,7 @@ void agc_display_set_logger(agc_log_fn fn);
 
 agc_display_t *agc_display_open(unsigned int width, unsigned int height);
 int agc_display_is_ready(const agc_display_t *disp);
+int agc_display_is_gpu_accelerated(const agc_display_t *disp);
 uint32_t *agc_display_get_framebuffer(agc_display_t *disp);
 unsigned int agc_display_get_width(const agc_display_t *disp);
 unsigned int agc_display_get_height(const agc_display_t *disp);

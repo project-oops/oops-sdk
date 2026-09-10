@@ -1,8 +1,8 @@
 #ifndef OOPS_KEYBOARD_H
 #define OOPS_KEYBOARD_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,67 +11,75 @@ extern "C" {
 /*
  * USB keyboard input (libSceKeyboard).
  *
- * A homebrew UI beyond a gamepad needs real key events. This binds the keyboard device and
- * exposes a timestamped key-transition queue in OOPS's own shape.
+ * A homebrew UI beyond a gamepad needs real key events. This binds the keyboard
+ * device and exposes a timestamped key-transition queue in OOPS's own shape.
  *
  * # State of this subsystem, honestly
  *
- * obSCEne's 101-input-ext measured it on 12.40. The library and its four entry points resolve
- * in the app context; in the eboot and payload contexts the library loads but nothing in it
- * resolves, so a payload cannot reach the keyboard on this firmware, and availability below
- * says so honestly. A read writes a 96-byte record, so the size is confirmed; what the bytes mean is
- * not, because no keyboard was attached. The read path is therefore capture-gated and refuses
- * with OOPS_KEYBOARD_ELAYOUT rather than parse a record whose fields are a guess - a distinct
- * code, not zero events, so a caller can tell "no keys" from "no reader".
+ * obSCEne's 101-input-ext measured it on 12.40. The library and its four entry
+ * points resolve in the app context; in the eboot and payload contexts the
+ * library loads but nothing in it resolves, so a payload cannot reach the
+ * keyboard on this firmware, and availability below says so honestly. A read
+ * writes a 96-byte record, so the size is confirmed; what the bytes mean is
+ * not, because no keyboard was attached. The read path is therefore
+ * capture-gated and refuses with OOPS_KEYBOARD_ELAYOUT rather than parse a
+ * record whose fields are a guess - a distinct code, not zero events, so a
+ * caller can tell "no keys" from "no reader".
  */
 
 enum {
-    OOPS_KEYBOARD_OK       = 0,
-    OOPS_KEYBOARD_EUNAVAIL = -1, /* the library, its entry points or a signed-in user did not resolve */
-    OOPS_KEYBOARD_ELAYOUT  = -2, /* the read is real but the platform record layout is unconfirmed */
-    OOPS_KEYBOARD_EPARAM   = -3, /* a caller argument was rejected before any platform call */
+  OOPS_KEYBOARD_OK = 0,
+  OOPS_KEYBOARD_EUNAVAIL = -1, /* the library, its entry points or a signed-in
+                                  user did not resolve */
+  OOPS_KEYBOARD_ELAYOUT =
+      -2, /* the read is real but the platform record layout is unconfirmed */
+  OOPS_KEYBOARD_EPARAM =
+      -3, /* a caller argument was rejected before any platform call */
 };
 
 /* Key transition kind. */
 enum {
-    OOPS_KEY_UP   = 0,
-    OOPS_KEY_DOWN = 1,
+  OOPS_KEY_UP = 0,
+  OOPS_KEY_DOWN = 1,
 };
 
 /* Modifier bits, OOPS's own values. */
 enum {
-    OOPS_KMOD_CTRL  = 1u << 0,
-    OOPS_KMOD_SHIFT = 1u << 1,
-    OOPS_KMOD_ALT   = 1u << 2,
-    OOPS_KMOD_GUI   = 1u << 3,
+  OOPS_KMOD_CTRL = 1u << 0,
+  OOPS_KMOD_SHIFT = 1u << 1,
+  OOPS_KMOD_ALT = 1u << 2,
+  OOPS_KMOD_GUI = 1u << 3,
 };
 
 /* A single key transition in OOPS's shape - not the platform record. */
 typedef struct oops_key_event {
-    uint16_t usage;      /* USB HID usage code */
-    uint8_t  transition; /* OOPS_KEY_UP / OOPS_KEY_DOWN */
-    uint8_t  modifiers;  /* OOPS_KMOD_* mask */
-    uint64_t timestamp;  /* platform sample time, 0 if unavailable */
+  uint16_t usage;     /* USB HID usage code */
+  uint8_t transition; /* OOPS_KEY_UP / OOPS_KEY_DOWN */
+  uint8_t modifiers;  /* OOPS_KMOD_* mask */
+  uint64_t timestamp; /* platform sample time, 0 if unavailable */
 } oops_key_event_t;
 
 #define OOPS_MAX_KEY_EVENTS 32
 
 /*
- * Open the keyboard for the signed-in user. 0 on success, OOPS_KEYBOARD_EUNAVAIL when the
- * library or the user is absent, otherwise the platform's own negative code from the open.
- * The result is remembered and repeated by later calls until oops_keyboard_close().
+ * Open the keyboard for the signed-in user. 0 on success,
+ * OOPS_KEYBOARD_EUNAVAIL when the library or the user is absent, otherwise the
+ * platform's own negative code from the open. The result is remembered and
+ * repeated by later calls until oops_keyboard_close().
  */
 int oops_keyboard_init(void);
 
-/* Whether keyboard input is reachable: the library and its entry points resolve. 1/0. */
+/* Whether keyboard input is reachable: the library and its entry points
+ * resolve. 1/0. */
 int oops_keyboard_available(void);
 
 /*
- * Drain up to `max_events` (cap OOPS_MAX_KEY_EVENTS) key transitions, oldest first, and return
- * the count. Negative is one of the codes above.
+ * Drain up to `max_events` (cap OOPS_MAX_KEY_EVENTS) key transitions, oldest
+ * first, and return the count. Negative is one of the codes above.
  *
- * NOTE: capture-gated. The platform key-record layout is unconfirmed, so this returns
- * OOPS_KEYBOARD_ELAYOUT until the obSCEne capture lands, never a fabricated count.
+ * NOTE: capture-gated. The platform key-record layout is unconfirmed, so this
+ * returns OOPS_KEYBOARD_ELAYOUT until the obSCEne capture lands, never a
+ * fabricated count.
  */
 int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events);
 

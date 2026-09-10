@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-void     oops_time_init(void);
+void oops_time_init(void);
 uint64_t oops_time_get_ticks(void);
 uint64_t oops_time_get_counter(void);
 uint64_t oops_time_get_frequency(void);
@@ -15,9 +15,9 @@ uint64_t oops_time_get_counter_frequency(void);
 uint64_t oops_time_get_ns(void);
 uint64_t oops_time_get_us(void);
 uint64_t oops_time_get_ms(void);
-double   oops_time_get_seconds(void);
-void     oops_time_sleep_us(uint32_t microseconds);
-void     oops_time_sleep_ms(uint32_t milliseconds);
+double oops_time_get_seconds(void);
+void oops_time_sleep_us(uint32_t microseconds);
+void oops_time_sleep_ms(uint32_t milliseconds);
 
 #ifdef __cplusplus
 }

@@ -1,8 +1,9 @@
 /*
  * Freestanding standard helpers.
  *
- * Zero libc dependency. Provides string length/comparison, integer/hex formatting,
- * and memory operations for freestanding targets (probe, injector, payloads).
+ * Zero libc dependency. Provides string length/comparison, integer/hex
+ * formatting, and memory operations for freestanding targets (probe, injector,
+ * payloads).
  */
 
 #ifndef OOPS_FREESTD_H
@@ -11,9 +12,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 1) || defined(OOPS_HOST_BUILD) || defined(OBSCENE_HOST_BUILD)
-#include <sys/types.h>
+#if (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 1) ||                      \
+    defined(OOPS_HOST_BUILD) || defined(OBSCENE_HOST_BUILD)
 #include <string.h>
+#include <sys/types.h>
 #else
 #ifndef _PID_T_DECLARED
 typedef int32_t pid_t;

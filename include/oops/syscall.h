@@ -8,8 +8,8 @@
 #ifndef OOPS_SYSCALL_H
 #define OOPS_SYSCALL_H
 
-#include "oops/krw.h"
 #include "oops/freestd.h"
+#include "oops/krw.h"
 
 #define SYS_exit 1
 #define SYS_read 3
@@ -23,7 +23,9 @@
 #define SYS_ioctl 54
 #define SYS_munmap 73
 #define SYS_mprotect 74
-#define SYS_socket 97          /* hardware-confirmed: sys_call(97, AF_INET, SOCK_STREAM, IPPROTO_TCP) returns a descriptor (obSCEne, 12.40) */
+#define SYS_socket                                                             \
+  97 /* hardware-confirmed: sys_call(97, AF_INET, SOCK_STREAM, IPPROTO_TCP)    \
+        returns a descriptor (obSCEne, 12.40) */
 #define SYS_setsockopt 105
 #define SYS_mmap 477
 #define SYS_klog 601
@@ -43,4 +45,3 @@ void sys_enable_direct(int enable);
 #endif
 
 #endif /* OOPS_SYSCALL_H */
-

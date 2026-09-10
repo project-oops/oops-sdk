@@ -1,9 +1,9 @@
 #ifndef OOPS_ESCALATE_H
 #define OOPS_ESCALATE_H
 
-#include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,20 +13,22 @@ extern "C" {
 #define OOPS_SYSTEM_AUTHID 0x3000000000000001ULL
 
 /**
- * Initialize kernel read/write capabilities if available in current payload context.
- * Returns: 0 on success, -1 on failure.
+ * Initialize kernel read/write capabilities if available in current payload
+ * context. Returns: 0 on success, -1 on failure.
  */
 int oops_kernel_rw_init(void);
 
 /**
- * Initialize kernel arbitrary read/write using pipe primitives (from WebKit exploit arguments).
+ * Initialize kernel arbitrary read/write using pipe primitives (from WebKit
+ * exploit arguments).
  *
  * rwpipe: file descriptors [read_fd, write_fd]
  * rwpair: file descriptors [read_fd, write_fd] for address manipulation
  * kpipe_addr: kernel address of the pipe buffer
  * kdata_base: kernel .data base address (or 0 to lookup from offsets table)
  */
-int oops_kernel_pipe_init(int rwpipe[2], int rwpair[2], uint64_t kpipe_addr, uint64_t kdata_base);
+int oops_kernel_pipe_init(int rwpipe[2], int rwpair[2], uint64_t kpipe_addr,
+                          uint64_t kdata_base);
 
 /**
  * Read memory from the kernel address space.
@@ -65,10 +67,9 @@ int oops_escalate_to_system_authid(void);
 int oops_has_system_authid(void);
 
 /**
- * Applies the complete 11-write credential and filesystem escalation to the given PID:
- *   1-5: cr_uid, cr_ruid, cr_svuid, cr_ngroups, cr_rgid zeroed
- *   6:   cr_sceAuthID set to SYSTEM_AUTHID
- *   7-8: cr_sceCaps set to 0xFFFFFFFFFFFFFFFF
+ * Applies the complete 11-write credential and filesystem escalation to the
+ * given PID: 1-5: cr_uid, cr_ruid, cr_svuid, cr_ngroups, cr_rgid zeroed 6:
+ * cr_sceAuthID set to SYSTEM_AUTHID 7-8: cr_sceCaps set to 0xFFFFFFFFFFFFFFFF
  *   9:   cr_sceAttr0 set to 0x80
  *   10:  fd_rdir set to kernel rootvnode (sandbox jailbreak)
  *   11:  fd_jdir set to kernel rootvnode (sandbox jailbreak)

@@ -32,7 +32,8 @@ ifeq ($(filter 1 2,$(OOPS_TARGET_NUM)),)
     # PS5 native (Prospero / Trinity)
     GRAPHICS_OBJS := \
         $(BUILD)/agc/agc_display.o \
-        $(BUILD)/agc/agc_tiler.o
+        $(BUILD)/agc/agc_tiler.o \
+        $(BUILD)/agc/agc_compute.o
 else
     # PS4 (Orbis / Neo)
     GRAPHICS_OBJS := \
@@ -92,11 +93,13 @@ TEST_SRCS := \
     tests/unit/test_freestd.c \
     tests/unit/test_krw.c \
     tests/unit/test_inject.c \
+    tests/unit/test_gpu.c \
     tests/integration/test_pipeline_draw_tile.c \
     tests/integration/test_memory_surface.c \
     tests/integration/test_thread_worker_pool.c \
     tests/integration/test_net_loopback.c \
     src/agc/agc_tiler.c \
+    src/agc/agc_compute.c \
     src/draw/draw.c \
     src/input/input.c \
     src/input/keyboard.c \
