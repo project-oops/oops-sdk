@@ -9,6 +9,13 @@ OOPS_SDK_DIR ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 # Default: prospero
 TARGET ?= prospero
 
+# Backward-compatibility aliases for legacy target names
+ifeq ($(TARGET),ps5)
+    override TARGET := prospero
+else ifeq ($(TARGET),ps4)
+    override TARGET := orbis
+endif
+
 ifeq ($(TARGET),orbis)
     OOPS_TARGET_NUM := 1
 else ifeq ($(TARGET),neo)
@@ -25,15 +32,15 @@ OOPS_TARGET_FLAGS := -DOOPS_TARGET=$(OOPS_TARGET_NUM)
 OOPS_SDK_INCLUDE := -I$(OOPS_SDK_DIR)/include -I$(OOPS_SDK_DIR) $(OOPS_TARGET_FLAGS)
 
 # Graphics backend source segregation:
-# Orbis / Neo (PS4) targets compile GNM only
-# Prospero / Trinity (PS5 native) targets compile AGC only
+# Orbis / Neo targets compile GNM only
+# Prospero / Trinity native targets compile AGC only
 ifeq ($(filter 1 2,$(OOPS_TARGET_NUM)),)
-    # PS5 native (Prospero / Trinity)
+    # Prospero / Trinity native
     OOPS_SDK_GRAPHICS_SRCS := \
         $(OOPS_SDK_DIR)/src/agc/agc_display.c \
         $(OOPS_SDK_DIR)/src/agc/agc_tiler.c
 else
-    # PS4 (Orbis / Neo)
+    # Orbis / Neo
     OOPS_SDK_GRAPHICS_SRCS := \
         $(OOPS_SDK_DIR)/src/gnm/gnm_display.c
 endif

@@ -8,6 +8,13 @@ AR := ar
 # Default: prospero
 TARGET ?= prospero
 
+# Backward-compatibility aliases for legacy target names
+ifeq ($(TARGET),ps5)
+    override TARGET := prospero
+else ifeq ($(TARGET),ps4)
+    override TARGET := orbis
+endif
+
 ifeq ($(TARGET),orbis)
     OOPS_TARGET_NUM := 1
 else ifeq ($(TARGET),neo)
@@ -26,16 +33,16 @@ CFLAGS := $(TARGET_FLAGS) $(OOPS_TARGET_FLAGS) -std=c11 -Wall -Wextra -Werror -I
 BUILD := build/$(TARGET)
 
 # Graphics backend source segregation:
-# Orbis / Neo (PS4) targets compile GNM only
-# Prospero / Trinity (PS5 native) targets compile AGC only
+# Orbis / Neo targets compile GNM only
+# Prospero / Trinity native targets compile AGC only
 ifeq ($(filter 1 2,$(OOPS_TARGET_NUM)),)
-    # PS5 native (Prospero / Trinity)
+    # Prospero / Trinity native
     GRAPHICS_OBJS := \
         $(BUILD)/agc/agc_display.o \
         $(BUILD)/agc/agc_tiler.o \
         $(BUILD)/agc/agc_compute.o
 else
-    # PS4 (Orbis / Neo)
+    # Orbis / Neo
     GRAPHICS_OBJS := \
         $(BUILD)/gnm/gnm_display.o
 endif

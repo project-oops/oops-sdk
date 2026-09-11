@@ -8,34 +8,38 @@
  * and system library linkage.
  */
 
-#define OOPS_TARGET_ORBIS 1    /* Base PS4 (Liverpool / GCN 2 / GFX7) */
-#define OOPS_TARGET_NEO 2      /* PS4 Pro / Neo BC (Neo / GCN 4 / GFX8) */
-#define OOPS_TARGET_PROSPERO 3 /* PS5 Base (Oberon / RDNA 2 / GFX10.3) */
-#define OOPS_TARGET_TRINITY 4  /* PS5 Pro (Viola / RDNA 3 / GFX11-hybrid) */
+#define OOPS_TARGET_ORBIS 1    /* Base Orbis (Liverpool / GCN 2 / GFX7) */
+#define OOPS_TARGET_NEO 2      /* Orbis Pro / Neo (Neo / GCN 4 / GFX8) */
+#define OOPS_TARGET_PROSPERO 3 /* Base Prospero (Oberon / RDNA 2 / GFX10.3) */
+#define OOPS_TARGET_TRINITY 4  /* Prospero Pro (Viola / RDNA 3 / GFX11-hybrid) */
 
 #ifndef OOPS_TARGET
 #define OOPS_TARGET OOPS_TARGET_PROSPERO
 #endif
 
-/* Target classification helpers */
-#define OOPS_TARGET_IS_PS4                                                     \
+/* Target classification helpers (canonical codenames) */
+#define OOPS_TARGET_IS_ORBIS                                                   \
   (OOPS_TARGET == OOPS_TARGET_ORBIS || OOPS_TARGET == OOPS_TARGET_NEO)
-#define OOPS_TARGET_IS_PS5                                                     \
+#define OOPS_TARGET_IS_PROSPERO                                                \
   (OOPS_TARGET == OOPS_TARGET_PROSPERO || OOPS_TARGET == OOPS_TARGET_TRINITY)
+
+/* Backward-compatibility classification aliases */
+#define OOPS_TARGET_IS_PS4 OOPS_TARGET_IS_ORBIS
+#define OOPS_TARGET_IS_PS5 OOPS_TARGET_IS_PROSPERO
 
 /*
  * OOPS_TARGET is what a binary is COMPILED FOR, fixed at build time. It is not
  * the environment the binary turns out to run in. A payload compiled `prospero`
- * can land in a previous- generation compatibility sandbox where the
+ * can land in a previous-generation compatibility sandbox where the
  * current-generation graphics driver does not resolve at all, so the running
  * environment is measured, not compiled - obSCEne owns that as its OBS|context
  * - and the two must never be conflated.
  *
  * `neo` and `trinity` are the mid-generation Pro refreshes of `orbis` and
  * `prospero`, not synonyms: a previous-generation artifact is `orbis`, and
- * `neo` is correct only for a build that is genuinely PS4-Pro-specific;
+ * `neo` is correct only for a build that is genuinely Pro-specific;
  * likewise `prospero` is the current-generation default and `trinity` only for
- * a PS5-Pro-specific build.
+ * a Trinity-specific build.
  */
 
 typedef enum oops_target {
