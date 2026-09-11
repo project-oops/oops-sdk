@@ -8,13 +8,6 @@ AR := ar
 # Default: prospero
 TARGET ?= prospero
 
-# Backward-compatibility aliases for legacy target names
-ifeq ($(TARGET),ps5)
-    override TARGET := prospero
-else ifeq ($(TARGET),ps4)
-    override TARGET := orbis
-endif
-
 ifeq ($(TARGET),orbis)
     OOPS_TARGET_NUM := 1
 else ifeq ($(TARGET),neo)
@@ -75,7 +68,8 @@ OBJS := \
     $(BUILD)/system/procctl.o \
     $(BUILD)/system/loader.o \
     $(BUILD)/system/target.o \
-    $(BUILD)/system/inject.o
+    $(BUILD)/system/inject.o \
+    $(BUILD)/system/procparam.o
 
 TEST_SRCS := \
     tests/test_runner.c \

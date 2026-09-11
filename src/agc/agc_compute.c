@@ -3,7 +3,7 @@
 #include "oops/memory.h"
 #include "oops/target.h"
 
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
 
 __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
 

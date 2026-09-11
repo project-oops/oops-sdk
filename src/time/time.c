@@ -23,7 +23,17 @@ static int s_time_initialized = 0;
 static uint64_t scale(uint64_t ticks, uint64_t per_second, uint64_t freq) {
   if (freq == 0)
     return 0;
+#if defined(__x86_64__) || defined(_M_X64)
+  uint64_t quot, rem;
+  __asm__("mulq %[per_sec]\n\t"
+          "divq %[divisor]"
+          : "=a"(quot), "=&d"(rem)
+          : "a"(ticks), [per_sec] "r"(per_second), [divisor] "r"(freq)
+          : "cc");
+  return quot;
+#else
   return (uint64_t)(((unsigned __int128)ticks * per_second) / freq);
+#endif
 }
 
 uint64_t oops_time_get_ticks(void) {

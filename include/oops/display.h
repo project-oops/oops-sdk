@@ -22,8 +22,8 @@ typedef struct oops_display oops_display_t;
 
 /*
  * Open the primary display output. OOPS_DISPLAY_BACKEND_AUTO defers to the
- * compiled target mode: AGC for Prospero/Trinity (PS5 native) and GNM for
- * Orbis/Neo (PS4). Check oops_display_is_ready() - a backend that could not
+ * compiled target mode: AGC for Prospero/Trinity (native) and GNM for
+ * Orbis/Neo. Check oops_display_is_ready() - a backend that could not
  * open is returned, not hidden.
  */
 oops_display_t *oops_display_open(oops_display_backend_t backend,

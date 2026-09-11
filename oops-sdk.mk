@@ -9,21 +9,18 @@ OOPS_SDK_DIR ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 # Default: prospero
 TARGET ?= prospero
 
-# Backward-compatibility aliases for legacy target names
-ifeq ($(TARGET),ps5)
-    override TARGET := prospero
-else ifeq ($(TARGET),ps4)
-    override TARGET := orbis
-endif
-
 ifeq ($(TARGET),orbis)
     OOPS_TARGET_NUM := 1
+    OOPS_TARGET_TAG := ORB
 else ifeq ($(TARGET),neo)
     OOPS_TARGET_NUM := 2
+    OOPS_TARGET_TAG := NEO
 else ifeq ($(TARGET),prospero)
     OOPS_TARGET_NUM := 3
+    OOPS_TARGET_TAG := PRO
 else ifeq ($(TARGET),trinity)
     OOPS_TARGET_NUM := 4
+    OOPS_TARGET_TAG := TRI
 else
     $(error Unknown oops-sdk TARGET '$(TARGET)': expected orbis, neo, prospero, or trinity)
 endif

@@ -10,7 +10,20 @@ static long s_ptr_syscall = 0;
 static int *(*s_ptr_error)(void) = NULL;
 
 int sys_call_init(const payload_args_t *args) {
-  if (args == NULL || args->sys_dynlib_dlsym == NULL) {
+  if (args == NULL) {
+    return -1;
+  }
+
+  /* Shape check: args must be aligned and within canonical user space */
+  unsigned long uargs = (unsigned long)args;
+  if (uargs < 0x10000UL || uargs >= 0x0000800000000000UL || (uargs & 0x7UL) != 0) {
+    return -1;
+  }
+
+  /* Callable check: a title loader hands off a struct where offset 0 is 0x2 (D324).
+   * Refuse anything that is not a canonical callable address. */
+  unsigned long dlsym_addr = (unsigned long)args->sys_dynlib_dlsym;
+  if (dlsym_addr < 0x10000UL || dlsym_addr >= 0x0000800000000000UL) {
     return -1;
   }
 

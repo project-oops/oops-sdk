@@ -23,10 +23,6 @@
 #define OOPS_TARGET_IS_PROSPERO                                                \
   (OOPS_TARGET == OOPS_TARGET_PROSPERO || OOPS_TARGET == OOPS_TARGET_TRINITY)
 
-/* Backward-compatibility classification aliases */
-#define OOPS_TARGET_IS_PS4 OOPS_TARGET_IS_ORBIS
-#define OOPS_TARGET_IS_PS5 OOPS_TARGET_IS_PROSPERO
-
 /*
  * OOPS_TARGET is what a binary is COMPILED FOR, fixed at build time. It is not
  * the environment the binary turns out to run in. A payload compiled `prospero`
@@ -51,7 +47,7 @@ typedef enum oops_target {
 
 /* Returns the target the current binary was COMPILED FOR - not the environment
  * it is running in, which is measured elsewhere (see the note above
- * OOPS_TARGET_IS_PS4). */
+ * OOPS_TARGET_IS_ORBIS). */
 static inline oops_target_t oops_get_target(void) {
   return (oops_target_t)OOPS_TARGET;
 }

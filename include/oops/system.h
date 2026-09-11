@@ -61,7 +61,7 @@ int oops_system_get_hw_model(char *out_model, size_t max_len);
 typedef enum oops_app_category {
   /**
    * Big App / Native Game (0x00000000).
-   * - Direct Memory (DMEM): Full budget (~12.5 GB on PS5, ~5.5 GB on PS4).
+   * - Direct Memory (DMEM): Full budget (~12.5 GB on Prospero, ~5.5 GB on Orbis).
    * - Display: Exclusive ownership of primary HDMI scanout (OBS_VIDEO_BUS_MAIN
    * = 0).
    * - Multitasking: Foreground exclusive; launching another Big App suspends or
@@ -108,7 +108,7 @@ typedef enum oops_app_category {
 } oops_app_category_t;
 
 /* Checks if /dev/pltauth is patched for native Prospero category 0 execution.
- * Returns 1 if pltauth is patched (or on PS4/host), 0 if unpatched/failing. */
+ * Returns 1 if pltauth is patched (or on Orbis/host), 0 if unpatched/failing. */
 int oops_system_check_pltauth(void);
 
 #ifdef __cplusplus

@@ -1,7 +1,7 @@
 #include "oops/display.h"
 #include "oops/target.h"
 
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
 #include "agc/display.h"
 #include "gnm/display.h"
 #else
@@ -11,7 +11,7 @@
 
 struct oops_display {
   oops_display_backend_t backend;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   agc_display_t *agc;
 #else
   gnm_display_t *gnm;
@@ -33,8 +33,8 @@ oops_display_t *oops_display_open(oops_display_backend_t backend,
   }
   disp->backend = backend;
 
-#if OOPS_TARGET_IS_PS5
-  /* PS5 Native target (Prospero / Trinity): AGC graphics */
+#if OOPS_TARGET_IS_PROSPERO
+  /* Prospero / Trinity native target: AGC graphics */
   if (backend == OOPS_DISPLAY_BACKEND_AUTO ||
       backend == OOPS_DISPLAY_BACKEND_AGC) {
     disp->backend = OOPS_DISPLAY_BACKEND_AGC;
@@ -42,11 +42,11 @@ oops_display_t *oops_display_open(oops_display_backend_t backend,
     s_opened = 1;
     return disp;
   }
-  /* GNM requested on a PS5 native target: refused to prevent NeoMode linkage */
+  /* GNM requested on a Prospero native target: refused to prevent NeoMode linkage */
   disp->agc = (agc_display_t *)0;
   return (oops_display_t *)0;
 #else
-  /* PS4 target (Orbis / Neo): GNM graphics */
+  /* Orbis / Neo target: GNM graphics */
   if (backend == OOPS_DISPLAY_BACKEND_AUTO ||
       backend == OOPS_DISPLAY_BACKEND_GNM) {
     disp->backend = OOPS_DISPLAY_BACKEND_GNM;
@@ -54,7 +54,7 @@ oops_display_t *oops_display_open(oops_display_backend_t backend,
     s_opened = 1;
     return disp;
   }
-  /* AGC requested on a PS4 target: unsupported */
+  /* AGC requested on an Orbis target: unsupported */
   disp->gnm = (gnm_display_t *)0;
   return (oops_display_t *)0;
 #endif
@@ -63,7 +63,7 @@ oops_display_t *oops_display_open(oops_display_backend_t backend,
 int oops_display_is_ready(const oops_display_t *disp) {
   if (!disp)
     return 0;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return agc_display_is_ready(disp->agc);
 #else
   return gnm_display_is_ready(disp->gnm);
@@ -73,7 +73,7 @@ int oops_display_is_ready(const oops_display_t *disp) {
 int oops_display_is_gpu_accelerated(const oops_display_t *disp) {
   if (!disp)
     return 0;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return agc_display_is_gpu_accelerated(disp->agc);
 #else
   return 0;
@@ -83,7 +83,7 @@ int oops_display_is_gpu_accelerated(const oops_display_t *disp) {
 uint32_t *oops_display_get_framebuffer(oops_display_t *disp) {
   if (!disp)
     return (uint32_t *)0;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return agc_display_get_framebuffer(disp->agc);
 #else
   return gnm_display_get_framebuffer(disp->gnm);
@@ -93,7 +93,7 @@ uint32_t *oops_display_get_framebuffer(oops_display_t *disp) {
 unsigned int oops_display_get_width(const oops_display_t *disp) {
   if (!disp)
     return 0;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return agc_display_get_width(disp->agc);
 #else
   return gnm_display_get_width(disp->gnm);
@@ -103,7 +103,7 @@ unsigned int oops_display_get_width(const oops_display_t *disp) {
 unsigned int oops_display_get_height(const oops_display_t *disp) {
   if (!disp)
     return 0;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return agc_display_get_height(disp->agc);
 #else
   return gnm_display_get_height(disp->gnm);
@@ -113,7 +113,7 @@ unsigned int oops_display_get_height(const oops_display_t *disp) {
 uint64_t oops_display_get_flip_count(const oops_display_t *disp) {
   if (!disp)
     return 0;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return agc_display_get_flip_count(disp->agc);
 #else
   return gnm_display_get_flip_count(disp->gnm);
@@ -123,7 +123,7 @@ uint64_t oops_display_get_flip_count(const oops_display_t *disp) {
 int oops_display_get_last_error(const oops_display_t *disp) {
   if (!disp)
     return -1;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return agc_display_get_last_error(disp->agc);
 #else
   return gnm_display_get_last_error(disp->gnm);
@@ -133,7 +133,7 @@ int oops_display_get_last_error(const oops_display_t *disp) {
 int oops_display_get_video_handle(const oops_display_t *disp) {
   if (!disp)
     return -1;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return agc_display_get_video_handle(disp->agc);
 #else
   return gnm_display_get_video_handle(disp->gnm);
@@ -143,7 +143,7 @@ int oops_display_get_video_handle(const oops_display_t *disp) {
 const char *oops_display_get_backend_name(const oops_display_t *disp) {
   if (!disp)
     return "none";
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return (OOPS_TARGET == OOPS_TARGET_TRINITY) ? "AGC (Trinity)"
                                               : "AGC (Prospero)";
 #else
@@ -154,7 +154,7 @@ const char *oops_display_get_backend_name(const oops_display_t *disp) {
 void oops_display_clear(oops_display_t *disp, uint32_t color) {
   if (!disp)
     return;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   agc_display_clear(disp->agc, color);
 #else
   gnm_display_clear(disp->gnm, color);
@@ -164,7 +164,7 @@ void oops_display_clear(oops_display_t *disp, uint32_t color) {
 int oops_display_flip(oops_display_t *disp) {
   if (!disp)
     return -1;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   return agc_display_flip(disp->agc);
 #else
   return gnm_display_flip(disp->gnm);
@@ -174,7 +174,7 @@ int oops_display_flip(oops_display_t *disp) {
 void oops_display_close(oops_display_t *disp) {
   if (!disp)
     return;
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
   agc_display_close(disp->agc);
 #else
   gnm_display_close(disp->gnm);
@@ -182,9 +182,9 @@ void oops_display_close(oops_display_t *disp) {
   s_opened = 0;
 }
 
-#if OOPS_TARGET_IS_PS5
+#if OOPS_TARGET_IS_PROSPERO
 /* Stubs for the gnm backend when the build targets prospero or trinity
- * (OOPS_TARGET_IS_PS5), so code that calls gnm_* directly still links without
+ * (OOPS_TARGET_IS_PROSPERO), so code that calls gnm_* directly still links without
  * that backend compiled in. Weak on purpose: OOPS_SDK_C_SRCS lists every
  * backend, so a consumer following it compiles src/gnm/gnm_display.c alongside
  * this file, and the real definitions there must win rather than collide. */
@@ -248,7 +248,7 @@ __attribute__((weak)) void gnm_display_close(gnm_display_t *disp) {
 }
 #else
 /* Stubs for the agc backend when the build targets orbis or neo
- * (OOPS_TARGET_IS_PS4), weak for the same reason: a consumer that compiles
+ * (OOPS_TARGET_IS_ORBIS), weak for the same reason: a consumer that compiles
  * src/agc/agc_display.c as well gets the real backend. */
 __attribute__((weak)) void agc_display_set_logger(agc_log_fn fn) { (void)fn; }
 __attribute__((weak)) agc_display_t *agc_display_open(unsigned int width,
