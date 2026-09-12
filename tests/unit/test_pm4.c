@@ -10,6 +10,8 @@
 #include "oops/agc.h"
 #include "oops/gpu.h"
 #include "src/agc/agc_internal.h"
+#include "GL/gl.h"
+#include "src/gl/gl_internal.h"
 #include "tests/test_common.h"
 #include <string.h>
 #include <stdio.h>
@@ -462,12 +464,138 @@ static void test_pm4_real_sdk_draw_stream(void) {
   ASSERT_EQ(report.db_z_info & 0x3u, OOPS_AGC_Z_32_FLOAT);
 }
 
+static void test_pm4_gl_hardware_depth_stream(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+  ASSERT_TRUE(disp != NULL);
+
+  void *ctx_handle = glContextCreate(disp);
+  ASSERT_TRUE(ctx_handle != NULL);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  uint32_t dcb[4096];
+  uint8_t payload[0x4000];
+  uint8_t vbo[65536];
+  __attribute__((aligned(8))) uint32_t fence = 0x11111111u;
+  __attribute__((aligned(8))) uint32_t canary = 0xaaaaaaaa;
+
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  memset(vbo, 0, sizeof(vbo));
+
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 4096;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = &fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  /* Step 1: Draw triangle with default state (Depth test disabled) */
+  glBegin(GL_TRIANGLES);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+
+  oops_pm4_report_t report;
+  int rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Step 1 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.db_depth_control & 0x02u, 0u); /* Z_ENABLE should be 0 */
+  ASSERT_EQ(report.draw_index_auto_count, 1u);
+
+  /* Step 2: Enable GL_DEPTH_TEST with GL_LEQUAL and depth mask TRUE */
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LEQUAL);
+  glDepthMask(GL_TRUE);
+
+  glBegin(GL_TRIANGLES);
+  glColor3f(0.0f, 1.0f, 0.0f);
+  glVertex3f(-0.5f, -0.5f, 0.3f);
+  glVertex3f(0.5f, -0.5f, 0.3f);
+  glVertex3f(0.0f, 0.5f, 0.3f);
+  glEnd();
+
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Step 2 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_TRUE((report.db_depth_control & 0x02u) != 0); /* Z_ENABLE should be 1 */
+  ASSERT_TRUE((report.db_depth_control & 0x04u) != 0); /* Z_WRITE_ENABLE should be 1 */
+  ASSERT_EQ((report.db_depth_control >> 4) & 0x7u, OOPS_AGC_ZFUNC_LEQUAL); /* ZFUNC == 3 */
+  ASSERT_EQ(report.db_z_info & 0x3u, OOPS_AGC_Z_32_FLOAT);
+  ASSERT_EQ(report.draw_index_auto_count, 2u);
+
+  /* Step 3: Change to GL_GREATER and depth mask FALSE */
+  glDepthFunc(GL_GREATER);
+  glDepthMask(GL_FALSE);
+
+  glBegin(GL_TRIANGLES);
+  glColor3f(0.0f, 0.0f, 1.0f);
+  glVertex3f(-0.5f, -0.5f, 0.1f);
+  glVertex3f(0.5f, -0.5f, 0.1f);
+  glVertex3f(0.0f, 0.5f, 0.1f);
+  glEnd();
+
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Step 3 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_TRUE((report.db_depth_control & 0x02u) != 0); /* Z_ENABLE should be 1 */
+  ASSERT_EQ(report.db_depth_control & 0x04u, 0u);      /* Z_WRITE_ENABLE should be 0 */
+  ASSERT_EQ((report.db_depth_control >> 4) & 0x7u, OOPS_AGC_ZFUNC_GREATER); /* ZFUNC == 4 */
+  ASSERT_EQ(report.draw_index_auto_count, 3u);
+
+  /* Step 4: Disable GL_DEPTH_TEST dynamically */
+  glDisable(GL_DEPTH_TEST);
+
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.0f);
+  glVertex3f(0.5f, -0.5f, 0.0f);
+  glVertex3f(0.0f, 0.5f, 0.0f);
+  glEnd();
+
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Step 4 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.db_depth_control & 0x02u, 0u); /* Z_ENABLE should be 0 */
+  ASSERT_EQ(report.draw_index_auto_count, 4u);
+
+  /* Step 5: Flush frame and verify RELEASE_MEM packet */
+  uint32_t words_before_flush = ctx->dcb_words;
+  gl_hw_flush(ctx);
+  uint32_t total_flushed_words = words_before_flush + 24; /* 8 RELEASE_MEM + 16 NOP pads */
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, total_flushed_words, &report);
+  if (rc != 0) printf("\n[PM4 Step 5 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.release_mem_count, 1u);
+  ASSERT_EQ(report.draw_index_auto_count, 4u);
+
+  /* Clean up mock pointers */
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 void run_unit_tests_pm4(void);
 
 void run_unit_tests_pm4(void) {
   TEST_SUITE_BEGIN("PM4 Static Command Stream Validator (RDNA2 GFX10.3)");
   RUN_TEST(test_pm4_synthetic_valid_stream);
   RUN_TEST(test_pm4_real_sdk_draw_stream);
+  RUN_TEST(test_pm4_gl_hardware_depth_stream);
   RUN_TEST(test_pm4_detects_truncated_buffer);
   RUN_TEST(test_pm4_detects_invalid_reg_bounds);
   RUN_TEST(test_pm4_detects_depth_invariants);

@@ -11,10 +11,18 @@ gl_context_t *g_gl_ctx = NULL;
 #include <stdlib.h>
 static gl_context_t s_host_ctx;
 static float s_host_depth[1920 * 1080];
+static inline void gl_klog_line(const char *msg) { (void)msg; }
+static inline void gl_klog_val(const char *tag, uint64_t val) { (void)tag; (void)val; }
 #else
 #include "oops/syscall.h"
+#endif
+
 __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
 __attribute__((weak)) int sceAgcDriverSubmitCommandBuffer(void *queue, const void *dcb);
+__attribute__((weak)) int sceAgcDriverSubmitDcb(const oops_agc_dcb_desc *desc);
+__attribute__((weak)) int sceAgcDriverCreateQueue(uint32_t type, void *queue_out, uint32_t flags);
+
+#ifndef OOPS_HOST_BUILD
 
 static void gl_klog_line(const char *msg) {
     char buf[160];
@@ -53,6 +61,7 @@ static void gl_klog_val(const char *tag, uint64_t val) {
     buf[n] = '\0';
     (void)sys_call(SYS_klog, 7, (long)buf, 0, 0, 0, 0);
 }
+#endif
 
 void gl_hw_flush(gl_context_t *ctx) {
     if (!ctx || !ctx->use_hardware || !ctx->hw_frame_active || ctx->dcb_words == 0) {
@@ -160,7 +169,6 @@ void gl_hw_flush(gl_context_t *ctx) {
     ctx->dcb_words = 0;
     ctx->triangles_drawn = 0;
 }
-#endif
 
 void *glContextCreate(struct oops_display *disp) {
     if (!disp) return NULL;

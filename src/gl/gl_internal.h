@@ -9,6 +9,7 @@
 #include "GL/glu.h"
 #include "oops/freestd.h"
 #include "oops/display.h"
+#include "oops/agc.h"
 
 #ifndef OOPS_HOST_BUILD
 #include "oops/memory.h"
@@ -233,12 +234,32 @@ void gl_update_normal_matrix(gl_context_t *ctx);
 void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *obj_norm,
                          const float *in_color, float *out_color);
 
+static inline uint32_t gl_depth_func_to_zfunc(GLenum func) {
+    switch (func) {
+        case GL_NEVER:    return OOPS_AGC_ZFUNC_NEVER;
+        case GL_LESS:     return OOPS_AGC_ZFUNC_LESS;
+        case GL_EQUAL:    return OOPS_AGC_ZFUNC_EQUAL;
+        case GL_LEQUAL:   return OOPS_AGC_ZFUNC_LEQUAL;
+        case GL_GREATER:  return OOPS_AGC_ZFUNC_GREATER;
+        case GL_NOTEQUAL: return OOPS_AGC_ZFUNC_NOTEQUAL;
+        case GL_GEQUAL:   return OOPS_AGC_ZFUNC_GEQUAL;
+        case GL_ALWAYS:   return OOPS_AGC_ZFUNC_ALWAYS;
+        default:          return OOPS_AGC_ZFUNC_LESS;
+    }
+}
+
+static inline uint32_t gl_compute_db_depth_control(const gl_context_t *ctx) {
+    if (!ctx) return 0u;
+    int z_enable = (ctx->cap_depth_test && ctx->depth_buffer != NULL) ? 1 : 0;
+    int z_write = (z_enable && ctx->depth_mask) ? 1 : 0;
+    uint32_t zfunc = gl_depth_func_to_zfunc(ctx->depth_func);
+    return z_enable ? OOPS_AGC_DB_DEPTH_CONTROL(1, z_write, zfunc) : 0u;
+}
+
 /* Rendering pipeline */
 void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                            const gl_screen_vertex_t *v1, const gl_screen_vertex_t *v2);
-#ifndef OOPS_HOST_BUILD
 void gl_hw_flush(gl_context_t *ctx);
-#endif
 void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
                                 const gl_vertex_t *v1, const gl_vertex_t *v2);
 

@@ -204,7 +204,6 @@ void glEnd(void) {
  * ------------------------------------------------------------------------- */
 
 
-#ifndef OOPS_HOST_BUILD
 static void gl_hw_begin_frame(gl_context_t *ctx) {
     uint32_t *dw = ctx->dcb_mem;
     uint64_t color_gpu = (uint64_t)(uintptr_t)ctx->framebuffer;
@@ -329,11 +328,8 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     };
 
     uint64_t depth_gpu = (uint64_t)(uintptr_t)ctx->depth_buffer;
-    int depth_on = (ctx->cap_depth_test && ctx->depth_buffer) ? 1 : 0;
-    uint32_t zfunc = (ctx->depth_func >= 0x0200 && ctx->depth_func <= 0x0207) ? (ctx->depth_func - 0x0200) : 1u;
-    uint32_t z_write = ctx->depth_mask ? 1u : 0u;
-    uint32_t depth_ctrl = (1u << 1) | (z_write << 2) | ((zfunc & 0x7u) << 4);
-    uint32_t z_info = 3u | 0x80000180u; /* Z_32_FLOAT | SW_MODE=24 | ZRANGE_PRECISION */
+    uint32_t depth_ctrl = gl_compute_db_depth_control(ctx);
+    uint32_t z_info = OOPS_AGC_Z_32_FLOAT | 0x80000180u; /* Z_32_FLOAT | SW_MODE=24 | ZRANGE_PRECISION */
 
     for (size_t i = 0; i < sizeof(ctx_regs) / sizeof(ctx_regs[0]); i++) {
         uint32_t reg = ctx_regs[i].reg;
@@ -347,15 +343,15 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         } else if (reg == 0x007u) {
             val = ((h - 1) << 16) | (w - 1);
         } else if (reg == 0x010u) {
-            val = depth_on ? z_info : 0u;
+            val = ctx->depth_buffer ? z_info : 0u;
         } else if (reg == 0x012u || reg == 0x014u) {
-            val = depth_on ? (uint32_t)(depth_gpu >> 8) : 0u;
+            val = ctx->depth_buffer ? (uint32_t)(depth_gpu >> 8) : 0u;
         } else if (reg == 0x01au || reg == 0x01cu) {
-            val = depth_on ? (uint32_t)(depth_gpu >> 40) : 0u;
+            val = ctx->depth_buffer ? (uint32_t)(depth_gpu >> 40) : 0u;
         } else if (reg == 0x1e0u) {
             val = ctx->cap_blend ? 0x00002504u : 0u;
         } else if (reg == 0x200u) {
-            val = depth_on ? depth_ctrl : 0u;
+            val = depth_ctrl;
         }
         *dw++ = 0xc0016900u;
         *dw++ = reg;
@@ -408,7 +404,6 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
     ctx->hw_frame_active = GL_TRUE;
 }
-#endif
 
 void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *obj_norm,
                          const float *in_color, float *out_color) {
@@ -690,7 +685,6 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
 
     if (area > -1e-4f && area < 1e-4f) return; /* Degenerate */
 
-#ifndef OOPS_HOST_BUILD
     /* 5. Hardware AGC Path (AMD RDNA2 GFX10.3) */
     if (ctx->use_hardware) {
         if (!ctx->hw_frame_active) {
@@ -736,23 +730,34 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         uint64_t desc_table_va = payload_va + 0x900;
         uint64_t ps_va = payload_va + 0x300; /* Default: untextured Gouraud */
 
-        if (ctx->cap_texture_2d) {
+        if (ctx->cap_texture_2d && ctx->bound_texture_2d > 0) {
             ps_va = payload_va + 0x200; /* Stage 5: Textured + Gouraud */
-            if (ctx->bound_texture_2d > 0) {
-                for (int ti = 0; ti < GL_MAX_TEXTURE_OBJECTS; ti++) {
-                    if (ctx->textures[ti].used && ctx->textures[ti].id == ctx->bound_texture_2d) {
-                        uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload + 0x900);
-                        memcpy(dt, ctx->textures[ti].img_desc, 32);
-                        memcpy(dt + 8, ctx->textures[ti].samp_desc, 16);
+            for (int ti = 0; ti < GL_MAX_TEXTURE_OBJECTS; ti++) {
+                if (ctx->textures[ti].used && ctx->textures[ti].id == ctx->bound_texture_2d) {
+                    uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload + 0x900);
+                    memcpy(dt, ctx->textures[ti].img_desc, 32);
+                    memcpy(dt + 8, ctx->textures[ti].samp_desc, 16);
 #if defined(__x86_64__)
-                        __builtin_ia32_clflush((const void *)dt);
+                    __builtin_ia32_clflush((const void *)dt);
 #endif
-                        break;
-                    }
+                    break;
                 }
             }
         }
 
+        /* Emit dynamic Depth Control and Blending state */
+        uint32_t cur_depth_ctrl = gl_compute_db_depth_control(ctx);
+        uint32_t cur_blend_ctrl = ctx->cap_blend ? 0x00002504u : 0u;
+
+        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmDB_DEPTH_CONTROL (0x200) */
+        *dw++ = 0x200u;
+        *dw++ = cur_depth_ctrl;
+
+        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmCB_BLEND0_CONTROL (0x1e0) */
+        *dw++ = 0x1e0u;
+        *dw++ = cur_blend_ctrl;
+
+        /* Emit Shader & User Data */
         *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_LO_PS */
         *dw++ = 0x08u;
         *dw++ = (uint32_t)(ps_va >> 8);
@@ -784,7 +789,6 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         ctx->triangles_drawn++;
         return;
     }
-#endif
 
     /* 6. Software Fallback Rasterizer */
     gl_rasterize_triangle(ctx, &sv0, &sv1, &sv2);
