@@ -4,22 +4,46 @@ int g_tests_run = 0;
 int g_tests_passed = 0;
 int g_tests_failed = 0;
 
-/* Weak stubs for display getters when running host test runner */
 #include "oops/display.h"
+
+static uint32_t s_host_fb[1920 * 1080];
+static int s_host_disp_dummy = 1;
+static unsigned int s_host_w = 1920;
+static unsigned int s_host_h = 1080;
+
+__attribute__((weak)) oops_display_t *
+oops_display_open(oops_display_backend_t backend, unsigned int width, unsigned int height) {
+  (void)backend;
+  s_host_w = width ? width : 1920;
+  s_host_h = height ? height : 1080;
+  return (oops_display_t *)&s_host_disp_dummy;
+}
+
+__attribute__((weak)) void
+oops_display_close(oops_display_t *disp) {
+  (void)disp;
+}
+
+__attribute__((weak)) int
+oops_display_flip(oops_display_t *disp) {
+  (void)disp;
+  return 0;
+}
+
 __attribute__((weak))
 uint32_t *oops_display_get_framebuffer(oops_display_t *disp) {
   (void)disp;
-  return NULL;
+  return s_host_fb;
 }
 __attribute__((weak)) unsigned int
 oops_display_get_width(const oops_display_t *disp) {
   (void)disp;
-  return 1920;
+  return s_host_w;
 }
 __attribute__((weak)) unsigned int
 oops_display_get_height(const oops_display_t *disp) {
   (void)disp;
-  return 1080;
+  return s_host_h;
 }
 __attribute__((weak)) int
 oops_display_is_gpu_accelerated(const oops_display_t *disp) {
@@ -56,6 +80,8 @@ void run_unit_tests_freestd(void);
 void run_unit_tests_krw(void);
 void run_unit_tests_inject(void);
 void run_unit_tests_gpu(void);
+void run_unit_tests_pm4(void);
+void run_unit_tests_gl(void);
 
 /* Declarations of integration test suites */
 void run_integration_tests_pipeline(void);
@@ -103,6 +129,8 @@ int main(int argc, char **argv) {
     run_unit_tests_krw();
     run_unit_tests_inject();
     run_unit_tests_gpu();
+    run_unit_tests_pm4();
+    run_unit_tests_gl();
   }
 
   if (run_int) {

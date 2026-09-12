@@ -140,7 +140,7 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
     } else if (reg == 0x200u) {
       val = (desc->depth_buffer && desc->depth_control) ? desc->depth_control : 0u;
     } else if (reg == 0x203u) {
-      val = 0x00000010u;
+      val = 0x00000000u; /* DB_SHADER_CONTROL: LATE_Z default matching AgcCompositor.elf */
     } else if (reg == 0x10fu || reg == 0x110u) {
       val = float_as_u32(half_w);
     } else if (reg == 0x111u || reg == 0x112u) {
@@ -151,7 +151,7 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
     *dw++ = val;
   }
 
-  /* Optional Depth Buffer and Depth Test setup */
+  /* Optional Depth Buffer and Depth Test setup (aligned with AgcCompositor.elf) */
   if (desc->depth_buffer && desc->depth_control) {
     uint64_t depth_gpu = (uint64_t)(uintptr_t)desc->depth_buffer;
     uint32_t z_format = desc->depth_format ? (desc->depth_format & 0x3u) : OOPS_AGC_Z_32_FLOAT;
@@ -161,14 +161,30 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
       uint32_t reg;
       uint32_t val;
     } db_regs[] = {
-      {OOPS_AGC_REG_DB_RENDER_CONTROL,  0x00000000u}, /* Driver default */
-      {OOPS_AGC_REG_DB_DEPTH_VIEW,      0x00000000u},
-      {OOPS_AGC_REG_DB_DEPTH_SIZE_XY,   0},
-      {OOPS_AGC_REG_DB_Z_INFO,          0},
-      {OOPS_AGC_REG_DB_Z_READ_BASE,     0},
-      {OOPS_AGC_REG_DB_Z_READ_BASE_HI,  0},
-      {OOPS_AGC_REG_DB_Z_WRITE_BASE,    0},
-      {OOPS_AGC_REG_DB_Z_WRITE_BASE_HI, 0},
+      {OOPS_AGC_REG_DB_RENDER_CONTROL,        0x00000000u},
+      {OOPS_AGC_REG_DB_COUNT_CONTROL,         0x11000100u},
+      {OOPS_AGC_REG_DB_DEPTH_VIEW,            0x00000000u},
+      {OOPS_AGC_REG_DB_RENDER_OVERRIDE,       0x00000000u},
+      {OOPS_AGC_REG_DB_RENDER_OVERRIDE2,      0x00000000u},
+      {OOPS_AGC_REG_DB_HTILE_DATA_BASE,       0x00000000u},
+      {OOPS_AGC_REG_DB_DEPTH_SIZE_XY,         0},
+      {OOPS_AGC_REG_DB_DEPTH_BOUNDS_MIN,      0x00000000u},
+      {OOPS_AGC_REG_DB_DEPTH_BOUNDS_MAX,      0x00000000u},
+      {OOPS_AGC_REG_DB_STENCIL_CLEAR,         0x00000000u},
+      {OOPS_AGC_REG_DB_DEPTH_CLEAR,           0x00000000u},
+      {OOPS_AGC_REG_DB_Z_INFO,                0},
+      {OOPS_AGC_REG_DB_STENCIL_INFO,          0x20000180u},
+      {OOPS_AGC_REG_DB_Z_READ_BASE,           0},
+      {OOPS_AGC_REG_DB_STENCIL_READ_BASE,     0x00000000u},
+      {OOPS_AGC_REG_DB_Z_WRITE_BASE,          0},
+      {OOPS_AGC_REG_DB_STENCIL_WRITE_BASE,    0x00000000u},
+      {OOPS_AGC_REG_DB_Z_READ_BASE_HI,        0},
+      {OOPS_AGC_REG_DB_STENCIL_READ_BASE_HI,  0x00000000u},
+      {OOPS_AGC_REG_DB_Z_WRITE_BASE_HI,       0},
+      {OOPS_AGC_REG_DB_STENCIL_WRITE_BASE_HI, 0x00000000u},
+      {OOPS_AGC_REG_DB_HTILE_DATA_BASE_HI,    0x00000000u},
+      {OOPS_AGC_REG_DB_RMI_L2_CACHE_CONTROL,  0x00000000u},
+      {OOPS_AGC_REG_DB_HTILE_SURFACE,         0x00040000u},
     };
     for (size_t i = 0; i < sizeof(db_regs) / sizeof(db_regs[0]); i++) {
       uint32_t reg = db_regs[i].reg;

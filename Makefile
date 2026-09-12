@@ -44,6 +44,10 @@ endif
 OBJS := \
     $(BUILD)/display.o \
     $(GRAPHICS_OBJS) \
+    $(BUILD)/gl/gl_context.o \
+    $(BUILD)/gl/gl_state.o \
+    $(BUILD)/gl/gl_matrix.o \
+    $(BUILD)/gl/gl_draw.o \
     $(BUILD)/input/input.o \
     $(BUILD)/input/keyboard.o \
     $(BUILD)/input/mouse.o \
@@ -96,6 +100,8 @@ TEST_SRCS := \
     tests/unit/test_krw.c \
     tests/unit/test_inject.c \
     tests/unit/test_gpu.c \
+    tests/unit/test_pm4.c \
+    tests/unit/test_gl.c \
     tests/integration/test_pipeline_draw_tile.c \
     tests/integration/test_memory_surface.c \
     tests/integration/test_thread_worker_pool.c \
@@ -128,7 +134,11 @@ TEST_SRCS := \
     src/time/time.c \
     src/thread/thread.c \
     src/net/net.c \
-    src/net/netctl.c
+    src/net/netctl.c \
+    src/gl/gl_context.c \
+    src/gl/gl_state.c \
+    src/gl/gl_matrix.c \
+    src/gl/gl_draw.c
 
 HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -DOOPS_HOST_BUILD $(OOPS_TARGET_FLAGS)
 

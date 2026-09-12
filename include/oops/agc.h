@@ -20,6 +20,7 @@ extern "C" {
 #define OOPS_AGC_PM4_DRAW_INDEX_AUTO    0x2Du
 #define OOPS_AGC_PM4_NUM_INSTANCES      0x2fu
 #define OOPS_AGC_PM4_WAIT_REG_MEM       0x3Cu
+#define OOPS_AGC_PM4_EVENT_WRITE        0x46u
 #define OOPS_AGC_PM4_RELEASE_MEM        0x49u
 #define OOPS_AGC_PM4_DMA_DATA           0x50u
 #define OOPS_AGC_PM4_SET_CONFIG_REG     0x68u
@@ -85,6 +86,7 @@ extern "C" {
 #define OOPS_AGC_REG_DB_DEPTH_CONTROL         0x200u
 #define OOPS_AGC_REG_DB_EQAA                  0x201u
 #define OOPS_AGC_REG_DB_SHADER_CONTROL        0x203u
+#define OOPS_AGC_REG_DB_HTILE_SURFACE         0x2afu
 
 /*
  * Depth Extent Packing Macro:
@@ -131,6 +133,8 @@ extern "C" {
 #define OOPS_AGC_REG_SPI_INTERP_CONTROL_0     0x1b5u
 #define OOPS_AGC_REG_SPI_PS_IN_CONTROL        0x1b6u
 #define OOPS_AGC_REG_SPI_BARYC_CNTL           0x1b8u
+#define OOPS_AGC_REG_SPI_SHADER_POS_FORMAT    0x1c3u
+#define OOPS_AGC_REG_SPI_SHADER_COL_FORMAT    0x1c5u
 
 /* UConfig Registers */
 #define OOPS_AGC_REG_VGT_PRIMITIVE_TYPE       0x242u /* UConfig space */
