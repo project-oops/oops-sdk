@@ -140,7 +140,7 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
     } else if (reg == 0x200u) {
       val = (desc->depth_buffer && desc->depth_control) ? desc->depth_control : 0u;
     } else if (reg == 0x203u) {
-      val = (desc->depth_buffer && desc->depth_control) ? 0x00000e10u : 0x00000010u;
+      val = 0x00000010u;
     } else if (reg == 0x10fu || reg == 0x110u) {
       val = float_as_u32(half_w);
     } else if (reg == 0x111u || reg == 0x112u) {
@@ -155,13 +155,13 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
   if (desc->depth_buffer && desc->depth_control) {
     uint64_t depth_gpu = (uint64_t)(uintptr_t)desc->depth_buffer;
     uint32_t z_format = desc->depth_format ? (desc->depth_format & 0x3u) : OOPS_AGC_Z_32_FLOAT;
-    uint32_t z_info = z_format | 0x80000000u;
+    uint32_t z_info = z_format | 0x80000180u; /* SW_MODE=24 (0x180), ZRANGE_PRECISION (0x80000000) */
 
     static const struct {
       uint32_t reg;
       uint32_t val;
     } db_regs[] = {
-      {OOPS_AGC_REG_DB_RENDER_CONTROL,  0x00000060u}, /* DEPTH_COMPRESS_DISABLE | STENCIL_COMPRESS_DISABLE */
+      {OOPS_AGC_REG_DB_RENDER_CONTROL,  0x00000000u}, /* Driver default */
       {OOPS_AGC_REG_DB_DEPTH_VIEW,      0x00000000u},
       {OOPS_AGC_REG_DB_DEPTH_SIZE_XY,   0},
       {OOPS_AGC_REG_DB_Z_INFO,          0},
