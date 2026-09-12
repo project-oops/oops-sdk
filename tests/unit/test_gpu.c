@@ -68,6 +68,15 @@ static void test_gpu_primitive_draw_contract(void) {
   memset(&desc, 0, sizeof(desc));
   rc = oops_agc_draw_primitive(NULL, &desc);
   ASSERT_EQ(rc, -1);
+
+  /* Verify depth descriptor fields */
+  uint32_t dummy_depth[64];
+  desc.depth_buffer = dummy_depth;
+  desc.depth_control = OOPS_AGC_DB_DEPTH_CONTROL(1, 1, OOPS_AGC_ZFUNC_LESS);
+  desc.depth_format = OOPS_AGC_Z_32_FLOAT;
+  ASSERT_EQ(desc.depth_control, 0x16u);
+  ASSERT_EQ(desc.depth_format, 3u);
+  ASSERT_TRUE(desc.depth_buffer != NULL);
 }
 
 static void test_gpu_pm4_constants(void) {
@@ -102,6 +111,42 @@ static void test_gpu_pm4_constants(void) {
   ASSERT_EQ(AGC_CB_COLOR_ATTRIB2(64, 64), (63u << 14) | 63u);
   ASSERT_EQ(AGC_CB_COLOR_ATTRIB2(1920, 1080), (1079u << 14) | 1919u);
   ASSERT_EQ(OOPS_AGC_CB_COLOR_ATTRIB2(1280, 720), (719u << 14) | 1279u);
+
+  /* Verify Depth Block Context Registers */
+  ASSERT_EQ(OOPS_AGC_REG_DB_RENDER_CONTROL, 0x000u);
+  ASSERT_EQ(OOPS_AGC_REG_DB_DEPTH_VIEW, 0x002u);
+  ASSERT_EQ(OOPS_AGC_REG_DB_DEPTH_SIZE_XY, 0x007u);
+  ASSERT_EQ(OOPS_AGC_REG_DB_DEPTH_CLEAR, 0x00bu);
+  ASSERT_EQ(OOPS_AGC_REG_DB_DFSM_CONTROL, 0x00eu);
+  ASSERT_EQ(OOPS_AGC_REG_DB_Z_INFO, 0x010u);
+  ASSERT_EQ(OOPS_AGC_REG_DB_Z_READ_BASE, 0x012u);
+  ASSERT_EQ(OOPS_AGC_REG_DB_Z_WRITE_BASE, 0x014u);
+  ASSERT_EQ(OOPS_AGC_REG_DB_Z_READ_BASE_HI, 0x01au);
+  ASSERT_EQ(OOPS_AGC_REG_DB_Z_WRITE_BASE_HI, 0x01cu);
+  ASSERT_EQ(OOPS_AGC_REG_DB_DEPTH_CONTROL, 0x200u);
+  ASSERT_EQ(OOPS_AGC_REG_DB_EQAA, 0x201u);
+  ASSERT_EQ(OOPS_AGC_REG_DB_SHADER_CONTROL, 0x203u);
+
+  /* Verify Depth Extent Macro (height-1 in bits 29:16, width-1 in bits 13:0) */
+  ASSERT_EQ(OOPS_AGC_DB_DEPTH_SIZE_XY(64, 64), (63u << 16) | 63u);
+  ASSERT_EQ(AGC_DB_DEPTH_SIZE_XY(1920, 1080), (1079u << 16) | 1919u);
+  ASSERT_EQ(OOPS_AGC_DB_DEPTH_SIZE_XY(1280, 720), (719u << 16) | 1279u);
+
+  /* Verify Depth Compare Functions & Formats */
+  ASSERT_EQ(OOPS_AGC_ZFUNC_NEVER, 0x0u);
+  ASSERT_EQ(OOPS_AGC_ZFUNC_LESS, 0x1u);
+  ASSERT_EQ(OOPS_AGC_ZFUNC_EQUAL, 0x2u);
+  ASSERT_EQ(OOPS_AGC_ZFUNC_LEQUAL, 0x3u);
+  ASSERT_EQ(OOPS_AGC_ZFUNC_GREATER, 0x4u);
+  ASSERT_EQ(OOPS_AGC_ZFUNC_NOTEQUAL, 0x5u);
+  ASSERT_EQ(OOPS_AGC_ZFUNC_GEQUAL, 0x6u);
+  ASSERT_EQ(OOPS_AGC_ZFUNC_ALWAYS, 0x7u);
+  ASSERT_EQ(OOPS_AGC_Z_32_FLOAT, 0x3u);
+
+  /* Verify DB_DEPTH_CONTROL helper */
+  ASSERT_EQ(OOPS_AGC_DB_DEPTH_CONTROL(1, 1, OOPS_AGC_ZFUNC_LESS), 0x16u);
+  ASSERT_EQ(OOPS_AGC_DB_DEPTH_CONTROL(1, 0, OOPS_AGC_ZFUNC_LEQUAL), 0x32u);
+  ASSERT_EQ(OOPS_AGC_DB_DEPTH_CONTROL(0, 0, OOPS_AGC_ZFUNC_ALWAYS), 0x70u);
 
   /* Verify SPI PS Input & Interpolant Registers */
   ASSERT_EQ(OOPS_AGC_REG_SPI_PS_INPUT_CNTL_0, 0x191u);

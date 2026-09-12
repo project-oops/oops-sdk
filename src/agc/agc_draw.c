@@ -137,6 +137,8 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
       val = (uint32_t)(color_gpu >> 40);
     } else if (reg == 0x3b0u) {
       val = OOPS_AGC_CB_COLOR_ATTRIB2(desc->width, desc->height);
+    } else if (reg == 0x200u) {
+      val = (desc->depth_buffer && desc->depth_control) ? desc->depth_control : 0u;
     } else if (reg == 0x10fu || reg == 0x110u) {
       val = float_as_u32(half_w);
     } else if (reg == 0x111u || reg == 0x112u) {
@@ -145,6 +147,43 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
     *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG, count 1 */
     *dw++ = reg;
     *dw++ = val;
+  }
+
+  /* Optional Depth Buffer and Depth Test setup */
+  if (desc->depth_buffer && desc->depth_control) {
+    uint64_t depth_gpu = (uint64_t)(uintptr_t)desc->depth_buffer;
+    uint32_t z_format = desc->depth_format ? (desc->depth_format & 0x3u) : OOPS_AGC_Z_32_FLOAT;
+    uint32_t z_info = z_format | 0x80000000u;
+
+    static const struct {
+      uint32_t reg;
+      uint32_t val;
+    } db_regs[] = {
+      {OOPS_AGC_REG_DB_RENDER_CONTROL, 0x00000040u}, /* DEPTH_COMPRESS_DISABLE */
+      {OOPS_AGC_REG_DB_DEPTH_VIEW,     0x00000000u},
+      {OOPS_AGC_REG_DB_DEPTH_SIZE_XY,  0},
+      {OOPS_AGC_REG_DB_Z_INFO,         0},
+      {OOPS_AGC_REG_DB_Z_READ_BASE,    0},
+      {OOPS_AGC_REG_DB_Z_READ_BASE_HI, 0},
+      {OOPS_AGC_REG_DB_Z_WRITE_BASE,   0},
+      {OOPS_AGC_REG_DB_Z_WRITE_BASE_HI,0},
+    };
+    for (size_t i = 0; i < sizeof(db_regs) / sizeof(db_regs[0]); i++) {
+      uint32_t reg = db_regs[i].reg;
+      uint32_t val = db_regs[i].val;
+      if (reg == OOPS_AGC_REG_DB_DEPTH_SIZE_XY) {
+        val = OOPS_AGC_DB_DEPTH_SIZE_XY(desc->width, desc->height);
+      } else if (reg == OOPS_AGC_REG_DB_Z_INFO) {
+        val = z_info;
+      } else if (reg == OOPS_AGC_REG_DB_Z_READ_BASE || reg == OOPS_AGC_REG_DB_Z_WRITE_BASE) {
+        val = (uint32_t)(depth_gpu >> 8);
+      } else if (reg == OOPS_AGC_REG_DB_Z_READ_BASE_HI || reg == OOPS_AGC_REG_DB_Z_WRITE_BASE_HI) {
+        val = (uint32_t)(depth_gpu >> 40);
+      }
+      *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG, count 1 */
+      *dw++ = reg;
+      *dw++ = val;
+    }
   }
 
   /* Clear all 32 SPI_PS_INPUT_CNTL registers to 0 */

@@ -55,6 +55,73 @@ extern "C" {
   ((((uint32_t)(h) - 1u) << 14) | ((uint32_t)(w) - 1u))
 #define AGC_CB_COLOR_ATTRIB2(w, h) OOPS_AGC_CB_COLOR_ATTRIB2(w, h)
 
+/*
+ * Depth Block (DB) Context Registers (base 0xa000).
+ */
+#define OOPS_AGC_REG_DB_RENDER_CONTROL        0x000u
+#define OOPS_AGC_REG_DB_COUNT_CONTROL         0x001u
+#define OOPS_AGC_REG_DB_DEPTH_VIEW            0x002u
+#define OOPS_AGC_REG_DB_RENDER_OVERRIDE       0x003u
+#define OOPS_AGC_REG_DB_RENDER_OVERRIDE2      0x004u
+#define OOPS_AGC_REG_DB_HTILE_DATA_BASE       0x005u
+#define OOPS_AGC_REG_DB_DEPTH_SIZE_XY         0x007u
+#define OOPS_AGC_REG_DB_DEPTH_BOUNDS_MIN      0x008u
+#define OOPS_AGC_REG_DB_DEPTH_BOUNDS_MAX      0x009u
+#define OOPS_AGC_REG_DB_STENCIL_CLEAR         0x00au
+#define OOPS_AGC_REG_DB_DEPTH_CLEAR           0x00bu
+#define OOPS_AGC_REG_DB_DFSM_CONTROL          0x00eu
+#define OOPS_AGC_REG_DB_Z_INFO                0x010u
+#define OOPS_AGC_REG_DB_STENCIL_INFO          0x011u
+#define OOPS_AGC_REG_DB_Z_READ_BASE           0x012u
+#define OOPS_AGC_REG_DB_STENCIL_READ_BASE     0x013u
+#define OOPS_AGC_REG_DB_Z_WRITE_BASE          0x014u
+#define OOPS_AGC_REG_DB_STENCIL_WRITE_BASE    0x015u
+#define OOPS_AGC_REG_DB_Z_READ_BASE_HI        0x01au
+#define OOPS_AGC_REG_DB_STENCIL_READ_BASE_HI  0x01bu
+#define OOPS_AGC_REG_DB_Z_WRITE_BASE_HI       0x01cu
+#define OOPS_AGC_REG_DB_STENCIL_WRITE_BASE_HI 0x01du
+#define OOPS_AGC_REG_DB_HTILE_DATA_BASE_HI    0x01eu
+#define OOPS_AGC_REG_DB_RMI_L2_CACHE_CONTROL  0x01fu
+#define OOPS_AGC_REG_DB_DEPTH_CONTROL         0x200u
+#define OOPS_AGC_REG_DB_EQAA                  0x201u
+#define OOPS_AGC_REG_DB_SHADER_CONTROL        0x203u
+
+/*
+ * Depth Extent Packing Macro:
+ * DB_DEPTH_SIZE_XY: bits [29:16] = (height - 1), bits [13:0] = (width - 1)
+ */
+#define OOPS_AGC_DB_DEPTH_SIZE_XY(w, h) \
+  (((((uint32_t)(h) - 1u) & 0x3fffu) << 16) | (((uint32_t)(w) - 1u) & 0x3fffu))
+#define AGC_DB_DEPTH_SIZE_XY(w, h) OOPS_AGC_DB_DEPTH_SIZE_XY(w, h)
+
+/*
+ * Depth Compare Functions (CompareFrag / ZFUNC).
+ */
+#define OOPS_AGC_ZFUNC_NEVER                  0x0u
+#define OOPS_AGC_ZFUNC_LESS                   0x1u
+#define OOPS_AGC_ZFUNC_EQUAL                  0x2u
+#define OOPS_AGC_ZFUNC_LEQUAL                 0x3u
+#define OOPS_AGC_ZFUNC_GREATER                0x4u
+#define OOPS_AGC_ZFUNC_NOTEQUAL               0x5u
+#define OOPS_AGC_ZFUNC_GEQUAL                 0x6u
+#define OOPS_AGC_ZFUNC_ALWAYS                 0x7u
+
+/*
+ * Depth Formats (ZFormat).
+ */
+#define OOPS_AGC_Z_INVALID                    0x0u
+#define OOPS_AGC_Z_16                         0x1u
+#define OOPS_AGC_Z_24                         0x2u
+#define OOPS_AGC_Z_32_FLOAT                   0x3u
+
+/*
+ * DB_DEPTH_CONTROL bitmask helper:
+ * Bit 1 = Z_ENABLE, Bit 2 = Z_WRITE_ENABLE, Bits [6:4] = ZFUNC.
+ */
+#define OOPS_AGC_DB_DEPTH_CONTROL(z_enable, z_write, zfunc) \
+  (((z_enable) ? (1u << 1) : 0u) | ((z_write) ? (1u << 2) : 0u) | (((uint32_t)(zfunc) & 0x7u) << 4))
+#define AGC_DB_DEPTH_CONTROL(z_enable, z_write, zfunc) OOPS_AGC_DB_DEPTH_CONTROL(z_enable, z_write, zfunc)
+
 /* SPI PS Input, Interpolant, and Barycentric Controls */
 #define OOPS_AGC_REG_SPI_PS_INPUT_CNTL(i)     (0x191u + (uint32_t)(i))
 #define OOPS_AGC_REG_SPI_PS_INPUT_CNTL_0      0x191u
@@ -162,6 +229,9 @@ typedef struct oops_agc_draw_desc {
   uint64_t ps_shader_va;    /* Virtual address of RDNA2 Pixel Shader */
   uint32_t vertex_count;    /* Number of vertices to draw (e.g. 3 for triangle) */
   uint32_t primitive_type;  /* Topology (e.g. OOPS_AGC_PRIM_TRILIST = 0x4) */
+  void *depth_buffer;       /* Optional depth buffer (Direct coherent / Onion memory) */
+  uint32_t depth_control;   /* DB_DEPTH_CONTROL value (0 = depth disabled) */
+  uint32_t depth_format;    /* ZFormat (e.g. OOPS_AGC_Z_32_FLOAT = 0x3) */
 } oops_agc_draw_desc_t;
 
 /*
