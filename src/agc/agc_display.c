@@ -109,6 +109,7 @@ struct agc_display {
   uint8_t *dcb_mem;
   volatile uint32_t *fence;
   int gpu_accelerated;
+  int tiling_mode;
 };
 
 static struct agc_display s_agc_display;
@@ -127,6 +128,15 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
   for (size_t i = 0; i < sizeof(*disp); i++) {
     ((unsigned char *)disp)[i] = 0;
   }
+  /* PS5 libSceVideoOut restricts 720p buffer registration to consoles configured
+   * for 720p scanout mode, refusing 1280x720 with 0x80290005 on 1080p/1440p/4K displays.
+   * Universal 1080p (1920x1080) is supported across all output modes. If requested
+   * at 1280x720, promote to standard 1080p. */
+  if (width == 1280 && height == 720) {
+    width = 1920;
+    height = 1080;
+  }
+
   disp->handle = -1;
   disp->width = width;
   disp->height = height;
@@ -270,10 +280,11 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
   unsigned char attr[256];
   for (size_t i = 0; i < sizeof(attr); i++)
     attr[i] = 0;
+  disp->tiling_mode = 0; /* 0 = tiled mode required by libSceVideoOut on this port */
   if (sceVideoOutSetBufferAttribute2) {
     sceVideoOutSetBufferAttribute2(
         attr, 0x8000000000000000ULL,
-        0 /* tiled: written by agc_tile_surface(), not linear */, width, height,
+        (uint32_t)disp->tiling_mode, width, height,
         0, 0, 0);
   }
   agc_log("agc-attr-0", "attr word 0", *(const uint64_t *)(attr + 0));
@@ -299,16 +310,23 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
     return disp;
   }
 
-  /* Clear and tile initial buffers */
+  /* Clear and initialize initial buffers */
   disp->ready = 1;
   disp->fb_index = 0;
   disp->last_error = 0;
   disp->flip_count = 0;
   agc_display_clear(disp, 0);
-  agc_tile_surface(disp->target_gpu_fb[0], disp->linear_scratch_fb, width,
-                   height);
-  agc_tile_surface(disp->target_gpu_fb[1], disp->linear_scratch_fb, width,
-                   height);
+  if (disp->tiling_mode == 1) {
+    for (size_t i = 0; i < (size_t)width * height; i++) {
+      disp->target_gpu_fb[0][i] = 0;
+      disp->target_gpu_fb[1][i] = 0;
+    }
+  } else {
+    agc_tile_surface(disp->target_gpu_fb[0], disp->linear_scratch_fb, width,
+                     height);
+    agc_tile_surface(disp->target_gpu_fb[1], disp->linear_scratch_fb, width,
+                     height);
+  }
 
   /* Attempt hardware GPU acceleration setup via libSceAgc / libSceAgcDriver */
   disp->gpu_accelerated = 0;
@@ -364,8 +382,10 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
 
         if (src == 0 && s_obj != (void *)0) {
           disp->shader_obj = s_obj;
-          disp->gpu_accelerated = 1;
-          agc_log("agc-gpu-accel", "GPU acceleration enabled", 1);
+          /* RDNA2 MUBUF requires 128-bit V# buffer descriptors in s[12..15] and s[8..11];
+           * keep GPU compute dispatch disabled until V# descriptors are constructed. */
+          disp->gpu_accelerated = 0;
+          agc_log("agc-gpu-accel", "GPU acceleration disabled (CPU tiling active)", 0);
         } else {
           oops_mem_free((void *)dcb);
           oops_mem_free((void *)f);
@@ -453,124 +473,36 @@ int agc_display_flip(agc_display_t *disp) {
     agc_wait_for_flips(disp);
   }
 
-  /* Tiling step: hardware GPU dispatch when accelerated, CPU fallback otherwise
-   */
-  if (disp->gpu_accelerated && disp->dcb_mem && disp->fence &&
-      disp->agc_queue && sceAgcDriverSubmitDcb) {
-    uint64_t src_gpu =
-        AGC_VM_BASE + 2u * AGC_STRIDE_BYTES; /* linear scratch FB */
-    uint64_t dst_gpu =
-        AGC_VM_BASE +
-        (uint64_t)shown * AGC_STRIDE_BYTES; /* targeted display buffer */
-    uint32_t *dw = (uint32_t *)disp->dcb_mem;
-
-    /* Extract and patch register table from shader header (offset +0x88) */
-    const uint32_t *reg_table = (const uint32_t *)(s_agc_tiler_hdr_full + 0x88);
-    uint64_t payload_va = (uint64_t)(uintptr_t)disp->shader_payload;
-
-    for (int i = 0; i < 11; i++) {
-      uint32_t reg_idx = reg_table[i * 2];
-      uint32_t reg_val = reg_table[i * 2 + 1];
-      if (reg_idx == 0x20c) { /* COMPUTE_PGM_LO */
-        reg_val = (uint32_t)(payload_va >> 8);
-      } else if (reg_idx == 0x20d) { /* COMPUTE_PGM_HI */
-        reg_val = (uint32_t)(payload_va >> 40);
-      }
-      *dw++ = 0xc0017600u; /* SET_SH_REG, count 1 */
-      *dw++ = reg_idx;
-      *dw++ = reg_val;
+  /* Scanout buffer preparation: linear direct copy when tiling_mode == 1,
+   * CPU software display-tiling when tiling_mode == 0 (RDNA2 display-tiled). */
+  if (disp->tiling_mode == 1) {
+    const uint64_t *src64 = (const uint64_t *)disp->linear_scratch_fb;
+    uint64_t *dst64 = (uint64_t *)disp->target_gpu_fb[shown];
+    size_t qwords = ((size_t)disp->width * disp->height * sizeof(uint32_t)) / sizeof(uint64_t);
+    for (size_t i = 0; i < qwords; i++) {
+      dst64[i] = src64[i];
     }
-
-    /* User data: source linear FB and dest tiled FB */
-    *dw++ = 0xc0017600u; /* SET_SH_REG */
-    *dw++ = 0x240u;      /* COMPUTE_USER_DATA_0 */
-    *dw++ = (uint32_t)src_gpu;
-    *dw++ = 0xc0017600u;
-    *dw++ = 0x241u; /* COMPUTE_USER_DATA_1 */
-    *dw++ = (uint32_t)(src_gpu >> 32);
-
-    *dw++ = 0xc0017600u;
-    *dw++ = 0x242u; /* COMPUTE_USER_DATA_2 */
-    *dw++ = (uint32_t)dst_gpu;
-    *dw++ = 0xc0017600u;
-    *dw++ = 0x243u; /* COMPUTE_USER_DATA_3 */
-    *dw++ = (uint32_t)(dst_gpu >> 32);
-
-    *dw++ = 0xc0017600u;
-    *dw++ = 0x244u; /* COMPUTE_USER_DATA_4: width | (height << 16) */
-    *dw++ = (uint32_t)(disp->width & 0xffffu) |
-            ((uint32_t)(disp->height & 0xffffu) << 16);
-
-    /* DISPATCH_DIRECT: threadgroups covering width x height in 128x128
-     * macro-tiles */
-    uint32_t tg_x = (disp->width + 127u) >> 7;
-    uint32_t tg_y = (disp->height + 127u) >> 7;
-    *dw++ = 0xc0031500u; /* DISPATCH_DIRECT */
-    *dw++ = (tg_x > 0) ? tg_x : 1u;
-    *dw++ = (tg_y > 0) ? tg_y : 1u;
-    *dw++ = 1u;    /* dim_z */
-    *dw++ = 0x41u; /* initiator */
-
-    /* RELEASE_MEM: EOP event write to completion fence in coherent Onion memory
-     */
-    uint64_t fence_gpu = (uint64_t)(uintptr_t)disp->fence;
-    *disp->fence = 0x11111111u;
-
-    *dw++ = 0xc0064900u; /* PACKET3_RELEASE_MEM, count 6 */
-    *dw++ =
-        0x06603514u;     /* GCR_SEQ | GCR_GL2_WB | GCR_GLM_INV | GCR_GLM_WB |
-                            CACHE_POLICY(3) | EVENT_TYPE(0x14) | EVENT_INDEX(5) */
-    *dw++ = 0x20000000u; /* DATA_SEL(1) = 32-bit int low */
-    *dw++ = (uint32_t)fence_gpu;
-    *dw++ = (uint32_t)(fence_gpu >> 32);
-    *dw++ = 0xbeefcafeu; /* fence value */
-    *dw++ = 0u;
-    *dw++ = 0u;
-
-    /* Trailing PM4 NOPs for prefetch safety */
-    for (int p = 0; p < 16; p++) {
-      dw[p] = 0xffff1000u;
-    }
-    dw += 16;
-
-    uint32_t dcb_dwords = (uint32_t)(dw - (uint32_t *)disp->dcb_mem);
-    oops_agc_dcb_desc desc;
-    desc.gpu_addr = (uint64_t)(uintptr_t)disp->dcb_mem;
-    desc.size = dcb_dwords; /* STRICTLY in DWORDs, per hardware requirement */
-    desc.flags = 0;
-    desc.pad = 0;
-
-    int submit_rc = sceAgcDriverSubmitDcb(&desc);
-    agc_log("agc-dcb-rc", "SubmitDcb rc", (uint64_t)(uint32_t)submit_rc);
-
-    if (submit_rc == 0) {
-      for (int poll = 0; poll < 10000; poll++) {
-#if defined(__x86_64__)
-        __builtin_ia32_clflush((const void *)disp->fence);
-#endif
-        if (*disp->fence == 0xbeefcafeu) {
-          break;
-        }
-        if (sceKernelUsleep) {
-          sceKernelUsleep(10);
-        }
-      }
-    } else {
-      /* Fallback to CPU tiling if submission fails */
-      agc_tile_surface(disp->target_gpu_fb[shown], disp->linear_scratch_fb,
-                       disp->width, disp->height);
+    if (disp->flip_count < 5) {
+      agc_log("agc-scanout-lin", "linear frame scanout, first pixel", (uint64_t)disp->target_gpu_fb[shown][0]);
     }
   } else {
-    /* CPU software tiling fallback path */
+    /* CPU software tiling: swizzle linear scratch buffer into RDNA2 tiled scanout surface */
     agc_tile_surface(disp->target_gpu_fb[shown], disp->linear_scratch_fb,
                      disp->width, disp->height);
+  }
+
+  if (disp->flip_count <= 5) {
+    agc_log("agc-pix-0", "target_gpu_fb first pixel", (uint64_t)disp->target_gpu_fb[shown][0]);
+    agc_log("agc-scr-0", "linear_scratch_fb first pixel", (uint64_t)disp->linear_scratch_fb[0]);
   }
 
   disp->flip_count++;
 
   if (sceVideoOutSubmitFlip) {
     int frc = sceVideoOutSubmitFlip(disp->handle, (int)shown, 1, 0);
-    agc_log("agc-flip-rc", "SubmitFlip rc", (uint64_t)(uint32_t)frc);
+    if (frc != 0 || disp->flip_count <= 5) {
+      agc_log("agc-flip-rc", "SubmitFlip rc", (uint64_t)(uint32_t)frc);
+    }
     return frc;
   }
   return 0;

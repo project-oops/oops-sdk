@@ -329,16 +329,20 @@ uintptr_t procctl_find_syscall_gadget(pid_t pid, uintptr_t libkernel_base) {
   if (libkernel_base == 0) {
     return 0;
   }
-  uintptr_t canonical = libkernel_base + 0x5ba;
-  uint8_t buf[4] = {0};
-  if (procctl_copyout(pid, canonical, buf, 2) == 0) {
-    if (buf[0] == 0x0f && buf[1] == 0x05) { /* 0f 05 = syscall */
-      klog_write_hex("verified syscall gadget at getpid+0xa: ", canonical);
-      s_remote_syscall_gadget = canonical;
-      return s_remote_syscall_gadget;
+  /* PS5 Prospero getpid+0xa is 0x4ea; PS4 Orbis getpid+0xa is 0x5ba */
+  const uintptr_t offsets[] = { 0x4ea, 0x5ba };
+  for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+    uintptr_t canonical = libkernel_base + offsets[i];
+    uint8_t buf[4] = {0};
+    if (procctl_copyout(pid, canonical, buf, 2) == 0) {
+      if (buf[0] == 0x0f && buf[1] == 0x05) { /* 0f 05 = syscall */
+        klog_write_hex("verified syscall gadget at getpid+0xa: ", canonical);
+        s_remote_syscall_gadget = canonical;
+        return s_remote_syscall_gadget;
+      }
     }
   }
-  /* Always fallback to canonical getpid + 0xa on FW 12.40 */
+  uintptr_t canonical = libkernel_base + 0x4ea;
   klog_write_hex("using canonical syscall gadget: ", canonical);
   s_remote_syscall_gadget = canonical;
   return s_remote_syscall_gadget;

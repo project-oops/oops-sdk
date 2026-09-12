@@ -34,8 +34,11 @@ static void test_gpu_available_contract(void) {
   int avail = oops_gpu_available();
   ASSERT_EQ(avail, 0);
 
-  oops_gpu_queue_t *q = oops_gpu_create_compute_queue();
-  ASSERT_TRUE(q == NULL);
+  oops_gpu_queue_t *cq = oops_gpu_create_compute_queue();
+  ASSERT_TRUE(cq == NULL);
+
+  oops_gpu_queue_t *gq = oops_gpu_create_graphics_queue();
+  ASSERT_TRUE(gq == NULL);
 }
 
 static void test_gpu_dispatch_struct_contract(void) {
@@ -56,10 +59,22 @@ static void test_gpu_dispatch_struct_contract(void) {
   ASSERT_EQ(rc, -1);
 }
 
+static void test_gpu_primitive_draw_contract(void) {
+  /* Safe with NULL queue and descriptor */
+  int rc = oops_agc_draw_primitive(NULL, NULL);
+  ASSERT_EQ(rc, -1);
+
+  oops_agc_draw_desc_t desc;
+  memset(&desc, 0, sizeof(desc));
+  rc = oops_agc_draw_primitive(NULL, &desc);
+  ASSERT_EQ(rc, -1);
+}
+
 static void test_gpu_pm4_constants(void) {
   /* Verify PM4 Packet 3 Opcodes */
   ASSERT_EQ(OOPS_AGC_PM4_NOP, 0x10u);
   ASSERT_EQ(OOPS_AGC_PM4_DRAW_INDEX_AUTO, 0x2Du);
+  ASSERT_EQ(OOPS_AGC_PM4_NUM_INSTANCES, 0x2Fu);
   ASSERT_EQ(OOPS_AGC_PM4_WAIT_REG_MEM, 0x3Cu);
   ASSERT_EQ(OOPS_AGC_PM4_RELEASE_MEM, 0x49u);
   ASSERT_EQ(OOPS_AGC_PM4_DMA_DATA, 0x50u);
@@ -68,9 +83,45 @@ static void test_gpu_pm4_constants(void) {
   ASSERT_EQ(OOPS_AGC_PM4_SET_SH_REG, 0x76u);
   ASSERT_EQ(OOPS_AGC_PM4_SET_UCONFIG_REG, 0x79u);
 
-  /* Verify Register Offsets */
+  /* Verify Color Buffer Context Registers */
+  ASSERT_EQ(OOPS_AGC_REG_CB_TARGET_MASK, 0x08eu);
+  ASSERT_EQ(OOPS_AGC_REG_CB_SHADER_MASK, 0x08fu);
   ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_BASE, 0x200u);
+  ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_BASE_GFX10, 0x318u);
+  ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_BASE_EXT, 0x390u);
+  ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_VIEW, 0x31bu);
+  ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_INFO, 0x31cu);
+  ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_ATTRIB, 0x31du);
+  ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_DCC_CONTROL, 0x31eu);
+  ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_ATTRIB2, 0x3b0u);
+  ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_ATTRIB3, 0x3b8u);
+  ASSERT_EQ(OOPS_AGC_REG_CB_COLOR_CONTROL, 0x202u);
+  ASSERT_EQ(OOPS_AGC_REG_CB_BLEND0_CONTROL, 0x1e0u);
+
+  /* Verify ATTRIB2 Extent Macro (height-1 in bits 27:14, width-1 in bits 13:0) */
+  ASSERT_EQ(AGC_CB_COLOR_ATTRIB2(64, 64), (63u << 14) | 63u);
+  ASSERT_EQ(AGC_CB_COLOR_ATTRIB2(1920, 1080), (1079u << 14) | 1919u);
+  ASSERT_EQ(OOPS_AGC_CB_COLOR_ATTRIB2(1280, 720), (719u << 14) | 1279u);
+
+  /* Verify SPI PS Input & Interpolant Registers */
+  ASSERT_EQ(OOPS_AGC_REG_SPI_PS_INPUT_CNTL_0, 0x191u);
+  ASSERT_EQ(OOPS_AGC_REG_SPI_PS_INPUT_CNTL_31, 0x1b0u);
+  ASSERT_EQ(OOPS_AGC_REG_SPI_PS_INPUT_CNTL(0), 0x191u);
+  ASSERT_EQ(OOPS_AGC_REG_SPI_PS_INPUT_CNTL(31), 0x1b0u);
+  ASSERT_EQ(OOPS_AGC_REG_SPI_PS_INPUT_ENA, 0x1b3u);
+  ASSERT_EQ(OOPS_AGC_REG_SPI_PS_INPUT_ADDR, 0x1b4u);
+  ASSERT_EQ(OOPS_AGC_REG_SPI_INTERP_CONTROL_0, 0x1b5u);
+  ASSERT_EQ(OOPS_AGC_REG_SPI_PS_IN_CONTROL, 0x1b6u);
+  ASSERT_EQ(OOPS_AGC_REG_SPI_BARYC_CNTL, 0x1b8u);
+
+  /* Verify UCONFIG Registers & Defaults */
   ASSERT_EQ(OOPS_AGC_REG_VGT_PRIMITIVE_TYPE, 0x242u);
+  ASSERT_EQ(OOPS_AGC_REG_GE_CNTL, 0x25bu);
+  ASSERT_EQ(OOPS_AGC_REG_GE_PC_ALLOC, 0x260u);
+  ASSERT_EQ(OOPS_AGC_GE_CNTL_DEFAULT, 0x00008040u);
+  ASSERT_EQ(OOPS_AGC_GE_PC_ALLOC_DEFAULT, 0x000003ffu);
+
+  /* Verify RDNA2 SH Registers */
   ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_PS, 0x008u);
   ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_ES, 0x088u);
   ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_VS, 0x0c8u);
@@ -104,5 +155,6 @@ void run_unit_tests_gpu(void) {
   RUN_TEST(test_gpu_null_safety);
   RUN_TEST(test_gpu_available_contract);
   RUN_TEST(test_gpu_dispatch_struct_contract);
+  RUN_TEST(test_gpu_primitive_draw_contract);
   RUN_TEST(test_gpu_pm4_constants);
 }

@@ -50,6 +50,13 @@ int oops_gpu_available(void);
 oops_gpu_queue_t *oops_gpu_create_compute_queue(void);
 
 /*
+ * Create an AGC hardware universal graphics queue (Type 0). Allocates direct coherent
+ * Onion WB memory for command stream buffers and synchronization fences.
+ * Returns NULL on host or if queue creation fails.
+ */
+oops_gpu_queue_t *oops_gpu_create_graphics_queue(void);
+
+/*
  * Flush, wait on pending fences, and destroy a GPU compute queue.
  */
 void oops_gpu_destroy_queue(oops_gpu_queue_t *queue);

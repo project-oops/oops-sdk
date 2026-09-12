@@ -2,18 +2,11 @@
 #include "oops/gpu.h"
 #include "oops/memory.h"
 #include "oops/target.h"
+#include "agc_internal.h"
 
 #if OOPS_TARGET_IS_PROSPERO
 
 __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
-
-struct oops_gpu_queue {
-  void *agc_queue_handle;
-  uint8_t *dcb_mem;
-  size_t dcb_size;
-  volatile uint32_t *fence;
-  uint32_t last_fence;
-};
 
 struct oops_gpu_shader {
   void *shader_obj;
@@ -50,7 +43,7 @@ int oops_gpu_available(void) {
   return (init_agc_subsystem() == 0);
 }
 
-oops_gpu_queue_t *oops_gpu_create_compute_queue(void) {
+static oops_gpu_queue_t *create_queue_type(uint32_t type) {
   if (!oops_gpu_available())
     return (oops_gpu_queue_t *)0;
 
@@ -60,7 +53,7 @@ oops_gpu_queue_t *oops_gpu_create_compute_queue(void) {
     return (oops_gpu_queue_t *)0;
 
   void *queue_handle = (void *)0;
-  int qrc = sceAgcDriverCreateQueue(3, &queue_handle, 0);
+  int qrc = sceAgcDriverCreateQueue(type, &queue_handle, 0);
   if (qrc != 0 || !queue_handle) {
     oops_mem_free(q);
     return (oops_gpu_queue_t *)0;
@@ -90,6 +83,14 @@ oops_gpu_queue_t *oops_gpu_create_compute_queue(void) {
   *q->fence = 0;
   q->last_fence = 0;
   return q;
+}
+
+oops_gpu_queue_t *oops_gpu_create_compute_queue(void) {
+  return create_queue_type(3);
+}
+
+oops_gpu_queue_t *oops_gpu_create_graphics_queue(void) {
+  return create_queue_type(0);
 }
 
 void oops_gpu_destroy_queue(oops_gpu_queue_t *queue) {
@@ -278,6 +279,9 @@ uint32_t oops_gpu_get_last_fence(const oops_gpu_queue_t *queue) {
 /* Host / Non-PS5 Stubs */
 int oops_gpu_available(void) { return 0; }
 oops_gpu_queue_t *oops_gpu_create_compute_queue(void) {
+  return (oops_gpu_queue_t *)0;
+}
+oops_gpu_queue_t *oops_gpu_create_graphics_queue(void) {
   return (oops_gpu_queue_t *)0;
 }
 void oops_gpu_destroy_queue(oops_gpu_queue_t *queue) { (void)queue; }

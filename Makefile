@@ -33,7 +33,8 @@ ifeq ($(filter 1 2,$(OOPS_TARGET_NUM)),)
     GRAPHICS_OBJS := \
         $(BUILD)/agc/agc_display.o \
         $(BUILD)/agc/agc_tiler.o \
-        $(BUILD)/agc/agc_compute.o
+        $(BUILD)/agc/agc_compute.o \
+        $(BUILD)/agc/agc_draw.o
 else
     # Orbis / Neo
     GRAPHICS_OBJS := \
@@ -101,6 +102,7 @@ TEST_SRCS := \
     tests/integration/test_net_loopback.c \
     src/agc/agc_tiler.c \
     src/agc/agc_compute.c \
+    src/agc/agc_draw.c \
     src/draw/draw.c \
     src/input/input.c \
     src/input/keyboard.c \
