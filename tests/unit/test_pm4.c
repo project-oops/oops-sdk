@@ -43,6 +43,8 @@ typedef struct {
   uint32_t spi_shader_pos_format;
   uint32_t spi_shader_col_format;
   uint32_t spi_ps_in_control;
+  uint64_t spi_shader_pgm_ps;
+  uint64_t spi_shader_user_data_ps_01;
 
   uint32_t vgt_primitive_type;
   uint32_t last_draw_index_count;
@@ -133,9 +135,9 @@ static int oops_pm4_validate_stream(const uint32_t *words, size_t word_count,
           } else if (reg == OOPS_AGC_REG_DB_Z_WRITE_BASE_HI) {
             report->db_z_write_base = (report->db_z_write_base & 0x00000000ffffffffULL) | ((uint64_t)val << 32);
           } else if (reg == OOPS_AGC_REG_CB_COLOR0_BASE_GFX10) {
-            report->cb_color0_base = (report->cb_color0_base & 0xffffffff00000000ULL) | ((uint64_t)val << 8);
+            report->cb_color0_base = (report->cb_color0_base & 0xffffff00000000ffULL) | ((uint64_t)val << 8);
           } else if (reg == OOPS_AGC_REG_CB_COLOR0_BASE_EXT) {
-            report->cb_color0_base = (report->cb_color0_base & 0x00000000ffffffffULL) | ((uint64_t)val << 40);
+            report->cb_color0_base = (report->cb_color0_base & 0x000000ffffffffffULL) | ((uint64_t)val << 40);
           } else if (reg == OOPS_AGC_REG_CB_COLOR0_INFO) report->cb_color0_info = val;
           else if (reg == OOPS_AGC_REG_CB_COLOR0_ATTRIB2) report->cb_color0_attrib2 = val;
           else if (reg == OOPS_AGC_REG_SPI_SHADER_POS_FORMAT) report->spi_shader_pos_format = val;
@@ -161,6 +163,19 @@ static int oops_pm4_validate_stream(const uint32_t *words, size_t word_count,
                    "Word %zu: SH reg out of range (base=0x%03x, num=%u)",
                    idx, (unsigned)base_reg, (unsigned)num_regs);
           return -1;
+        }
+        for (uint32_t r = 0; r < num_regs; r++) {
+          uint32_t reg = base_reg + r;
+          uint32_t val = payload[1u + r];
+          if (reg == 0x08u) {
+            report->spi_shader_pgm_ps = (report->spi_shader_pgm_ps & 0xffffff00000000ffULL) | ((uint64_t)val << 8);
+          } else if (reg == 0x09u) {
+            report->spi_shader_pgm_ps = (report->spi_shader_pgm_ps & 0x000000ffffffffffULL) | ((uint64_t)val << 40);
+          } else if (reg == 0x0cu) {
+            report->spi_shader_user_data_ps_01 = (report->spi_shader_user_data_ps_01 & 0xffffffff00000000ULL) | (uint64_t)val;
+          } else if (reg == 0x0du) {
+            report->spi_shader_user_data_ps_01 = (report->spi_shader_user_data_ps_01 & 0x00000000ffffffffULL) | ((uint64_t)val << 32);
+          }
         }
         break;
       }
@@ -589,6 +604,100 @@ static void test_pm4_gl_hardware_depth_stream(void) {
   oops_display_close(disp);
 }
 
+static void test_pm4_gl_hardware_texture_stream(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[4096];
+  static _Alignas(64) uint32_t fence = 0x11111111u;
+  static _Alignas(64) uint32_t canary[16];
+
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  memset(vbo, 0, sizeof(vbo));
+
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 4096;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = &fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  /* Step 1: Draw triangle without texture (Untextured Gouraud shader at 0x300) */
+  glBegin(GL_TRIANGLES);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+
+  oops_pm4_report_t report;
+  int rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Texture Step 1 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
+  ASSERT_EQ(report.spi_shader_pgm_ps, payload_va + 0x300u);
+
+  /* Step 2: Upload 16x16 RGBA texture, bind it, enable GL_TEXTURE_2D */
+  GLuint tex_id = 0;
+  glGenTextures(1, &tex_id);
+  glBindTexture(GL_TEXTURE_2D, tex_id);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  uint32_t tex_data[16 * 16];
+  for (int i = 0; i < 256; i++) tex_data[i] = 0xffff00ffu; /* Magenta */
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, tex_data);
+  glEnable(GL_TEXTURE_2D);
+
+  /* Draw textured triangle: shader should switch to 0x200, User SGPR 0/1 to descriptor table 0x900 */
+  glBegin(GL_TRIANGLES);
+  glTexCoord2f(0.0f, 0.0f); glVertex3f(-0.5f, -0.5f, 0.5f);
+  glTexCoord2f(1.0f, 0.0f); glVertex3f(0.5f, -0.5f, 0.5f);
+  glTexCoord2f(0.5f, 1.0f); glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Texture Step 2 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.spi_shader_pgm_ps, payload_va + 0x200u);
+  ASSERT_EQ(report.spi_shader_user_data_ps_01, payload_va + 0x900u);
+
+  /* Verify descriptor table in gpu_payload at 0x900 */
+  uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload + 0x900);
+  ASSERT_EQ(dt[3], 0x90000688u); /* SQ_RSRC_IMG_2D */
+  ASSERT_EQ(dt[9], 0x00fff000u); /* Sampler MAX_LOD */
+
+  /* Flush and verify packet stream */
+  uint32_t words_before_flush = ctx->dcb_words;
+  gl_hw_flush(ctx);
+  uint32_t total_flushed_words = words_before_flush + 24;
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, total_flushed_words, &report);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.release_mem_count, 1u);
+
+  glDeleteTextures(1, &tex_id);
+
+  /* Clean up mock pointers */
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 void run_unit_tests_pm4(void);
 
 void run_unit_tests_pm4(void) {
@@ -596,6 +705,7 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_synthetic_valid_stream);
   RUN_TEST(test_pm4_real_sdk_draw_stream);
   RUN_TEST(test_pm4_gl_hardware_depth_stream);
+  RUN_TEST(test_pm4_gl_hardware_texture_stream);
   RUN_TEST(test_pm4_detects_truncated_buffer);
   RUN_TEST(test_pm4_detects_invalid_reg_bounds);
   RUN_TEST(test_pm4_detects_depth_invariants);

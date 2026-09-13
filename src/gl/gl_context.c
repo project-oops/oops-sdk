@@ -11,8 +11,8 @@ gl_context_t *g_gl_ctx = NULL;
 #include <stdlib.h>
 static gl_context_t s_host_ctx;
 static float s_host_depth[1920 * 1080];
-static inline void gl_klog_line(const char *msg) { (void)msg; }
-static inline void gl_klog_val(const char *tag, uint64_t val) { (void)tag; (void)val; }
+static inline __attribute__((unused)) void gl_klog_line(const char *msg) { (void)msg; }
+static inline __attribute__((unused)) void gl_klog_val(const char *tag, uint64_t val) { (void)tag; (void)val; }
 #else
 #include "oops/syscall.h"
 #endif
