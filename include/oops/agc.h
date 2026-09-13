@@ -124,6 +124,14 @@ extern "C" {
   (((z_enable) ? (1u << 1) : 0u) | ((z_write) ? (1u << 2) : 0u) | (((uint32_t)(zfunc) & 0x7u) << 4))
 #define AGC_DB_DEPTH_CONTROL(z_enable, z_write, zfunc) OOPS_AGC_DB_DEPTH_CONTROL(z_enable, z_write, zfunc)
 
+/* PA SU / SC Face Culling and Polygon Control */
+#define OOPS_AGC_REG_PA_SU_SC_MODE_CNTL       0x205u
+#define OOPS_AGC_CULL_NONE                    0x00000240u
+#define OOPS_AGC_CULL_FRONT                   0x00000241u
+#define OOPS_AGC_CULL_BACK                    0x00000242u
+#define OOPS_AGC_CULL_FRONT_AND_BACK          0x00000243u
+#define OOPS_AGC_FACE_CW                      (1u << 2)
+
 /* SPI PS Input, Interpolant, and Barycentric Controls */
 #define OOPS_AGC_REG_SPI_PS_INPUT_CNTL(i)     (0x191u + (uint32_t)(i))
 #define OOPS_AGC_REG_SPI_PS_INPUT_CNTL_0      0x191u

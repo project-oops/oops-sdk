@@ -39,6 +39,8 @@ typedef struct {
   uint32_t cb_color0_info;
   uint32_t cb_color0_attrib2;
   uint64_t cb_color0_base;
+  uint32_t cb_target_mask;
+  uint32_t pa_su_sc_mode_cntl;
 
   uint32_t spi_shader_pos_format;
   uint32_t spi_shader_col_format;
@@ -140,6 +142,8 @@ static int oops_pm4_validate_stream(const uint32_t *words, size_t word_count,
             report->cb_color0_base = (report->cb_color0_base & 0x000000ffffffffffULL) | ((uint64_t)val << 40);
           } else if (reg == OOPS_AGC_REG_CB_COLOR0_INFO) report->cb_color0_info = val;
           else if (reg == OOPS_AGC_REG_CB_COLOR0_ATTRIB2) report->cb_color0_attrib2 = val;
+          else if (reg == OOPS_AGC_REG_CB_TARGET_MASK) report->cb_target_mask = val;
+          else if (reg == OOPS_AGC_REG_PA_SU_SC_MODE_CNTL) report->pa_su_sc_mode_cntl = val;
           else if (reg == OOPS_AGC_REG_SPI_SHADER_POS_FORMAT) report->spi_shader_pos_format = val;
           else if (reg == OOPS_AGC_REG_SPI_SHADER_COL_FORMAT) report->spi_shader_col_format = val;
           else if (reg == OOPS_AGC_REG_SPI_PS_IN_CONTROL) report->spi_ps_in_control = val;
@@ -698,6 +702,146 @@ static void test_pm4_gl_hardware_texture_stream(void) {
   oops_display_close(disp);
 }
 
+static void test_pm4_gl_hardware_cull_and_color_mask_stream(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[4096];
+  static _Alignas(64) uint32_t fence = 0x11111111u;
+  static _Alignas(64) uint32_t canary[16];
+
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  memset(vbo, 0, sizeof(vbo));
+
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 4096;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = &fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  /* Step 1: Default state (no culling, all color channels enabled) */
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.0f);
+  glVertex3f(0.5f, -0.5f, 0.0f);
+  glVertex3f(0.0f, 0.5f, 0.0f);
+  glEnd();
+
+  oops_pm4_report_t report;
+  int rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Cull Step 1 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.pa_su_sc_mode_cntl, 0x00000240u); /* No cull, CCW front */
+  ASSERT_EQ(report.cb_target_mask, 0x0fu);            /* All RGBA channels */
+
+  /* Step 2: Enable GL_CULL_FACE with default GL_BACK and GL_CCW */
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_BACK);
+  glFrontFace(GL_CCW);
+
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.0f);
+  glVertex3f(0.5f, -0.5f, 0.0f);
+  glVertex3f(0.0f, 0.5f, 0.0f);
+  glEnd();
+
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Cull Step 2 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.pa_su_sc_mode_cntl, 0x00000242u); /* CULL_BACK (bit 1), CCW */
+
+  /* Step 3: Change front face to GL_CW */
+  glFrontFace(GL_CW);
+
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.0f);
+  glVertex3f(0.5f, -0.5f, 0.0f);
+  glVertex3f(0.0f, 0.5f, 0.0f);
+  glEnd();
+
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Cull Step 3 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.pa_su_sc_mode_cntl, 0x00000246u); /* CULL_BACK (bit 1) | CW (bit 2) */
+
+  /* Step 4: Change cull mode to GL_FRONT */
+  glCullFace(GL_FRONT);
+
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.0f);
+  glVertex3f(0.5f, -0.5f, 0.0f);
+  glVertex3f(0.0f, 0.5f, 0.0f);
+  glEnd();
+
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Cull Step 4 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.pa_su_sc_mode_cntl, 0x00000245u); /* CULL_FRONT (bit 0) | CW (bit 2) */
+
+  /* Step 5: Test dynamic color mask */
+  glColorMask(GL_FALSE, GL_TRUE, GL_FALSE, GL_TRUE); /* G and A only */
+
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.0f);
+  glVertex3f(0.5f, -0.5f, 0.0f);
+  glVertex3f(0.0f, 0.5f, 0.0f);
+  glEnd();
+
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Color Mask Step 5 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.cb_target_mask, 0x0au); /* Bit 1 (G) | Bit 3 (A) = 0xa */
+
+  /* Step 6: Disable culling and set single red channel mask */
+  glDisable(GL_CULL_FACE);
+  glColorMask(GL_TRUE, GL_FALSE, GL_FALSE, GL_FALSE);
+
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.0f);
+  glVertex3f(0.5f, -0.5f, 0.0f);
+  glVertex3f(0.0f, 0.5f, 0.0f);
+  glEnd();
+
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report);
+  if (rc != 0) printf("\n[PM4 Step 6 error]: %s\n", report.last_error);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.pa_su_sc_mode_cntl, 0x00000244u); /* CW front, no cull */
+  ASSERT_EQ(report.cb_target_mask, 0x01u);            /* Bit 0 (R) */
+
+  /* Step 7: Flush frame and verify RELEASE_MEM packet */
+  uint32_t words_before_flush = ctx->dcb_words;
+  gl_hw_flush(ctx);
+  uint32_t total_flushed_words = words_before_flush + 24;
+  rc = oops_pm4_validate_stream(ctx->dcb_mem, total_flushed_words, &report);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(report.error_count, 0u);
+  ASSERT_EQ(report.release_mem_count, 1u);
+
+  /* Clean up mock pointers */
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 void run_unit_tests_pm4(void);
 
 void run_unit_tests_pm4(void) {
@@ -706,6 +850,7 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_real_sdk_draw_stream);
   RUN_TEST(test_pm4_gl_hardware_depth_stream);
   RUN_TEST(test_pm4_gl_hardware_texture_stream);
+  RUN_TEST(test_pm4_gl_hardware_cull_and_color_mask_stream);
   RUN_TEST(test_pm4_detects_truncated_buffer);
   RUN_TEST(test_pm4_detects_invalid_reg_bounds);
   RUN_TEST(test_pm4_detects_depth_invariants);

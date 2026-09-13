@@ -352,6 +352,10 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
             val = ctx->cap_blend ? 0x00002504u : 0u;
         } else if (reg == 0x200u) {
             val = depth_ctrl;
+        } else if (reg == 0x205u) {
+            val = gl_compute_pa_su_sc_mode_cntl(ctx);
+        } else if (reg == 0x08eu) {
+            val = gl_compute_cb_target_mask(ctx);
         }
         *dw++ = 0xc0016900u;
         *dw++ = reg;
@@ -673,7 +677,7 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
     /* 4. Backface culling via 2D signed area (screen coordinates) */
     float area = (sv1.sx - sv0.sx) * (sv2.sy - sv0.sy) - (sv1.sy - sv0.sy) * (sv2.sx - sv0.sx);
 
-    if (ctx->cap_cull_face) {
+    if (!ctx->use_hardware && ctx->cap_cull_face) {
         /* Note: with Y-flip, CCW in 3D becomes negative in screen space */
         GLboolean is_ccw = (area < 0.0f) ? GL_TRUE : GL_FALSE;
         if (ctx->front_face == GL_CW) is_ccw = !is_ccw;
@@ -745,9 +749,11 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
             }
         }
 
-        /* Emit dynamic Depth Control and Blending state */
+        /* Emit dynamic Depth Control, Blending, Cull Mode, and Color Target Mask state */
         uint32_t cur_depth_ctrl = gl_compute_db_depth_control(ctx);
         uint32_t cur_blend_ctrl = ctx->cap_blend ? 0x00002504u : 0u;
+        uint32_t cur_cull_ctrl = gl_compute_pa_su_sc_mode_cntl(ctx);
+        uint32_t cur_target_mask = gl_compute_cb_target_mask(ctx);
 
         *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmDB_DEPTH_CONTROL (0x200) */
         *dw++ = 0x200u;
@@ -756,6 +762,14 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmCB_BLEND0_CONTROL (0x1e0) */
         *dw++ = 0x1e0u;
         *dw++ = cur_blend_ctrl;
+
+        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmPA_SU_SC_MODE_CNTL (0x205) */
+        *dw++ = 0x205u;
+        *dw++ = cur_cull_ctrl;
+
+        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmCB_TARGET_MASK (0x08e) */
+        *dw++ = 0x08eu;
+        *dw++ = cur_target_mask;
 
         /* Emit Shader & User Data */
         *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_LO_PS */

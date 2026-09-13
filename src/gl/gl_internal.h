@@ -256,6 +256,34 @@ static inline uint32_t gl_compute_db_depth_control(const gl_context_t *ctx) {
     return z_enable ? OOPS_AGC_DB_DEPTH_CONTROL(1, z_write, zfunc) : 0u;
 }
 
+static inline uint32_t gl_compute_pa_su_sc_mode_cntl(const gl_context_t *ctx) {
+    if (!ctx) return OOPS_AGC_CULL_NONE;
+    uint32_t cull_bits = 0;
+    if (ctx->cap_cull_face) {
+        if (ctx->cull_mode == GL_FRONT) {
+            cull_bits |= 1u; /* CULL_FRONT */
+        } else if (ctx->cull_mode == GL_BACK) {
+            cull_bits |= 2u; /* CULL_BACK */
+        } else if (ctx->cull_mode == GL_FRONT_AND_BACK) {
+            cull_bits |= 3u; /* CULL_FRONT_AND_BACK */
+        }
+    }
+    if (ctx->front_face == GL_CW) {
+        cull_bits |= OOPS_AGC_FACE_CW; /* FACE = CW */
+    }
+    return OOPS_AGC_CULL_NONE | cull_bits;
+}
+
+static inline uint32_t gl_compute_cb_target_mask(const gl_context_t *ctx) {
+    if (!ctx) return 0x0000000fu;
+    uint32_t mask = 0;
+    if (ctx->color_mask[0]) mask |= 0x1u; /* Red */
+    if (ctx->color_mask[1]) mask |= 0x2u; /* Green */
+    if (ctx->color_mask[2]) mask |= 0x4u; /* Blue */
+    if (ctx->color_mask[3]) mask |= 0x8u; /* Alpha */
+    return mask;
+}
+
 /* Rendering pipeline */
 void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                            const gl_screen_vertex_t *v1, const gl_screen_vertex_t *v2);
