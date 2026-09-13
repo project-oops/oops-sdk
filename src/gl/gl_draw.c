@@ -1057,7 +1057,14 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                         ib = (uint32_t)(res_b * 255.0f + 0.5f);
                         ia = (uint32_t)(res_a * 255.0f + 0.5f);
                     }
-                    fb_row[x] = (ia << 24) | (ir << 16) | (ig << 8) | ib;
+
+                    uint32_t old_dst = fb_row[x];
+                    uint32_t new_px = 0;
+                    new_px |= ctx->color_mask[0] ? (ir << 16) : (old_dst & 0x00ff0000u);
+                    new_px |= ctx->color_mask[1] ? (ig << 8)  : (old_dst & 0x0000ff00u);
+                    new_px |= ctx->color_mask[2] ? ib         : (old_dst & 0x000000ffu);
+                    new_px |= ctx->color_mask[3] ? (ia << 24) : (old_dst & 0xff000000u);
+                    fb_row[x] = new_px;
                 }
             }
         }
