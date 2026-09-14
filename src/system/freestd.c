@@ -273,3 +273,294 @@ const void *obs_kexport_lookup(const obs_kexport_table_t *table,
   }
   return NULL;
 }
+
+typedef struct {
+  char *buf;
+  size_t size;
+  size_t written;
+} snprintf_ctx_t;
+
+static inline void snprintf_putc(snprintf_ctx_t *ctx, char c) {
+  if (ctx->buf != NULL && ctx->size > 0) {
+    if (ctx->written + 1 < ctx->size) {
+      ctx->buf[ctx->written] = c;
+    }
+  }
+  ctx->written++;
+}
+
+static void snprintf_puts(snprintf_ctx_t *ctx, const char *s, size_t len, int left_align, size_t width, char pad_char) {
+  if (!left_align && width > len) {
+    for (size_t i = 0; i < width - len; i++) {
+      snprintf_putc(ctx, pad_char);
+    }
+  }
+  for (size_t i = 0; i < len; i++) {
+    snprintf_putc(ctx, s[i]);
+  }
+  if (left_align && width > len) {
+    for (size_t i = 0; i < width - len; i++) {
+      snprintf_putc(ctx, ' ');
+    }
+  }
+}
+
+int oops_vsnprintf(char *buf, size_t size, const char *fmt, va_list args) {
+  if (fmt == NULL) {
+    if (buf != NULL && size > 0) {
+      buf[0] = '\0';
+    }
+    return 0;
+  }
+
+  snprintf_ctx_t ctx;
+  ctx.buf = buf;
+  ctx.size = size;
+  ctx.written = 0;
+
+  for (size_t i = 0; fmt[i] != '\0'; i++) {
+    if (fmt[i] != '%') {
+      snprintf_putc(&ctx, fmt[i]);
+      continue;
+    }
+
+    i++; /* Skip '%' */
+    if (fmt[i] == '\0') {
+      break;
+    }
+    if (fmt[i] == '%') {
+      snprintf_putc(&ctx, '%');
+      continue;
+    }
+
+    /* Parse flags */
+    int left_align = 0;
+    int zero_pad = 0;
+    int plus_sign = 0;
+    int space_sign = 0;
+    int alt_form = 0;
+
+    int parsing_flags = 1;
+    while (parsing_flags) {
+      switch (fmt[i]) {
+        case '-': left_align = 1; i++; break;
+        case '0': zero_pad = 1; i++; break;
+        case '+': plus_sign = 1; i++; break;
+        case ' ': space_sign = 1; i++; break;
+        case '#': alt_form = 1; i++; break;
+        default: parsing_flags = 0; break;
+      }
+    }
+    if (left_align) zero_pad = 0;
+
+    /* Parse width */
+    size_t width = 0;
+    while (fmt[i] >= '0' && fmt[i] <= '9') {
+      width = width * 10 + (size_t)(fmt[i] - '0');
+      i++;
+    }
+
+    /* Parse length modifier */
+    int length_mod = 0; /* 0: default, 1: l, 2: ll, 3: z, 4: h */
+    if (fmt[i] == 'l') {
+      i++;
+      if (fmt[i] == 'l') {
+        length_mod = 2;
+        i++;
+      } else {
+        length_mod = 1;
+      }
+    } else if (fmt[i] == 'z') {
+      length_mod = 3;
+      i++;
+    } else if (fmt[i] == 'h') {
+      length_mod = 4;
+      i++;
+    }
+
+    char spec = fmt[i];
+    char scratch[64];
+    size_t len = 0;
+
+    if (spec == 's') {
+      const char *s = va_arg(args, const char *);
+      if (s == NULL) s = "(null)";
+      len = obs_strlen(s);
+      snprintf_puts(&ctx, s, len, left_align, width, ' ');
+    } else if (spec == 'c') {
+      char c = (char)va_arg(args, int);
+      scratch[0] = c;
+      snprintf_puts(&ctx, scratch, 1, left_align, width, ' ');
+    } else if (spec == 'd' || spec == 'i') {
+      int64_t val = 0;
+      if (length_mod == 2) val = va_arg(args, long long);
+      else if (length_mod == 1) val = va_arg(args, long);
+      else if (length_mod == 3) val = (int64_t)va_arg(args, ssize_t);
+      else val = va_arg(args, int);
+
+      uint64_t uval;
+      int negative = 0;
+      if (val < 0) {
+        negative = 1;
+        uval = (uint64_t)(-(val + 1)) + 1;
+      } else {
+        uval = (uint64_t)val;
+      }
+
+      char num_buf[32];
+      size_t num_len = 0;
+      if (uval == 0) {
+        num_buf[num_len++] = '0';
+      } else {
+        while (uval > 0 && num_len < sizeof(num_buf)) {
+          num_buf[num_len++] = (char)('0' + (uval % 10));
+          uval /= 10;
+        }
+      }
+
+      /* Compute prefix */
+      char pfx = '\0';
+      if (negative) pfx = '-';
+      else if (plus_sign) pfx = '+';
+      else if (space_sign) pfx = ' ';
+
+      size_t total_len = num_len + (pfx ? 1 : 0);
+      if (zero_pad) {
+        if (pfx) snprintf_putc(&ctx, pfx);
+        if (width > total_len) {
+          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, '0');
+        }
+        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+      } else {
+        if (!left_align && width > total_len) {
+          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
+        }
+        if (pfx) snprintf_putc(&ctx, pfx);
+        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+        if (left_align && width > total_len) {
+          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
+        }
+      }
+    } else if (spec == 'u') {
+      uint64_t uval = 0;
+      if (length_mod == 2) uval = va_arg(args, unsigned long long);
+      else if (length_mod == 1) uval = va_arg(args, unsigned long);
+      else if (length_mod == 3) uval = (uint64_t)va_arg(args, size_t);
+      else uval = va_arg(args, unsigned int);
+
+      char num_buf[32];
+      size_t num_len = 0;
+      if (uval == 0) {
+        num_buf[num_len++] = '0';
+      } else {
+        while (uval > 0 && num_len < sizeof(num_buf)) {
+          num_buf[num_len++] = (char)('0' + (uval % 10));
+          uval /= 10;
+        }
+      }
+
+      char pad_ch = zero_pad ? '0' : ' ';
+      if (!left_align && width > num_len) {
+        for (size_t p = 0; p < width - num_len; p++) snprintf_putc(&ctx, pad_ch);
+      }
+      for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+      if (left_align && width > num_len) {
+        for (size_t p = 0; p < width - num_len; p++) snprintf_putc(&ctx, ' ');
+      }
+    } else if (spec == 'x' || spec == 'X') {
+      static const char hex_lower[] = "0123456789abcdef";
+      static const char hex_upper[] = "0123456789ABCDEF";
+      const char *digits = (spec == 'X') ? hex_upper : hex_lower;
+
+      uint64_t uval = 0;
+      if (length_mod == 2) uval = va_arg(args, unsigned long long);
+      else if (length_mod == 1) uval = va_arg(args, unsigned long);
+      else if (length_mod == 3) uval = (uint64_t)va_arg(args, size_t);
+      else uval = va_arg(args, unsigned int);
+
+      char num_buf[32];
+      size_t num_len = 0;
+      if (uval == 0) {
+        num_buf[num_len++] = '0';
+      } else {
+        while (uval > 0 && num_len < sizeof(num_buf)) {
+          num_buf[num_len++] = digits[uval & 0xf];
+          uval >>= 4;
+        }
+      }
+
+      size_t pfx_len = (alt_form && uval != 0) ? 2 : 0;
+      size_t total_len = num_len + pfx_len;
+      if (zero_pad) {
+        if (pfx_len) {
+          snprintf_putc(&ctx, '0');
+          snprintf_putc(&ctx, spec);
+        }
+        if (width > total_len) {
+          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, '0');
+        }
+        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+      } else {
+        if (!left_align && width > total_len) {
+          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
+        }
+        if (pfx_len) {
+          snprintf_putc(&ctx, '0');
+          snprintf_putc(&ctx, spec);
+        }
+        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+        if (left_align && width > total_len) {
+          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
+        }
+      }
+    } else if (spec == 'p') {
+      void *ptr = va_arg(args, void *);
+      if (ptr == NULL) {
+        const char *nil_str = "(nil)";
+        len = 5;
+        snprintf_puts(&ctx, nil_str, len, left_align, width, ' ');
+      } else {
+        uint64_t uval = (uint64_t)(uintptr_t)ptr;
+        static const char hex_lower[] = "0123456789abcdef";
+        char num_buf[32];
+        size_t num_len = 0;
+        while (uval > 0 && num_len < sizeof(num_buf)) {
+          num_buf[num_len++] = hex_lower[uval & 0xf];
+          uval >>= 4;
+        }
+        size_t total_len = num_len + 2; /* "0x" */
+        if (!left_align && width > total_len) {
+          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
+        }
+        snprintf_putc(&ctx, '0');
+        snprintf_putc(&ctx, 'x');
+        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+        if (left_align && width > total_len) {
+          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
+        }
+      }
+    } else {
+      /* Unknown specifier: emit verbatim */
+      snprintf_putc(&ctx, '%');
+      snprintf_putc(&ctx, spec);
+    }
+  }
+
+  if (buf != NULL && size > 0) {
+    if (ctx.written < size) {
+      buf[ctx.written] = '\0';
+    } else {
+      buf[size - 1] = '\0';
+    }
+  }
+
+  return (int)ctx.written;
+}
+
+int oops_snprintf(char *buf, size_t size, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  int ret = oops_vsnprintf(buf, size, fmt, args);
+  va_end(args);
+  return ret;
+}

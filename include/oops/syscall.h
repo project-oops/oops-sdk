@@ -17,17 +17,20 @@
 #define SYS_open 5
 #define SYS_close 6
 #define SYS_wait4 7
+#define SYS_unlink 10
 #define SYS_getpid 20
 #define SYS_ptrace 26
 #define SYS_kill 37
 #define SYS_ioctl 54
 #define SYS_munmap 73
 #define SYS_mprotect 74
+#define SYS_mkdir 136
 #define SYS_socket                                                             \
   97 /* hardware-confirmed: sys_call(97, AF_INET, SOCK_STREAM, IPPROTO_TCP)    \
         returns a descriptor (obSCEne, 12.40) */
 #define SYS_setsockopt 105
 #define SYS_mmap 477
+#define SYS_lseek 478
 #define SYS_klog 601
 #define SYS_dynlib_get_obj_member 649
 

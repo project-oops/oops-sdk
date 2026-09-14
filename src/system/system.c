@@ -1,6 +1,8 @@
 #include "oops/system.h"
 #include "oops/syscall.h"
 #include "oops/target.h"
+#include "oops/freestd.h"
+#include <stdarg.h>
 
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
@@ -366,4 +368,51 @@ int oops_system_check_pltauth(void) {
   sys_call(SYS_close, (long)fd, 0, 0, 0, 0, 0);
   return (ret == 0) ? 1 : 0;
 #endif
+}
+
+#ifdef OOPS_HOST_BUILD
+#include <stdio.h>
+static char s_host_last_klog[512] = {0};
+const char *oops_test_get_last_klog(void) { return s_host_last_klog; }
+#endif
+
+void oops_klog(const char *tag, const char *msg) {
+  if (msg == NULL) return;
+  char buf[512];
+  size_t pos = 0;
+  if (tag != NULL && tag[0] != '\0') {
+    buf[pos++] = '[';
+    for (size_t i = 0; tag[i] != '\0' && pos < 40; i++) {
+      buf[pos++] = tag[i];
+    }
+    if (pos < 42) {
+      buf[pos++] = ']';
+      buf[pos++] = ' ';
+    }
+  }
+  for (size_t i = 0; msg[i] != '\0' && pos < sizeof(buf) - 2; i++) {
+    buf[pos++] = msg[i];
+  }
+  buf[pos++] = '\n';
+  buf[pos] = '\0';
+
+#ifndef OOPS_HOST_BUILD
+  (void)sys_call(SYS_klog, 7, (long)buf, 0, 0, 0, 0);
+#else
+  for (size_t i = 0; i < sizeof(s_host_last_klog) - 1 && buf[i] != '\0'; i++) {
+    s_host_last_klog[i] = buf[i];
+    s_host_last_klog[i + 1] = '\0';
+  }
+  fputs(buf, stderr);
+#endif
+}
+
+void oops_kprintf(const char *tag, const char *fmt, ...) {
+  if (fmt == NULL) return;
+  char buf[512];
+  va_list args;
+  va_start(args, fmt);
+  (void)oops_vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  oops_klog(tag, buf);
 }

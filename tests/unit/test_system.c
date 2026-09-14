@@ -61,6 +61,26 @@ static void test_system_pltauth_check(void) {
   ASSERT_TRUE(status == 0 || status == 1);
 }
 
+#ifdef OOPS_HOST_BUILD
+const char *oops_test_get_last_klog(void);
+#endif
+
+static void test_system_klog(void) {
+  /* Null safety */
+  oops_klog(NULL, NULL);
+  oops_kprintf(NULL, NULL);
+
+  oops_klog("TEST", "Hello telemetry");
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[TEST] Hello telemetry\n");
+#endif
+
+  oops_kprintf("SYS", "ErrorCode: 0x%08x (%d)", 0x1234, 4660);
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SYS] ErrorCode: 0x00001234 (4660)\n");
+#endif
+}
+
 void run_unit_tests_system(void) {
   TEST_SUITE_BEGIN("System & User Services");
   RUN_TEST(test_system_info_query);
@@ -68,4 +88,5 @@ void run_unit_tests_system(void) {
   RUN_TEST(test_system_hw_telemetry);
   RUN_TEST(test_system_services_and_multiuser);
   RUN_TEST(test_system_pltauth_check);
+  RUN_TEST(test_system_klog);
 }

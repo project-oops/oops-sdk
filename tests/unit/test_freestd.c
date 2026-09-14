@@ -62,9 +62,38 @@ static void test_freestd_nid(void) {
   ASSERT_STR_EQ(nid, "YndgXqQVV7c");
 }
 
+static void test_freestd_snprintf(void) {
+  char buf[128];
+  int ret;
+
+  /* Basic strings and numbers */
+  ret = oops_snprintf(buf, sizeof(buf), "Hello %s, num=%d, hex=0x%x", "world", 42, 0xabcd);
+  ASSERT_EQ(ret, 31);
+  ASSERT_STR_EQ(buf, "Hello world, num=42, hex=0xabcd");
+
+  /* Padding and alignment */
+  ret = oops_snprintf(buf, sizeof(buf), "%08x|%-6s|%4d", 0x1234, "pad", 7);
+  ASSERT_STR_EQ(buf, "00001234|pad   |   7");
+
+  /* Large unsigned and pointer */
+  ret = oops_snprintf(buf, sizeof(buf), "%llu|%p", 12345678901234ULL, (void *)(uintptr_t)0xdeadbeef);
+  ASSERT_STR_EQ(buf, "12345678901234|0xdeadbeef");
+
+  /* Truncation safety: buffer size 6 */
+  char small[6];
+  ret = oops_snprintf(small, sizeof(small), "123456789");
+  ASSERT_EQ(ret, 9);
+  ASSERT_STR_EQ(small, "12345");
+
+  /* Null buffer gives required size */
+  ret = oops_snprintf(NULL, 0, "Test %d", 100);
+  ASSERT_EQ(ret, 8);
+}
+
 void run_unit_tests_freestd(void) {
   TEST_SUITE_BEGIN("Freestanding Runtime Helpers");
   RUN_TEST(test_freestd_strings);
   RUN_TEST(test_freestd_formatting);
   RUN_TEST(test_freestd_nid);
+  RUN_TEST(test_freestd_snprintf);
 }

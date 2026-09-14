@@ -43,17 +43,26 @@ void glClear(GLbitfield mask) {
 
     size_t total_px = (size_t)ctx->width * (size_t)ctx->height;
 
-    if (mask & GL_COLOR_BUFFER_BIT) {
-        uint32_t ir = (uint32_t)(ctx->clear_color[0] * 255.0f + 0.5f);
-        uint32_t ig = (uint32_t)(ctx->clear_color[1] * 255.0f + 0.5f);
-        uint32_t ib = (uint32_t)(ctx->clear_color[2] * 255.0f + 0.5f);
-        uint32_t ia = (uint32_t)(ctx->clear_color[3] * 255.0f + 0.5f);
-        if (ir > 255) ir = 255;
-        if (ig > 255) ig = 255;
-        if (ib > 255) ib = 255;
-        if (ia > 255) ia = 255;
-        uint32_t col = (ia << 24) | (ir << 16) | (ig << 8) | ib;
+    uint32_t ir = (uint32_t)(ctx->clear_color[0] * 255.0f + 0.5f);
+    uint32_t ig = (uint32_t)(ctx->clear_color[1] * 255.0f + 0.5f);
+    uint32_t ib = (uint32_t)(ctx->clear_color[2] * 255.0f + 0.5f);
+    uint32_t ia = (uint32_t)(ctx->clear_color[3] * 255.0f + 0.5f);
+    if (ir > 255) ir = 255;
+    if (ig > 255) ig = 255;
+    if (ib > 255) ib = 255;
+    if (ia > 255) ia = 255;
+    uint32_t col = (ia << 24) | (ir << 16) | (ig << 8) | ib;
 
+#ifndef OOPS_HOST_BUILD
+    if (ctx->use_hardware) {
+        /* The GPU clears its own targets; the CPU never writes them on this path. */
+        gl_hw_clear(ctx, mask, col, ctx->clear_depth);
+        if (mask & GL_COLOR_BUFFER_BIT) ctx->fb_cleared = GL_TRUE;
+        return;
+    }
+#endif
+
+    if (mask & GL_COLOR_BUFFER_BIT) {
         uint32_t *fb = ctx->framebuffer;
         if (fb) {
             for (size_t i = 0; i < total_px; i++) {
@@ -71,16 +80,14 @@ void glClear(GLbitfield mask) {
             memcpy(&cd_raw, &cd, 4);
             uint64_t cd_raw64 = ((uint64_t)cd_raw << 32) | cd_raw;
             uint64_t *db64 = (uint64_t *)db;
-            size_t total_qwords = total_px / 2;
+            size_t depth_px = ctx->depth_px ? ctx->depth_px : total_px; /* the whole tiled extent */
+            size_t total_qwords = depth_px / 2;
             for (size_t i = 0; i < total_qwords; i++) {
                 db64[i] = cd_raw64;
             }
-            if (total_px & 1) {
-                db[total_px - 1] = cd;
+            if (depth_px & 1) {
+                db[depth_px - 1] = cd;
             }
-#if defined(__x86_64__)
-            __builtin_ia32_sfence();
-#endif
         }
     }
 }
@@ -528,19 +535,21 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     uint32_t w = tex->width ? (uint32_t)tex->width : 1u;
     uint32_t h = tex->height ? (uint32_t)tex->height : 1u;
 
-    /* RDNA2 SQ_IMG_RSRC_WORD0..7 (32 bytes) */
-    tex->img_desc[0] = (uint32_t)(va & 0xffffffffu);
-    tex->img_desc[1] = (uint32_t)((va >> 32) & 0xfffffu) | (56u << 20) | (((w - 1u) & 3u) << 30);
-    tex->img_desc[2] = (((w - 1u) >> 2) & 0x3fffu) | (((h - 1u) & 0x3fffu) << 14) | (1u << 31);
-    tex->img_desc[3] = 0x90000688u; /* SQ_RSRC_IMG_2D, linear, RGBA swizzle */
-    tex->img_desc[4] = 0u;
+    /* RDNA2 SQ_IMG_RSRC_WORD0..7 (32 bytes), laid out as the public RDNA ISA reference gives them.
+     * The base address is in 256-byte units: the unshifted address sent the sampler 256 times too
+     * far and drew a wavefront fault on 2026-09-14. */
+    tex->img_desc[0] = (uint32_t)(va >> 8);                                   /* BASE_ADDRESS[39:8] */
+    tex->img_desc[1] = (uint32_t)((va >> 40) & 0xffu) | (56u << 20) | (((w - 1u) & 3u) << 30); /* BASE_ADDRESS_HI, MIN_LOD=0, FORMAT=8_8_8_8_UNORM, WIDTH_LO */
+    tex->img_desc[2] = (((w - 1u) >> 2) & 0x3fffu) | (((h - 1u) & 0x3fffu) << 14) | (1u << 31); /* WIDTH_HI, HEIGHT, RESOURCE_LEVEL */
+    tex->img_desc[3] = 0x90000000u | 0xfacu; /* TYPE=2D, SW_MODE=LINEAR_GENERAL, DST_SEL X,Y,Z,W = channels 0,1,2,3 (4,5,6,7) */
+    tex->img_desc[4] = 0u; /* DEPTH: unused for a 2D image; it does not carry the linear pitch on this GPU (measured 2026-09-14) */
     tex->img_desc[5] = 0u;
     tex->img_desc[6] = 0u;
     tex->img_desc[7] = 0u;
 
     /* RDNA2 SQ_IMG_SAMP_WORD0..3 (16 bytes) */
-    uint32_t cx = (tex->wrap_s == GL_CLAMP_TO_EDGE || tex->wrap_s == GL_CLAMP) ? 1u : 0u;
-    uint32_t cy = (tex->wrap_t == GL_CLAMP_TO_EDGE || tex->wrap_t == GL_CLAMP) ? 1u : 0u;
+    uint32_t cx = (tex->wrap_s == GL_CLAMP_TO_EDGE || tex->wrap_s == GL_CLAMP) ? 2u : 0u; /* CLAMP_LAST_TEXEL : WRAP */
+    uint32_t cy = (tex->wrap_t == GL_CLAMP_TO_EDGE || tex->wrap_t == GL_CLAMP) ? 2u : 0u;
     tex->samp_desc[0] = cx | (cy << 3);
     tex->samp_desc[1] = 0x00fff000u;
     uint32_t mag = (tex->mag_filter == GL_LINEAR) ? 1u : 0u;
@@ -637,7 +646,12 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
     if (!tex) return;
 
     size_t num_pixels = (size_t)width * (size_t)height;
-    size_t rgba_bytes = num_pixels * 4;
+    /* The sampler takes a linear image's row pitch from its width (measured 2026-09-14: rows laid
+     * out twice as far apart, with the DEPTH field carrying that pitch or left at zero, sampled
+     * identically wrong), so rows are stored at exactly the width. Widths that are not a multiple
+     * of 64 pixels are unmeasured. */
+    size_t pitch_px = (size_t)width;
+    size_t rgba_bytes = pitch_px * (size_t)height * 4;
 
 #ifndef OOPS_HOST_BUILD
     if (tex->garlic_data) {
@@ -651,18 +665,24 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
     }
     tex->garlic_va = (uint64_t)(uintptr_t)tex->garlic_data;
     tex->pixels = tex->garlic_data;
+    tex->pitch = (uint32_t)pitch_px;
+    (void)num_pixels;
 
     if (pixels) {
-        if (format == GL_RGBA) {
-            memcpy(tex->garlic_data, pixels, rgba_bytes);
-        } else if (format == GL_RGB) {
-            const uint8_t *src = (const uint8_t *)pixels;
-            uint8_t *dst = (uint8_t *)tex->garlic_data;
-            for (size_t p = 0; p < num_pixels; p++) {
-                dst[p * 4 + 0] = src[p * 3 + 0];
-                dst[p * 4 + 1] = src[p * 3 + 1];
-                dst[p * 4 + 2] = src[p * 3 + 2];
-                dst[p * 4 + 3] = 255;
+        const uint8_t *src = (const uint8_t *)pixels;
+        uint8_t *dst = (uint8_t *)tex->garlic_data;
+        for (size_t y = 0; y < (size_t)height; y++) {
+            uint8_t *row = dst + y * pitch_px * 4;
+            if (format == GL_RGBA) {
+                memcpy(row, src + y * (size_t)width * 4, (size_t)width * 4);
+            } else if (format == GL_RGB) {
+                for (size_t x = 0; x < (size_t)width; x++) {
+                    const uint8_t *s = src + (y * (size_t)width + x) * 3;
+                    row[x * 4 + 0] = s[0];
+                    row[x * 4 + 1] = s[1];
+                    row[x * 4 + 2] = s[2];
+                    row[x * 4 + 3] = 255;
+                }
             }
         }
 #if defined(__x86_64__)

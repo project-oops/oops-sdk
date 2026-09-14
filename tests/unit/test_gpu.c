@@ -107,10 +107,10 @@ static void test_gpu_pm4_constants(void) {
   ASSERT_EQ(OOPS_AGC_REG_CB_COLOR_CONTROL, 0x202u);
   ASSERT_EQ(OOPS_AGC_REG_CB_BLEND0_CONTROL, 0x1e0u);
 
-  /* Verify ATTRIB2 Extent Macro (height-1 in bits 27:14, width-1 in bits 13:0) */
+  /* Verify ATTRIB2 Extent Macro (width-1 in bits 27:14, height-1 in bits 13:0: the row pitch) */
   ASSERT_EQ(AGC_CB_COLOR_ATTRIB2(64, 64), (63u << 14) | 63u);
-  ASSERT_EQ(AGC_CB_COLOR_ATTRIB2(1920, 1080), (1079u << 14) | 1919u);
-  ASSERT_EQ(OOPS_AGC_CB_COLOR_ATTRIB2(1280, 720), (719u << 14) | 1279u);
+  ASSERT_EQ(AGC_CB_COLOR_ATTRIB2(1920, 1080), (1919u << 14) | 1079u);
+  ASSERT_EQ(OOPS_AGC_CB_COLOR_ATTRIB2(1280, 720), (1279u << 14) | 719u);
 
   /* Verify Depth Block Context Registers */
   ASSERT_EQ(OOPS_AGC_REG_DB_RENDER_CONTROL, 0x000u);

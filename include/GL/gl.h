@@ -313,6 +313,40 @@ void glFlush(void);
 void glFinish(void);
 void glGetCanary(GLuint *vs_canary, GLuint *ps_canary);
 void glGetCanaryEx(GLuint *vs_canary, GLuint *ps_canary, GLuint *vs_s0, GLuint *ps_s0);
+/* oops-gl extension: the hardware proof. GL_TRUE only when the GPU-only clear at context creation
+ * survived readback and the last submission's end-of-pipe fence and GPU clock both came back.
+ * Nothing here reports which code path was chosen. */
+GLboolean glIsHardwareAccelerated(void);
+
+typedef struct gl_hw_status {
+    GLboolean verified;        /* glIsHardwareAccelerated() */
+    GLboolean failed;          /* a submit or fence failure stopped drawing; nothing is drawn by the CPU */
+    const char *failure;       /* the reason when failed, else NULL */
+    GLuint fence;              /* the end-of-pipe fence word read back: 0xbeefcafe when it fired */
+    GLuint timestamp_lo;       /* the 64-bit GPU clock counter written at end of pipe */
+    GLuint timestamp_hi;
+    GLuint frames_confirmed;   /* submissions whose fence and clock both arrived */
+    GLuint clear_colour;       /* the GPU-only clear test: colour, pixels read back in it, pixels in the target */
+    GLuint clear_matched;
+    GLuint clear_expected;
+} gl_hw_status_t;
+void glGetHardwareStatus(gl_hw_status_t *out);
+
+/* The next submission logs its command stream, shader words, descriptors, fence and GPU clock to
+ * klog as the oracle record. */
+void glRequestHardwareDump(void);
+
+/* Words the next and every later frame's command stream opens with, before oops-gl's own state:
+ * an experiment hook, so a caller can put another driver's preamble in front of this one and
+ * measure what the hardware and the compositor make of it (oops-mesa roadmap unit 2). The words
+ * are used in place, not copied, and must stay valid until replaced; NULL or zero removes them.
+ * No validation: the caller owns what the command processor is handed. */
+void glSetHardwarePrelude(const GLuint *words, GLuint count);
+
+/* The command processor's copy of the last submitted frame's render target, taken after the
+ * end-of-pipe cache flush and before the timestamp, in CPU-cached memory: hash this, not the
+ * uncached target. NULL on the host and before the first submission. */
+const GLuint *glGetFrameReadback(void);
 
 /* OOPS-GL Context Lifecycle (EGL/GLX equivalent) */
 struct oops_display;

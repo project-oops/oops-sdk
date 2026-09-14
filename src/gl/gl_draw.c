@@ -204,132 +204,185 @@ void glEnd(void) {
  * ------------------------------------------------------------------------- */
 
 
-static void gl_hw_begin_frame(gl_context_t *ctx) {
-    uint32_t *dw = ctx->dcb_mem;
-    uint64_t color_gpu = (uint64_t)(uintptr_t)ctx->framebuffer;
-    uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
+static inline uint32_t gl_f32_bits(float f) {
+    union { float f; uint32_t u; } v;
+    v.f = f;
+    return v.u;
+}
 
+/* The depth block: surface, extent and bases. Emitted the first time a frame draws with the
+ * depth test on, so a frame that never tests depth carries exactly the measured no-depth recipe.
+ * The register list and order are the ones oops_agc_draw_primitive carries (AgcCompositor.elf). */
+static void gl_hw_emit_depth_block(gl_context_t *ctx, uint32_t **dw_ptr) {
+    uint32_t *dw = *dw_ptr;
+    uint64_t depth_gpu = (uint64_t)(uintptr_t)ctx->depth_buffer;
     uint32_t w = ctx->width ? ctx->width : 1920;
     uint32_t h = ctx->height ? ctx->height : 1080;
+    uint32_t z_info = OOPS_AGC_Z_32_FLOAT | 0x80000180u; /* Z_32_FLOAT | SW_MODE=24 | ZRANGE_PRECISION */
 
     static const struct {
         uint32_t reg;
         uint32_t val;
-    } ctx_regs[] = {
-        {0x318u, 0}, /* CB_COLOR0_BASE */
-        {0x390u, 0}, /* CB_COLOR0_BASE_EXT */
-        {0x31bu, 0x00000000u}, /* CB_COLOR0_VIEW */
-        {0x31cu, 0x000180a8u}, /* CB_COLOR0_INFO: COLOR_8_8_8_8, LINEAR_GENERAL, UNORM */
-        {0x31du, 0x00000000u}, /* CB_COLOR0_ATTRIB: 0 */
-        {0x31eu, 0x00000000u}, /* CB_COLOR0_DCC_CONTROL: disabled */
-        {0x3b0u, (1919u << 14) | 1079u}, /* CB_COLOR0_ATTRIB2 */
-        {0x202u, 0x00cc0010u}, /* CB_COLOR_CONTROL: CB_NORMAL, ROP3_COPY */
-        {0x08eu, 0x0000000fu}, /* CB_TARGET_MASK */
-        {0x08fu, 0x0000000fu}, /* CB_SHADER_MASK */
-        {0x1e0u, 0x00000000u}, /* CB_BLEND0_CONTROL: blending disabled */
+    } db_regs[] = {
         {0x000u, 0x00000000u}, /* DB_RENDER_CONTROL */
+        {0x001u, 0x11000100u}, /* DB_COUNT_CONTROL */
         {0x002u, 0x00000000u}, /* DB_DEPTH_VIEW */
         {0x003u, 0x00000000u}, /* DB_RENDER_OVERRIDE */
-        {0x004u, 0x08000000u}, /* DB_RENDER_OVERRIDE2 */
+        {0x004u, 0x00000000u}, /* DB_RENDER_OVERRIDE2 */
         {0x005u, 0x00000000u}, /* DB_HTILE_DATA_BASE */
-        {0x007u, 0},           /* DB_DEPTH_SIZE_XY */
+        {0x007u, 0},           /* DB_DEPTH_SIZE_XY (patched) */
         {0x008u, 0x00000000u}, /* DB_DEPTH_BOUNDS_MIN */
         {0x009u, 0x00000000u}, /* DB_DEPTH_BOUNDS_MAX */
         {0x00au, 0x00000000u}, /* DB_STENCIL_CLEAR */
         {0x00bu, 0x00000000u}, /* DB_DEPTH_CLEAR */
-        {0x00eu, 0x00000002u}, /* DB_DFSM_CONTROL */
-        {0x010u, 0},           /* DB_Z_INFO */
+        {0x010u, 0},           /* DB_Z_INFO (patched) */
         {0x011u, 0x20000180u}, /* DB_STENCIL_INFO */
-        {0x012u, 0},           /* DB_Z_READ_BASE */
+        {0x012u, 0},           /* DB_Z_READ_BASE (patched) */
         {0x013u, 0x00000000u}, /* DB_STENCIL_READ_BASE */
-        {0x014u, 0},           /* DB_Z_WRITE_BASE */
+        {0x014u, 0},           /* DB_Z_WRITE_BASE (patched) */
         {0x015u, 0x00000000u}, /* DB_STENCIL_WRITE_BASE */
-        {0x01au, 0},           /* DB_Z_READ_BASE_HI */
+        {0x01au, 0},           /* DB_Z_READ_BASE_HI (patched) */
         {0x01bu, 0x00000000u}, /* DB_STENCIL_READ_BASE_HI */
-        {0x01cu, 0},           /* DB_Z_WRITE_BASE_HI */
+        {0x01cu, 0},           /* DB_Z_WRITE_BASE_HI (patched) */
         {0x01du, 0x00000000u}, /* DB_STENCIL_WRITE_BASE_HI */
         {0x01eu, 0x00000000u}, /* DB_HTILE_DATA_BASE_HI */
         {0x01fu, 0x00000000u}, /* DB_RMI_L2_CACHE_CONTROL */
-        {0x200u, 0},           /* DB_DEPTH_CONTROL */
-        {0x201u, 0x00130000u}, /* DB_EQAA */
-        {0x203u, 0x00000000u}, /* DB_SHADER_CONTROL: LATE_Z */
         {0x2afu, 0x00040000u}, /* DB_HTILE_SURFACE */
+    };
+
+    for (size_t i = 0; i < sizeof(db_regs) / sizeof(db_regs[0]); i++) {
+        uint32_t reg = db_regs[i].reg;
+        uint32_t val = db_regs[i].val;
+        if (reg == 0x007u) {
+            val = OOPS_AGC_DB_DEPTH_SIZE_XY(w, h);
+        } else if (reg == 0x010u) {
+            val = z_info;
+        } else if (reg == 0x012u || reg == 0x014u) {
+            val = (uint32_t)(depth_gpu >> 8);
+        } else if (reg == 0x01au || reg == 0x01cu) {
+            val = (uint32_t)(depth_gpu >> 40);
+        }
+        *dw++ = 0xc0016900u;
+        *dw++ = reg;
+        *dw++ = val;
+    }
+    *dw_ptr = dw;
+}
+
+static void gl_hw_begin_frame(gl_context_t *ctx) {
+    uint32_t *dw = ctx->dcb_mem;
+    uint64_t color_gpu = (uint64_t)(uintptr_t)ctx->framebuffer;
+
+    /* An experiment's prelude (glSetHardwarePrelude) goes first, ahead of every register this
+     * frame sets, so whatever it programs is what this frame's own state is written over. */
+    if (ctx->hw_prelude && ctx->hw_prelude_words) {
+        for (uint32_t i = 0; i < ctx->hw_prelude_words; i++) *dw++ = ctx->hw_prelude[i];
+    }
+    uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
+
+    uint32_t w = ctx->width ? ctx->width : 1920;
+    uint32_t h = ctx->height ? ctx->height : 1080;
+    uint32_t scissor_br = ((h & 0x7fffu) << 16) | (w & 0x7fffu);
+
+    /* The static state is the recipe measured to put pixels on the screen (obSCEne
+     * 166-agc/primitive-draw, the same one oops_agc_draw_primitive carries): NGG in passthrough
+     * mode, no depth. Entries marked (patched) take the frame's own values below. The GL-facing
+     * delta is the two parameter exports (colour, texcoord) the pixel shaders interpolate:
+     * SPI_VS_OUT_CONFIG, SPI_PS_IN_CONTROL and the first two SPI_PS_INPUT_CNTL slots. */
+    static const struct {
+        uint32_t reg;
+        uint32_t val;
+    } ctx_regs[] = {
+        {0x318u, 0},           /* CB_COLOR0_BASE (patched) */
+        {0x390u, 0},           /* CB_COLOR0_BASE_EXT (patched) */
+        {0x31bu, 0x00000000u}, /* CB_COLOR0_VIEW */
+        {0x31cu, 0x000188a8u}, /* CB_COLOR0_INFO: COLOR_8_8_8_8, LINEAR_GENERAL, UNORM, COMP_SWAP=ALT (bytes B,G,R,A: the 0xAARRGGBB framebuffer) */
+        {0x31du, 0x00000000u}, /* CB_COLOR0_ATTRIB */
+        {0x31eu, 0x00000000u}, /* CB_COLOR0_DCC_CONTROL: disabled */
+        {0x3b0u, 0},           /* CB_COLOR0_ATTRIB2 (patched: extent) */
+        {0x3b8u, 0x08c00000u}, /* CB_COLOR0_ATTRIB3: COLOR_SW_MODE=LINEAR (the measured 0x08c6c000 carries 64KB_R_X, the compositor's tiled surface, and streaked our linear scratch buffer) */
+        {0x109u, 0x00000000u}, /* CB_DCC_CONTROL: disabled */
+        {0x202u, 0x00cc0010u}, /* CB_COLOR_CONTROL: CB_NORMAL, ROP3_COPY */
+        {0x08eu, 0x0000000fu}, /* CB_TARGET_MASK (patched) */
+        {0x08fu, 0x0000000fu}, /* CB_SHADER_MASK: MRT0 four components */
+        {0x1e0u, 0x00000000u}, /* CB_BLEND0_CONTROL (patched) */
+        {0x200u, 0x00000000u}, /* DB_DEPTH_CONTROL (patched) */
+        {0x201u, 0x00010000u}, /* DB_EQAA */
+        {0x203u, 0x00000010u}, /* DB_SHADER_CONTROL: EARLY_Z_THEN_LATE_Z */
         {0x08cu, 0xaa99aaaau}, /* PA_SC_EDGERULE */
         {0x1d4u, 0x000000ffu}, /* SX_PS_DOWNCONVERT_CONTROL */
-        {0x291u, (128u << 22) | (128u << 11) | 256u}, /* VGT_GS_ONCHIP_CNTL */
-        {0x29bu, 0x00000002u}, /* VGT_GS_OUT_PRIM_TYPE: TRILIST */
+        {0x291u, 0x20040100u}, /* VGT_GS_ONCHIP_CNTL: ES_VERTS=256, GS_PRIMS=128, GS_INST_PRIMS=128 (subgroup sizing as radeonsi programs it) */
+        {0x29bu, 0x00000002u}, /* VGT_GS_OUT_PRIM_TYPE: TRISTRIP */
         {0x2d3u, 0x00000001u}, /* GE_NGG_SUBGRP_CNTL: PRIM_AMP=1 */
-        {0x2d5u, 0x00c12010u}, /* VGT_SHADER_STAGES_EN: ES_EN | PRIMGEN_EN | GS_W32 | VS_W32 */
-        {0x1ffu, 0x00000100u}, /* GE_MAX_OUTPUT_PER_SUBGROUP */
-        {0x20eu, 0x00000078u}, /* PA_CL_NGG_CNTL */
+        {0x2d5u, 0x00c12010u}, /* VGT_SHADER_STAGES_EN: ES_EN=REAL | PRIMGEN_EN | MAX_PRIMGRP_IN_WAVE=2 | GS_W32 | VS_W32 (NGG, wave32) */
+        {0x1ffu, 0x00000100u}, /* GE_MAX_OUTPUT_PER_SUBGROUP: 256 */
+        {0x20eu, 0x00000078u}, /* PA_CL_NGG_CNTL: VERTEX_REUSE_DEPTH=30 */
         {0x2a1u, 0x00000000u}, /* VGT_PRIMITIVEID_EN */
-        {0x2a6u, 0x00000000u}, /* VGT_DRAW_PAYLOAD_CNTL */
+        {0x2a6u, 0x00000040u}, /* VGT_DRAW_PAYLOAD_CNTL */
         {0x2adu, 0x00000000u}, /* VGT_REUSE_OFF */
+        {0x2abu, 0x00000001u}, /* VGT_ESGS_RING_ITEMSIZE: 1, so the vertex offsets handed to the primitive thread are plain vertex indices */
         {0x2ceu, 0x00000400u}, /* VGT_GS_MAX_VERT_OUT */
-        {0x2e4u, 0x00000004u}, /* VGT_GS_INSTANCE_CNT */
-        {0x2d4u, 0x88101010u}, /* VGT_TESS_DISTRIBUTION */
+        {0x2e4u, 0x00000000u}, /* VGT_GS_INSTANCE_CNT: 0 */
+        {0x290u, 0x00000000u}, /* VGT_GS_MODE: off */
+        {0x2d4u, 0x88101000u}, /* VGT_TESS_DISTRIBUTION */
         {0x103u, 0xffffffffu}, /* VGT_MULTI_PRIM_IB_RESET_INDX */
         {0x30eu, 0xffffffffu}, /* PA_SC_AA_MASK_X0Y0_X1Y0 */
         {0x30fu, 0xffffffffu}, /* PA_SC_AA_MASK_X0Y1_X1Y1 */
         {0x310u, 0x00000000u}, /* PA_SC_SHADER_CONTROL */
-        {0x314u, 0x00000200u}, /* PA_SC_NGG_MODE_CNTL */
-        {0x311u, 0x19fc0122u}, /* PA_SC_BINNER_CNTL_0 */
+        {0x314u, 0x00000202u}, /* PA_SC_NGG_MODE_CNTL */
+        {0x311u, 0x01fd2002u}, /* PA_SC_BINNER_CNTL_0 */
         {0x312u, 0x03ff0080u}, /* PA_SC_BINNER_CNTL_1 */
-        {0x313u, 0x00100000u}, /* PA_SC_CONSERVATIVE_RASTERIZATION_CNTL */
+        {0x313u, 0x00006000u}, /* PA_SC_CONSERVATIVE_RASTERIZATION_CNTL */
         {0x00eu, 0x00000002u}, /* DB_DFSM_CONTROL */
         {0x280u, 0x00080008u}, /* PA_SU_POINT_SIZE */
         {0x281u, 0xffff0000u}, /* PA_SU_POINT_MINMAX */
         {0x282u, 0x00000008u}, /* PA_SU_LINE_CNTL */
         {0x2deu, 0x000001e9u}, /* PA_SU_POLY_OFFSET_DB_FMT_CNTL */
         {0x00cu, 0x00000000u}, /* PA_SC_SCREEN_SCISSOR_TL */
-        {0x00du, 0x04380780u}, /* PA_SC_SCREEN_SCISSOR_BR (1920x1080) */
-        {0x081u, 0x80000000u}, /* PA_SC_WINDOW_SCISSOR_TL (WINDOW_OFFSET_DISABLE) */
-        {0x082u, 0x04380780u}, /* PA_SC_WINDOW_SCISSOR_BR (1920x1080) */
-        {0x090u, 0x80000000u}, /* PA_SC_GENERIC_SCISSOR_TL (WINDOW_OFFSET_DISABLE) */
-        {0x091u, 0x04380780u}, /* PA_SC_GENERIC_SCISSOR_BR (1920x1080) */
-        {0x094u, 0x80000000u}, /* PA_SC_VPORT_SCISSOR_0_TL (WINDOW_OFFSET_DISABLE) */
-        {0x095u, 0x04380780u}, /* PA_SC_VPORT_SCISSOR_0_BR (1920x1080) */
+        {0x00du, 0},           /* PA_SC_SCREEN_SCISSOR_BR (patched) */
+        {0x081u, 0x80000000u}, /* PA_SC_WINDOW_SCISSOR_TL: WINDOW_OFFSET_DISABLE */
+        {0x082u, 0},           /* PA_SC_WINDOW_SCISSOR_BR (patched) */
+        {0x090u, 0x80000000u}, /* PA_SC_GENERIC_SCISSOR_TL: WINDOW_OFFSET_DISABLE */
+        {0x091u, 0},           /* PA_SC_GENERIC_SCISSOR_BR (patched) */
+        {0x094u, 0x80000000u}, /* PA_SC_VPORT_SCISSOR_0_TL: WINDOW_OFFSET_DISABLE */
+        {0x095u, 0},           /* PA_SC_VPORT_SCISSOR_0_BR (patched) */
         {0x0b4u, 0x00000000u}, /* PA_SC_VPORT_ZMIN_0: 0.0f */
         {0x0b5u, 0x3f800000u}, /* PA_SC_VPORT_ZMAX_0: 1.0f */
-        {0x10fu, 0x44700000u}, /* PA_CL_VPORT_XSCALE: 960.0f */
-        {0x110u, 0x44700000u}, /* PA_CL_VPORT_XOFFSET: 960.0f */
-        {0x111u, 0x44070000u}, /* PA_CL_VPORT_YSCALE: 540.0f */
-        {0x112u, 0x44070000u}, /* PA_CL_VPORT_YOFFSET: 540.0f */
+        {0x10fu, 0},           /* PA_CL_VPORT_XSCALE (patched) */
+        {0x110u, 0},           /* PA_CL_VPORT_XOFFSET (patched) */
+        {0x111u, 0},           /* PA_CL_VPORT_YSCALE (patched) */
+        {0x112u, 0},           /* PA_CL_VPORT_YOFFSET (patched) */
         {0x113u, 0x3f000000u}, /* PA_CL_VPORT_ZSCALE: 0.5f */
         {0x114u, 0x3f000000u}, /* PA_CL_VPORT_ZOFFSET: 0.5f */
         {0x083u, 0x0000ffffu}, /* PA_SC_CLIPRECT_RULE */
         {0x084u, 0x00000000u}, /* PA_SC_CLIPRECT_0_TL */
-        {0x085u, 0x20002000u}, /* PA_SC_CLIPRECT_0_BR (8192x8192) */
+        {0x085u, 0x20002000u}, /* PA_SC_CLIPRECT_0_BR */
         {0x204u, 0x00000000u}, /* PA_CL_CLIP_CNTL: standard clipping */
-        {0x206u, 0x0000043fu}, /* PA_CL_VTE_CNTL */
+        {0x206u, 0x0000043fu}, /* PA_CL_VTE_CNTL: viewport scale and offset on x, y, z */
         {0x207u, 0x00000000u}, /* PA_CL_VS_OUT_CNTL */
         {0x2fau, 0x40800000u}, /* PA_CL_GB_VERT_CLIP_ADJ: 4.0f */
         {0x2fbu, 0x40800000u}, /* PA_CL_GB_VERT_DISC_ADJ: 4.0f */
         {0x2fcu, 0x40800000u}, /* PA_CL_GB_HORZ_CLIP_ADJ: 4.0f */
         {0x2fdu, 0x40800000u}, /* PA_CL_GB_HORZ_DISC_ADJ: 4.0f */
-        {0x205u, 0x00000240u}, /* PA_SU_SC_MODE_CNTL: no cull, face=0, poly=trilist */
-        {0x20cu, 0x00000000u}, /* PA_SU_SMALL_PRIM_FILTER_CNTL: disabled */
-        {0x292u, 0x00000022u}, /* PA_SC_MODE_CNTL_0 */
-        {0x293u, 0x760201b5u}, /* PA_SC_MODE_CNTL_1 */
-        {0x2f8u, 0x20000000u}, /* PA_SC_AA_CONFIG */
+        {0x205u, 0x00000240u}, /* PA_SU_SC_MODE_CNTL (patched) */
+        {0x20cu, 0x00000000u}, /* PA_SU_SMALL_PRIM_FILTER_CNTL */
+        {0x292u, 0x00000002u}, /* PA_SC_MODE_CNTL_0: VPORT_SCISSOR_ENABLE */
+        {0x293u, 0x06020000u}, /* PA_SC_MODE_CNTL_1 */
+        {0x2f8u, 0x00000000u}, /* PA_SC_AA_CONFIG: 1x */
         {0x2f9u, 0x0000002du}, /* PA_SU_VTX_CNTL */
-        {0x191u, 0x00000000u}, /* SPI_PS_INPUT_CNTL_0: Offset 0, smooth (Color) */
-        {0x192u, 0x00000001u}, /* SPI_PS_INPUT_CNTL_1: Offset 1, smooth (UV) */
-        {0x1b1u, 0x00000001u}, /* SPI_VS_OUT_CONFIG: 2 PC Exports (param0, param1), NO_PC_EXPORT=0 */
-        {0x1c2u, 0x00000001u}, /* SPI_SHADER_IDX_FORMAT: IDX0 = 1COMP */
+        {0x191u, 0x00000000u}, /* SPI_PS_INPUT_CNTL_0: parameter 0 (colour), smooth */
+        {0x192u, 0x00000001u}, /* SPI_PS_INPUT_CNTL_1: parameter 1 (texcoord), smooth */
+        {0x1b1u, 0x00000002u}, /* SPI_VS_OUT_CONFIG: VS_EXPORT_COUNT (bits 5:1) = 1, two parameters */
+        {0x1c2u, 0x00000001u}, /* SPI_SHADER_IDX_FORMAT */
         {0x1c3u, 0x00000004u}, /* SPI_SHADER_POS_FORMAT: POS0 = 4COMP */
-        {0x1c4u, 0x00000000u}, /* SPI_SHADER_Z_FORMAT */
+        {0x1c4u, 0x00000000u}, /* SPI_SHADER_Z_FORMAT: no Z export */
         {0x1c5u, 0x00000009u}, /* SPI_SHADER_COL_FORMAT: COL0 = 32_ABGR */
         {0x1b3u, 0x00000002u}, /* SPI_PS_INPUT_ENA: PERSP_CENTER_ENA */
         {0x1b4u, 0x00000002u}, /* SPI_PS_INPUT_ADDR: PERSP_CENTER_ENA */
-        {0x1b5u, 0x00000000u}, /* SPI_INTERP_CONTROL_0: 0 */
-        {0x1b6u, 0x00008002u}, /* SPI_PS_IN_CONTROL: PS_W32_EN, NUM_INTERP=2 */
+        {0x1b5u, 0x00000001u}, /* SPI_INTERP_CONTROL_0: FLAT_SHADE_ENA (no parameter is flagged flat) */
+        {0x1b6u, 0x00000002u}, /* SPI_PS_IN_CONTROL: NUM_INTERP=2 */
         {0x1b8u, 0x01000000u}, /* SPI_BARYC_CNTL: FRONT_FACE_ALL_BITS */
     };
-
-    uint64_t depth_gpu = (uint64_t)(uintptr_t)ctx->depth_buffer;
-    uint32_t depth_ctrl = gl_compute_db_depth_control(ctx);
-    uint32_t z_info = OOPS_AGC_Z_32_FLOAT | 0x80000180u; /* Z_32_FLOAT | SW_MODE=24 | ZRANGE_PRECISION */
 
     for (size_t i = 0; i < sizeof(ctx_regs) / sizeof(ctx_regs[0]); i++) {
         uint32_t reg = ctx_regs[i].reg;
@@ -339,19 +392,19 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         } else if (reg == 0x390u) {
             val = (uint32_t)(color_gpu >> 40);
         } else if (reg == 0x3b0u) {
-            val = ((w - 1) << 14) | (h - 1);
-        } else if (reg == 0x007u) {
-            val = ((h - 1) << 16) | (w - 1);
-        } else if (reg == 0x010u) {
-            val = ctx->depth_buffer ? z_info : 0u;
-        } else if (reg == 0x012u || reg == 0x014u) {
-            val = ctx->depth_buffer ? (uint32_t)(depth_gpu >> 8) : 0u;
-        } else if (reg == 0x01au || reg == 0x01cu) {
-            val = ctx->depth_buffer ? (uint32_t)(depth_gpu >> 40) : 0u;
+            val = OOPS_AGC_CB_COLOR_ATTRIB2(w, h);
+        } else if (reg == 0x00du || reg == 0x082u || reg == 0x091u || reg == 0x095u) {
+            val = scissor_br;
+        } else if (reg == 0x10fu || reg == 0x110u) {
+            val = gl_f32_bits((float)w * 0.5f);
+        } else if (reg == 0x111u) {
+            val = gl_f32_bits(-(float)h * 0.5f); /* NDC +y is up in GL; rows grow downward, so the Y scale is negative */
+        } else if (reg == 0x112u) {
+            val = gl_f32_bits((float)h * 0.5f);
         } else if (reg == 0x1e0u) {
             val = ctx->cap_blend ? 0x00002504u : 0u;
         } else if (reg == 0x200u) {
-            val = depth_ctrl;
+            val = gl_compute_db_depth_control(ctx);
         } else if (reg == 0x205u) {
             val = gl_compute_pa_su_sc_mode_cntl(ctx);
         } else if (reg == 0x08eu) {
@@ -368,45 +421,130 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         *dw++ = 0u;
     }
 
-    static const struct {
+    /* Shader stages. Every graphics stage is pointed at real code so no stage can fetch from an
+     * unmapped address; on GFX10 the NGG wave takes its program counter from PGM_LO_ES and its
+     * resource words from RSRC1/RSRC2_GS. RSRC1_GS is the measured 0x622c0042 with VGPRS raised
+     * from 2 to 0x10: the measured value allocates twelve VGPRs in wave64 and the shader uses v20. */
+    int textured = (ctx->cap_texture_2d && ctx->bound_texture_2d > 0) ? 1 : 0;
+    uint64_t ps_init_offset = textured ? 0x200u : 0x300u;
+    uint32_t ps_rsrc2 = textured ? 0x00000004u : 0u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor table */
+    const struct {
         uint32_t base_reg;
         uint64_t va_offset;
         uint32_t rsrc1;
         uint32_t rsrc2;
     } stages[] = {
-        {0x08u, 0x200u, 0x000c0010u, 0x00000002u},  /* PS: 2 User SGPRs (s[0:1] = desc_table) */
-        {0x48u, 0x000u, 0x000c0010u, 0x00000008u},  /* VS: 4 User SGPRs */
-        {0x88u, 0x000u, 0x200c0010u, 0x00000008u},  /* GS / NGG: 4 User SGPRs (s0 = vbo_offset) */
-        {0xc8u, 0x000u, 0x000c0010u, 0x00000008u},  /* ES */
-        {0x108u, 0x000u, 0x000c0010u, 0x00000008u}, /* HS */
-        {0x148u, 0x000u, 0x000c0010u, 0x00000008u}, /* LS */
+        {0x08u, ps_init_offset, 0x000c0010u, ps_rsrc2}, /* PS */
+        {0x48u, 0x000u, 0x000c0010u, 0x00000008u},      /* VS: USER_SGPR=4 (s0 = vbo offset) */
+        {0x88u, 0x000u, 0x622c0046u, 0x000b0008u},      /* GS/NGG: VGPRS=6 (56 in wave32), ES_VGPR_COMP_CNT=3, LDS_SIZE=1 granule, USER_SGPR=4 (user data 0 = vbo offset, which lands in s8) */
+        {0xc8u, 0x000u, 0x000c0010u, 0x00000000u},      /* ES: the NGG program counter */
+        {0x108u, 0x000u, 0x000c0010u, 0x00000000u},     /* HS */
+        {0x148u, 0x000u, 0x000c0010u, 0x00000000u},     /* LS */
     };
-    uint64_t ps_init_offset = (ctx->cap_texture_2d && ctx->bound_texture_2d > 0) ? 0x200u : 0x300u;
     for (size_t s = 0; s < sizeof(stages) / sizeof(stages[0]); s++) {
         uint32_t base_reg = stages[s].base_reg;
-        uint64_t s_va = payload_va + ((s == 0) ? ps_init_offset : stages[s].va_offset);
+        uint64_t s_va = payload_va + stages[s].va_offset;
         *dw++ = 0xc0017600u; *dw++ = base_reg;       *dw++ = (uint32_t)(s_va >> 8);
         *dw++ = 0xc0017600u; *dw++ = base_reg + 1u;  *dw++ = (uint32_t)(s_va >> 40);
         *dw++ = 0xc0017600u; *dw++ = base_reg + 2u;  *dw++ = stages[s].rsrc1;
         *dw++ = 0xc0017600u; *dw++ = base_reg + 3u;  *dw++ = stages[s].rsrc2;
     }
 
-    *dw++ = 0xc0017600u; *dw++ = 0x007u; *dw++ = 0x003fffffu;
-    *dw++ = 0xc0017600u; *dw++ = 0x001u; *dw++ = 0x0000ffffu;
-    *dw++ = 0xc0017600u; *dw++ = 0x030u; *dw++ = 0x00000007u;
-    *dw++ = 0xc0017600u; *dw++ = 0x046u; *dw++ = 0x003fffffu;
-    *dw++ = 0xc0017600u; *dw++ = 0x041u; *dw++ = 0x0000ffffu;
-    *dw++ = 0xc0017600u; *dw++ = 0x087u; *dw++ = 0x003fffffu;
-    *dw++ = 0xc0017600u; *dw++ = 0x081u; *dw++ = 0x0000ffffu;
-    *dw++ = 0xc0017600u; *dw++ = 0x107u; *dw++ = 0x003fffffu;
+    /* Compute-unit masks, as measured: CU1 stays clear for the NGG stage so pixel waves can
+     * always find a home. */
+    static const struct {
+        uint32_t reg;
+        uint32_t val;
+    } spi_cu_regs[] = {
+        {0x007u, 0x003fffffu}, /* SPI_SHADER_PGM_RSRC3_PS: CU_EN=0xffff, WAVE_LIMIT=0x3f */
+        {0x001u, 0x0000ffffu}, /* SPI_SHADER_PGM_RSRC4_PS: CU_EN=0xffff */
+        {0x030u, 0x00000007u}, /* SPI_SHADER_REQ_CTRL_PS */
+        {0x046u, 0x003fffffu}, /* SPI_SHADER_PGM_RSRC3_VS */
+        {0x041u, 0x0000ffffu}, /* SPI_SHADER_PGM_RSRC4_VS */
+        {0x087u, 0x003fffffu}, /* SPI_SHADER_PGM_RSRC3_GS: every CU, WAVE_LIMIT=0x3f */
+        {0x081u, 0x0000ffffu}, /* SPI_SHADER_PGM_RSRC4_GS */
+        {0x107u, 0x003fffffu}, /* SPI_SHADER_PGM_RSRC3_HS */
+    };
+    for (size_t i = 0; i < sizeof(spi_cu_regs) / sizeof(spi_cu_regs[0]); i++) {
+        *dw++ = 0xc0017600u;
+        *dw++ = spi_cu_regs[i].reg;
+        *dw++ = spi_cu_regs[i].val;
+    }
 
-    *dw++ = 0xc0002f00u; *dw++ = 1u;                          /* PACKET3_NUM_INSTANCES */
-    *dw++ = 0xc0017900u; *dw++ = 0x242u; *dw++ = 0x4u;        /* mmVGT_PRIMITIVE_TYPE: TRILIST */
-    *dw++ = 0xc0017900u; *dw++ = 0x25bu; *dw++ = 0x00020080u; /* mmGE_CNTL */
-    *dw++ = 0xc0017900u; *dw++ = 0x260u; *dw++ = 0x000001ffu; /* mmGE_PC_ALLOC */
+    *dw++ = 0xc0002f00u; *dw++ = 1u;                                            /* PACKET3_NUM_INSTANCES */
+    /* VGT_PRIMITIVE_TYPE goes through SET_UCONFIG_REG_INDEX with index 1: on GFX9 and later the CP
+     * only forwards the primitive type to the geometry engine from the indexed write, and a plain
+     * write leaves the GE assembling whatever the previous client drew (measured here: points). */
+    *dw++ = 0xc0017a00u; *dw++ = 0x10000242u; *dw++ = OOPS_AGC_PRIM_TRILIST;    /* mmVGT_PRIMITIVE_TYPE, index 1 */
+    *dw++ = 0xc0017900u; *dw++ = 0x25bu; *dw++ = 0x00020080u;      /* mmGE_CNTL: VERT_GRP_SIZE=256, PRIM_GRP_SIZE=128 */
+    *dw++ = 0xc0017900u; *dw++ = 0x260u; *dw++ = OOPS_AGC_GE_PC_ALLOC_DEFAULT;  /* mmGE_PC_ALLOC */
 
     ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
+    ctx->hw_z_bound = GL_FALSE;
     ctx->hw_frame_active = GL_TRUE;
+}
+
+/* PACKET3_DMA_DATA: the command processor fills memory with a 32-bit pattern. SRC_SEL=DATA takes
+ * the pattern from the packet, DST_SEL=TC_L2 writes through the GPU's L2 (the end-of-pipe event
+ * writes it back before the CPU reads), CP_SYNC holds the CP until the fill has landed so the
+ * draws that follow see it. Layout per the public PM4 documentation and the open-source drivers. */
+void gl_hw_emit_dma_fill(uint32_t **dw_ptr, uint64_t dst, uint32_t value, uint32_t bytes) {
+    uint32_t *dw = *dw_ptr;
+    while (bytes > 0u) {
+        uint32_t chunk = bytes > 0x3fffffcu ? 0x3fffffcu : bytes;
+        *dw++ = 0xc0055000u;                     /* DMA_DATA, six body dwords */
+        *dw++ = 0x80000000u | (2u << 29) | (3u << 20); /* CP_SYNC | SRC_SEL=DATA | DST_SEL=TC_L2, engine ME */
+        *dw++ = value;                           /* the pattern (src address low when SRC_SEL is an address) */
+        *dw++ = 0u;
+        *dw++ = (uint32_t)dst;
+        *dw++ = (uint32_t)(dst >> 32);
+        *dw++ = chunk & 0x3ffffffu;              /* BYTE_COUNT; source and destination in memory, both incrementing */
+        dst += chunk;
+        bytes -= chunk;
+    }
+    *dw_ptr = dw;
+}
+
+/* PACKET3_DMA_DATA memory to memory, both sides through L2. */
+void gl_hw_emit_dma_copy(uint32_t **dw_ptr, uint64_t src, uint64_t dst, uint32_t bytes) {
+    uint32_t *dw = *dw_ptr;
+    while (bytes > 0u) {
+        uint32_t chunk = bytes > 0x3fffffcu ? 0x3fffffcu : bytes;
+        *dw++ = 0xc0055000u;
+        *dw++ = 0x80000000u | (3u << 29) | (3u << 20); /* CP_SYNC | SRC_SEL=TC_L2 address | DST_SEL=TC_L2 address */
+        *dw++ = (uint32_t)src;
+        *dw++ = (uint32_t)(src >> 32);
+        *dw++ = (uint32_t)dst;
+        *dw++ = (uint32_t)(dst >> 32);
+        *dw++ = chunk & 0x3ffffffu;
+        src += chunk;
+        dst += chunk;
+        bytes -= chunk;
+    }
+    *dw_ptr = dw;
+}
+
+/* glClear on the hardware path: no CPU write touches the colour or depth surface. */
+void gl_hw_clear(gl_context_t *ctx, GLbitfield mask, uint32_t colour, float depth) {
+    if (!ctx || !ctx->use_hardware || ctx->hw_failed) return;
+    if (!ctx->hw_frame_active) {
+        gl_hw_begin_frame(ctx);
+    }
+    if (ctx->dcb_words + 32u >= ctx->dcb_capacity_dw) {
+        gl_hw_flush(ctx);
+        gl_hw_begin_frame(ctx);
+    }
+    uint32_t w = ctx->width ? ctx->width : 1920u;
+    uint32_t h = ctx->height ? ctx->height : 1080u;
+    uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
+    if ((mask & GL_COLOR_BUFFER_BIT) && ctx->framebuffer) {
+        gl_hw_emit_dma_fill(&dw, (uint64_t)(uintptr_t)ctx->framebuffer, colour, w * h * 4u);
+    }
+    if ((mask & GL_DEPTH_BUFFER_BIT) && ctx->depth_buffer) {
+        uint32_t px = ctx->depth_px ? (uint32_t)ctx->depth_px : w * h;
+        gl_hw_emit_dma_fill(&dw, (uint64_t)(uintptr_t)ctx->depth_buffer, gl_f32_bits(depth), px * 4u);
+    }
+    ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
 }
 
 void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *obj_norm,
@@ -691,11 +829,12 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
 
     /* 5. Hardware AGC Path (AMD RDNA2 GFX10.3) */
     if (ctx->use_hardware) {
+        if (ctx->hw_failed) return; /* the failure is on the log and the status query; nothing is drawn */
         if (!ctx->hw_frame_active) {
             gl_hw_begin_frame(ctx);
         }
 
-        if (ctx->dcb_words + 64 >= ctx->dcb_capacity_dw) {
+        if (ctx->dcb_words + 160 >= ctx->dcb_capacity_dw) {
             gl_hw_flush(ctx);
             gl_hw_begin_frame(ctx);
         }
@@ -733,9 +872,11 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
         uint64_t desc_table_va = payload_va + 0x900;
         uint64_t ps_va = payload_va + 0x300; /* Default: untextured Gouraud */
+        uint32_t ps_rsrc2 = 0u;
 
         if (ctx->cap_texture_2d && ctx->bound_texture_2d > 0) {
             ps_va = payload_va + 0x200; /* Stage 5: Textured + Gouraud */
+            ps_rsrc2 = 0x00000004u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor table. 0x2 loads one SGPR and the primitive mask lands in s1 (measured 2026-09-14) */
             for (int ti = 0; ti < GL_MAX_TEXTURE_OBJECTS; ti++) {
                 if (ctx->textures[ti].used && ctx->textures[ti].id == ctx->bound_texture_2d) {
                     uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload + 0x900);
@@ -754,6 +895,12 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         uint32_t cur_blend_ctrl = ctx->cap_blend ? 0x00002504u : 0u;
         uint32_t cur_cull_ctrl = gl_compute_pa_su_sc_mode_cntl(ctx);
         uint32_t cur_target_mask = gl_compute_cb_target_mask(ctx);
+
+        /* The first depth-tested draw of a frame binds the depth surface. */
+        if (cur_depth_ctrl != 0u && !ctx->hw_z_bound) {
+            gl_hw_emit_depth_block(ctx, &dw);
+            ctx->hw_z_bound = GL_TRUE;
+        }
 
         *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmDB_DEPTH_CONTROL (0x200) */
         *dw++ = 0x200u;
@@ -778,6 +925,9 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_HI_PS */
         *dw++ = 0x09u;
         *dw++ = (uint32_t)(ps_va >> 40);
+        *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_RSRC2_PS */
+        *dw++ = 0x0bu;
+        *dw++ = ps_rsrc2;
 
         /* Pass Descriptor Table VA to PS User SGPRs 0 and 1 (mmSPI_SHADER_USER_DATA_PS_0 = 0x0c, 0x0d) */
         *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_PS_0 */
@@ -790,6 +940,9 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         /* Pass VBO byte offset into GS User SGPR 0 (mmSPI_SHADER_USER_DATA_GS_0 = 0x8c) */
         *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_GS_0 */
         *dw++ = 0x8cu;
+        *dw++ = (uint32_t)vbo_offset;
+        *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_VS_0 (legacy VS stage) */
+        *dw++ = 0x4cu;
         *dw++ = (uint32_t)vbo_offset;
 
         /* Dispatch Hardware Draw */
@@ -804,11 +957,16 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         return;
     }
 
-    /* 6. Software Fallback Rasterizer */
+#ifdef OOPS_HOST_BUILD
+    /* 6. Host builds have no GPU: the software rasterizer stands in for it there, and only there. */
     gl_rasterize_triangle(ctx, &sv0, &sv1, &sv2);
     ctx->triangles_drawn++;
+#else
+    gl_hw_fail(ctx, "no hardware pipeline: nothing is drawn");
+#endif
 }
 
+#ifdef OOPS_HOST_BUILD
 static float get_blend_factor(GLenum factor, float src_r, float src_g, float src_b, float src_a,
                               float dst_r, float dst_g, float dst_b, float dst_a, int channel) {
     switch (factor) {
@@ -1074,6 +1232,8 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
 /* -------------------------------------------------------------------------
  * Client Arrays Draw Dispatches
  * ------------------------------------------------------------------------- */
+
+#endif /* OOPS_HOST_BUILD */
 
 static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
     /* Position */

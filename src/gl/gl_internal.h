@@ -61,6 +61,7 @@ typedef struct gl_texture_object {
     void *pixels;          /* Host software copy */
     void *garlic_data;     /* 256-byte aligned Garlic allocation on PS5 */
     uint64_t garlic_va;    /* GPU Virtual Address */
+    uint32_t pitch;      /* pixels per row in memory: equals the width, which is where the sampler takes the pitch from */
     uint32_t img_desc[8];  /* SQ_IMG_RSRC_WORD0..7 */
     uint32_t samp_desc[4]; /* SQ_IMG_SAMP_WORD0..3 */
     GLboolean desc_dirty;
@@ -195,12 +196,30 @@ typedef struct gl_context {
     uint32_t dcb_capacity_dw;
     uint32_t dcb_words;
     GLboolean hw_frame_active;
+    GLboolean hw_z_bound; /* the depth surface is bound in the open frame */
+    size_t depth_px;      /* floats in depth_buffer: the 64KB_Z_X tiled extent, both axes padded to 128 px */
     GLboolean use_hardware;
     uint32_t canary_vs;
     uint32_t canary_ps;
     uint32_t canary_vs_s0;
     uint32_t canary_ps_s0;
     GLboolean fb_cleared;
+
+    /* The hardware proof: what the last submission measured, never which path was picked. */
+    GLboolean hw_failed;          /* a submit or fence failure: drawing has stopped for good */
+    const char *hw_failure;       /* why, for the log and the HUD */
+    uint32_t hw_last_fence;       /* the end-of-pipe fence word read back after the last submission */
+    uint64_t hw_last_timestamp;   /* the GPU clock counter the end-of-pipe RELEASE_MEM wrote */
+    uint64_t hw_prev_timestamp;
+    uint32_t hw_frames_confirmed; /* submissions whose fence and clock both arrived */
+    GLboolean hw_clear_verified;  /* the GPU-only clear at context creation survived readback */
+    uint32_t hw_clear_colour;
+    uint32_t hw_clear_matched;
+    uint32_t hw_clear_expected;
+    GLboolean hw_dump_pending;    /* log the next submission's stream, shaders and fence: the oracle record */
+    const uint32_t *hw_prelude;   /* glSetHardwarePrelude: words every frame's stream opens with, or NULL */
+    uint32_t hw_prelude_words;
+    uint32_t *readback;           /* CPU-cached copy of the render target, made by the CP at the end of every submission */
 
     /* Performance telemetry */
     uint64_t frame_count;
@@ -288,6 +307,10 @@ static inline uint32_t gl_compute_cb_target_mask(const gl_context_t *ctx) {
 void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                            const gl_screen_vertex_t *v1, const gl_screen_vertex_t *v2);
 void gl_hw_flush(gl_context_t *ctx);
+void gl_hw_fail(gl_context_t *ctx, const char *reason);
+void gl_hw_emit_dma_fill(uint32_t **dw_ptr, uint64_t dst, uint32_t value, uint32_t bytes);
+void gl_hw_emit_dma_copy(uint32_t **dw_ptr, uint64_t src, uint64_t dst, uint32_t bytes);
+void gl_hw_clear(gl_context_t *ctx, GLbitfield mask, uint32_t colour, float depth);
 void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
                                 const gl_vertex_t *v1, const gl_vertex_t *v2);
 

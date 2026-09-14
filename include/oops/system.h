@@ -35,6 +35,12 @@ int oops_user_get_logged_in_users(int32_t *out_user_ids, size_t max_users,
 int oops_system_get_info(oops_system_info_t *out_info);
 int oops_system_notify(const char *text);
 
+/* Kernel Log & Telemetry Output (/dev/klog on target, stderr on host) */
+void oops_klog(const char *tag, const char *msg);
+void oops_kprintf(const char *tag, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+const char *oops_test_get_last_klog(void);
+
 /* System Service Controls (libSceSystemService) */
 int oops_system_hide_splash(void);
 int oops_system_power_tick(void);

@@ -8,15 +8,15 @@ static oops_fw_offsets_t s_fws[MAX_FW_ENTRIES];
 static size_t s_fw_count = 0;
 static bool s_loaded = false;
 
+#ifdef OOPS_HOST_BUILD
+#include <fcntl.h>
+#include <unistd.h>
+#else
 /* Platform file I/O weak symbols */
 __attribute__((weak)) int sceKernelOpen(const char *path, int flags, int mode);
 __attribute__((weak)) int sceKernelRead(int fd, void *buf, size_t nbytes);
 __attribute__((weak)) int sceKernelClose(int fd);
-
-/* POSIX libc weak symbols (for host testing or libc environments) */
-__attribute__((weak)) int open(const char *pathname, int flags, ...);
-__attribute__((weak)) long read(int fd, void *buf, size_t count);
-__attribute__((weak)) int close(int fd);
+#endif
 
 /* Helper string utilities (freestanding) */
 
@@ -269,11 +269,13 @@ int oops_offsets_load_file(const char *path) {
     return -1;
 
   int fd = -1;
+#ifdef OOPS_HOST_BUILD
+  fd = open(path, 0 /* O_RDONLY */);
+#else
   if (sceKernelOpen) {
     fd = sceKernelOpen(path, 0 /* O_RDONLY */, 0);
-  } else if (open) {
-    fd = open(path, 0 /* O_RDONLY */);
   }
+#endif
 
   if (fd < 0)
     return -1;
@@ -281,17 +283,17 @@ int oops_offsets_load_file(const char *path) {
   char buf[MAX_FILE_SIZE];
   long bytes_read = 0;
 
+#ifdef OOPS_HOST_BUILD
+  bytes_read = (long)read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+#else
   if (sceKernelRead) {
     bytes_read = sceKernelRead(fd, buf, sizeof(buf) - 1);
-  } else if (read) {
-    bytes_read = read(fd, buf, sizeof(buf) - 1);
   }
-
   if (sceKernelClose) {
     sceKernelClose(fd);
-  } else if (close) {
-    close(fd);
   }
+#endif
 
   if (bytes_read <= 0)
     return -1;

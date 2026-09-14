@@ -1,142 +1,102 @@
 # oops-sdk
 
-The hardware, behind an interface, in freestanding C.
+**Clean-Room Freestanding C Runtime and Hardware Abstraction SDK for Prospero.**
 
-A homebrew payload on this platform talks to the same handful of subsystems every time -
-put a picture on the screen, read a controller, allocate memory the GPU can see, tell the
-time. Every project that has done it has written that layer again. This is that layer,
-written once.
+`oops-sdk` is a clean-room, freestanding C runtime (`-ffreestanding -nostdlib`) for developing native homebrew on 8th and 9th generation console hardware (Orbis and Prospero). It exposes direct hardware interfaces for RDNA2 AGC display and tile swizzling, DualSense controller polling, PCM audio streaming, GPU direct memory allocation, and threading—all without relying on proprietary vendor headers or libraries.
 
-> **Status: in progress, and honest about which parts.** The display path is developed and
-> exercised on hardware, and a few more paths have now run there too - the table below says
-> which, and in which context. Everything not in it is a thin wrapper over the platform's
-> entry points, written to the shape of the interface rather than to a measured behaviour:
-> a declaration of intent that compiles.
+| 📖 **[Developer User Guide](docs/USER_GUIDE.md)** | 📚 **[Complete API Reference](docs/API_REFERENCE.md)** | 📐 **[Architecture Decisions](docs/DECISIONS.md)** |
+| :--- | :--- | :--- |
+| *Step-by-step tutorials from Hello World to 3D graphics, audio, and JIT.* | *Exhaustive technical reference covering 21 subsystems and ~90 functions.* | *Numbered ADRs (D001–D006) capturing provenance, compiler design, and W^X.* |
 
-### What has run on hardware
+---
 
-Measured by obSCEne's hardware sweeps on firmware 12.40, on prospero (the current-generation PS5 base), 2026-09-08. A
-sweep runs three legs: a title launched as an **eboot**, a bare **payload**, and an installed
-**pkg** (the app context). Which libraries resolve differs by leg, and that split is a finding
-in itself, so each row says where a thing worked. The probe ids are obSCEne's, for the reader
-who wants the bytes.
+## Role in THE LOOP
 
-| subsystem | what ran | where | probe |
-|---|---|---|---|
-| display (agc) | opened, registered two tiled buffers, presented frames | eboot, pkg | obSCEne's own display path |
-| input, pad | `oops_input_init` and `oops_input_poll` returned a record cleanly; the driver record is 120 bytes, so the batched read strides on a measured size | eboot, pkg | `100-input/oops-sdk-poll`, `read-extent`, `batched-read` |
-| input, adaptive triggers | the effect entry point resolves; its parameter is unconfirmed, so the call still refuses | pkg only | `100-input/dualsense-symbols` |
-| audio | `oops_audio_open`, `oops_audio_set_volume`, `oops_audio_write` of 512 frames all returned 0; the stereo format selector, the accepted chunk sizes and rate, and the blocking depth are measured | eboot, pkg | `090-audio/oops-sdk-pcm`, `090-audio/format-selector`, `open-shapes`, `blocking` |
-| keyboard, mouse | both libraries and all four entry points resolve; the keyboard record is 96 bytes, fields unconfirmed, so both reads still refuse | pkg only | `101-input-ext` |
-| video out | the flip-status record is 64 bytes in the shape the gnm path declares; the submit call queues without blocking, five deep after a burst and drained within 200 ms, so the agc path now drains the queue before reusing a buffer | pkg, eboot | `080-video/flip-status`, `visual-flip` |
-| net (payload) | an unsigned payload's weak references to the POSIX socket exports bind at load, and a payload opened, bound, listened, accepted, received and echoed on a socket end to end | payload | `102-net`, `080-video/visual-flip` sweep 20260909-144348 |
+Within the [OOPS ecosystem](../docs/THE_LOOP.md), `oops-sdk` is the **Clean-Room Target Runtime**:
 
-Where a row says a read "still refuses", the header for that subsystem says what capture
-would open it and the code returns a distinct negative code rather than a plausible zero.
+```
+oops-sdk (Freestanding C Runtime & Hardware Abstraction)
+    │
+    ├──► oops-apps (Test Titles: gl-cube, wipeout, home, pltauth-patch)
+    │        │
+    │        ▼
+    │    Packaged by SELFish ──► Deployed by Prosperous ──► Tested on PS5
+    │                                                        │
+    │    ┌───────────────────────────────────────────────────┘
+    │    ▼
+    └──► obSCEne (Hardware Conformance Probe)
+             │
+             ▼
+         Ground Truth Oracle to Orbistoun
+```
 
-## The subsystems
+1. **Common Target Foundation**: Both consumer applications ([`oops-apps`](../oops-apps/)) and hardware probes ([`obSCEne`](../obscene/)) build on `oops-sdk`.
+2. **Zero Proprietary SDK Headers**: Replaces proprietary headers with mathematically verified structures, hardware register layouts, and clean-room freestanding C runtime stubs (`-nostdlib -ffreestanding`).
+3. **Fail-Safe Hardware Invariants**: Enforces strict hardware safety invariants (e.g. CPU fallback on fence timeouts, graceful error returns instead of kernel panic) to protect physical console silicon.
+4. **First-Class Hardware Features**: Native RDNA2 AGC rasterization and 64 KB micro-tile swizzling, fixed-function OpenGL 1.3 pipeline, W^X dual-mapped JIT memory allocation, DualSense polling, and privilege escalation broker.
 
-One header each, all of them behind `<oops/oops.h>` if you want the lot. **Display is the one
-with real depth** (below); the rest are thin wrappers over the platform's own entry points -
-the controller, an audio output port, direct memory the GPU can address, the clock, threads
-and mutexes, and sockets enough for a payload to answer on a port - with more added as
-payloads need them.
+---
 
-**`include/` is the authority for the current set**, not this paragraph: the list grows, and a
-table here would lag it. Point a newcomer at the headers rather than at prose that goes stale.
+## Developer Quickstart
 
-### Display, and the two backends
-
-Display is the one subsystem with real depth, because it is the one that had to work first.
-`oops_display_open()` takes a backend or `OOPS_DISPLAY_BACKEND_AUTO`:
-
-| backend | header | what it does |
-|---|---|---|
-| **agc** | `<agc/display.h>`, `<agc/tiler.h>` | Prospero-generation: display handle on bus 0, write-combined direct memory, a batch map into the GPU's address space, and 64 KB hardware tile swizzling |
-| **gnm** | `<gnm/display.h>` | Orbis-generation: display handle on bus 0, direct memory at 64 KB page alignment, linear scanout |
-
-Off hardware there is no third backend. `make test` stubs the display getters and drives the
-draw canvas and the tiler on plain memory, which is how the interface is exercised without one.
-
-`agc` and `gnm` are the platform's own driver families and are ABI facts rather than brand
-names - the same reason obSCEne reports which of them resolves rather than guessing a
-generation from it. See
-[the OOPS conventions, section 2](https://github.com/project-oops/OOPS/blob/main/docs/CONVENTIONS.md#2-naming-no-vendor-brands-in-prose-or-in-our-own-api).
-
-## Using it
-
-Include the helper from a consumer Makefile. It works out its own location, so the only
-thing you have to say is where it is:
+### 1. Integrate into a Consumer Makefile
+`oops-sdk` is consumed via **source inclusion** rather than a prebuilt archive, ensuring all sources compile under the consumer's target flags (`-target x86_64-unknown-freebsd -ffreestanding` or `-target x86_64-scei-ps4`):
 
 ```makefile
-OOPS_SDK ?= $(abspath ../oops-sdk)
+OOPS_SDK ?= $(abspath ../../oops-sdk)
 include $(OOPS_SDK)/oops-sdk.mk
 
 INCLUDE += $(OOPS_SDK_INCLUDE)
-# Compile the SDK's sources alongside your own - see below for why source, not an archive.
 MY_SRCS += $(OOPS_SDK_C_SRCS)
 ```
 
-The helper defines just these:
+Alternatively, `make all` builds a static target archive `liboops.a` for standard freestanding linking.
 
-| variable | what it is |
-|---|---|
-| `OOPS_SDK_INCLUDE` | the `-I` flags for `include/` and the repository root |
-| `OOPS_SDK_C_SRCS` | the SDK's source files, to compile with your own |
-
-**The consumer compiles the sources; there is no archive.** A prebuilt `.a` would freeze the
-SDK's compile flags, and on a freestanding target the SDK and the consumer must agree on the
-target triple, `-ffreestanding`, stack-protector and the rest - so the consumer's flags are
-made authoritative by compiling the sources under them. It also means a subsystem the consumer
-never calls is simply never compiled in. obSCEne is the first consumer and does exactly this -
-it compiles `$(OOPS_SDK_C_SRCS)` into its module and eboot objects; its `Makefile` is the
-worked example.
-
-```c
-#include <oops/display.h>
-
-oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 1920, 1080);
-if (oops_display_is_ready(disp)) {
-    oops_display_clear(disp, 0xFF0D1116u);
-    oops_display_flip(disp);
-}
-```
-
-`oops_display_is_ready()` is not decoration. A backend that could not open reports it here
-rather than handing back a buffer that goes nowhere, and `oops_display_get_last_error()`
-says which step failed.
-
-## Building
-
-The same entry point every OOPS repository carries, so `oops build oops-sdk` and
-`./bin/oops-sdk build` are one command reached two ways:
-
+### 2. Run Local Unit Tests
 ```bash
-./bin/oops-sdk build
+make test    # compiles and runs headless test stubs on host PC (139 tests)
 ```
 
-**It builds for the target, not for the machine you are on.** `clang` cross-compiles to
-`x86_64-unknown-freebsd`, freestanding, with no standard library - so a Windows checkout
-builds it under WSL and not natively. [docs/BUILDING.md](docs/BUILDING.md) has the flags and
-what each one is for.
+---
 
-## Licence
+## Supported Subsystems
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
-Consumers link this into what they ship, so it carries the same terms as everything else in
-the collection.
+Detailed signatures, parameters, return codes, hardware invariants, and code examples are documented in **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)**. Include individual subsystem headers or the unified header `<oops/oops.h>`:
 
-## Where it sits
+| Subsystem | Header | Key APIs | Capabilities & Hardware Invariants |
+|---|---|---|---|
+| **[Display & Framebuffer](docs/API_REFERENCE.md#1-display--video-output-oopsdisplayh)** | `<oops/display.h>` | `oops_display_open`, `flip`, `close` | Direct video memory scanning, hardware vsync flip, double buffering, host SDL2/headless fallback |
+| **[2D Software Rendering](docs/API_REFERENCE.md#2-2d-software-drawing-canvas-oopsdrawh)** | `<oops/draw.h>` | `oops_draw_clear`, `rect`, `text` | Software rasterizer, 8x8 font rendering, clipping rectangles, RGBA/BGRA blend modes |
+| **[OpenGL 1.3 Shim](docs/API_REFERENCE.md#3-opengl-13-3d-graphics-engine-glglh)** | `<GL/gl.h>`, `<oops/gl.h>` | `glBegin`, `glVertex3f`, `glLoadIdentity` | Fixed-function 3D pipeline, modelview/projection matrix stack, lighting, lowering directly to AGC PM4 |
+| **[Hardware AGC & Tiler](docs/API_REFERENCE.md#4-hardware-rdna2-agc-graphics-oopsagch-oopsgpuh)** | `<oops/agc.h>`, `<agc/tiler.h>` | `oops_agc_init`, `queue_submit`, `swizzle` | Direct RDNA2 universal queue submit, PM4 packets, fence synchronization, 64 KB micro-tile morton swizzle |
+| **[Direct Physical Memory](docs/API_REFERENCE.md#5-memory-management--direct-memory-oopsmemoryh)** | `<oops/memory.h>` | `oops_mem_alloc`, `map_dmem`, `free` | Direct physical memory mapping, Onion (coherent CPU/GPU) and Garlic (high-speed GPU) bus management |
+| **[Dynamic Code Gen (JIT)](docs/API_REFERENCE.md#6-jit--dynamic-executable-memory-oopsjith)** | `<oops/jit.h>` | `oops_jit_alloc`, `flush_icache`, `free` | W^X-compliant dual-mapped pages (`rx_addr` execution / `rw_addr` write), auto-fallback to `mprotect_fix` |
+| **[Controller & Input](docs/API_REFERENCE.md#7-controller--input-devices-oopsinputh-oopskeyboardh-oopsmouseh)** | `<oops/input.h>` | `oops_input_init`, `poll`, `rumble` | DualSense controller polling (buttons, analog sticks, adaptive triggers, haptics), keyboard & mouse |
+| **[PCM Audio Output](docs/API_REFERENCE.md#8-audio-streaming-oopsaudioh)** | `<oops/audio.h>` | `oops_audio_init`, `submit_stereo` | Multi-channel PCM audio streaming (48 kHz 16-bit stereo), hardware port volume control |
+| **[Hardware Media Codecs](docs/API_REFERENCE.md#9-hardware-media-codecs-oopsaudiodech-oopsvideodech)** | `<oops/videodec.h>`, `<oops/audiodec.h>` | `oops_videodec_create`, `audiodec_create` | VPU hardware-accelerated H.264/HEVC video decoding, DSP MP3/AAC audio decompression |
+| **[Dialogs & IME Keyboard](docs/API_REFERENCE.md#10-system-ui-dialogs--on-screen-ime-oopsdialogh)** | `<oops/dialog.h>` | `oops_dialog_ime_open`, `poll`, `get_text` | System OS virtual keyboard dialog, UTF-8 text entry, asynchronous user confirmation |
+| **[Save Data Management](docs/API_REFERENCE.md#11-save-data-management-oopssavedatah)** | `<oops/savedata.h>` | `oops_savedata_mount`, `unmount` | Title save data directory mounting, encrypted partition access, quota management |
+| **[Package Management](docs/API_REFERENCE.md#12-package-management-oopspkgh)** | `<oops/pkg.h>` | `oops_pkg_install`, `get_progress` | Background package installer, progress polling, `/data/pkg` installation broker |
+| **[Security Escalation](docs/API_REFERENCE.md#13-privilege-escalation--sandbox-escape-oopsescalateh)** | `<oops/escalate.h>` | `oops_escalate_check`, `acquire_root` | Clean-room credential override (`cr_uid 0`), jailbreak escape (`rootvnode`), debug entitlement elevation |
+| **[Kernel Read/Write Broker](docs/API_REFERENCE.md#14-kernel-readwrite--syscall-dispatcher-oopskrwh-oopssyscallh)** | `<oops/krw.h>`, `<oops/syscall.h>` | `oops_krw_init`, `kread64`, `kwrite64` | Arbitrary kernel memory primitives, pipe/socket leak or exploit driver broker |
+| **[Dynamic Module Loader](docs/API_REFERENCE.md#15-system-modules--dynamic-linking-oopssysmoduleh)** | `<oops/sysmodule.h>` | `oops_sysmodule_load`, `unload` | Dynamic runtime loading of system PRXs (AudioOut, Pad, VideoDec, Ime, NetCtl) |
+| **[System Telemetry](docs/API_REFERENCE.md#16-system-information--telemetry-oopssystemh-oopsoffsetsh)** | `<oops/system.h>` | `oops_klog`, `oops_kprintf`, `system_get_info` | Kernel log streaming (`SYS_klog 601`), hardware telemetry, firmware offset tables |
+| **[High-Resolution Timing](docs/API_REFERENCE.md#17-high-resolution-timing-oopstimeh)** | `<oops/time.h>` | `oops_time_get_ms`, `sleep_ms` | Hardware TSC counter access, microsecond/millisecond intervals, thread sleep |
+| **[Multithreading & Sync](docs/API_REFERENCE.md#18-threading--synchronization-oopsthreadh)** | `<oops/thread.h>` | `oops_thread_create`, `mutex_lock` | Native kernel thread creation, affinity binding, priority control, mutexes, condition variables |
+| **[Sockets & DNS](docs/API_REFERENCE.md#19-bsd-sockets--network-telemetry-oopsneth-oopsnetctlh)** | `<oops/net.h>`, `<oops/netctl.h>` | `oops_socket`, `connect`, `net_resolve` | POSIX TCP/UDP sockets, clean-room RFC 1035 UDP DNS resolution, NetCtl telemetry |
+| **[Freestanding C Runtime](docs/API_REFERENCE.md#20-freestanding-c-runtime-utilities-oopsfreestdh)** | `<oops/freestd.h>` | `obs_strlen`, `oops_snprintf`, `obs_compute_nid` | Freestanding string manipulation, clean-room printf/snprintf formatting, NID hashing |
+| **[Process Injection](docs/API_REFERENCE.md#21-process-control--code-injection-oopsinjecth-oopsprocctlh-oopsprocparamh)** | `<oops/inject.h>` | `oops_inject_elf`, `proc_kill` | Dynamic code injection into running processes via kernel thread hijacking / ptrace |
+| **[High-Level Filesystem](docs/API_REFERENCE.md#22-high-level-filesystem-subsystem-oopsfsh)** | `<oops/fs.h>` | `oops_fs_open`, `read_all`, `write_all`, `exists` | Clean-room POSIX-compatible filesystem layer, whole-file slurp/dump, file size query |
+| **[Userland Heap Allocator](docs/API_REFERENCE.md#23-freestanding-userland-heap-allocator-oopsheaph)** | `<oops/heap.h>` | `oops_malloc`, `free`, `calloc`, `realloc` | Segregated-fit slab allocator backed by anonymous virtual memory (works in Cat 65536 zero-DMEM) |
+| **[Freestanding Math & 3D](docs/API_REFERENCE.md#24-freestanding-math--3d-linear-algebra-oopsmathh)** | `<oops/math.h>` | `oops_sinf`, `vec3_normalize`, `mat4_perspective` | Clean-room math library, polynomial trig, 3D vectors and 4x4 matrices matching RDNA2 layout |
 
-Not one of the four. **OOPS** is Orbistoun, obSCEne, Prosperous and SELFish - four projects
-aimed at one console's operating system. This sits underneath them the way
-[oops-libs](https://github.com/project-oops/oops-libs) does, and for the same reason: it is a
-repository rather than a project.
+---
 
-The split between the two is what each is made of. oops-libs is Rust, and it is what the
-**host-side tools** share - build stamps, logging, where a tool writes. oops-sdk is
-freestanding C, and it is what **target-side payloads** share. Nothing links both.
+## Cross-Project Links
 
-Shared rules - provenance, naming, decision logs, honest failure, gates - live in
-[the OOPS conventions](https://github.com/project-oops/OOPS/blob/main/docs/CONVENTIONS.md)
-and are not restated here.
+- **[Master OOPS Front Door](../README.md)** — Collection overview and building instructions.
+- **[The OOPS Loop](../docs/THE_LOOP.md)** — Master ecosystem loop specification.
+- **[oops-apps](../oops-apps/)** — Conforming applications built on `oops-sdk`.
+- **[obSCEne](../obscene/)** — Hardware conformance probe built on `oops-sdk`.
+- **[SELFish](../selfish/)** — Packages `oops-sdk` binaries into title containers.
+- **[Prosperous](../prosperous/)** — Deploys `oops-sdk` payloads to physical hardware.

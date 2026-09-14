@@ -55,16 +55,21 @@ OBJS := \
     $(BUILD)/audio/audiodec.o \
     $(BUILD)/videodec/videodec.o \
     $(BUILD)/memory/memory.o \
+    $(BUILD)/memory/heap.o \
+    $(BUILD)/math/math.o \
     $(BUILD)/system/system.o \
     $(BUILD)/system/offsets.o \
     $(BUILD)/system/sysmodule.o \
     $(BUILD)/system/dialog.o \
     $(BUILD)/system/savedata.o \
     $(BUILD)/system/escalate.o \
+    $(BUILD)/system/jit.o \
+    $(BUILD)/system/fs.o \
     $(BUILD)/time/time.o \
     $(BUILD)/thread/thread.o \
     $(BUILD)/net/net.o \
     $(BUILD)/net/netctl.o \
+    $(BUILD)/net/dns.o \
     $(BUILD)/draw/draw.o \
     $(BUILD)/system/pkg.o \
     $(BUILD)/system/freestd.o \
@@ -102,6 +107,11 @@ TEST_SRCS := \
     tests/unit/test_gpu.c \
     tests/unit/test_pm4.c \
     tests/unit/test_gl.c \
+    tests/unit/test_jit.c \
+    tests/unit/test_fs.c \
+    tests/unit/test_heap.c \
+    tests/unit/test_math.c \
+    tests/unit/test_dns.c \
     tests/integration/test_pipeline_draw_tile.c \
     tests/integration/test_memory_surface.c \
     tests/integration/test_thread_worker_pool.c \
@@ -117,12 +127,16 @@ TEST_SRCS := \
     src/audio/audiodec.c \
     src/videodec/videodec.c \
     src/memory/memory.c \
+    src/memory/heap.c \
+    src/math/math.c \
     src/system/system.c \
     src/system/offsets.c \
     src/system/sysmodule.c \
     src/system/dialog.c \
     src/system/savedata.c \
     src/system/escalate.c \
+    src/system/jit.c \
+    src/system/fs.c \
     src/system/pkg.c \
     src/system/freestd.c \
     src/system/syscall.c \
@@ -135,12 +149,13 @@ TEST_SRCS := \
     src/thread/thread.c \
     src/net/net.c \
     src/net/netctl.c \
+    src/net/dns.c \
     src/gl/gl_context.c \
     src/gl/gl_state.c \
     src/gl/gl_matrix.c \
     src/gl/gl_draw.c
 
-HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -DOOPS_HOST_BUILD $(OOPS_TARGET_FLAGS)
+HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -D_GNU_SOURCE -DOOPS_HOST_BUILD $(OOPS_TARGET_FLAGS)
 
 .PHONY: all clean test test-unit test-int
 

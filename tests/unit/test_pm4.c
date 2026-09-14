@@ -184,7 +184,8 @@ static int oops_pm4_validate_stream(const uint32_t *words, size_t word_count,
         break;
       }
 
-      case OOPS_AGC_PM4_SET_UCONFIG_REG: {
+      case OOPS_AGC_PM4_SET_UCONFIG_REG:
+      case OOPS_AGC_PM4_SET_UCONFIG_REG_INDEX: { /* the indexed form: the index sits in bits 31:28 of the offset word, masked below */
         report->set_uconfig_reg_count++;
         if (count < 2u) {
           report->error_count++;
@@ -588,12 +589,12 @@ static void test_pm4_gl_hardware_depth_stream(void) {
   /* Step 5: Flush frame and verify RELEASE_MEM packet */
   uint32_t words_before_flush = ctx->dcb_words;
   gl_hw_flush(ctx);
-  uint32_t total_flushed_words = words_before_flush + 24; /* 8 RELEASE_MEM + 16 NOP pads */
+  uint32_t total_flushed_words = words_before_flush + 32; /* two RELEASE_MEM (fence, GPU clock) + 16 NOP pads */
   rc = oops_pm4_validate_stream(ctx->dcb_mem, total_flushed_words, &report);
   if (rc != 0) printf("\n[PM4 Step 5 error]: %s\n", report.last_error);
   ASSERT_EQ(rc, 0);
   ASSERT_EQ(report.error_count, 0u);
-  ASSERT_EQ(report.release_mem_count, 1u);
+  ASSERT_EQ(report.release_mem_count, 2u); /* the fence and the GPU clock */
   ASSERT_EQ(report.draw_index_auto_count, 4u);
 
   /* Clean up mock pointers */
@@ -676,17 +677,17 @@ static void test_pm4_gl_hardware_texture_stream(void) {
 
   /* Verify descriptor table in gpu_payload at 0x900 */
   uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload + 0x900);
-  ASSERT_EQ(dt[3], 0x90000688u); /* SQ_RSRC_IMG_2D */
+  ASSERT_EQ(dt[3], 0x90000facu); /* SQ_RSRC_IMG_2D, linear, DST_SEL = channels 0..3 */
   ASSERT_EQ(dt[9], 0x00fff000u); /* Sampler MAX_LOD */
 
   /* Flush and verify packet stream */
   uint32_t words_before_flush = ctx->dcb_words;
   gl_hw_flush(ctx);
-  uint32_t total_flushed_words = words_before_flush + 24;
+  uint32_t total_flushed_words = words_before_flush + 32; /* two RELEASE_MEM (fence, GPU clock) + 16 NOP pads */
   rc = oops_pm4_validate_stream(ctx->dcb_mem, total_flushed_words, &report);
   ASSERT_EQ(rc, 0);
   ASSERT_EQ(report.error_count, 0u);
-  ASSERT_EQ(report.release_mem_count, 1u);
+  ASSERT_EQ(report.release_mem_count, 2u); /* the fence and the GPU clock */
 
   glDeleteTextures(1, &tex_id);
 
@@ -824,11 +825,11 @@ static void test_pm4_gl_hardware_cull_and_color_mask_stream(void) {
   /* Step 7: Flush frame and verify RELEASE_MEM packet */
   uint32_t words_before_flush = ctx->dcb_words;
   gl_hw_flush(ctx);
-  uint32_t total_flushed_words = words_before_flush + 24;
+  uint32_t total_flushed_words = words_before_flush + 32; /* two RELEASE_MEM (fence, GPU clock) + 16 NOP pads */
   rc = oops_pm4_validate_stream(ctx->dcb_mem, total_flushed_words, &report);
   ASSERT_EQ(rc, 0);
   ASSERT_EQ(report.error_count, 0u);
-  ASSERT_EQ(report.release_mem_count, 1u);
+  ASSERT_EQ(report.release_mem_count, 2u); /* the fence and the GPU clock */
 
   /* Clean up mock pointers */
   ctx->use_hardware = GL_FALSE;

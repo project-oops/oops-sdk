@@ -19,6 +19,8 @@ decisions made with the reasoning to hand.
 | 🟢 | D002 | [There is no slot for a vendor archive](decisions/D002-there-is-no-slot-for-a-vendor-archive.md) | decided | 2026-09-03 |
 | 🟢 | D003 | [Source inclusion over static archives for freestanding consumers](decisions/D003-source-inclusion-over-static-archives-for-freestanding-consumers.md) | decided | 2026-09-04 |
 | 🟢 | D004 | [Privilege escalation, kernel offsets provenance, and explicit opt-in](decisions/D004-privilege-escalation-and-kernel-offsets-provenance.md) | decided | 2026-09-04 |
+| 🟢 | D005 | [Three NGG facts first seen in a decrypted module are kept, cited to the open sources](decisions/D005-three-ngg-facts-kept-cited-to-open-sources.md) | decided | 2026-09-14 |
+| 🟢 | D006 | [Dynamic code generation and JIT memory interface](decisions/D006-dynamic-code-generation-and-jit-memory-interface.md) | decided | 2026-09-14 |
 
 | | meaning |
 |---|---|

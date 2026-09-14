@@ -27,6 +27,7 @@ extern "C" {
 #define OOPS_AGC_PM4_SET_CONTEXT_REG    0x69u
 #define OOPS_AGC_PM4_SET_SH_REG         0x76u
 #define OOPS_AGC_PM4_SET_UCONFIG_REG    0x79u
+#define OOPS_AGC_PM4_SET_UCONFIG_REG_INDEX 0x7Au /* bits 31:28 of the offset word carry the index */
 
 /*
  * Hardware Register Offsets across the 4 register spaces.
@@ -47,13 +48,16 @@ extern "C" {
 
 /*
  * CB_COLOR0_ATTRIB2 surface extent macro:
- * Bits [27:14] = (height - 1)
- * Bits [13:0]  = (width - 1)
- * Physical PS5 verification confirmed omitting this causes GFX10 CB
- * to treat surface bounds as 0x0 and drop all pixel writes.
+ * Bits [27:14] = (width - 1)
+ * Bits [13:0]  = (height - 1)
+ * Physical PS5 verification: omitting the register makes the GFX10 CB treat the
+ * surface as 0x0 and drop every pixel write. With the fields the other way round
+ * (height in 27:14) a 1920 x 1080 LINEAR_GENERAL target was written with a row
+ * pitch of 1088 pixels (1080 rounded up to 64), measured 2026-09-14: the colour
+ * block takes the row pitch from bits 27:14.
  */
 #define OOPS_AGC_CB_COLOR_ATTRIB2(w, h) \
-  ((((uint32_t)(h) - 1u) << 14) | ((uint32_t)(w) - 1u))
+  ((((uint32_t)(w) - 1u) << 14) | ((uint32_t)(h) - 1u))
 #define AGC_CB_COLOR_ATTRIB2(w, h) OOPS_AGC_CB_COLOR_ATTRIB2(w, h)
 
 /*

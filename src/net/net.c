@@ -427,8 +427,13 @@ int oops_connect(int sock, const char *server_ip, uint16_t port) {
   if (sock < 0 || !server_ip)
     return -1;
   uint32_t ip_net = 0;
-  if (oops_net_inet_pton(server_ip, &ip_net) != 0)
-    return -1;
+  if (oops_net_inet_pton(server_ip, &ip_net) != 0) {
+    char resolved[32];
+    if (oops_net_resolve(server_ip, resolved, sizeof(resolved)) != 0)
+      return -1;
+    if (oops_net_inet_pton(resolved, &ip_net) != 0)
+      return -1;
+  }
   struct fbsd_sockaddr_in addr;
   fill_addr(&addr, ip_net, port);
   return p_connect(sock, &addr, (socklen_t_)sizeof(addr));

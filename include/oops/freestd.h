@@ -60,6 +60,12 @@ size_t obs_format_hex(char *dest, uint64_t value);
 
 void obs_compute_nid(const char *name, char out_nid[12]);
 
+#include <stdarg.h>
+
+int oops_vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
+int oops_snprintf(char *buf, size_t size, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+
 #ifdef __cplusplus
 }
 #endif

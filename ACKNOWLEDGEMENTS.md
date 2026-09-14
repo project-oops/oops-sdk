@@ -26,3 +26,12 @@ obSCEne's `107-videodec` and `108-audiodec` census on hardware.
 - Open PlayStation homebrew toolchains and interface documentation (OpenOrbis, the
   ps5-payload-dev SDK) — for the ABI shape of platform libraries this SDK binds, on the same
   footing obSCEne's `platform.h` uses them.
+- The public AMD RDNA ISA reference guides and the PM4 packet documentation the open-source
+  Linux graphics stack carries (Mesa: RADV and radeonsi, and the AMDGPU LLVM backend) — for
+  the register field positions, the image and sampler descriptor layouts, and the packet
+  formats (`RELEASE_MEM`, `DMA_DATA`, `WAIT_REG_MEM`) the GL hardware path programs, and for the
+  NGG primitive-shader protocol the vertex shader follows: `GS_ALLOC_REQ` with the vertex and
+  primitive counts in m0, the primitive export word, and the export-counter wait before the exec
+  mask changes (Mesa's `ac_nir_lower_ngg` emits the same sequence; the ISA reference states
+  the ordering rules). Each value taken from them was then confirmed on the console;
+  `docs/hardware/` holds the records and D005 the provenance decision on the NGG facts.

@@ -82,6 +82,11 @@ void run_unit_tests_inject(void);
 void run_unit_tests_gpu(void);
 void run_unit_tests_pm4(void);
 void run_unit_tests_gl(void);
+void run_unit_tests_jit(void);
+void run_unit_tests_fs(void);
+void run_unit_tests_heap(void);
+void run_unit_tests_math(void);
+void run_unit_tests_dns(void);
 
 /* Declarations of integration test suites */
 void run_integration_tests_pipeline(void);
@@ -131,6 +136,11 @@ int main(int argc, char **argv) {
     run_unit_tests_gpu();
     run_unit_tests_pm4();
     run_unit_tests_gl();
+    run_unit_tests_jit();
+    run_unit_tests_fs();
+    run_unit_tests_heap();
+    run_unit_tests_math();
+    run_unit_tests_dns();
   }
 
   if (run_int) {

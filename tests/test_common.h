@@ -77,4 +77,17 @@ extern int g_tests_failed;
     }                                                                          \
   } while (0)
 
+#define ASSERT_FLOAT_NEAR(a, b, eps)                                           \
+  do {                                                                         \
+    float _fa = (float)(a);                                                    \
+    float _fb = (float)(b);                                                    \
+    float _diff = (_fa > _fb) ? (_fa - _fb) : (_fb - _fa);                     \
+    if (_diff > (float)(eps)) {                                                \
+      g_tests_failed++;                                                        \
+      printf("\033[31mFAIL\033[0m (%s:%d: expected %f ~= %f within %f, diff %f)\n", \
+             __FILE__, __LINE__, (double)_fa, (double)_fb, (double)(eps), (double)_diff); \
+      exit(1);                                                                 \
+    }                                                                          \
+  } while (0)
+
 #endif /* OOPS_TEST_COMMON_H */

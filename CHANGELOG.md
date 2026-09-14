@@ -12,6 +12,14 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **`glSetHardwarePrelude(words, count)` in oops-gl** (2026-09-14): words every later frame's
+  command stream opens with, ahead of oops-gl's own state. An experiment hook, unvalidated on
+  purpose, so another driver's preamble can be put in front of this one and measured; oops-mesa
+  used it for its route measurement (oops-mesa#D003, worklog 002).
+- **JIT and Dynamic Executable Memory Subsystem (`oops/jit.h`).** Clean-room APIs
+  (`oops_jit_alloc`, `oops_jit_free`, `oops_jit_flush_icache`, `oops_jit_is_available`)
+  providing progressive fallback across Sony shared memory dual-mapping (`rx_addr` / `rw_addr`),
+  relaxed W^X `mprotect` execution under `kstuff-lite`, and host testing environments. (D006)
 - **A repository for what target-side payloads share.** Display, input, audio, direct
   memory, system, time, threads and sockets behind one set of headers, built as a static
   archive a payload links. obSCEne is the first consumer.

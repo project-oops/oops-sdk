@@ -77,6 +77,14 @@ int oops_set_nonblocking(int sock, int nonblocking);
 int oops_net_would_block(long rc);
 void oops_close(int sock);
 
+/* DNS hostname resolution */
+int oops_net_resolve(const char *hostname, char *out_ip, size_t out_len);
+int oops_dns_build_query(const char *hostname, uint16_t tx_id, uint8_t *out_buf,
+                         size_t max_len);
+int oops_dns_parse_response(const uint8_t *resp, size_t resp_len,
+                            uint16_t expected_tx_id, char *out_ip,
+                            size_t out_len);
+
 #ifdef __cplusplus
 }
 #endif
