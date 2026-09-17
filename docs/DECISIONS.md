@@ -21,6 +21,9 @@ decisions made with the reasoning to hand.
 | 🟢 | D004 | [Privilege escalation, kernel offsets provenance, and explicit opt-in](decisions/D004-privilege-escalation-and-kernel-offsets-provenance.md) | decided | 2026-09-04 |
 | 🟢 | D005 | [Three NGG facts first seen in a decrypted module are kept, cited to the open sources](decisions/D005-three-ngg-facts-kept-cited-to-open-sources.md) | decided | 2026-09-14 |
 | 🟢 | D006 | [Dynamic code generation and JIT memory interface](decisions/D006-dynamic-code-generation-and-jit-memory-interface.md) | decided | 2026-09-14 |
+| 🟢 | D007 | [oops-gl is an instrument scoped to fixed-function, and oops-mesa is the GL anyone runs](decisions/D007-oops-gl-is-an-instrument-scoped-to-fixed.md) | decided | 2026-09-16 |
+| 🟢 | D008 | [oops-gl grows to OpenGL 1 and 2, superseding D007's instrument-only scope](decisions/D008-oops-gl-grows-to-opengl-1-and-2-superseding.md) | decided | 2026-09-17 |
+| 🟢 | D009 | [An absent feature is an absent symbol, not a function that refuses](decisions/D009-an-absent-feature-is-an-absent-symbol.md) | decided | 2026-09-17 |
 
 | | meaning |
 |---|---|

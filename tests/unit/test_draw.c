@@ -259,6 +259,36 @@ static void test_draw_blend_primitives(void) {
   ASSERT_EQ(buf[0], OOPS_COLOR_BLACK); /* corner outside the circle untouched */
 }
 
+static void test_draw_png_decode(void) {
+  /* Null / invalid parameter rejections */
+  uint32_t out[16];
+  ASSERT_EQ(oops_png_decode(NULL, 0, out, 1, 1, NULL, NULL), -1);
+  ASSERT_EQ(oops_png_decode("invalid", 7, out, 1, 1, NULL, NULL), -1);
+
+  /* A minimal valid 1x1 RGBA PNG with a red pixel (255, 0, 0, 255) */
+  static const uint8_t min_png[] = {
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+      0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00,
+      0x1F, 0x15, 0xC4, 0x89,
+      0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54,
+      0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF,
+      0x89, 0x99, 0x3D, 0x1D,
+      0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+      0xAE, 0x42, 0x60, 0x82
+  };
+
+  uint32_t orig_w = 0, orig_h = 0;
+  uint32_t decoded_pixel = 0;
+  int rc = oops_png_decode(min_png, sizeof(min_png), &decoded_pixel, 1, 1, &orig_w, &orig_h);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(orig_w, 1u);
+  ASSERT_EQ(orig_h, 1u);
+  /* 32bpp ARGB: 0xFFFF0000 (red) */
+  ASSERT_EQ(decoded_pixel, 0xFFFF0000u);
+}
+
 void run_unit_tests_draw(void) {
 
   TEST_SUITE_BEGIN("2D Graphics Canvas & Primitives");
@@ -273,4 +303,5 @@ void run_unit_tests_draw(void) {
   RUN_TEST(test_draw_gradient);
   RUN_TEST(test_draw_text_width_and_lowercase);
   RUN_TEST(test_draw_blend_primitives);
+  RUN_TEST(test_draw_png_decode);
 }

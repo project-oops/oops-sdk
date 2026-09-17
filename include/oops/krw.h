@@ -117,6 +117,8 @@ int krw_get_ucred_attrs(pid_t pid, uint8_t attrs[32]);
 int krw_set_ucred_attrs(pid_t pid, const uint8_t attrs[32]);
 
 uintptr_t krw_get_root_vnode(void);
+uintptr_t krw_get_proc_cdir(pid_t pid);
+int krw_set_proc_cdir(pid_t pid, uintptr_t vnode);
 uintptr_t krw_get_proc_rootdir(pid_t pid);
 int krw_set_proc_rootdir(pid_t pid, uintptr_t vnode);
 uintptr_t krw_get_proc_jaildir(pid_t pid);

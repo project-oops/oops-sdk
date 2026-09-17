@@ -305,6 +305,10 @@ __attribute__((weak)) int agc_display_flip(agc_display_t *disp) {
   (void)disp;
   return -1;
 }
+__attribute__((weak)) int agc_display_try_gpu_tiler(agc_display_t *disp) {
+  (void)disp;
+  return 0;
+}
 __attribute__((weak)) void agc_display_close(agc_display_t *disp) {
   (void)disp;
 }

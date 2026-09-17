@@ -149,9 +149,11 @@ void handle_input(void) {
 
 ---
 
-## 5. Tutorial 3: 3D Hardware Graphics with OpenGL (`oops-gl`)
+## 5. Tutorial 3: 3D Hardware Graphics with the fixed-function instrument (`oops-gl`)
 
-`oops-sdk` bundles a complete OpenGL 1.3 fixed-function engine (`<GL/gl.h>`) running directly on RDNA2 AGC hardware.
+`oops-sdk` bundles a fixed-function 3D engine (`<GL/gl.h>`) running directly on RDNA2 AGC hardware. Its surface is OpenGL 1.1-class - immediate mode, vertex arrays, one 2D texture unit, lighting, the matrix stacks - and it is deliberately not a GL version: it exists so the command stream stays readable as a hardware record (D007).
+
+**Writing an application? Use [oops-mesa](../../oops-mesa/) instead**, which gives OpenGL 3.3 Core and GLSL 3.30. Follow this tutorial when you want to see PM4 come out of a draw call.
 
 ```c
 #include <oops/oops.h>

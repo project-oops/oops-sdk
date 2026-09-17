@@ -26,6 +26,29 @@ void agc_display_clear(agc_display_t *disp, uint32_t color);
 int agc_display_flip(agc_display_t *disp);
 void agc_display_close(agc_display_t *disp);
 
+/*
+ * Hardware bring-up for the RDNA2 compute tiler. NOT called by agc_display_open
+ * and not called by anything else in this SDK: a caller has to ask for it.
+ *
+ * Fills the linear surface with a pattern, tiles it onto one scanout buffer with
+ * the compute shader and onto the other with agc_tile_surface(), and compares
+ * the two byte for byte. On an exact match the display switches to GPU tiling
+ * for later flips; on anything else - mismatch, dispatch failure, fence
+ * timeout - it tears the GPU path down and stays on the CPU tiler.
+ *
+ * Only safe before the first flip, because it writes both scanout buffers.
+ *
+ * The shader's dispatch interface was recovered by decoding the payload in
+ * <agc/shader_tiler.h>, not measured (see the note in <agc/tiler.h>), and one
+ * argument's meaning is still a guess. A wrong guess here is a malformed
+ * dispatch, and a malformed dispatch can wedge the GPU - which a comparison
+ * after the fact cannot undo. Run it on a device you can recover.
+ *
+ * Returns 1 if GPU tiling is now enabled, 0 if it is not, negative on a bad
+ * argument.
+ */
+int agc_display_try_gpu_tiler(agc_display_t *disp);
+
 #ifdef __cplusplus
 }
 #endif

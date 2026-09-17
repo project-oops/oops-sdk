@@ -13,16 +13,35 @@
 
 #ifndef OOPS_HOST_BUILD
 #include "oops/memory.h"
+#include "oops/heap.h"
 #include "oops/syscall.h"
 #include "agc/driver.h"
 #endif
 
-#define GL_MAX_MODELVIEW_STACK_DEPTH 16
-#define GL_MAX_PROJECTION_STACK_DEPTH 4
-#define GL_MAX_TEXTURE_STACK_DEPTH 2
-#define GL_MAX_IMMEDIATE_VERTS 2048
-#define GL_MAX_TEXTURE_OBJECTS 32
-#define GL_MAX_LIGHTS 8
+/* **The capacities are `OOPS_GL_`, not `GL_`.** They used to be spelled `GL_MAX_LIGHTS`,
+ * `GL_MAX_ATTRIB_STACK_DEPTH` and so on - which are the names of the *GL enumerants a program
+ * passes to glGetIntegerv to ask for these very numbers*. Holding those names internally made
+ * the enums impossible to define, so `glGetIntegerv(GL_MAX_LIGHTS, ...)` could not be written
+ * at all. The prefix is what keeps the two apart: anything here is a size this port chose,
+ * anything in <GL/gl.h> is a number the specification assigned. */
+#define OOPS_GL_MODELVIEW_STACK_CAPACITY 16
+#define OOPS_GL_PROJECTION_STACK_CAPACITY 4
+#define OOPS_GL_TEXTURE_STACK_CAPACITY 2
+#define OOPS_GL_MAX_IMMEDIATE_VERTS 2048
+/* Display lists, sized like everything else here: fixed, so nothing allocates on a guest's
+ * behalf in a freestanding binary. A program that wants more is refused loudly rather than
+ * silently dropping geometry - see `gl_list_record`. */
+#define GL_MAX_LISTS 256
+#define GL_MAX_LIST_COMMANDS 4096
+/* How deep one list may call another before it is refused as recursion. GL leaves the limit
+ * implementation-defined and requires at least 64. */
+#define GL_MAX_LIST_DEPTH 64
+/* The specification's minimum, which is what this provides. */
+#define OOPS_GL_ATTRIB_STACK_CAPACITY 16
+#define OOPS_GL_CLIENT_ATTRIB_STACK_CAPACITY 16
+#define OOPS_GL_MAX_TEXTURE_OBJECTS 32
+#define OOPS_GL_MAX_BUFFER_OBJECTS 64
+#define OOPS_GL_LIGHT_COUNT 8
 
 typedef struct {
     GLboolean enabled;
@@ -46,6 +65,57 @@ typedef struct {
     float emission[4];
     float shininess;
 } gl_material_t;
+
+/* One recorded call inside a display list.
+ *
+ * A tagged union flattened into fixed fields rather than a real union, because every operation
+ * this records fits in an enum, four floats and two integers, and a flat record is one memcpy
+ * to append and needs no per-op sizing. `GL_MAX_LIST_COMMANDS` of these is the cost.
+ *
+ * **What is recorded is the call, not its effect.** A list replays the same calls in the same
+ * order, so a list compiled before a texture is bound and executed after it draws with the
+ * later texture - which is what GL says happens, and would not if the effect were baked. */
+typedef enum {
+    GL_LIST_OP_BEGIN,
+    GL_LIST_OP_END,
+    GL_LIST_OP_VERTEX,
+    GL_LIST_OP_COLOR,
+    GL_LIST_OP_NORMAL,
+    GL_LIST_OP_TEXCOORD,
+    GL_LIST_OP_ENABLE,
+    GL_LIST_OP_DISABLE,
+    GL_LIST_OP_MATRIX_MODE,
+    GL_LIST_OP_LOAD_IDENTITY,
+    GL_LIST_OP_PUSH_MATRIX,
+    GL_LIST_OP_POP_MATRIX,
+    GL_LIST_OP_TRANSLATE,
+    GL_LIST_OP_ROTATE,
+    GL_LIST_OP_SCALE,
+    GL_LIST_OP_LOAD_MATRIX,
+    GL_LIST_OP_MULT_MATRIX,
+    GL_LIST_OP_BIND_TEXTURE,
+    GL_LIST_OP_SHADE_MODEL,
+    GL_LIST_OP_CULL_FACE,
+    GL_LIST_OP_FRONT_FACE,
+    GL_LIST_OP_DEPTH_FUNC,
+    GL_LIST_OP_BLEND_FUNC,
+    GL_LIST_OP_CALL_LIST,
+} gl_list_op_t;
+
+typedef struct {
+    gl_list_op_t op;
+    GLenum e0;
+    GLenum e1;
+    GLuint u0;
+    GLfloat f[4];
+} gl_list_cmd_t;
+
+typedef struct {
+    GLboolean used;       /* named by glGenLists or glNewList */
+    GLboolean compiled;   /* glEndList has closed it, so it may be called */
+    GLuint count;
+    gl_list_cmd_t cmds[GL_MAX_LIST_COMMANDS];
+} gl_display_list_t;
 
 typedef struct gl_texture_object {
     GLuint id;
@@ -85,13 +155,112 @@ typedef struct {
     float u, v;
 } gl_screen_vertex_t;
 
+/* One entry of the attribute stack: the GL state `glPushAttrib` can save.
+ *
+ * A struct of its own rather than a copy of the context, because the context also holds the
+ * display lists - 256 of them, 4096 commands each - and snapshotting that would be tens of
+ * megabytes per push. What is here is the state a program can change and expect back.
+ */
+typedef struct {
+    GLbitfield mask; /* what this push asked to save, and so what the pop restores */
+
+    /* GL_CURRENT_BIT */
+    float cur_color[4];
+    float cur_normal[3];
+    float cur_texcoord[2];
+
+    /* GL_ENABLE_BIT, and the individual buffer bits that also carry an enable */
+    GLboolean cap_depth_test, cap_cull_face, cap_blend, cap_scissor_test;
+    GLboolean cap_lighting, cap_texture_2d, cap_normalize, cap_color_material;
+    GLboolean cap_alpha_test, cap_polygon_offset_fill;
+
+    /* GL_DEPTH_BUFFER_BIT */
+    GLenum depth_func;
+    GLboolean depth_mask;
+    float clear_depth;
+
+    /* GL_COLOR_BUFFER_BIT */
+    GLenum blend_src, blend_dst, blend_src_alpha, blend_dst_alpha, blend_equation;
+    GLboolean color_mask[4];
+    float clear_color[4];
+    GLenum alpha_func;
+    float alpha_ref;
+
+    /* GL_POLYGON_BIT */
+    GLenum cull_mode, front_face;
+    float polygon_offset_factor, polygon_offset_units;
+
+    /* GL_LIGHTING_BIT */
+    GLenum shade_model;
+    gl_light_t lights[OOPS_GL_LIGHT_COUNT];
+    gl_material_t mat_front, mat_back;
+    float light_model_ambient[4];
+
+    /* GL_TEXTURE_BIT */
+    GLuint bound_texture_2d;
+    GLenum tex_env_mode;
+    float tex_env_color[4];
+
+    /* GL_VIEWPORT_BIT */
+    GLint vp_x, vp_y;
+    GLsizei vp_w, vp_h;
+    float depth_near, depth_far;
+
+    /* GL_SCISSOR_BIT */
+    GLint sc_x, sc_y;
+    GLsizei sc_w, sc_h;
+
+    /* GL_TRANSFORM_BIT */
+    GLenum matrix_mode;
+
+    /* GL_LIST_BIT */
+    GLuint list_base;
+} gl_attrib_entry_t;
+
+
 typedef struct {
     GLint size;
     GLenum type;
     GLsizei stride;
+    /* Client memory, or - when `buffer` is non-zero - a **byte offset** into that buffer
+     * object. The same field carries both, which is what the GL 1.5 API does with the same
+     * parameter. */
     const void *pointer;
     GLboolean enabled;
+    /* The buffer bound to GL_ARRAY_BUFFER when this array was specified, or 0 for client
+     * memory. The *name*, not an address: glBufferData may reallocate the storage, and a
+     * program respecifying a buffer every frame is ordinary rather than exotic. */
+    GLuint buffer;
 } gl_client_array_t;
+
+/* One buffer object. The storage is ordinary process memory: everything that reads it here is
+ * the CPU-side array reader, and the hardware path copies the vertices it builds into its own
+ * GPU allocation afterwards regardless of where they came from. */
+typedef struct {
+    GLuint id;
+    GLboolean used;
+    void *data;
+    GLsizeiptr size;
+    GLenum usage;
+} gl_buffer_object_t;
+
+/* One frame of the *client* attribute stack. Separate from gl_attrib_entry_t because the
+ * specification keeps the two stacks separate: a push of client state must not pop server
+ * state, and a program that brackets a helper with both is relying on that. */
+typedef struct {
+    GLbitfield mask;
+
+    /* GL_CLIENT_VERTEX_ARRAY_BIT */
+    gl_client_array_t array_vertex;
+    gl_client_array_t array_color;
+    gl_client_array_t array_normal;
+    gl_client_array_t array_texcoord;
+
+    /* GL_CLIENT_PIXEL_STORE_BIT */
+    GLint unpack_alignment;
+    GLint unpack_row_length;
+    GLint pack_alignment;
+} gl_client_attrib_entry_t;
 
 typedef struct gl_context {
     struct oops_display *disp;
@@ -128,6 +297,9 @@ typedef struct gl_context {
     GLenum blend_equation;
     GLenum tex_env_mode;
     float tex_env_color[4];
+    /* glHint(GL_PERSPECTIVE_CORRECTION_HINT). Recorded and reported; it changes nothing,
+     * because the rasteriser interpolates perspective-correctly either way. */
+    GLenum perspective_hint;
     GLenum cull_mode;     /* GL_BACK, GL_FRONT, etc. */
     GLenum front_face;    /* GL_CCW, GL_CW */
     GLenum shade_model;   /* GL_SMOOTH, GL_FLAT */
@@ -135,11 +307,11 @@ typedef struct gl_context {
 
     /* Matrix stacks */
     GLenum matrix_mode;
-    gl_mat4_t modelview_stack[GL_MAX_MODELVIEW_STACK_DEPTH];
+    gl_mat4_t modelview_stack[OOPS_GL_MODELVIEW_STACK_CAPACITY];
     int modelview_depth;
-    gl_mat4_t projection_stack[GL_MAX_PROJECTION_STACK_DEPTH];
+    gl_mat4_t projection_stack[OOPS_GL_PROJECTION_STACK_CAPACITY];
     int projection_depth;
-    gl_mat4_t texture_stack[GL_MAX_TEXTURE_STACK_DEPTH];
+    gl_mat4_t texture_stack[OOPS_GL_TEXTURE_STACK_CAPACITY];
     int texture_depth;
 
     /* Combined MVP cache */
@@ -155,7 +327,7 @@ typedef struct gl_context {
     GLboolean cap_color_material;
     GLenum color_material_face;
     GLenum color_material_mode;
-    gl_light_t lights[GL_MAX_LIGHTS];
+    gl_light_t lights[OOPS_GL_LIGHT_COUNT];
     gl_material_t mat_front;
     gl_material_t mat_back;
     float light_model_ambient[4];
@@ -176,12 +348,18 @@ typedef struct gl_context {
     /* Immediate mode buffer */
     GLenum imm_mode;
     GLboolean imm_active;
-    gl_vertex_t imm_verts[GL_MAX_IMMEDIATE_VERTS];
+    gl_vertex_t imm_verts[OOPS_GL_MAX_IMMEDIATE_VERTS];
     int imm_count;
 
     /* Texture Management */
     GLuint bound_texture_2d;
-    gl_texture_object_t textures[GL_MAX_TEXTURE_OBJECTS];
+    gl_texture_object_t textures[OOPS_GL_MAX_TEXTURE_OBJECTS];
+
+    /* Buffer objects. Two binding points, because GL_ARRAY_BUFFER and GL_ELEMENT_ARRAY_BUFFER
+     * are independent - a program binds one of each and draws from both at once. */
+    gl_buffer_object_t buffers[OOPS_GL_MAX_BUFFER_OBJECTS];
+    GLuint bound_array_buffer;
+    GLuint bound_element_array_buffer;
 
     /* Error tracking */
     GLenum last_error;
@@ -221,6 +399,43 @@ typedef struct gl_context {
     uint32_t hw_prelude_words;
     uint32_t *readback;           /* CPU-cached copy of the render target, made by the CP at the end of every submission */
 
+    /* glPushAttrib. The specification requires at least 16 deep. */
+    gl_attrib_entry_t attrib_stack[OOPS_GL_ATTRIB_STACK_CAPACITY];
+    GLuint attrib_depth;
+
+    /* glPushClientAttrib. Its own stack and its own depth; the specification's minimum is 16. */
+    gl_client_attrib_entry_t client_attrib_stack[OOPS_GL_CLIENT_ATTRIB_STACK_CAPACITY];
+    GLuint client_attrib_depth;
+
+    /* glAlphaFunc. A fragment whose alpha fails the comparison is discarded. */
+    GLboolean cap_alpha_test;
+    GLenum alpha_func;
+    float alpha_ref;
+
+    /* glPolygonOffset. `enabled` is GL_POLYGON_OFFSET_FILL; the wireframe and point variants
+     * need glPolygonMode, which needs primitives this cannot draw. */
+    GLboolean cap_polygon_offset_fill;
+    float polygon_offset_factor;
+    float polygon_offset_units;
+
+    /* glDepthRange: where NDC z lands in the depth buffer. Defaults to the specification's
+     * 0..1, which is the pair the viewport registers were already carrying as constants. */
+    float depth_near;
+    float depth_far;
+
+    /* glPixelStorei: how a client's pixel rectangle is laid out in its own memory. Only the
+     * unpack side exists, because nothing here reads pixels back yet. */
+    GLint unpack_alignment;  /* row start alignment in bytes: 1, 2, 4 or 8 */
+    GLint unpack_row_length; /* pixels per source row, or 0 meaning "the width being uploaded" */
+    GLint pack_alignment;    /* the same, for rows glReadPixels writes back */
+
+    /* Display lists: what was recorded, and what is being recorded now. */
+    gl_display_list_t lists[GL_MAX_LISTS];
+    GLuint list_compiling;   /* the name being recorded into, or 0 for none */
+    GLenum list_mode;        /* GL_COMPILE or GL_COMPILE_AND_EXECUTE */
+    GLuint list_base;        /* glListBase, added to every name glCallLists reads */
+    GLuint list_depth;       /* nested glCallList, to stop a list that calls itself */
+
     /* Performance telemetry */
     uint64_t frame_count;
     uint64_t triangles_drawn;
@@ -231,6 +446,60 @@ extern gl_context_t *g_gl_ctx;
 static inline gl_context_t *gl_get_ctx(void) {
     return g_gl_ctx;
 }
+
+/* Records an error the way GL says to: **the first one wins.**
+ *
+ * The specification is explicit that once the flag is set, no further errors are recorded
+ * until glGetError() reads and clears it. Every site here used to assign `last_error`
+ * directly, which is the opposite rule - the *last* error won - so a caller doing several
+ * calls before one glGetError() was shown the most recent failure and never the one that
+ * started it. That sends somebody to the wrong call, which is the only thing an error code is
+ * for.
+ *
+ * glGetError() itself still assigns, because clearing the flag is its job. */
+static inline void gl_record_error(gl_context_t *ctx, GLenum error) {
+    if (ctx && ctx->last_error == GL_NO_ERROR) {
+        ctx->last_error = error;
+    }
+}
+
+/* A float's bits, for the registers and shader literals that take one. */
+static inline uint32_t gl_f32_bits(float f) {
+    union { float f; uint32_t u; } v;
+    v.f = f;
+    return v.u;
+}
+
+/* Where the alpha test sits in each pixel shader, as a word index. Four words are reserved,
+ * which is what the longest form needs: a literal load (two words), a compare, and the mask
+ * update. `gl_ps_patch_alpha_test` writes them; anything else leaves them as `s_nop`.
+ *
+ * Patched in place rather than rebuilt, because the shaders are laid into the GPU payload once
+ * at context creation and a rebuild would have to redo the descriptors and the cache flush with
+ * them. The instruction encodings were produced by assembling for gfx1030 rather than written
+ * from memory - see the table in `gl_ps_patch_alpha_test`. */
+#define GL_PS_ALPHA_SLOT_UNTEX 24u
+#define GL_PS_ALPHA_SLOT_TEX   40u
+void gl_ps_patch_alpha_test(gl_context_t *ctx);
+
+/* Buffer objects. `gl_find_buffer` answers NULL for name 0 and for a name never generated.
+ *
+ * `gl_array_base` is the one place an array's effective address is worked out: client memory
+ * straight through, or the buffer's storage plus the offset the `pointer` field is carrying.
+ * It answers NULL when the named buffer has gone or has no storage, which stops the reader
+ * rather than letting it walk an address computed from a freed pointer. */
+gl_buffer_object_t *gl_find_buffer(gl_context_t *ctx, GLuint name);
+/* Releases every buffer object's storage. Called from glContextDestroy, and living beside the
+ * allocation in gl_state.c so the choice of allocator stays in one file. */
+void gl_free_all_buffers(gl_context_t *ctx);
+const uint8_t *gl_array_base(const gl_context_t *ctx, const gl_client_array_t *a);
+
+/* Display lists. `gl_list_capture` appends the call being made to the list being compiled and
+ * returns whether the caller should stop there; `gl_list_refuse` does the same for a call that
+ * cannot be compiled. Both answer false when no list is being compiled, which is the ordinary
+ * path and costs one load. */
+GLboolean gl_list_capture(gl_list_op_t op, GLenum e0, GLenum e1, GLuint u0, const GLfloat *f);
+GLboolean gl_list_refuse(void);
 
 /* Freestanding math primitives */
 float gl_sin(float rad);
@@ -289,6 +558,15 @@ static inline uint32_t gl_compute_pa_su_sc_mode_cntl(const gl_context_t *ctx) {
     }
     if (ctx->front_face == GL_CW) {
         cull_bits |= OOPS_AGC_FACE_CW; /* FACE = CW */
+    }
+    if (ctx->cap_polygon_offset_fill) {
+        /* Front, back and para together: GL has one enable for filled polygons and does not
+         * distinguish the faces, so enabling one and not the other would offset half a mesh.
+         *
+         * Bit positions from Mesa's generated register header,
+         * `src/amd/common/amdgfxregs.h`: S_028814_POLY_OFFSET_FRONT_ENABLE is bit 11,
+         * BACK_ENABLE bit 12, PARA_ENABLE bit 13. */
+        cull_bits |= (1u << 11) | (1u << 12) | (1u << 13);
     }
     return OOPS_AGC_CULL_NONE | cull_bits;
 }

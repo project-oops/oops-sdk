@@ -35,7 +35,9 @@ ifeq ($(filter 1 2,$(OOPS_TARGET_NUM)),)
     # Prospero / Trinity native
     OOPS_SDK_GRAPHICS_SRCS := \
         $(OOPS_SDK_DIR)/src/agc/agc_display.c \
-        $(OOPS_SDK_DIR)/src/agc/agc_tiler.c
+        $(OOPS_SDK_DIR)/src/agc/agc_tiler.c \
+        $(OOPS_SDK_DIR)/src/agc/agc_compute.c \
+        $(OOPS_SDK_DIR)/src/agc/agc_draw.c
 else
     # Orbis / Neo
     OOPS_SDK_GRAPHICS_SRCS := \

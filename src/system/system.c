@@ -2,7 +2,12 @@
 #include "oops/syscall.h"
 #include "oops/target.h"
 #include "oops/freestd.h"
+#include "oops/fs.h"
+#include "oops/time.h"
 #include <stdarg.h>
+#ifdef OOPS_HOST_BUILD
+#include <unistd.h>
+#endif
 
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
@@ -15,12 +20,14 @@ __attribute__((weak)) int sceSystemServiceNavigateToGoHome(void);
 __attribute__((weak)) int sceSystemServiceParamGetInt(int32_t paramId,
                                                       int32_t *value);
 __attribute__((weak)) int
+sceSystemServiceLaunchApp(const char *titleId, const char *const *argv,
+                          const void *param);
+__attribute__((weak)) int
 sceSysUtilSendSystemNotificationWithText(int type, const char *msg);
 __attribute__((weak)) int sysctlbyname(const char *name, void *oldp,
                                        size_t *oldlenp, void *newp,
                                        size_t newlen);
 __attribute__((weak)) size_t sceKernelGetDirectMemorySize(void);
-
 /* Weak symbols for hardware telemetry (libkernel / libkernel_sys) */
 __attribute__((weak)) int sceKernelGetCpuTemperature(int *temperature);
 __attribute__((weak)) int sceKernelGetSocSensorTemperature(int sensor,
@@ -238,6 +245,33 @@ int oops_system_get_enter_button(int *out_button) {
   return -1;
 }
 
+int oops_system_launch_app(const char *title_id) {
+  if (!title_id || title_id[0] == '\0') {
+    return -1;
+  }
+  if (sceSystemServiceLaunchApp) {
+    int32_t user_id = oops_user_get_initial_user_id();
+    struct {
+      size_t size;
+      int32_t userId;
+      int32_t enableCrashReport;
+      int32_t checkAppSystemVer;
+    } param;
+    for (size_t i = 0; i < sizeof(param); i++) {
+      ((unsigned char *)&param)[i] = 0;
+    }
+    param.size = sizeof(param);
+    param.userId = (user_id >= 0) ? user_id : 0;
+
+    const char *argv[2] = {title_id, 0};
+    int ret = sceSystemServiceLaunchApp(title_id, argv, &param);
+    oops_kprintf("SYSTEM", "sceSystemServiceLaunchApp(%s): ret = 0x%08x\n",
+                 title_id, ret);
+    return ret;
+  }
+  return -1;
+}
+
 int oops_system_get_cpu_temp(int *out_temp_celsius) {
   if (!out_temp_celsius)
     return -1;
@@ -376,20 +410,118 @@ static char s_host_last_klog[512] = {0};
 const char *oops_test_get_last_klog(void) { return s_host_last_klog; }
 #endif
 
+static char s_app_id[32] = {0};
+static int s_app_id_resolved = 0;
+
+void oops_log_init(const char *app_id) {
+  if (app_id != NULL && app_id[0] != '\0') {
+    obs_strncpy(s_app_id, app_id, sizeof(s_app_id) - 1);
+    s_app_id[sizeof(s_app_id) - 1] = '\0';
+    s_app_id_resolved = 1;
+  } else {
+    s_app_id[0] = '\0';
+    s_app_id_resolved = 0;
+  }
+}
+
+const char *oops_log_get_app_id(void) {
+  if (s_app_id_resolved && s_app_id[0] != '\0') {
+    return s_app_id;
+  }
+
+#if defined(OOPS_APP_ID)
+  obs_strncpy(s_app_id, OOPS_APP_ID, sizeof(s_app_id) - 1);
+  s_app_id[sizeof(s_app_id) - 1] = '\0';
+  s_app_id_resolved = 1;
+  return s_app_id;
+#elif defined(OOPS_APP_NAME)
+  obs_strncpy(s_app_id, OOPS_APP_NAME, sizeof(s_app_id) - 1);
+  s_app_id[sizeof(s_app_id) - 1] = '\0';
+  s_app_id_resolved = 1;
+  return s_app_id;
+#endif
+
+  /* On target: check /app0/sce_sys/param.json */
+#ifndef OOPS_HOST_BUILD
+  int fd = oops_fs_open("/app0/sce_sys/param.json", OOPS_O_RDONLY, 0);
+  if (fd >= 0) {
+    char pbuf[256];
+    int64_t n = oops_fs_read(fd, pbuf, sizeof(pbuf) - 1);
+    oops_fs_close(fd);
+    if (n > 0) {
+      pbuf[n] = '\0';
+      const char *key = "\"titleId\"";
+      size_t klen = obs_strlen(key);
+      for (size_t i = 0; i + klen + 4 < (size_t)n; i++) {
+        if (obs_strncmp(pbuf + i, key, klen) == 0) {
+          const char *p = pbuf + i + klen;
+          while (*p == ' ' || *p == ':' || *p == '\t' || *p == '"') p++;
+          size_t len = 0;
+          while (p[len] != '\0' && p[len] != '"' && p[len] != ',' && p[len] != ' ' && p[len] != '\n' && len < sizeof(s_app_id) - 1) {
+            s_app_id[len] = p[len];
+            len++;
+          }
+          s_app_id[len] = '\0';
+          if (len > 0) {
+            s_app_id_resolved = 1;
+            return s_app_id;
+          }
+        }
+      }
+    }
+  }
+#endif
+
+  s_app_id_resolved = 1;
+  return NULL;
+}
+
+void oops_log(const char *fmt, ...) {
+  if (fmt == NULL) return;
+  char buf[512];
+  va_list args;
+  va_start(args, fmt);
+  int len = oops_vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  if (len < 0) return;
+  oops_klog(NULL, buf);
+}
+
 void oops_klog(const char *tag, const char *msg) {
   if (msg == NULL) return;
   char buf[512];
   size_t pos = 0;
-  if (tag != NULL && tag[0] != '\0') {
+
+  const char *app = oops_log_get_app_id();
+  int have_app = (app != NULL && app[0] != '\0');
+  int have_tag = (tag != NULL && tag[0] != '\0');
+
+  /* If tag is identical to app, treat as no extra sub-tag */
+  if (have_app && have_tag && obs_strcmp(tag, app) == 0) {
+    have_tag = 0;
+  }
+
+  if (have_app || have_tag) {
     buf[pos++] = '[';
-    for (size_t i = 0; tag[i] != '\0' && pos < 40; i++) {
-      buf[pos++] = tag[i];
+    if (have_app) {
+      for (size_t i = 0; app[i] != '\0' && pos < 32; i++) {
+        buf[pos++] = app[i];
+      }
+      if (have_tag && pos < 48) {
+        buf[pos++] = ':';
+      }
     }
-    if (pos < 42) {
+    if (have_tag) {
+      for (size_t i = 0; tag[i] != '\0' && pos < 48; i++) {
+        buf[pos++] = tag[i];
+      }
+    }
+    if (pos < 50) {
       buf[pos++] = ']';
       buf[pos++] = ' ';
     }
   }
+
   for (size_t i = 0; msg[i] != '\0' && pos < sizeof(buf) - 2; i++) {
     buf[pos++] = msg[i];
   }
@@ -398,6 +530,7 @@ void oops_klog(const char *tag, const char *msg) {
 
 #ifndef OOPS_HOST_BUILD
   (void)sys_call(SYS_klog, 7, (long)buf, 0, 0, 0, 0);
+  (void)sys_call(SYS_write, 1, (long)buf, (long)pos, 0, 0, 0);
 #else
   for (size_t i = 0; i < sizeof(s_host_last_klog) - 1 && buf[i] != '\0'; i++) {
     s_host_last_klog[i] = buf[i];
@@ -412,7 +545,86 @@ void oops_kprintf(const char *tag, const char *fmt, ...) {
   char buf[512];
   va_list args;
   va_start(args, fmt);
-  (void)oops_vsnprintf(buf, sizeof(buf), fmt, args);
+  int len = oops_vsnprintf(buf, sizeof(buf), fmt, args);
   va_end(args);
+  if (len < 0) return;
   oops_klog(tag, buf);
+}
+
+/* ------------------------------------------------------------------ */
+/* Sandbox escape via decoupled daemon handshake                        */
+/* ------------------------------------------------------------------ */
+/* Sandbox escape via loopback IPC handshake                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * oops_system_escape_sandbox — explicit opt-in sandbox escape.
+ *
+ * Connects to the resident sandbox-daemon via TCP 127.0.0.1:9069,
+ * sends the calling process PID (4 bytes), and reads back an int32_t
+ * status code (0 = success, negative = failure).
+ *
+ * This is the client-side half of the decoupled namespace service
+ * described in oops-sdk/docs/decisions/D004.
+ *
+ * Returns: 0 on success, -1 on connection failure or timeout.
+ */
+int oops_system_escape_sandbox(void) {
+#ifndef OOPS_HOST_BUILD
+  /* Resolve current PID */
+  pid_t my_pid = (pid_t)sys_call(SYS_getpid, 0, 0, 0, 0, 0, 0);
+  if (my_pid <= 0) {
+    return -1;
+  }
+
+  /* Create a stream socket */
+  int sock = (int)sys_call(SYS_socket, 2 /* AF_INET */,
+                           1 /* SOCK_STREAM */, 6 /* IPPROTO_TCP */, 0, 0, 0);
+  if (sock < 0) {
+    return -1;
+  }
+
+  /* Build sockaddr_in for 127.0.0.1:9069 (FreeBSD / PS5 ABI) */
+  char sockaddr[16];
+  sockaddr[0] = 16;      /* sin_len = sizeof(struct sockaddr_in) */
+  sockaddr[1] = 2;       /* sin_family = AF_INET (2) */
+  sockaddr[2] = 0x23;    /* port high byte: 9069 = 0x236D */
+  sockaddr[3] = 0x6D;    /* port low byte */
+  sockaddr[4] = 127;     /* 127.0.0.1 (network byte order) */
+  sockaddr[5] = 0;
+  sockaddr[6] = 0;
+  sockaddr[7] = 1;
+  for (int i = 8; i < 16; i++) {
+    sockaddr[i] = 0;
+  }
+
+  /* Connect with a short timeout (3 seconds) */
+  long connect_rc = sys_call(SYS_connect, sock, (long)sockaddr, 16, 0, 0, 0);
+  if (connect_rc != 0) {
+    sys_call(SYS_close, sock, 0, 0, 0, 0, 0);
+    return -1;
+  }
+
+  /* Send PID */
+  long written = sys_call(SYS_write, sock, (long)&my_pid, 4, 0, 0, 0);
+  if (written != 4) {
+    sys_call(SYS_close, sock, 0, 0, 0, 0, 0);
+    return -1;
+  }
+
+  /* Read 4-byte status code */
+  int32_t status = 0;
+  long read_rc = sys_call(SYS_read, sock, (long)&status, 4, 0, 0, 0);
+  sys_call(SYS_close, sock, 0, 0, 0, 0, 0);
+
+  if (read_rc != 4 || status != 0) {
+    return -1;
+  }
+
+  return 0;
+#else
+  /* On the host side there is no sandbox to escape. */
+  (void)0;
+  return 0;
+#endif
 }

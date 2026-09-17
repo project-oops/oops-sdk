@@ -9,6 +9,11 @@
 extern "C" {
 #endif
 
+/* Weak platform symbols for libSceAppInstUtil (resolved at link time) */
+__attribute__((weak)) int sceAppInstUtilInitialize(void);
+__attribute__((weak)) int sceAppInstUtilTerminate(void);
+__attribute__((weak)) int sceAppInstUtilAppExists(const char *titleId, int32_t *exists);
+
 typedef struct oops_pkg_progress_info {
   uint32_t
       state; /* 0 = Not installing, 1 = In progress, 2 = Completed, 3 = Error */

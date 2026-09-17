@@ -126,6 +126,11 @@ static const uintptr_t KERNEL_OFFSET_UCRED_CR_SCEAUTHID = 0x58;
 static const uintptr_t KERNEL_OFFSET_UCRED_CR_SCECAPS = 0x60;
 static const uintptr_t KERNEL_OFFSET_UCRED_CR_SCEATTRS = 0x80;
 
+/* File descriptor (struct filedesc) offsets from FreeBSD 11/12 and ps5-payload-dev-sdk */
+static const uintptr_t KERNEL_OFFSET_FILEDESC_FD_CDIR = 0x08;
+static const uintptr_t KERNEL_OFFSET_FILEDESC_FD_RDIR = 0x10;
+static const uintptr_t KERNEL_OFFSET_FILEDESC_FD_JDIR = 0x18;
+
 static uintptr_t s_offset_vmspace_p_root = 0x1d0;
 static uintptr_t s_offset_vmspace_vm_pmap = 0x2e8;
 static uintptr_t s_kernel_root_vnode = 0;
@@ -511,17 +516,28 @@ int krw_set_ucred_attrs(pid_t pid, const uint8_t attrs[32]) {
   return krw_copyin(attrs, ucred + KERNEL_OFFSET_UCRED_CR_SCEATTRS, 32);
 }
 
-uintptr_t krw_get_root_vnode(void) {
-  if (s_kernel_root_vnode != 0) {
-    return s_kernel_root_vnode;
-  }
-  pid_t mypid = (pid_t)sys_call(SYS_getpid, 0, 0, 0, 0, 0, 0);
-  uintptr_t rdir = krw_get_proc_rootdir(mypid);
-  if (rdir != 0) {
-    s_kernel_root_vnode = rdir;
-    return rdir;
-  }
-  return 0;
+uintptr_t krw_get_proc_cdir(pid_t pid) {
+  uintptr_t proc = krw_get_proc(pid);
+  if (proc == 0)
+    return 0;
+  uintptr_t fd = 0;
+  if (krw_copyout(proc + KERNEL_OFFSET_PROC_P_FD, &fd, sizeof(fd)) != 0 ||
+      fd == 0)
+    return 0;
+  uintptr_t cdir = 0;
+  krw_copyout(fd + KERNEL_OFFSET_FILEDESC_FD_CDIR, &cdir, sizeof(cdir));
+  return cdir;
+}
+
+int krw_set_proc_cdir(pid_t pid, uintptr_t vnode) {
+  uintptr_t proc = krw_get_proc(pid);
+  if (proc == 0)
+    return -1;
+  uintptr_t fd = 0;
+  if (krw_copyout(proc + KERNEL_OFFSET_PROC_P_FD, &fd, sizeof(fd)) != 0 ||
+      fd == 0)
+    return -1;
+  return krw_copyin(&vnode, fd + KERNEL_OFFSET_FILEDESC_FD_CDIR, sizeof(vnode));
 }
 
 uintptr_t krw_get_proc_rootdir(pid_t pid) {
@@ -533,7 +549,7 @@ uintptr_t krw_get_proc_rootdir(pid_t pid) {
       fd == 0)
     return 0;
   uintptr_t rdir = 0;
-  krw_copyout(fd + 0x18, &rdir, sizeof(rdir));
+  krw_copyout(fd + KERNEL_OFFSET_FILEDESC_FD_RDIR, &rdir, sizeof(rdir));
   return rdir;
 }
 
@@ -545,7 +561,7 @@ int krw_set_proc_rootdir(pid_t pid, uintptr_t vnode) {
   if (krw_copyout(proc + KERNEL_OFFSET_PROC_P_FD, &fd, sizeof(fd)) != 0 ||
       fd == 0)
     return -1;
-  return krw_copyin(&vnode, fd + 0x18, sizeof(vnode));
+  return krw_copyin(&vnode, fd + KERNEL_OFFSET_FILEDESC_FD_RDIR, sizeof(vnode));
 }
 
 uintptr_t krw_get_proc_jaildir(pid_t pid) {
@@ -557,7 +573,7 @@ uintptr_t krw_get_proc_jaildir(pid_t pid) {
       fd == 0)
     return 0;
   uintptr_t jdir = 0;
-  krw_copyout(fd + 0x20, &jdir, sizeof(jdir));
+  krw_copyout(fd + KERNEL_OFFSET_FILEDESC_FD_JDIR, &jdir, sizeof(jdir));
   return jdir;
 }
 
@@ -569,7 +585,33 @@ int krw_set_proc_jaildir(pid_t pid, uintptr_t vnode) {
   if (krw_copyout(proc + KERNEL_OFFSET_PROC_P_FD, &fd, sizeof(fd)) != 0 ||
       fd == 0)
     return -1;
-  return krw_copyin(&vnode, fd + 0x20, sizeof(vnode));
+  return krw_copyin(&vnode, fd + KERNEL_OFFSET_FILEDESC_FD_JDIR, sizeof(vnode));
+}
+
+uintptr_t krw_get_root_vnode(void) {
+  if (s_kernel_root_vnode != 0) {
+    return s_kernel_root_vnode;
+  }
+  /* First attempt: PID 1's fd_rdir (if chrooted to root) */
+  uintptr_t rdir = krw_get_proc_rootdir(1);
+  if (rdir != 0) {
+    s_kernel_root_vnode = rdir;
+    return rdir;
+  }
+  /* Second attempt: PID 1's fd_cdir (mini-syscore starts at /) */
+  uintptr_t cdir1 = krw_get_proc_cdir(1);
+  if (cdir1 != 0) {
+    s_kernel_root_vnode = cdir1;
+    return cdir1;
+  }
+  /* Third attempt: calling process's fd_cdir (if unjailed daemon at /) */
+  pid_t mypid = (pid_t)sys_call(SYS_getpid, 0, 0, 0, 0, 0, 0);
+  uintptr_t mycdir = krw_get_proc_cdir(mypid);
+  if (mycdir != 0) {
+    s_kernel_root_vnode = mycdir;
+    return mycdir;
+  }
+  return 0;
 }
 
 int krw_elevate_current_process(void) {

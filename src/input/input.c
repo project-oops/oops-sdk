@@ -19,13 +19,48 @@ __attribute__((weak)) int scePadResetOrientation(int handle);
  * parameter layout is still unconfirmed. */
 __attribute__((weak)) int scePadSetTriggerEffect(int handle, const void *param);
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
+__attribute__((weak)) int sceUserServiceGetLoginUserIdList(void *list);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
 static int s_pad_handles[OOPS_MAX_PADS] = {-1, -1, -1, -1};
+static int s_pad_retry_cooldown[OOPS_MAX_PADS] = {0, 0, 0, 0};
 static int32_t s_user_id = -1;
 static int s_initialized = 0;
 static int s_init_rc =
     -1; /* what the first init reported; repeated until close */
+
+static void try_resolve_user_id(void) {
+  if (s_user_id >= 0) {
+    return;
+  }
+  if (sceUserServiceInitialize) {
+    sceUserServiceInitialize(NULL);
+  }
+  if (sceUserServiceGetInitialUser &&
+      sceUserServiceGetInitialUser(&s_user_id) == 0 && s_user_id >= 0) {
+    return;
+  }
+  if (sceUserServiceGetLoginUserIdList) {
+    struct {
+      int32_t userId[4];
+    } loginList;
+    for (size_t i = 0; i < sizeof(loginList); i++) {
+      ((unsigned char *)&loginList)[i] = 0;
+    }
+    if (sceUserServiceGetLoginUserIdList(&loginList) == 0) {
+      for (int i = 0; i < 4; i++) {
+        if (loginList.userId[i] >= 0 && loginList.userId[i] != 0xFF) {
+          s_user_id = loginList.userId[i];
+          return;
+        }
+      }
+    }
+  }
+  /* Fallback to primary retail user ID if user service list unpopulated */
+  if (s_user_id < 0 && (scePadOpen || scePadInit)) {
+    s_user_id = 0x10000000;
+  }
+}
 
 /* Declared in pad_layout.h; shared by the single-state poll and the batched
  * read. */
@@ -84,6 +119,8 @@ int oops_input_init(void) {
     }
   }
 
+  try_resolve_user_id();
+
   if (s_user_id >= 0 && scePadOpen) {
     s_pad_handles[0] = scePadOpen(s_user_id, 0, 0, NULL);
   }
@@ -104,12 +141,26 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
   }
 
   /* Lazy-open port if uninitialized but requested */
-  if (s_pad_handles[port] < 0 && s_user_id >= 0 && scePadOpen) {
-    s_pad_handles[port] = scePadOpen(s_user_id, 0, (int)port, NULL);
+  if (s_pad_handles[port] < 0 && scePadOpen) {
+    if (s_pad_retry_cooldown[port] > 0) {
+      s_pad_retry_cooldown[port]--;
+      return -1;
+    }
+    try_resolve_user_id();
+    if (s_user_id >= 0) {
+      s_pad_handles[port] = scePadOpen(s_user_id, 0, (int)port, NULL);
+      if (s_pad_handles[port] < 0 && s_user_id != 0x10000000) {
+        s_pad_handles[port] = scePadOpen(0x10000000, 0, (int)port, NULL);
+      }
+    }
+    if (s_pad_handles[port] < 0) {
+      s_pad_retry_cooldown[port] = 120; /* retry at most once every 120 frames (~2 seconds) */
+      return -1;
+    }
   }
 
   int handle = s_pad_handles[port];
-  if (handle < 0 || !scePadReadState) {
+  if (handle < 0 || (!scePadReadState && !scePadRead)) {
     return -1;
   }
 
@@ -117,7 +168,13 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
   for (size_t i = 0; i < sizeof(raw); i++)
     ((unsigned char *)&raw)[i] = 0;
 
-  int rc = scePadReadState(handle, &raw);
+  int rc = -1;
+  if (scePadReadState) {
+    rc = scePadReadState(handle, &raw);
+  }
+  if (rc != 0 && scePadRead) {
+    rc = (scePadRead(handle, &raw, 1) > 0) ? 0 : -1;
+  }
   if (rc != 0) {
     return -1;
   }
@@ -138,8 +195,22 @@ int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
   /* The stride is the driver's 120-byte record, held to that size in
    * pad_layout.h. */
   /* Lazy-open port if uninitialized but requested */
-  if (s_pad_handles[port] < 0 && s_user_id >= 0 && scePadOpen) {
-    s_pad_handles[port] = scePadOpen(s_user_id, 0, (int)port, NULL);
+  if (s_pad_handles[port] < 0 && scePadOpen) {
+    if (s_pad_retry_cooldown[port] > 0) {
+      s_pad_retry_cooldown[port]--;
+      return -1;
+    }
+    try_resolve_user_id();
+    if (s_user_id >= 0) {
+      s_pad_handles[port] = scePadOpen(s_user_id, 0, (int)port, NULL);
+      if (s_pad_handles[port] < 0 && s_user_id != 0x10000000) {
+        s_pad_handles[port] = scePadOpen(0x10000000, 0, (int)port, NULL);
+      }
+    }
+    if (s_pad_handles[port] < 0) {
+      s_pad_retry_cooldown[port] = 120;
+      return -1;
+    }
   }
   int handle = s_pad_handles[port];
   if (handle < 0 || !scePadRead) {
@@ -243,6 +314,7 @@ void oops_input_close(void) {
       scePadClose(s_pad_handles[i]);
       s_pad_handles[i] = -1;
     }
+    s_pad_retry_cooldown[i] = 0;
   }
   s_initialized = 0;
   s_init_rc = -1;

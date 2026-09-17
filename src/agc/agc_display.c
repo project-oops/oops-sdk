@@ -2,6 +2,7 @@
 #include "agc/shader_tiler.h"
 #include "agc/tiler.h"
 #include "oops/agc.h"
+#include "oops/gpu.h"
 #include "oops/memory.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -110,6 +111,9 @@ struct agc_display {
   volatile uint32_t *fence;
   int gpu_accelerated;
   int tiling_mode;
+  /* The compute-tiler path, populated only by agc_display_try_gpu_tiler(). */
+  oops_gpu_queue_t *gpu_queue;
+  oops_gpu_shader_t *gpu_shader;
 };
 
 static struct agc_display s_agc_display;
@@ -382,10 +386,17 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
 
         if (src == 0 && s_obj != (void *)0) {
           disp->shader_obj = s_obj;
-          /* RDNA2 MUBUF requires 128-bit V# buffer descriptors in s[12..15] and s[8..11];
-           * keep GPU compute dispatch disabled until V# descriptors are constructed. */
+          /* The shader instantiates, and agc_tiler_dispatch_params() can now
+           * build the two buffer resource constants it wants (source in user
+           * data 1..4, destination in 5..8 - see <agc/tiler.h>). That is a
+           * decode of the payload, not a measurement, so opening a display does
+           * not dispatch it. agc_display_try_gpu_tiler() is the opt-in that
+           * checks the GPU's output against the CPU tiler before trusting it. */
           disp->gpu_accelerated = 0;
-          agc_log("agc-gpu-accel", "GPU acceleration disabled (CPU tiling active)", 0);
+          agc_log("agc-gpu-accel",
+                  "CPU tiling active; compute tiler available via "
+                  "agc_display_try_gpu_tiler",
+                  0);
         } else {
           oops_mem_free((void *)dcb);
           oops_mem_free((void *)f);
@@ -453,6 +464,130 @@ static void agc_wait_for_flips(struct agc_display *disp) {
   }
 }
 
+/* Tiles the linear surface onto `dst` with the compute shader. Returns 0 when
+ * the dispatch retired its fence, negative otherwise. */
+static int agc_gpu_tile(struct agc_display *disp, uint32_t *dst) {
+  uint32_t user_data[AGC_TILER_USER_DATA_COUNT];
+  uint32_t groups_x = 0;
+  uint32_t groups_y = 0;
+
+  if (!disp->gpu_queue || !disp->gpu_shader || !dst)
+    return -1;
+  if (agc_tiler_dispatch_params(user_data, &groups_x, &groups_y,
+                                (uint64_t)(uintptr_t)disp->linear_scratch_fb,
+                                (uint64_t)(uintptr_t)dst, disp->width,
+                                disp->height) != 0) {
+    return -1;
+  }
+
+  oops_gpu_dispatch_t d;
+  d.shader = disp->gpu_shader;
+  d.user_data = user_data;
+  d.user_data_count = AGC_TILER_USER_DATA_COUNT;
+  d.grid_x = groups_x;
+  d.grid_y = groups_y;
+  d.grid_z = 1u;
+  return oops_gpu_dispatch(disp->gpu_queue, &d);
+}
+
+static void agc_gpu_teardown(struct agc_display *disp) {
+  if (disp->gpu_shader) {
+    oops_gpu_destroy_shader(disp->gpu_shader);
+    disp->gpu_shader = (oops_gpu_shader_t *)0;
+  }
+  if (disp->gpu_queue) {
+    oops_gpu_destroy_queue(disp->gpu_queue);
+    disp->gpu_queue = (oops_gpu_queue_t *)0;
+  }
+  disp->gpu_accelerated = 0;
+}
+
+int agc_display_try_gpu_tiler(agc_display_t *disp) {
+  if (!disp)
+    return -1;
+  if (!disp->ready || !disp->linear_scratch_fb || disp->tiling_mode != 0)
+    return 0;
+  if (disp->gpu_accelerated)
+    return 1;
+
+  /* Both scanout buffers get written below, and after the first flip one of
+   * them is on screen or queued. */
+  if (disp->flip_count != 0) {
+    agc_log("agc-gpu-try", "refused: display has already flipped",
+            disp->flip_count);
+    return 0;
+  }
+
+  disp->gpu_queue = oops_gpu_create_compute_queue();
+  disp->gpu_shader = oops_gpu_create_shader(
+      s_agc_tiler_hdr_full, sizeof(s_agc_tiler_hdr_full),
+      s_agc_tiler_payload_base, sizeof(s_agc_tiler_payload_base));
+  if (!disp->gpu_queue || !disp->gpu_shader) {
+    agc_log("agc-gpu-try", "refused: queue or shader would not create", 0);
+    agc_gpu_teardown(disp);
+    return 0;
+  }
+
+  size_t pixels = (size_t)disp->width * (size_t)disp->height;
+  size_t tiled_bytes = agc_tile_surface_bytes(disp->width, disp->height);
+
+  /* A distinct value per pixel. Comparing two buffers that are both zero would
+   * pass whatever the shader did, including nothing. */
+  for (size_t i = 0; i < pixels; i++) {
+    disp->linear_scratch_fb[i] = (uint32_t)(i * 2654435761u) | 0xFF000000u;
+  }
+
+  /* Zero both destinations over the whole tiled extent first. The tiler leaves
+   * the margin of a partial tile alone, so without this the comparison would
+   * run over direct memory neither side wrote - and with it, a shader that
+   * writes outside the pixels it owns fails here rather than on a display. */
+  for (size_t i = 0; i < tiled_bytes / 4u; i++) {
+    disp->target_gpu_fb[0][i] = 0u;
+    disp->target_gpu_fb[1][i] = 0u;
+  }
+
+  int rc = agc_gpu_tile(disp, disp->target_gpu_fb[1]);
+  agc_log("agc-gpu-try", "dispatch rc", (uint64_t)(uint32_t)rc);
+  if (rc != 0) {
+    agc_gpu_teardown(disp);
+    return 0;
+  }
+
+  agc_tile_surface(disp->target_gpu_fb[0], disp->linear_scratch_fb, disp->width,
+                   disp->height);
+
+  size_t mismatch_at = tiled_bytes;
+  for (size_t i = 0; i < tiled_bytes / 4u; i++) {
+    if (disp->target_gpu_fb[0][i] != disp->target_gpu_fb[1][i]) {
+      mismatch_at = i * 4u;
+      break;
+    }
+  }
+
+  if (mismatch_at != tiled_bytes) {
+    agc_log("agc-gpu-try", "refused: first mismatch at byte",
+            (uint64_t)mismatch_at);
+    agc_gpu_teardown(disp);
+    /* Leave the buffers in the state a first flip expects. */
+    agc_display_clear(disp, 0);
+    agc_tile_surface(disp->target_gpu_fb[0], disp->linear_scratch_fb,
+                     disp->width, disp->height);
+    agc_tile_surface(disp->target_gpu_fb[1], disp->linear_scratch_fb,
+                     disp->width, disp->height);
+    return 0;
+  }
+
+  agc_log("agc-gpu-try", "compute tiler matches the CPU tiler, enabling",
+          (uint64_t)tiled_bytes);
+  disp->gpu_accelerated = 1;
+  agc_display_clear(disp, 0);
+  agc_tile_surface(disp->target_gpu_fb[0], disp->linear_scratch_fb, disp->width,
+                   disp->height);
+  agc_tile_surface(disp->target_gpu_fb[1], disp->linear_scratch_fb, disp->width,
+                   disp->height);
+  return 1;
+}
+
 int agc_display_flip(agc_display_t *disp) {
   if (!disp || !disp->ready)
     return -1;
@@ -484,6 +619,17 @@ int agc_display_flip(agc_display_t *disp) {
     }
     if (disp->flip_count < 5) {
       agc_log("agc-scanout-lin", "linear frame scanout, first pixel", (uint64_t)disp->target_gpu_fb[shown][0]);
+    }
+  } else if (disp->gpu_accelerated) {
+    /* Compute tiling, enabled only by agc_display_try_gpu_tiler() after it
+     * matched this shader's output against the CPU tiler. A dispatch that stops
+     * retiring later falls back rather than presenting a stale buffer. */
+    if (agc_gpu_tile(disp, disp->target_gpu_fb[shown]) != 0) {
+      agc_log("agc-gpu-fall", "dispatch failed mid-run, back to CPU tiling",
+              disp->flip_count);
+      agc_gpu_teardown(disp);
+      agc_tile_surface(disp->target_gpu_fb[shown], disp->linear_scratch_fb,
+                       disp->width, disp->height);
     }
   } else {
     /* CPU software tiling: swizzle linear scratch buffer into RDNA2 tiled scanout surface */
@@ -546,26 +692,31 @@ void agc_display_close(agc_display_t *disp) {
   if (!disp)
     return;
 
-  if (disp->gpu_accelerated) {
-    if (disp->agc_queue && sceAgcDriverDestroyQueue) {
-      sceAgcDriverDestroyQueue(disp->agc_queue);
-      disp->agc_queue = (void *)0;
-    }
-    if (disp->dcb_mem) {
-      oops_mem_free((void *)disp->dcb_mem);
-      disp->dcb_mem = (uint8_t *)0;
-    }
-    if (disp->fence) {
-      oops_mem_free((void *)disp->fence);
-      disp->fence = (volatile uint32_t *)0;
-    }
-    if (disp->shader_payload) {
-      oops_mem_free(disp->shader_payload);
-      disp->shader_payload = (void *)0;
-    }
-    disp->shader_obj = (void *)0;
-    disp->gpu_accelerated = 0;
+  agc_gpu_teardown(disp);
+
+  /* Released on whether they were allocated, not on whether acceleration ended
+   * up enabled. agc_display_open() allocates the queue, the command buffer, the
+   * fence and the shader payload while probing for GPU support and leaves the
+   * flag clear, so a condition on the flag freed none of them - and the display
+   * is a singleton that open() zeroes, so every close/open cycle lost three
+   * 64 KB Onion allocations and a driver queue. */
+  if (disp->agc_queue && sceAgcDriverDestroyQueue) {
+    sceAgcDriverDestroyQueue(disp->agc_queue);
+    disp->agc_queue = (void *)0;
   }
+  if (disp->dcb_mem) {
+    oops_mem_free((void *)disp->dcb_mem);
+    disp->dcb_mem = (uint8_t *)0;
+  }
+  if (disp->fence) {
+    oops_mem_free((void *)disp->fence);
+    disp->fence = (volatile uint32_t *)0;
+  }
+  if (disp->shader_payload) {
+    oops_mem_free(disp->shader_payload);
+    disp->shader_payload = (void *)0;
+  }
+  disp->shader_obj = (void *)0;
 
   if (disp->mapped_base) {
     (void)sceKernelMunmap(disp->mapped_base, AGC_TOTAL_ALLOC_BYTES);

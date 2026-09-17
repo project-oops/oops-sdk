@@ -10,7 +10,7 @@ This document provides a comprehensive technical API reference for all subsystem
 
 1. [Display & Video Output (`<oops/display.h>`)](#1-display--video-output-oopsdisplayh)
 2. [2D Software Drawing Canvas (`<oops/draw.h>`)](#2-2d-software-drawing-canvas-oopsdrawh)
-3. [OpenGL 1.3 3D Graphics Engine (`<GL/gl.h>`)](#3-opengl-13-3d-graphics-engine-glglh)
+3. [Fixed-Function 3D Instrument (`<GL/gl.h>`)](#3-fixed-function-3d-instrument-glglh)
 4. [Hardware RDNA2 AGC Graphics (`<oops/agc.h>`, `<oops/gpu.h>`)](#4-hardware-rdna2-agc-graphics-oopsagch-oopsgpuh)
 5. [Memory Management & Direct Memory (`<oops/memory.h>`)](#5-memory-management--direct-memory-oopsmemoryh)
 6. [JIT & Dynamic Executable Memory (`<oops/jit.h>`)](#6-jit--dynamic-executable-memory-oopsjith)
@@ -111,9 +111,15 @@ High-performance 2D rasterizer operating on linear ARGB pixel surfaces. Supports
 
 ---
 
-## 3. OpenGL 1.3 3D Graphics Engine (`<GL/gl.h>`)
+## 3. Fixed-Function 3D Instrument (`<GL/gl.h>`)
 
-`oops-gl` is a clean-room, hardware-accelerated OpenGL 1.3 / GLES 1.1 fixed-function translation profile. It maps standard GL calls directly to RDNA2 AGC command buffers (PM4 DCBs) without vendor graphics drivers.
+`oops-gl` is a clean-room, hardware-accelerated fixed-function 3D pipeline that maps GL-shaped calls directly to RDNA2 AGC command buffers (PM4 DCBs) with no vendor graphics driver underneath.
+
+**It is not an OpenGL version, and it is not the GL to write an application against.** Its surface is OpenGL 1.1-class fixed function - immediate mode, vertex arrays, one 2D texture unit, lighting and materials, the matrix stacks, blend/depth/cull - plus individual later calls added when an oracle program needed them (`glBlendEquation`, `glBlendFuncSeparate`). Multitexturing, shaders, stencil, fog, alpha test, display lists and the rest of 1.2/1.3 are absent by design (D007).
+
+What it is *for* is evidence: because nothing sits between the call and the packet, its command stream is readable as a hardware record. `docs/hardware/agc-gl-cube-oracle-fw1240.md` is one such record, and orbistoun checks its own RDNA2 translation against it.
+
+**For applications, use [oops-mesa](../../oops-mesa/), which provides OpenGL 3.3 Core and GLSL 3.30** through upstream Mesa and radeonsi. The two never link into the same title.
 
 ### Context Lifecycle
 
@@ -385,6 +391,11 @@ Low-level kernel credential escalation and filesystem jailbreak.
 * **Parameters**: Pass `0` or `-1` to target the calling process.
 * **Returns**: `0` on success; `-1` if unsupported or without kernel primitives.
 
+### `int oops_system_escape_sandbox(void)` (`<oops/system.h>`)
+* **When to use**: Explicit opt-in sandbox elevation for system launchers and file managers needing global filesystem access (`/user/app`, `/data/homebrew`, `/user/appmeta`).
+* **Mechanism**: Connects via loopback TCP (`127.0.0.1:9069`) to resident `sandbox-daemon`, passing the calling process PID and receiving an authorization ACK. Event-driven with zero polling.
+* **Returns**: `0` on success; `-1` on error or if `sandbox-daemon` is unreachable.
+
 ### `int oops_escape_jail(void)`
 * **When to use**: Escapes the `/app0` sandbox without modifying Sony credentials, pointing directory descriptors to `/`.
 
@@ -397,7 +408,16 @@ Primitives for interacting directly with kernel memory and dispatching system ca
 ### Syscall Trampoline (`<oops/syscall.h>`)
 * `long sys_call(long num, long a1, long a2, long a3, long a4, long a5, long a6)`: Dispatches arbitrary FreeBSD/Prospero syscalls through libkernel's registered trampoline (bypassing PPRBUG-22859 mitigation).
 
-### Kernel Memory Operations (`<oops/escalate.h>`)
+### Kernel Memory & Process Directory Operations (`<oops/krw.h>`)
+* `uintptr_t krw_get_proc_cdir(pid_t pid)`: Reads `fd_cdir` (offset `0x08`) from the process `filedesc`.
+* `int krw_set_proc_cdir(pid_t pid, uintptr_t vnode)`: Writes `fd_cdir` (offset `0x08`) in the process `filedesc`.
+* `uintptr_t krw_get_proc_rootdir(pid_t pid)`: Reads `fd_rdir` (offset `0x10`) from the process `filedesc`.
+* `int krw_set_proc_rootdir(pid_t pid, uintptr_t vnode)`: Writes `fd_rdir` (offset `0x10`) in the process `filedesc`.
+* `uintptr_t krw_get_proc_jaildir(pid_t pid)`: Reads `fd_jdir` (offset `0x18`) from the process `filedesc`.
+* `int krw_set_proc_jaildir(pid_t pid, uintptr_t vnode)`: Writes `fd_jdir` (offset `0x18`) in the process `filedesc`.
+* `uintptr_t krw_get_root_vnode(void)`: Dynamically resolves true kernel root directory vnode from PID 1 or self.
+
+### Legacy Escalation Primitives (`<oops/escalate.h>`)
 * `int oops_kernel_copyout(uint64_t kaddr, void *buf, size_t size)`: Read from arbitrary kernel virtual address.
 * `int oops_kernel_copyin(const void *buf, uint64_t kaddr, size_t size)`: Write to arbitrary kernel virtual address.
 * `uint64_t oops_kernel_find_proc_by_pid(int pid)`: Walk kernel `allproc` chain to locate a target process struct.

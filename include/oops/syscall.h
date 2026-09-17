@@ -28,7 +28,12 @@
 #define SYS_socket                                                             \
   97 /* hardware-confirmed: sys_call(97, AF_INET, SOCK_STREAM, IPPROTO_TCP)    \
         returns a descriptor (obSCEne, 12.40) */
+#define SYS_connect 98
+#define SYS_bind 104
+#define SYS_listen 106
+#define SYS_accept 30
 #define SYS_setsockopt 105
+#define SYS_getdents 272
 #define SYS_mmap 477
 #define SYS_lseek 478
 #define SYS_klog 601

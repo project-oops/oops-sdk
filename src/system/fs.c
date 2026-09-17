@@ -4,6 +4,7 @@
 
 #include "oops/fs.h"
 #include "oops/freestd.h"
+#include "oops/heap.h"
 #include "oops/memory.h"
 #include "oops/syscall.h"
 
@@ -143,7 +144,7 @@ int oops_fs_read_all(const char *path, void **out_data, size_t *out_size) {
   (void)oops_fs_seek(fd, 0, OOPS_SEEK_SET);
 
 #ifndef OOPS_HOST_BUILD
-  void *buf = oops_mem_alloc((size_t)sz + 1, 64, OOPS_MEM_WB_ONION);
+  void *buf = oops_malloc((size_t)sz + 1);
 #else
   void *buf = malloc((size_t)sz + 1);
 #endif
@@ -173,7 +174,7 @@ void oops_fs_free_data(void *data) {
     return;
   }
 #ifndef OOPS_HOST_BUILD
-  oops_mem_free(data);
+  oops_free(data);
 #else
   free(data);
 #endif

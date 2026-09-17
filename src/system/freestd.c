@@ -256,6 +256,9 @@ const void *obs_kexport_lookup(const obs_kexport_table_t *table,
                                const char *nid) {
   if (table == NULL || nid == NULL)
     return NULL;
+  uintptr_t utable = (uintptr_t)table;
+  if (utable < 0x10000UL || utable >= 0x0000800000000000UL || (utable & 0x7UL) != 0)
+    return NULL;
   if (table->count == 0 || table->count > 16384)
     return NULL;
   int low = 0;

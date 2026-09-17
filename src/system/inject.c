@@ -151,9 +151,16 @@ int oops_inject_elf(pid_t target_pid, const uint8_t *payload_data,
   uintptr_t args_remote = alloc_remote;
   payload_args_t target_args;
   memset(&target_args, 0, sizeof(target_args));
-  if (target_libkernel_base != 0) {
+  char dlsym_nid[12];
+  obs_compute_nid("sceKernelDlsym", dlsym_nid);
+  const void *dlsym_ptr = obs_kexport_lookup(&s_kexport_table, dlsym_nid);
+  if (dlsym_ptr != NULL && (uintptr_t)dlsym_ptr >= 0x10000UL) {
     target_args.sys_dynlib_dlsym =
-        (int (*)(int, const char *, void *))(target_libkernel_base + 0x5b0);
+        (int (*)(int, const char *, void *))(uintptr_t)dlsym_ptr;
+    klog_write_hex("target sceKernelDlsym=", (uintptr_t)dlsym_ptr);
+  } else {
+    target_args.sys_dynlib_dlsym = NULL;
+    klog_write("target sceKernelDlsym not found in exports; left null");
   }
   target_args.kpipe_addr = args->kpipe_addr;
   target_args.kdata_base_addr = args->kdata_base_addr;

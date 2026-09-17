@@ -30,7 +30,15 @@ dwords: the frame's register state, the CP DMA fills that clear colour and depth
 one triangle each, the end-of-pipe fence, the CP's wait on it, the readback copy, and the GPU clock.
 
 Facts these records pin, each measured on this console (details in worklogs 535 and 539 of
-orbistoun's `docs/worklog/`):
+orbistoun's `docs/worklog/`).
+
+**Each of these is asserted against the stream `oops-gl` emits today**, by
+`test_pm4_gl_honours_the_gl_cube_oracle_record` in `tests/unit/test_pm4.c`. They were prose
+here and checked nowhere until 2026-09-16, which meant a register could be edited and this
+document would go on describing a frame the code no longer produces. If you change one of
+these values, that test is what will tell you, and its display is deliberately 640 x 480 so
+the extent fields cannot be transposed without it failing - the transposition the first entry
+below records having already been measured once.
 
 - `CB_COLOR0_ATTRIB2`: width - 1 in bits 27:14, height - 1 in bits 13:0; the colour block takes the row pitch from bits 27:14.
 - `CB_COLOR0_INFO` `COMP_SWAP=ALT` stores bytes B, G, R, A.

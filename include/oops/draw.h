@@ -127,6 +127,18 @@ void oops_draw_blit_blend(oops_surface_t *dst, int dx, int dy,
                           const oops_surface_t *src, int sx, int sy, int sw,
                           int sh);
 
+/*
+ * Decodes a PNG image from memory into 32bpp ARGB pixels.
+ * If target_w and target_h are non-zero, resamples to target_w x target_h.
+ * If target_w and target_h are 0, decodes at original dimensions (out_pixels
+ * must hold at least out_orig_w * out_orig_h * 4 bytes).
+ * out_orig_w and out_orig_h (if non-NULL) receive original dimensions.
+ * Returns 0 on success, negative error code on failure.
+ */
+int oops_png_decode(const void *png_data, size_t png_size,
+                    uint32_t *out_pixels, uint32_t target_w, uint32_t target_h,
+                    uint32_t *out_orig_w, uint32_t *out_orig_h);
+
 #ifdef __cplusplus
 }
 #endif

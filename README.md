@@ -33,7 +33,7 @@ oops-sdk (Freestanding C Runtime & Hardware Abstraction)
 1. **Common Target Foundation**: Both consumer applications ([`oops-apps`](../oops-apps/)) and hardware probes ([`obSCEne`](../obscene/)) build on `oops-sdk`.
 2. **Zero Proprietary SDK Headers**: Replaces proprietary headers with mathematically verified structures, hardware register layouts, and clean-room freestanding C runtime stubs (`-nostdlib -ffreestanding`).
 3. **Fail-Safe Hardware Invariants**: Enforces strict hardware safety invariants (e.g. CPU fallback on fence timeouts, graceful error returns instead of kernel panic) to protect physical console silicon.
-4. **First-Class Hardware Features**: Native RDNA2 AGC rasterization and 64 KB micro-tile swizzling, fixed-function OpenGL 1.3 pipeline, W^X dual-mapped JIT memory allocation, DualSense polling, and privilege escalation broker.
+4. **First-Class Hardware Features**: Native RDNA2 AGC rasterization and 64 KB micro-tile swizzling, a fixed-function 3D instrument lowering straight to PM4, W^X dual-mapped JIT memory allocation, DualSense polling, and privilege escalation broker.
 
 ---
 
@@ -67,7 +67,7 @@ Detailed signatures, parameters, return codes, hardware invariants, and code exa
 |---|---|---|---|
 | **[Display & Framebuffer](docs/API_REFERENCE.md#1-display--video-output-oopsdisplayh)** | `<oops/display.h>` | `oops_display_open`, `flip`, `close` | Direct video memory scanning, hardware vsync flip, double buffering, host SDL2/headless fallback |
 | **[2D Software Rendering](docs/API_REFERENCE.md#2-2d-software-drawing-canvas-oopsdrawh)** | `<oops/draw.h>` | `oops_draw_clear`, `rect`, `text` | Software rasterizer, 8x8 font rendering, clipping rectangles, RGBA/BGRA blend modes |
-| **[OpenGL 1.3 Shim](docs/API_REFERENCE.md#3-opengl-13-3d-graphics-engine-glglh)** | `<GL/gl.h>`, `<oops/gl.h>` | `glBegin`, `glVertex3f`, `glLoadIdentity` | Fixed-function 3D pipeline, modelview/projection matrix stack, lighting, lowering directly to AGC PM4 |
+| **[Fixed-Function 3D Instrument](docs/API_REFERENCE.md#3-fixed-function-3d-instrument-glglh)** | `<GL/gl.h>`, `<oops/gl.h>` | `glBegin`, `glVertex3f`, `glLoadIdentity` | OpenGL 1.1-class fixed function, lowering directly to AGC PM4 so the stream reads as evidence. **Not** the GL for applications - that is [oops-mesa](../oops-mesa/), which gives OpenGL 3.3 (D007) |
 | **[Hardware AGC & Tiler](docs/API_REFERENCE.md#4-hardware-rdna2-agc-graphics-oopsagch-oopsgpuh)** | `<oops/agc.h>`, `<agc/tiler.h>` | `oops_agc_init`, `queue_submit`, `swizzle` | Direct RDNA2 universal queue submit, PM4 packets, fence synchronization, 64 KB micro-tile morton swizzle |
 | **[Direct Physical Memory](docs/API_REFERENCE.md#5-memory-management--direct-memory-oopsmemoryh)** | `<oops/memory.h>` | `oops_mem_alloc`, `map_dmem`, `free` | Direct physical memory mapping, Onion (coherent CPU/GPU) and Garlic (high-speed GPU) bus management |
 | **[Dynamic Code Gen (JIT)](docs/API_REFERENCE.md#6-jit--dynamic-executable-memory-oopsjith)** | `<oops/jit.h>` | `oops_jit_alloc`, `flush_icache`, `free` | W^X-compliant dual-mapped pages (`rx_addr` execution / `rw_addr` write), auto-fallback to `mprotect_fix` |

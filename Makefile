@@ -48,6 +48,9 @@ OBJS := \
     $(BUILD)/gl/gl_state.o \
     $(BUILD)/gl/gl_matrix.o \
     $(BUILD)/gl/gl_draw.o \
+    $(BUILD)/gl/gl_list.o \
+    $(BUILD)/gl/gl_attrib.o \
+    $(BUILD)/gl/glsl_lex.o \
     $(BUILD)/input/input.o \
     $(BUILD)/input/keyboard.o \
     $(BUILD)/input/mouse.o \
@@ -71,6 +74,7 @@ OBJS := \
     $(BUILD)/net/netctl.o \
     $(BUILD)/net/dns.o \
     $(BUILD)/draw/draw.o \
+    $(BUILD)/draw/png.o \
     $(BUILD)/system/pkg.o \
     $(BUILD)/system/freestd.o \
     $(BUILD)/system/syscall.o \
@@ -120,6 +124,7 @@ TEST_SRCS := \
     src/agc/agc_compute.c \
     src/agc/agc_draw.c \
     src/draw/draw.c \
+    src/draw/png.c \
     src/input/input.c \
     src/input/keyboard.c \
     src/input/mouse.c \
@@ -153,7 +158,10 @@ TEST_SRCS := \
     src/gl/gl_context.c \
     src/gl/gl_state.c \
     src/gl/gl_matrix.c \
-    src/gl/gl_draw.c
+    src/gl/gl_draw.c \
+    src/gl/gl_list.c \
+    src/gl/gl_attrib.c \
+    src/gl/glsl_lex.c
 
 HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -D_GNU_SOURCE -DOOPS_HOST_BUILD $(OOPS_TARGET_FLAGS)
 

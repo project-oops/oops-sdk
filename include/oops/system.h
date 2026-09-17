@@ -36,6 +36,11 @@ int oops_system_get_info(oops_system_info_t *out_info);
 int oops_system_notify(const char *text);
 
 /* Kernel Log & Telemetry Output (/dev/klog on target, stderr on host) */
+void oops_log_init(const char *app_id);
+const char *oops_log_get_app_id(void);
+
+void oops_log(const char *fmt, ...)
+    __attribute__((format(printf, 1, 2)));
 void oops_klog(const char *tag, const char *msg);
 void oops_kprintf(const char *tag, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
@@ -46,6 +51,7 @@ int oops_system_hide_splash(void);
 int oops_system_power_tick(void);
 int oops_system_navigate_home(void);
 int oops_system_get_enter_button(int *out_button); /* 0 = Circle, 1 = Cross */
+int oops_system_launch_app(const char *title_id);
 
 /* Hardware Telemetry & Diagnostics */
 int oops_system_get_hw_info(oops_hw_info_t *out_hw);
@@ -116,6 +122,21 @@ typedef enum oops_app_category {
 /* Checks if /dev/pltauth is patched for native Prospero category 0 execution.
  * Returns 1 if pltauth is patched (or on Orbis/host), 0 if unpatched/failing. */
 int oops_system_check_pltauth(void);
+
+struct payload_args;
+/* System namespace & root filesystem binding (resolves kernel root vnode) */
+int oops_system_init_namespace(const struct payload_args *args);
+
+/**
+ * Explicitly requests filesystem namespace elevation to access global /user and /data.
+ *
+ * Performs an on-demand event-driven handshake with the resident sandbox-daemon via
+ * loopback TCP at 127.0.0.1:9069. Sends the calling process's 4-byte PID and receives
+ * an int32_t status code (0 = success). Operates with zero background polling overhead.
+ *
+ * Returns: 0 on success, -1 on timeout or if daemon is unavailable.
+ */
+int oops_system_escape_sandbox(void);
 
 #ifdef __cplusplus
 }

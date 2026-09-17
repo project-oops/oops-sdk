@@ -2,14 +2,24 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Precomputed 128-element LUTs for 64KB RDNA2 macro-tiles (32bpp kRenderTarget)
+/* Precomputed 128-element LUTs for 64KB RDNA2 macro-tiles, 32bpp kRenderTarget,
+ * in the swizzle addrlib calls 64KB_R_X.
  */
 static uint32_t s_lut_x[128];
 static uint32_t s_lut_y[128];
 static int s_lut_initialized = 0;
 
 static void init_tiler_lut(void) {
-  /* RDNA2 GFX10.3 basis vectors for 32bpp (4 bytes/pixel) in 64KB blocks.
+  /* RDNA2 basis vectors for 32bpp (4 bytes/pixel) in 64KB blocks, for the GFX10
+   * level without RB+ that this part reports - not GFX10.3, which this comment
+   * claimed until the gfx level was actually settled. The vectors did not
+   * change; only the label on them was wrong. It was settled by deriving
+   * GB_ADDR_CONFIG from this table rather than by assuming a family: inverting
+   * addrlib against these numbers, no RB+ (GFX10.3) configuration reproduces
+   * them at all, and the non-RB+ one does, at 16 pipes with a 256 B interleave.
+   * The derivation is written out where its result is used, beside
+   * OOPS_GB_ADDR_CONFIG in oops-mesa's drm_device.c.
+   *
    * Each entry is the byte-address contribution of one x (or y) bit inside a
    * tile; a pixel's tile-relative byte address is the XOR of the entries for
    * its set bits. The 14 vectors are linearly independent across the 14 address
@@ -41,6 +51,77 @@ void agc_tile_init(void) {
   if (!s_lut_initialized) {
     init_tiler_lut();
   }
+}
+
+int agc_buffer_descriptor(uint32_t out[4], uint64_t base, uint32_t stride,
+                          uint32_t num_records, uint32_t format) {
+  if (!out || stride > 0x3FFFu || format > 0x7Fu) {
+    return -1;
+  }
+
+  /* Base is 48 bits; the high half shares word 1 with the stride. Truncating
+   * rather than refusing an over-wide address would point the descriptor at
+   * memory the caller did not name, so refuse that too. */
+  if ((base >> 48) != 0u) {
+    return -1;
+  }
+
+  out[0] = (uint32_t)(base & 0xFFFFFFFFu);
+  out[1] = (uint32_t)((base >> 32) & 0xFFFFu) | ((stride & 0x3FFFu) << 16);
+  /* bit 31 of word 1 is swizzle enable, left clear */
+  out[2] = num_records;
+  out[3] = AGC_BUF_DST_SEL_IDENTITY | ((format & 0x7Fu) << 12) |
+           (AGC_BUF_OOB_STRUCTURED << 28);
+  /* bit 23 of word 3 is add-thread-id, left clear; bits 31:30 are the resource
+   * type, 0 for a buffer */
+  return 0;
+}
+
+int agc_tiler_dispatch_params(uint32_t *user_data, uint32_t *groups_x,
+                              uint32_t *groups_y, uint64_t linear_src,
+                              uint64_t tiled_dst, uint32_t width,
+                              uint32_t height) {
+  if (!user_data || !groups_x || !groups_y || width == 0 || height == 0) {
+    return -1;
+  }
+
+  const uint32_t span_x = AGC_TILER_THREADS_X * AGC_TILER_PIXELS_PER_THREAD;
+  const uint32_t span_y = AGC_TILER_THREADS_Y;
+  if ((width % span_x) != 0u || (height % span_y) != 0u) {
+    return -1;
+  }
+
+  /* The source is the linear surface, one 32-bit pixel per record. The
+   * destination is the tiled surface addressed as dword *pairs*, because the
+   * stores are two-component: the swizzle puts a pixel and its x+1 neighbour in
+   * adjacent dwords (x bit 0 contributes 4 bytes, x bit 1 contributes 8), so a
+   * pair is contiguous and a two-component record is the right unit. */
+  uint32_t src_desc[4];
+  uint32_t dst_desc[4];
+  size_t tiled_bytes = agc_tile_surface_bytes(width, height);
+
+  if (agc_buffer_descriptor(src_desc, linear_src, 4u,
+                            width * height, AGC_BUF_FMT_32_UINT) != 0) {
+    return -1;
+  }
+  if (agc_buffer_descriptor(dst_desc, tiled_dst, 8u,
+                            (uint32_t)(tiled_bytes / 8u),
+                            AGC_BUF_FMT_32_32_UINT) != 0) {
+    return -1;
+  }
+
+  /* User data 0: read once by the shader and never again. Unestablished; the
+   * surface width in pixels is the assumption, and the one thing a hardware
+   * bring-up should vary first if the addressing comes out wrong. */
+  user_data[0] = width;
+  for (int i = 0; i < 4; i++) {
+    user_data[AGC_TILER_SRC_DESC_SLOT + (unsigned)i] = src_desc[i];
+    user_data[AGC_TILER_DST_DESC_SLOT + (unsigned)i] = dst_desc[i];
+  }
+
+  *groups_x = width / span_x;
+  *groups_y = height / span_y;
+  return 0;
 }
 
 size_t agc_tile_surface_bytes(uint32_t width, uint32_t height) {
@@ -80,6 +161,40 @@ void agc_tile_surface(void *dest, const void *src, uint32_t width,
 
         for (uint32_t lx = 0; lx < block_w; lx++) {
           tile_dest[y_off ^ s_lut_x[lx]] = src_row[lx];
+        }
+      }
+    }
+  }
+}
+
+
+void agc_detile_surface(void *dest, const void *src, uint32_t width,
+                        uint32_t height) {
+  if (!dest || !src || width == 0 || height == 0) {
+    return;
+  }
+
+  agc_tile_init();
+
+  uint32_t *dst32 = (uint32_t *)dest;
+  const uint32_t *src32 = (const uint32_t *)src;
+  uint32_t tiles_per_row = (width + 127u) >> 7;
+
+  for (uint32_t ty = 0; ty < height; ty += 128u) {
+    uint32_t block_h = (ty + 128u <= height) ? 128u : (height - ty);
+    uint32_t row_tile_idx = (ty >> 7) * tiles_per_row;
+
+    for (uint32_t tx = 0; tx < width; tx += 128u) {
+      uint32_t block_w = (tx + 128u <= width) ? 128u : (width - tx);
+      uint32_t tile_idx = row_tile_idx + (tx >> 7);
+      const uint32_t *tile_src = src32 + (size_t)tile_idx * (AGC_TILE_BYTES / 4u);
+
+      for (uint32_t ly = 0; ly < block_h; ly++) {
+        uint32_t y_off = s_lut_y[ly];
+        uint32_t *dst_row = dst32 + (ty + ly) * width + tx;
+
+        for (uint32_t lx = 0; lx < block_w; lx++) {
+          dst_row[lx] = tile_src[y_off ^ s_lut_x[lx]];
         }
       }
     }

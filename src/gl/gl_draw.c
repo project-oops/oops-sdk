@@ -5,6 +5,83 @@
 #include "gl_internal.h"
 
 /* -------------------------------------------------------------------------
+ * What this subset will draw, and how it refuses the rest
+ *
+ * Everything here reaches the hardware as triangles, so the four modes that triangulate are
+ * the four that work. GL_POINTS, GL_LINES, GL_LINE_STRIP, GL_LINE_LOOP, GL_QUAD_STRIP and
+ * GL_POLYGON are declared in <GL/gl.h> and are not implemented.
+ *
+ * **That is now a measured refusal rather than an unmeasured one.** obSCEne's
+ * `166-agc/primitive-draw-point-line` submitted both on retail hardware across four
+ * independent sweeps on 2026-09-16 (`20260916-211030`, `-211622`, `-213216`, `-221711`), a
+ * point with `m0 = 0x1001` (1 primitive, 1 vertex) and a line with `m0 = 0x1002` (1
+ * primitive, 2 vertices), with `VGT_GS_OUT_PRIM_TYPE` 0 and 1 respectively. Every run
+ * recorded `fence-hit 0` and `pixel-hit 0`: the end-of-pipe fence kept its `0x11111111`
+ * sentinel, so the submission never completed at all - it is not that the primitives drew
+ * wrongly, it is that the pipe stopped.
+ *
+ * The contrast in the same section is what makes it legible. `166-agc/primitive-draw` uses
+ * the same path with `m0 = 0x1003` - **three** vertices - and its fence retires and one pixel
+ * lands. So that geometry engine wanted three vertices per primitive, and one or two left it
+ * waiting.
+ *
+ * **And it is not a property of the fixture's stage configuration.** That was the open
+ * question: obSCEne's fixture programmes `VGT_SHADER_STAGES_EN` (`0x2d5`) to `0x02002000`,
+ * which it reads as passthrough, where oops-gl programmes `0x00c12010` - so the stall might
+ * have been something only their configuration did. Re-run with **oops-gl's own value**
+ * (`REQ-...5a3e`, sweep `20260917-010918`, rows recording `vgt-shader-stages-en 0xc12010`),
+ * both the point and the line stall exactly as before: `fence-hit 0`, `pixel-hit 0`, the
+ * target still holding its background, `res fail`.
+ *
+ * So the refusal is settled on a measurement of the configuration this code actually uses,
+ * rather than on an inference from somebody else's. Points and lines need a stage this does
+ * not build - not a different register value - and that is a larger piece of work than the
+ * rest of the 1.x surface (D008). They stay refused, and the refusal is now the correct
+ * answer rather than a cautious one.
+ *
+ * They used to reach a `default: break;` in three separate switches, which drew nothing, set
+ * no error, and left glGetError() answering GL_NO_ERROR. A caller had no way to tell that
+ * from a successful draw of a degenerate mesh - it is the plausible-output failure OOPS
+ * conventions section 3 forbids, and it is worse in a measuring instrument than anywhere
+ * else, because a record with nothing in it still looks like a record.
+ *
+ * So the check lives here, once, and every entry point that takes a mode calls it before
+ * doing anything. An unsupported mode is GL_INVALID_ENUM, which is the nearest thing GL has
+ * to "this implementation will not do that" - there is no GL_UNSUPPORTED, and staying silent
+ * is not an option.
+ * ------------------------------------------------------------------------- */
+
+static GLboolean gl_mode_is_drawable(GLenum mode) {
+    switch (mode) {
+        case GL_TRIANGLES:
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:
+        case GL_QUADS:
+            return GL_TRUE;
+        default:
+            return GL_FALSE;
+    }
+}
+
+/* Checks a mode and records the refusal on the context. Returns whether to go ahead. */
+static GLboolean gl_accept_mode(gl_context_t *ctx, GLenum mode) {
+    if (gl_mode_is_drawable(mode)) return GL_TRUE;
+    gl_record_error(ctx, GL_INVALID_ENUM);
+    return GL_FALSE;
+}
+
+/* The index types glDrawElements can read.
+ *
+ * Checked rather than assumed, because the reader below selects 16-bit and 8-bit explicitly
+ * and treats *everything else* as 32-bit. An unchecked type therefore did not merely give a
+ * wrong answer: passing GL_FLOAT, or GL_UNSIGNED_INT's neighbour by a typo, read four bytes
+ * per index out of an array the caller had sized for one, running off the end of it. */
+static GLboolean gl_index_type_is_readable(GLenum type) {
+    return (GLboolean)(type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT ||
+                       type == GL_UNSIGNED_INT);
+}
+
+/* -------------------------------------------------------------------------
  * Client-Side Vertex Arrays
  * ------------------------------------------------------------------------- */
 
@@ -16,7 +93,10 @@ void glEnableClientState(GLenum array) {
         case GL_COLOR_ARRAY:          ctx->array_color.enabled = GL_TRUE; break;
         case GL_NORMAL_ARRAY:         ctx->array_normal.enabled = GL_TRUE; break;
         case GL_TEXTURE_COORD_ARRAY:  ctx->array_texcoord.enabled = GL_TRUE; break;
-        default: break;
+        /* Same reasoning as glEnable: an array this subset does not keep is refused rather
+         * than dropped, so a caller asking for one finds out from glGetError() instead of
+         * from geometry that renders without it. */
+        default: gl_record_error(ctx, GL_INVALID_ENUM); break;
     }
 }
 
@@ -28,10 +108,15 @@ void glDisableClientState(GLenum array) {
         case GL_COLOR_ARRAY:          ctx->array_color.enabled = GL_FALSE; break;
         case GL_NORMAL_ARRAY:         ctx->array_normal.enabled = GL_FALSE; break;
         case GL_TEXTURE_COORD_ARRAY:  ctx->array_texcoord.enabled = GL_FALSE; break;
-        default: break;
+        default: gl_record_error(ctx, GL_INVALID_ENUM); break;
     }
 }
 
+/* **The buffer bound *now* is the one this array reads from later.** GL ties the array to the
+ * GL_ARRAY_BUFFER binding at the moment the pointer is specified, not at the moment of the
+ * draw - so a program that binds a buffer, sets four pointers, then binds a different buffer
+ * and sets a fifth ends up with arrays reading from two buffers at once, which is exactly what
+ * it meant. Capturing the name here is what makes that work. */
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
@@ -39,6 +124,7 @@ void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *poin
     ctx->array_vertex.type = type;
     ctx->array_vertex.stride = stride;
     ctx->array_vertex.pointer = pointer;
+    ctx->array_vertex.buffer = ctx->bound_array_buffer;
 }
 
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
@@ -48,6 +134,7 @@ void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *point
     ctx->array_color.type = type;
     ctx->array_color.stride = stride;
     ctx->array_color.pointer = pointer;
+    ctx->array_color.buffer = ctx->bound_array_buffer;
 }
 
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
@@ -57,6 +144,7 @@ void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *po
     ctx->array_texcoord.type = type;
     ctx->array_texcoord.stride = stride;
     ctx->array_texcoord.pointer = pointer;
+    ctx->array_texcoord.buffer = ctx->bound_array_buffer;
 }
 
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
@@ -66,6 +154,104 @@ void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
     ctx->array_normal.type = type;
     ctx->array_normal.stride = stride;
     ctx->array_normal.pointer = pointer;
+    ctx->array_normal.buffer = ctx->bound_array_buffer;
+}
+
+/* `glInterleavedArrays(format, stride, pointer)` - all four arrays from one buffer.
+ *
+ * The specification defines it as exactly the glEnableClientState / glDisableClientState and
+ * pointer calls a program would otherwise write out by hand, so that is what it does: there is
+ * nothing here the draw path does not already read, and nothing new to get wrong at draw time.
+ *
+ * **The arrays a format does not name are disabled, not left alone.** That is the part worth
+ * being deliberate about: a program that sets up GL_C3F_V3F after having had a normal array
+ * enabled would otherwise keep reading normals out of the old pointer, which is a stale read
+ * into a buffer that may well be gone. The specification says to disable them; this does.
+ *
+ * `stride` of 0 means "the format's own size", which is the packed case.
+ */
+void glInterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+
+    /* Component counts, in the order they appear in the buffer: texture coordinates first,
+     * then colour, then normal, then position - which is what the format names spell out
+     * backwards. A count of 0 means the format does not carry that array. */
+    int tc = 0, cc = 0, nc = 0, vc = 0;
+    GLboolean colour_is_bytes = GL_FALSE;
+
+    switch (format) {
+        case GL_V2F:             vc = 2; break;
+        case GL_V3F:             vc = 3; break;
+        case GL_C4UB_V2F:        cc = 4; colour_is_bytes = GL_TRUE; vc = 2; break;
+        case GL_C4UB_V3F:        cc = 4; colour_is_bytes = GL_TRUE; vc = 3; break;
+        case GL_C3F_V3F:         cc = 3; vc = 3; break;
+        case GL_N3F_V3F:         nc = 3; vc = 3; break;
+        case GL_C4F_N3F_V3F:     cc = 4; nc = 3; vc = 3; break;
+        case GL_T2F_V3F:         tc = 2; vc = 3; break;
+        case GL_T4F_V4F:         tc = 4; vc = 4; break;
+        case GL_T2F_C4UB_V3F:    tc = 2; cc = 4; colour_is_bytes = GL_TRUE; vc = 3; break;
+        case GL_T2F_C3F_V3F:     tc = 2; cc = 3; vc = 3; break;
+        case GL_T2F_N3F_V3F:     tc = 2; nc = 3; vc = 3; break;
+        case GL_T2F_C4F_N3F_V3F: tc = 2; cc = 4; nc = 3; vc = 3; break;
+        case GL_T4F_C4F_N3F_V4F: tc = 4; cc = 4; nc = 3; vc = 4; break;
+        default:
+            gl_record_error(ctx, GL_INVALID_ENUM);
+            return;
+    }
+    if (stride < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+
+    /* The four unsigned bytes of a C4UB colour occupy **four bytes rounded up to a float**,
+     * because the specification aligns what follows them to a float boundary. With a 4-byte
+     * GLfloat the two are the same number, so nothing here can currently observe the
+     * difference - the rounding is written out anyway rather than the coincidence relied on.
+     *
+     * Every offset below was checked against Mesa's own table
+     * (`src/mesa/main/varray.c`, `_mesa_get_interleaved_layout`), which computes
+     * `c = f * ((4 * sizeof(GLubyte) + (f - 1)) / f)` and lists each format's offsets and
+     * default stride explicitly. All fourteen agree. */
+    const size_t f = sizeof(GLfloat);
+    const size_t ub4 = f * ((4u * sizeof(GLubyte) + (f - 1u)) / f);
+    const size_t colour_bytes = colour_is_bytes ? ub4 : (size_t)cc * f;
+
+    const size_t off_t = 0u;
+    const size_t off_c = off_t + (size_t)tc * f;
+    /* `colour_bytes` is already zero when the format has no colour - `colour_is_bytes` is only
+     * set in the C4UB cases, where `cc` is 4 - so no guard is needed here. */
+    const size_t off_n = off_c + colour_bytes;
+    const size_t off_v = off_n + (size_t)nc * f;
+    const size_t packed = off_v + (size_t)vc * f;
+
+    const GLsizei real_stride = stride ? stride : (GLsizei)packed;
+    const uint8_t *base = (const uint8_t *)pointer;
+
+    if (tc) {
+        glTexCoordPointer(tc, GL_FLOAT, real_stride, base ? base + off_t : NULL);
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    } else {
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    }
+
+    if (cc) {
+        glColorPointer(cc, colour_is_bytes ? GL_UNSIGNED_BYTE : GL_FLOAT, real_stride,
+                       base ? base + off_c : NULL);
+        glEnableClientState(GL_COLOR_ARRAY);
+    } else {
+        glDisableClientState(GL_COLOR_ARRAY);
+    }
+
+    if (nc) {
+        glNormalPointer(GL_FLOAT, real_stride, base ? base + off_n : NULL);
+        glEnableClientState(GL_NORMAL_ARRAY);
+    } else {
+        glDisableClientState(GL_NORMAL_ARRAY);
+    }
+
+    glVertexPointer(vc, GL_FLOAT, real_stride, base ? base + off_v : NULL);
+    glEnableClientState(GL_VERTEX_ARRAY);
 }
 
 /* -------------------------------------------------------------------------
@@ -73,8 +259,20 @@ void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
  * ------------------------------------------------------------------------- */
 
 void glBegin(GLenum mode) {
+    {
+        GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (gl_list_capture(GL_LIST_OP_BEGIN, mode, 0, 0, f)) return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
+    /* Refused here rather than at glEnd, so the vertices in between are never collected and
+     * the error is attributable to the call that caused it. `imm_active` stays false, which
+     * makes glVertex*() and glEnd() no-ops for this block. */
+    if (!gl_accept_mode(ctx, mode)) {
+        ctx->imm_active = GL_FALSE;
+        ctx->imm_count = 0;
+        return;
+    }
     ctx->imm_mode = mode;
     ctx->imm_active = GL_TRUE;
     ctx->imm_count = 0;
@@ -93,9 +291,13 @@ void glVertex3fv(const GLfloat *v) {
 }
 
 void glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
+    {
+        GLfloat f[4] = {x, y, z, w};
+        if (gl_list_capture(GL_LIST_OP_VERTEX, 0, 0, 0, f)) return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !ctx->imm_active) return;
-    if (ctx->imm_count >= GL_MAX_IMMEDIATE_VERTS) return;
+    if (ctx->imm_count >= OOPS_GL_MAX_IMMEDIATE_VERTS) return;
 
     gl_vertex_t *v = &ctx->imm_verts[ctx->imm_count++];
     v->x = (float)x;
@@ -122,6 +324,10 @@ void glColor3fv(const GLfloat *v) {
 }
 
 void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
+    {
+        GLfloat f[4] = {red, green, blue, alpha};
+        if (gl_list_capture(GL_LIST_OP_COLOR, 0, 0, 0, f)) return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     ctx->cur_color[0] = (float)red;
@@ -140,6 +346,10 @@ void glColor4ub(GLubyte red, GLubyte green, GLubyte blue, GLubyte alpha) {
 }
 
 void glTexCoord2f(GLfloat s, GLfloat t) {
+    {
+        GLfloat f[4] = {s, t, 0.0f, 0.0f};
+        if (gl_list_capture(GL_LIST_OP_TEXCOORD, 0, 0, 0, f)) return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     ctx->cur_texcoord[0] = (float)s;
@@ -147,6 +357,10 @@ void glTexCoord2f(GLfloat s, GLfloat t) {
 }
 
 void glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz) {
+    {
+        GLfloat f[4] = {nx, ny, nz, 0.0f};
+        if (gl_list_capture(GL_LIST_OP_NORMAL, 0, 0, 0, f)) return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     ctx->cur_normal[0] = (float)nx;
@@ -158,7 +372,71 @@ void glNormal3fv(const GLfloat *v) {
     if (v) glNormal3f(v[0], v[1], v[2]);
 }
 
+/* -------------------------------------------------------------------------
+ * The other spellings
+ *
+ * GL 1.x names each attribute once per C type and once per arity. Every one of these converts
+ * and forwards to the `f` sibling above, so each attribute has exactly one implementation and
+ * the spellings cannot drift apart - which also means they are all recorded into a display list
+ * by the one `gl_list_capture` the sibling already has.
+ *
+ * A null vector pointer draws nothing rather than being dereferenced, matching the `fv` forms.
+ * ------------------------------------------------------------------------- */
+
+void glVertex2d(GLdouble x, GLdouble y) { glVertex4f((GLfloat)x, (GLfloat)y, 0.0f, 1.0f); }
+void glVertex3d(GLdouble x, GLdouble y, GLdouble z) {
+    glVertex4f((GLfloat)x, (GLfloat)y, (GLfloat)z, 1.0f);
+}
+void glVertex4d(GLdouble x, GLdouble y, GLdouble z, GLdouble w) {
+    glVertex4f((GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w);
+}
+void glVertex2i(GLint x, GLint y) { glVertex4f((GLfloat)x, (GLfloat)y, 0.0f, 1.0f); }
+void glVertex3i(GLint x, GLint y, GLint z) {
+    glVertex4f((GLfloat)x, (GLfloat)y, (GLfloat)z, 1.0f);
+}
+void glVertex2fv(const GLfloat *v) { if (v) glVertex4f(v[0], v[1], 0.0f, 1.0f); }
+void glVertex4fv(const GLfloat *v) { if (v) glVertex4f(v[0], v[1], v[2], v[3]); }
+void glVertex2dv(const GLdouble *v) { if (v) glVertex2d(v[0], v[1]); }
+void glVertex3dv(const GLdouble *v) { if (v) glVertex3d(v[0], v[1], v[2]); }
+void glVertex2iv(const GLint *v) { if (v) glVertex2i(v[0], v[1]); }
+void glVertex3iv(const GLint *v) { if (v) glVertex3i(v[0], v[1], v[2]); }
+
+void glColor3d(GLdouble red, GLdouble green, GLdouble blue) {
+    glColor4f((GLfloat)red, (GLfloat)green, (GLfloat)blue, 1.0f);
+}
+void glColor4d(GLdouble red, GLdouble green, GLdouble blue, GLdouble alpha) {
+    glColor4f((GLfloat)red, (GLfloat)green, (GLfloat)blue, (GLfloat)alpha);
+}
+/* **255 divides, it does not shift.** The specification maps the unsigned-byte range onto
+ * [0,1] so that 255 reaches exactly 1.0; dividing by 256 would leave full-brightness white one
+ * step short of white, which is invisible in isolation and wrong in a blend. */
+void glColor3ub(GLubyte red, GLubyte green, GLubyte blue) {
+    glColor4ub(red, green, blue, 255);
+}
+void glColor3dv(const GLdouble *v) { if (v) glColor3d(v[0], v[1], v[2]); }
+void glColor4dv(const GLdouble *v) { if (v) glColor4d(v[0], v[1], v[2], v[3]); }
+void glColor3ubv(const GLubyte *v) { if (v) glColor4ub(v[0], v[1], v[2], 255); }
+void glColor4ubv(const GLubyte *v) { if (v) glColor4ub(v[0], v[1], v[2], v[3]); }
+
+/* The one-coordinate form leaves t at 0, which is what the specification says and not simply an
+ * omission: a 1D-style lookup into a 2D texture wants row zero. */
+void glTexCoord1f(GLfloat s) { glTexCoord2f(s, 0.0f); }
+void glTexCoord2d(GLdouble s, GLdouble t) { glTexCoord2f((GLfloat)s, (GLfloat)t); }
+void glTexCoord2i(GLint s, GLint t) { glTexCoord2f((GLfloat)s, (GLfloat)t); }
+void glTexCoord2fv(const GLfloat *v) { if (v) glTexCoord2f(v[0], v[1]); }
+void glTexCoord2dv(const GLdouble *v) { if (v) glTexCoord2d(v[0], v[1]); }
+void glTexCoord2iv(const GLint *v) { if (v) glTexCoord2i(v[0], v[1]); }
+
+void glNormal3d(GLdouble nx, GLdouble ny, GLdouble nz) {
+    glNormal3f((GLfloat)nx, (GLfloat)ny, (GLfloat)nz);
+}
+void glNormal3dv(const GLdouble *v) { if (v) glNormal3d(v[0], v[1], v[2]); }
+
 void glEnd(void) {
+    {
+        GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (gl_list_capture(GL_LIST_OP_END, 0, 0, 0, f)) return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !ctx->imm_active) return;
     ctx->imm_active = GL_FALSE;
@@ -200,15 +478,70 @@ void glEnd(void) {
 }
 
 /* -------------------------------------------------------------------------
+ * glRect*
+ *
+ * A screen-aligned rectangle in the z=0 plane, drawn with the current colour, normal and
+ * texture coordinate. The specification defines it as exactly this sequence:
+ *
+ *     glBegin(GL_POLYGON);
+ *     glVertex2(x1, y1); glVertex2(x2, y1); glVertex2(x2, y2); glVertex2(x1, y2);
+ *     glEnd();
+ *
+ * **GL_POLYGON is not a primitive this accepts, and GL_QUADS is.** For four vertices those two
+ * are not merely similar: GL_POLYGON triangulates a convex polygon as a fan from vertex 0, and
+ * GL_QUADS splits a quad into (0,1,2) and (0,2,3), which for n=4 is the same fan. A rectangle is
+ * always convex, so the substitution is exact rather than an approximation - and the vertex
+ * order above is the winding the specification gives, so face culling sees what it should.
+ *
+ * Written on top of glBegin/glVertex/glEnd rather than reaching into the immediate-mode buffer,
+ * which is what makes it compile into a display list correctly: those three capture, so a
+ * glRectf inside glNewList records the four vertices, which is what the specification says a
+ * compiled glRect is.
+ * ------------------------------------------------------------------------- */
+
+void glRectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2) {
+    glBegin(GL_QUADS);
+    glVertex2f(x1, y1);
+    glVertex2f(x2, y1);
+    glVertex2f(x2, y2);
+    glVertex2f(x1, y2);
+    glEnd();
+}
+
+void glRectd(GLdouble x1, GLdouble y1, GLdouble x2, GLdouble y2) {
+    glRectf((GLfloat)x1, (GLfloat)y1, (GLfloat)x2, (GLfloat)y2);
+}
+
+void glRecti(GLint x1, GLint y1, GLint x2, GLint y2) {
+    glRectf((GLfloat)x1, (GLfloat)y1, (GLfloat)x2, (GLfloat)y2);
+}
+
+void glRects(GLshort x1, GLshort y1, GLshort x2, GLshort y2) {
+    glRectf((GLfloat)x1, (GLfloat)y1, (GLfloat)x2, (GLfloat)y2);
+}
+
+/* The vector forms take *two* corners in two arrays, not four scalars in one - the mistake to
+ * avoid is reading v1[2] and v1[3] for the second corner. */
+void glRectfv(const GLfloat *v1, const GLfloat *v2) {
+    if (v1 && v2) glRectf(v1[0], v1[1], v2[0], v2[1]);
+}
+
+void glRectdv(const GLdouble *v1, const GLdouble *v2) {
+    if (v1 && v2) glRectd(v1[0], v1[1], v2[0], v2[1]);
+}
+
+void glRectiv(const GLint *v1, const GLint *v2) {
+    if (v1 && v2) glRecti(v1[0], v1[1], v2[0], v2[1]);
+}
+
+void glRectsv(const GLshort *v1, const GLshort *v2) {
+    if (v1 && v2) glRects(v1[0], v1[1], v2[0], v2[1]);
+}
+
+/* -------------------------------------------------------------------------
  * Triangle Pipeline & Rasterizer
  * ------------------------------------------------------------------------- */
 
-
-static inline uint32_t gl_f32_bits(float f) {
-    union { float f; uint32_t u; } v;
-    v.f = f;
-    return v.u;
-}
 
 /* The depth block: surface, extent and bases. Emitted the first time a frame draws with the
  * depth test on, so a frame that never tests depth carries exactly the measured no-depth recipe.
@@ -312,6 +645,13 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x08cu, 0xaa99aaaau}, /* PA_SC_EDGERULE */
         {0x1d4u, 0x000000ffu}, /* SX_PS_DOWNCONVERT_CONTROL */
         {0x291u, 0x20040100u}, /* VGT_GS_ONCHIP_CNTL: ES_VERTS=256, GS_PRIMS=128, GS_INST_PRIMS=128 (subgroup sizing as radeonsi programs it) */
+        /* TRISTRIP, and there is now a measured negative behind that choice rather than only
+         * the positive one in the gl-cube oracle record. obSCEne's `166-agc/primitive-draw`
+         * (sweep 20260916-223136) submits three vertices with this register set to 0
+         * (POINTLIST) and its 64x64 target comes back with **4095 background pixels and
+         * exactly one red one** - the triangle became a point, which is precisely what the
+         * oracle said POINTLIST does here. Its fence retired, so this is the register's
+         * effect and not a failed submission. */
         {0x29bu, 0x00000002u}, /* VGT_GS_OUT_PRIM_TYPE: TRISTRIP */
         {0x2d3u, 0x00000001u}, /* GE_NGG_SUBGRP_CNTL: PRIM_AMP=1 */
         {0x2d5u, 0x00c12010u}, /* VGT_SHADER_STAGES_EN: ES_EN=REAL | PRIMGEN_EN | MAX_PRIMGRP_IN_WAVE=2 | GS_W32 | VS_W32 (NGG, wave32) */
@@ -334,10 +674,28 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x312u, 0x03ff0080u}, /* PA_SC_BINNER_CNTL_1 */
         {0x313u, 0x00006000u}, /* PA_SC_CONSERVATIVE_RASTERIZATION_CNTL */
         {0x00eu, 0x00000002u}, /* DB_DFSM_CONTROL */
+        /* These three were defaults nobody had varied, and nothing here draws a point or a
+         * line, so they had never affected a pixel. They are now **cross-checked, not
+         * measured**: obSCEne's `166-agc/primitive-draw` (sweep 20260916-223136, eboot) put a
+         * submission through this hardware whose fence retired, and its command stream sets
+         * all three to byte-identical values. A second independent stream agreeing is worth
+         * more than one, and it is still not a measurement of what they *do* - varying them
+         * and watching a pixel move is, and that is filed as obSCEne REQ-...9b71. */
         {0x280u, 0x00080008u}, /* PA_SU_POINT_SIZE */
         {0x281u, 0xffff0000u}, /* PA_SU_POINT_MINMAX */
         {0x282u, 0x00000008u}, /* PA_SU_LINE_CNTL */
+        /* PA_SU_POLY_OFFSET_DB_FMT_CNTL, and the value is not arbitrary: Mesa's radeonsi writes
+         * `NEG_NUM_DB_BITS(-23) | DB_IS_FLOAT_FMT(1)` for a 32-bit float z-buffer
+         * (`src/gallium/drivers/radeonsi/si_state.c`, the `uses_poly_offset` block), and -23 in
+         * the eight-bit field is 0xe9 with the float bit at 8 giving 0x1e9 - exactly what was
+         * already here. Which also settles that this depth buffer is on Mesa's 32-bit float
+         * path, so glPolygonOffset's units go in unscaled. */
         {0x2deu, 0x000001e9u}, /* PA_SU_POLY_OFFSET_DB_FMT_CNTL */
+        {0x2dfu, 0},           /* PA_SU_POLY_OFFSET_CLAMP (patched) */
+        {0x2e0u, 0},           /* PA_SU_POLY_OFFSET_FRONT_SCALE (patched) */
+        {0x2e1u, 0},           /* PA_SU_POLY_OFFSET_FRONT_OFFSET (patched) */
+        {0x2e2u, 0},           /* PA_SU_POLY_OFFSET_BACK_SCALE (patched) */
+        {0x2e3u, 0},           /* PA_SU_POLY_OFFSET_BACK_OFFSET (patched) */
         {0x00cu, 0x00000000u}, /* PA_SC_SCREEN_SCISSOR_TL */
         {0x00du, 0},           /* PA_SC_SCREEN_SCISSOR_BR (patched) */
         {0x081u, 0x80000000u}, /* PA_SC_WINDOW_SCISSOR_TL: WINDOW_OFFSET_DISABLE */
@@ -352,8 +710,8 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x110u, 0},           /* PA_CL_VPORT_XOFFSET (patched) */
         {0x111u, 0},           /* PA_CL_VPORT_YSCALE (patched) */
         {0x112u, 0},           /* PA_CL_VPORT_YOFFSET (patched) */
-        {0x113u, 0x3f000000u}, /* PA_CL_VPORT_ZSCALE: 0.5f */
-        {0x114u, 0x3f000000u}, /* PA_CL_VPORT_ZOFFSET: 0.5f */
+        {0x113u, 0},           /* PA_CL_VPORT_ZSCALE (patched: glDepthRange) */
+        {0x114u, 0},           /* PA_CL_VPORT_ZOFFSET (patched: glDepthRange) */
         {0x083u, 0x0000ffffu}, /* PA_SC_CLIPRECT_RULE */
         {0x084u, 0x00000000u}, /* PA_SC_CLIPRECT_0_TL */
         {0x085u, 0x20002000u}, /* PA_SC_CLIPRECT_0_BR */
@@ -401,6 +759,27 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
             val = gl_f32_bits(-(float)h * 0.5f); /* NDC +y is up in GL; rows grow downward, so the Y scale is negative */
         } else if (reg == 0x112u) {
             val = gl_f32_bits((float)h * 0.5f);
+        } else if (reg == 0x113u) {
+            /* Window z = z_ndc * ZSCALE + ZOFFSET, and glDepthRange(n, f) puts NDC -1..1 onto
+             * n..f - so ZSCALE is (f - n) / 2 and ZOFFSET is (f + n) / 2.
+             *
+             * Derived, and checked against a known-good point rather than assumed: the default
+             * range 0..1 gives 0.5 and 0.5, which are exactly the two constants these registers
+             * carried while the gl-cube oracle was recorded. */
+            val = gl_f32_bits((ctx->depth_far - ctx->depth_near) * 0.5f);
+        } else if (reg == 0x114u) {
+            val = gl_f32_bits((ctx->depth_far + ctx->depth_near) * 0.5f);
+        } else if (reg == 0x2dfu) {
+            /* GL's own glPolygonOffset has no clamp - that is EXT_polygon_offset_clamp, which
+             * this does not implement - so zero, which is the disabled value. */
+            val = 0u;
+        } else if (reg == 0x2e0u || reg == 0x2e2u) {
+            /* Scale, front and back. Mesa multiplies the factor by 16 (si_state.c). */
+            val = gl_f32_bits(ctx->polygon_offset_factor * 16.0f);
+        } else if (reg == 0x2e1u || reg == 0x2e3u) {
+            /* Offset, front and back. Unscaled on the 32-bit float z path, which the
+             * DB_FMT_CNTL above establishes this is. */
+            val = gl_f32_bits(ctx->polygon_offset_units);
         } else if (reg == 0x1e0u) {
             val = ctx->cap_blend ? 0x00002504u : 0u;
         } else if (reg == 0x200u) {
@@ -623,7 +1002,7 @@ void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *o
     }
 
     /* 6. Accumulate contribution from enabled light sources */
-    for (int i = 0; i < GL_MAX_LIGHTS; i++) {
+    for (int i = 0; i < OOPS_GL_LIGHT_COUNT; i++) {
         if (!ctx->lights[i].enabled) continue;
         const gl_light_t *lt = &ctx->lights[i];
 
@@ -877,7 +1256,7 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         if (ctx->cap_texture_2d && ctx->bound_texture_2d > 0) {
             ps_va = payload_va + 0x200; /* Stage 5: Textured + Gouraud */
             ps_rsrc2 = 0x00000004u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor table. 0x2 loads one SGPR and the primitive mask lands in s1 (measured 2026-09-14) */
-            for (int ti = 0; ti < GL_MAX_TEXTURE_OBJECTS; ti++) {
+            for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
                 if (ctx->textures[ti].used && ctx->textures[ti].id == ctx->bound_texture_2d) {
                     uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload + 0x900);
                     memcpy(dt, ctx->textures[ti].img_desc, 32);
@@ -1057,7 +1436,7 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
     /* Check for bound and enabled texture */
     gl_texture_object_t *tex = NULL;
     if (ctx->cap_texture_2d && ctx->bound_texture_2d > 0) {
-        for (int ti = 0; ti < GL_MAX_TEXTURE_OBJECTS; ti++) {
+        for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
             if (ctx->textures[ti].used && ctx->textures[ti].id == ctx->bound_texture_2d) {
                 tex = &ctx->textures[ti];
                 break;
@@ -1236,10 +1615,19 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
 #endif /* OOPS_HOST_BUILD */
 
 static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
+    /* **Each array's base comes from gl_array_base, not from its `pointer` field.** With a
+     * buffer object bound that field holds a byte *offset*, and an offset of zero is both legal
+     * and indistinguishable from the null pointer the old guards tested for - so a buffer whose
+     * data starts at offset 0 would have read as "no array" and drawn the default attribute. */
+    const uint8_t *base_v = gl_array_base(ctx, &ctx->array_vertex);
+    const uint8_t *base_c = gl_array_base(ctx, &ctx->array_color);
+    const uint8_t *base_t = gl_array_base(ctx, &ctx->array_texcoord);
+    const uint8_t *base_n = gl_array_base(ctx, &ctx->array_normal);
+
     /* Position */
-    if (ctx->array_vertex.enabled && ctx->array_vertex.pointer) {
+    if (ctx->array_vertex.enabled && base_v) {
         int stride = ctx->array_vertex.stride ? ctx->array_vertex.stride : (ctx->array_vertex.size * (int)sizeof(float));
-        const uint8_t *ptr = (const uint8_t *)ctx->array_vertex.pointer + (idx * stride);
+        const uint8_t *ptr = base_v + (idx * stride);
         const float *fp = (const float *)ptr;
         out->x = fp[0];
         out->y = (ctx->array_vertex.size > 1) ? fp[1] : 0.0f;
@@ -1250,10 +1638,10 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
     }
 
     /* Color */
-    if (ctx->array_color.enabled && ctx->array_color.pointer) {
+    if (ctx->array_color.enabled && base_c) {
         int stride = ctx->array_color.stride ? ctx->array_color.stride :
                      (ctx->array_color.type == GL_UNSIGNED_BYTE ? ctx->array_color.size : (ctx->array_color.size * (int)sizeof(float)));
-        const uint8_t *ptr = (const uint8_t *)ctx->array_color.pointer + (idx * stride);
+        const uint8_t *ptr = base_c + (idx * stride);
         if (ctx->array_color.type == GL_UNSIGNED_BYTE) {
             out->r = (float)ptr[0] / 255.0f;
             out->g = (float)ptr[1] / 255.0f;
@@ -1274,9 +1662,9 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
     }
 
     /* Texcoord */
-    if (ctx->array_texcoord.enabled && ctx->array_texcoord.pointer) {
+    if (ctx->array_texcoord.enabled && base_t) {
         int stride = ctx->array_texcoord.stride ? ctx->array_texcoord.stride : (ctx->array_texcoord.size * (int)sizeof(float));
-        const uint8_t *ptr = (const uint8_t *)ctx->array_texcoord.pointer + (idx * stride);
+        const uint8_t *ptr = base_t + (idx * stride);
         const float *fp = (const float *)ptr;
         out->u = fp[0];
         out->v = (ctx->array_texcoord.size > 1) ? fp[1] : 0.0f;
@@ -1286,9 +1674,9 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
     }
 
     /* Normal */
-    if (ctx->array_normal.enabled && ctx->array_normal.pointer) {
+    if (ctx->array_normal.enabled && base_n) {
         int stride = ctx->array_normal.stride ? ctx->array_normal.stride : (3 * (int)sizeof(float));
-        const uint8_t *ptr = (const uint8_t *)ctx->array_normal.pointer + (idx * stride);
+        const uint8_t *ptr = base_n + (idx * stride);
         const float *fp = (const float *)ptr;
         out->nx = fp[0]; out->ny = fp[1]; out->nz = fp[2];
     } else {
@@ -1298,9 +1686,50 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
     }
 }
 
-void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+/* `glArrayElement(i)` - one vertex pulled out of the enabled arrays, inside glBegin/glEnd.
+ *
+ * The bridge between the two ways of feeding geometry: a program keeps its data in arrays but
+ * still wants to choose the primitive assembly by hand. Everything it needs is already here -
+ * `fetch_vertex` reads whichever arrays are enabled and falls back to the current colour,
+ * normal and texture coordinate for the ones that are not, which is exactly what the
+ * specification says this does.
+ *
+ * Refused inside a display list for the same reason glDrawArrays is: a compiled list must
+ * dereference the arrays at *compile* time, and recording the index to read later would replay
+ * whatever the array holds then.
+ */
+void glArrayElement(GLint i) {
+    if (gl_list_refuse()) return;
     gl_context_t *ctx = gl_get_ctx();
-    if (!ctx || count <= 0) return;
+    if (!ctx) return;
+    if (i < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    /* Outside glBegin/glEnd this has nowhere to put the vertex. GL calls that undefined rather
+     * than an error, and doing nothing is the reading that cannot corrupt anything. */
+    if (!ctx->imm_active) return;
+    if (ctx->imm_count >= OOPS_GL_MAX_IMMEDIATE_VERTS) return;
+
+    fetch_vertex(ctx, i, &ctx->imm_verts[ctx->imm_count++]);
+}
+
+void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+    // Cannot be compiled into a list: the specification has a list dereference the client
+    // arrays at *compile* time, and storing the pointer to read later would draw whatever the
+    // array holds then - a different picture from the one that was compiled.
+    if (gl_list_refuse()) return;
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    /* A negative count is the caller's arithmetic having gone wrong, and GL says so with
+     * GL_INVALID_VALUE. A count of zero is legal and draws nothing, so the two are separated
+     * here - they used to share one silent `return`. */
+    if (count < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    if (!gl_accept_mode(ctx, mode)) return;
+    if (count == 0) return;
 
     gl_vertex_t v0, v1, v2, v3;
 
@@ -1349,9 +1778,56 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     }
 }
 
-void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
+/* `glDrawRangeElements` (GL 1.2) is glDrawElements plus a promise about the index range, which
+ * an implementation may use to pre-transform that slice of the arrays and may equally ignore.
+ * This one ignores it - and that is the specification's own allowance, not a shortcut.
+ *
+ * The range is still **checked**: a program that promises indices in [start, end] and then
+ * passes one outside it has a bug, and GL_INVALID_VALUE for start > end is required. Reading
+ * the indices to verify every one against the range would cost more than the hint saves. */
+void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count,
+                         GLenum type, const GLvoid *indices) {
     gl_context_t *ctx = gl_get_ctx();
-    if (!ctx || count <= 0 || !indices) return;
+    if (ctx && start > end) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    glDrawElements(mode, count, type, indices);
+}
+
+void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
+    if (gl_list_refuse()) return;
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (count < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    if (!gl_accept_mode(ctx, mode)) return;
+    /* **Before the reader runs, not inside it.** The index reader below selects 16-bit and
+     * 8-bit and falls through to 32-bit for anything else, so an unchecked type read past the
+     * end of a byte-indexed array rather than merely returning nonsense. */
+    if (!gl_index_type_is_readable(type)) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+
+    /* **With an element buffer bound, `indices` is a byte offset, and zero is a real one.**
+     * The null check below therefore cannot come first: a program drawing from the start of an
+     * index buffer passes NULL and means it. */
+    if (ctx->bound_element_array_buffer != 0u) {
+        const gl_client_array_t elements = {
+            0, 0, 0, indices, GL_TRUE, ctx->bound_element_array_buffer
+        };
+        indices = gl_array_base(ctx, &elements);
+        if (!indices) {
+            /* Bound to a buffer with no storage. Nothing to read; the draw is skipped rather
+             * than run against an address derived from NULL. */
+            gl_record_error(ctx, GL_INVALID_OPERATION);
+            return;
+        }
+    }
+    if (count == 0 || !indices) return;
 
     gl_vertex_t v0, v1, v2, v3;
 

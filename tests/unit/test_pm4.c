@@ -843,6 +843,317 @@ static void test_pm4_gl_hardware_cull_and_color_mask_stream(void) {
   oops_display_close(disp);
 }
 
+/* The last value written to one context register in a stream, or `absent` if never written.
+ *
+ * Walks the type-3 packets rather than searching for a value, so a register offset that
+ * happens to appear as somebody else's payload cannot be mistaken for a write to it. */
+#define REG_ABSENT 0xdeadbeefu
+static uint32_t last_context_reg(const uint32_t *w, size_t n, uint32_t offset) {
+  uint32_t found = REG_ABSENT;
+  size_t i = 0;
+  while (i < n) {
+    uint32_t hdr = w[i];
+    if ((hdr >> 30) != 3u) break;
+    uint32_t count = ((hdr >> 16) & 0x3fffu) + 1u;
+    uint32_t op = (hdr >> 8) & 0xffu;
+    if (i + 1u + count > n) break;
+    if (op == 0x69u && count >= 2u) { /* SET_CONTEXT_REG: base, then values */
+      uint32_t base = w[i + 1];
+      for (uint32_t k = 1; k < count; k++) {
+        if (base + k - 1u == offset) found = w[i + 1u + k];
+      }
+    }
+    i += 1u + count;
+  }
+  return found;
+}
+
+/*
+ * **The gl-cube oracle record's facts, asserted against the stream oops-gl emits today.**
+ *
+ * `docs/hardware/agc-gl-cube-oracle-fw1240.md` is the whole reason this subsystem exists
+ * (D007): a frame measured on retail firmware 12.40, with the register facts that made it
+ * draw written underneath it. Every one of those facts was prose and nothing checked that the
+ * code still honoured them - so a register could be edited and the document would go on
+ * describing a frame the code no longer produces, which is the documented-but-unchecked
+ * failure this repository keeps meeting.
+ *
+ * Each assertion below is one line of that record. The display is 640x480 on purpose: it is
+ * not square, so the extent fields cannot be transposed without this failing, which is
+ * exactly the bug the record says was measured and fixed once already.
+ */
+static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[4096];
+  static _Alignas(64) uint32_t fence = 0x11111111u;
+  static _Alignas(64) uint32_t canary[16];
+
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  memset(vbo, 0, sizeof(vbo));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 4096;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = &fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  /* Depth on, because the depth block is emitted only when it is - without this the
+   * DB_Z_INFO line of the record has nothing to check and the test would quietly cover five
+   * facts while claiming six. */
+  glEnable(GL_DEPTH_TEST);
+
+  glBegin(GL_TRIANGLES);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+
+  const uint32_t *w = ctx->dcb_mem;
+  const size_t n = ctx->dcb_words;
+  ASSERT_TRUE(n > 0);
+
+  /* Record: "CB_COLOR0_ATTRIB2: width - 1 in bits 27:14, height - 1 in bits 13:0; the colour
+   * block takes the row pitch from bits 27:14." Measured 2026-09-14 by putting them the other
+   * way round and watching a 1920x1080 target get a 1088-pixel row pitch. */
+  uint32_t attrib2 = last_context_reg(w, n, 0x3b0u);
+  ASSERT_NE(attrib2, REG_ABSENT);
+  ASSERT_EQ((attrib2 >> 14) & 0x3fffu, 639u); /* width - 1, NOT height */
+  ASSERT_EQ(attrib2 & 0x3fffu, 479u);         /* height - 1 */
+
+  /* Record: "CB_COLOR0_INFO COMP_SWAP=ALT stores bytes B, G, R, A" - which is what makes the
+   * framebuffer read as 0xAARRGGBB. */
+  uint32_t cb_info = last_context_reg(w, n, 0x31cu);
+  ASSERT_NE(cb_info, REG_ABSENT);
+  ASSERT_EQ(cb_info, 0x000188a8u);
+
+  /* Record: "PA_CL_VPORT_YSCALE negative for GL's upward NDC y". Asserted as the sign bit of
+   * the float rather than an exact value, because the magnitude is half the height and that
+   * is allowed to change with the display. */
+  uint32_t yscale = last_context_reg(w, n, 0x111u);
+  ASSERT_NE(yscale, REG_ABSENT);
+  ASSERT_TRUE((yscale & 0x80000000u) != 0u);
+  ASSERT_NE(yscale, 0x80000000u); /* negative *zero* would pass the sign test and draw nothing */
+
+  /* Record: "VGT_GS_OUT_PRIM_TYPE must be TRISTRIP (2) for triangles; POINTLIST turns each
+   * triangle into a point and starves the compositor."
+   *
+   * There is now a measured negative behind this too: obSCEne's `166-agc/primitive-draw`
+   * (sweep 20260916-223136) sets this register to 0, submits three vertices, retires its
+   * fence, and its 64x64 target comes back with 4,095 background pixels and exactly one red
+   * one. A point, from a triangle, exactly as the record says. */
+  uint32_t gs_out = last_context_reg(w, n, 0x29bu);
+  ASSERT_NE(gs_out, REG_ABSENT);
+  ASSERT_EQ(gs_out, 2u);
+
+  /* Record: "DB_Z_INFO with SW_MODE 64KB_Z_X and no HTILE (TILE_SURFACE_ENABLE 0,
+   * DB_HTILE_DATA_BASE 0) gives a working depth test." */
+  uint32_t z_info = last_context_reg(w, n, 0x010u);
+  ASSERT_NE(z_info, REG_ABSENT);
+  ASSERT_EQ(z_info & 0x3u, 3u);          /* Z_32_FLOAT */
+  ASSERT_EQ((z_info >> 4) & 0x1fu, 24u); /* SW_MODE = 24, 64KB_Z_X */
+  ASSERT_EQ((z_info >> 29) & 0x1u, 0u);  /* TILE_SURFACE_ENABLE: no HTILE */
+
+  /* **The colour target is LINEAR, and that is a deliberate difference from the capture.**
+   *
+   * `CB_COLOR0_ATTRIB3` bits 18:14 are COLOR_SW_MODE. oops-gl writes 0, because the measured
+   * 0x08c6c000 from the compositor's surface carries 27 (64KB_R_X) and streaked this scratch
+   * buffer when it was used. Pinned because the two values differ in one field and are easy
+   * to copy across from a capture by mistake - the arithmetic is (v >> 14) & 0x1f. */
+  uint32_t attrib3 = last_context_reg(w, n, 0x3b8u);
+  ASSERT_NE(attrib3, REG_ABSENT);
+  ASSERT_EQ((attrib3 >> 14) & 0x1fu, 0u);
+  ASSERT_NE((attrib3 >> 14) & 0x1fu, 27u);
+
+  /* **The depth range the oracle frame was recorded with.**
+   *
+   * `PA_CL_VPORT_ZSCALE` and `ZOFFSET` were literal `0.5f` constants when that frame was
+   * captured; they are now computed from `glDepthRange`, whose default is 0..1. The arithmetic
+   * is `(far - near) / 2` and `(far + near) / 2`, so the default has to come back to the same
+   * two words - and if it does not, every depth-tested frame differs from the record while
+   * nothing else in this test would notice. */
+  ASSERT_EQ(last_context_reg(w, n, 0x113u), 0x3f000000u); /* 0.5f */
+  ASSERT_EQ(last_context_reg(w, n, 0x114u), 0x3f000000u); /* 0.5f */
+
+  /* **The shader interface: what the vertex shader exports and what the pixel shader is handed.**
+   *
+   * This block was missing. `docs/GL_ROADMAP.md` claimed these registers were pinned here and
+   * used that as the reason fog and multitexture are blocked - "that test failing is the point".
+   * They were not pinned, by this test or any other, so the safety net the document described
+   * did not exist: moving the shader interface would have passed the whole suite and produced a
+   * wrong frame on hardware, which is the one place nothing here can check.
+   *
+   * It matters because **the shaders are hand-written binaries**. Adding an interpolated input
+   * renumbers the VGPRs the pixel shader already uses, and adding a parameter export changes
+   * what the vertex shader has to write - so these four registers and the shader code have to
+   * move together or not at all. Pinning them makes that a build failure rather than a bad
+   * frame, and a change that deliberately moves them updates this test and re-records the
+   * oracle frame on hardware.
+   */
+  uint32_t vs_out = last_context_reg(w, n, 0x1b1u); /* SPI_VS_OUT_CONFIG */
+  ASSERT_NE(vs_out, REG_ABSENT);
+  ASSERT_EQ((vs_out >> 1) & 0x1fu, 1u); /* VS_EXPORT_COUNT = 1, meaning two parameters */
+
+  uint32_t ps_in = last_context_reg(w, n, 0x1b6u); /* SPI_PS_IN_CONTROL */
+  ASSERT_NE(ps_in, REG_ABSENT);
+  ASSERT_EQ(ps_in & 0x3fu, 2u); /* NUM_INTERP = 2: colour and texcoord, and nothing else */
+
+  /* PERSP_CENTER_ENA and nothing else. Enabling POS_Z here - which is what fog would need -
+   * adds VGPRs *before* the ones the pixel shader already reads, so the colour it currently
+   * finds in v4..v7 would move. */
+  uint32_t ps_ena = last_context_reg(w, n, 0x1b3u); /* SPI_PS_INPUT_ENA */
+  ASSERT_NE(ps_ena, REG_ABSENT);
+  ASSERT_EQ(ps_ena, 0x00000002u);
+
+  /* The two interpolation slots, in the order the shaders assume: parameter 0 is the colour,
+   * parameter 1 is the texture coordinate. Swapping them draws a texture-coloured triangle
+   * with its colour used as coordinates and nothing else in this test would notice. */
+  ASSERT_EQ(last_context_reg(w, n, 0x191u), 0x00000000u); /* SPI_PS_INPUT_CNTL_0: param 0 */
+  ASSERT_EQ(last_context_reg(w, n, 0x192u), 0x00000001u); /* SPI_PS_INPUT_CNTL_1: param 1 */
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+
+/* glDepthRange reaches the viewport registers, and a reversed range is accepted.
+ *
+ * The three cases are chosen so no two share a ZSCALE or a ZOFFSET: 0..1 gives (0.5, 0.5),
+ * 0..0.5 gives (0.25, 0.25), and the reversed 1..0 gives (-0.5, 0.5). A build that swapped the
+ * two registers, or that sorted the arguments, fails on one of them.
+ */
+static void test_pm4_gl_depth_range_reaches_the_viewport(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[4096];
+  static _Alignas(64) uint32_t fence = 0x11111111u;
+  static _Alignas(64) uint32_t canary[16];
+
+  const struct { double near_val, far_val; uint32_t scale, offset; } cases[] = {
+    {0.0, 1.0, 0x3f000000u, 0x3f000000u},  /*  0.5,  0.5 - the default */
+    {0.0, 0.5, 0x3e800000u, 0x3e800000u},  /* 0.25, 0.25 */
+    {1.0, 0.0, 0xbf000000u, 0x3f000000u},  /* -0.5,  0.5 - reversed, and legal */
+  };
+
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+    memset(dcb, 0, sizeof(dcb));
+    memset(payload, 0, sizeof(payload));
+    memset(vbo, 0, sizeof(vbo));
+    ctx->dcb_mem = dcb;
+    ctx->dcb_capacity_dw = 4096;
+    ctx->dcb_words = 0;
+    ctx->gpu_payload = payload;
+    ctx->vbo_mem = vbo;
+    ctx->fence = &fence;
+    ctx->canary = &canary;
+    ctx->use_hardware = GL_TRUE;
+    ctx->hw_frame_active = GL_FALSE;
+
+    glDepthRange(cases[c].near_val, cases[c].far_val);
+    glBegin(GL_TRIANGLES);
+    glVertex3f(-0.5f, -0.5f, 0.5f);
+    glVertex3f(0.5f, -0.5f, 0.5f);
+    glVertex3f(0.0f, 0.5f, 0.5f);
+    glEnd();
+
+    ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x113u), cases[c].scale);
+    ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x114u), cases[c].offset);
+  }
+
+  /* Out of range is clamped rather than refused - the specification says clamp. */
+  glDepthRange(-5.0, 7.0);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* glPolygonOffset reaches its four registers, and the enable reaches PA_SU_SC_MODE_CNTL.
+ *
+ * The factor is scaled by 16 and the units are not, which is the part worth pinning: those are
+ * different multipliers taken from Mesa's radeonsi for a 32-bit float z-buffer, and a build that
+ * applied one scaling to both would pass a test that used equal values. So factor and units are
+ * deliberately different here, and neither is a value the other's scaling could produce.
+ */
+static void test_pm4_gl_polygon_offset_reaches_its_registers(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[4096];
+  static _Alignas(64) uint32_t fence = 0x11111111u;
+  static _Alignas(64) uint32_t canary[16];
+
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  memset(vbo, 0, sizeof(vbo));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 4096;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = &fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  glEnable(GL_POLYGON_OFFSET_FILL);
+  glPolygonOffset(2.0f, 3.0f);
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+
+  const uint32_t *w = ctx->dcb_mem;
+  const size_t n = ctx->dcb_words;
+  /* factor 2.0 * 16 = 32.0 */
+  ASSERT_EQ(last_context_reg(w, n, 0x2e0u), 0x42000000u); /* FRONT_SCALE */
+  ASSERT_EQ(last_context_reg(w, n, 0x2e2u), 0x42000000u); /* BACK_SCALE */
+  /* units 3.0, unscaled on the float z path */
+  ASSERT_EQ(last_context_reg(w, n, 0x2e1u), 0x40400000u); /* FRONT_OFFSET */
+  ASSERT_EQ(last_context_reg(w, n, 0x2e3u), 0x40400000u); /* BACK_OFFSET */
+  ASSERT_EQ(last_context_reg(w, n, 0x2dfu), 0u);          /* CLAMP: GL has none */
+  /* The DB format this was derived for has not moved. */
+  ASSERT_EQ(last_context_reg(w, n, 0x2deu), 0x000001e9u);
+
+  /* Enabled: front, back and para bits all set (11, 12, 13). */
+  uint32_t mode = last_context_reg(w, n, 0x205u);
+  ASSERT_NE(mode, REG_ABSENT);
+  ASSERT_EQ((mode >> 11) & 0x7u, 0x7u);
+
+  /* Disabled: the offsets stay programmed and the enables go. GL keeps the values across a
+   * disable, so a re-enable does not need the call repeated. */
+  ctx->dcb_words = 0;
+  ctx->hw_frame_active = GL_FALSE;
+  glDisable(GL_POLYGON_OFFSET_FILL);
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+  mode = last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x205u);
+  ASSERT_EQ((mode >> 11) & 0x7u, 0x0u);
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x2e0u), 0x42000000u);
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
 void run_unit_tests_pm4(void);
 
 void run_unit_tests_pm4(void) {
@@ -852,6 +1163,9 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_hardware_depth_stream);
   RUN_TEST(test_pm4_gl_hardware_texture_stream);
   RUN_TEST(test_pm4_gl_hardware_cull_and_color_mask_stream);
+  RUN_TEST(test_pm4_gl_honours_the_gl_cube_oracle_record);
+  RUN_TEST(test_pm4_gl_depth_range_reaches_the_viewport);
+  RUN_TEST(test_pm4_gl_polygon_offset_reaches_its_registers);
   RUN_TEST(test_pm4_detects_truncated_buffer);
   RUN_TEST(test_pm4_detects_invalid_reg_bounds);
   RUN_TEST(test_pm4_detects_depth_invariants);

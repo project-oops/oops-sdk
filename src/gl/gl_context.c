@@ -388,6 +388,7 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->blend_dst_alpha = GL_ONE_MINUS_SRC_ALPHA;
     ctx->blend_equation = GL_FUNC_ADD;
     ctx->tex_env_mode = GL_MODULATE;
+    ctx->perspective_hint = GL_DONT_CARE; /* the specification's default */
     ctx->tex_env_color[0] = 0.0f;
     ctx->tex_env_color[1] = 0.0f;
     ctx->tex_env_color[2] = 0.0f;
@@ -403,6 +404,16 @@ void *glContextCreate(struct oops_display *disp) {
 
     /* Matrices */
     ctx->matrix_mode = GL_MODELVIEW;
+    /* The specification's defaults, set explicitly: a zeroed context would read as alignment 1,
+     * which silently misplaces every row after the first for any caller that relies on the
+     * default of 4 - which is most of them, because most never call glPixelStorei at all. */
+    ctx->unpack_alignment = 4;
+    ctx->unpack_row_length = 0;
+    ctx->pack_alignment = 4;
+    ctx->depth_near = 0.0f;
+    ctx->depth_far = 1.0f;
+    ctx->alpha_func = GL_ALWAYS; /* the specification's default, which is no test at all */
+    ctx->alpha_ref = 0.0f;
     ctx->modelview_depth = 0;
     ctx->projection_depth = 0;
     ctx->texture_depth = 0;
@@ -446,7 +457,7 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->mat_front = default_mat;
     ctx->mat_back = default_mat;
 
-    for (int i = 0; i < GL_MAX_LIGHTS; i++) {
+    for (int i = 0; i < OOPS_GL_LIGHT_COUNT; i++) {
         ctx->lights[i].enabled = GL_FALSE;
         ctx->lights[i].ambient[0] = 0.0f; ctx->lights[i].ambient[1] = 0.0f;
         ctx->lights[i].ambient[2] = 0.0f; ctx->lights[i].ambient[3] = 1.0f;
@@ -613,10 +624,17 @@ void *glContextCreate(struct oops_display *disp) {
             ps_tex[37] = 0x100a1305u; /* v_mul_f32 v5, v5, v9 (G * G) */
             ps_tex[38] = 0x100c1506u; /* v_mul_f32 v6, v6, v10 (B * B) */
             ps_tex[39] = 0x100e1707u; /* v_mul_f32 v7, v7, v11 (A * A) */
-            ps_tex[40] = 0xf800180fu; /* exp mrt0, v4, v5, v6, v7 done vm */
-            ps_tex[41] = 0x07060504u;
-            ps_tex[42] = 0xbf810000u; /* s_endpgm */
-            for (size_t p = 43; p < 64; p++) ps_tex[p] = 0xbf800000u;
+            /* 40..43: the alpha test, as in the untextured shader. It goes *after* the texture
+             * multiply, so the alpha tested is the one that reaches the framebuffer rather than
+             * the interpolated one before modulation - which is what GL specifies and is the
+             * difference a texture with an alpha channel makes visible. */
+            for (size_t p = GL_PS_ALPHA_SLOT_TEX; p < GL_PS_ALPHA_SLOT_TEX + 4u; p++) {
+                ps_tex[p] = 0xbf800000u; /* s_nop 0 */
+            }
+            ps_tex[44] = 0xf800180fu; /* exp mrt0, v4, v5, v6, v7 done vm */
+            ps_tex[45] = 0x07060504u;
+            ps_tex[46] = 0xbf810000u; /* s_endpgm */
+            for (size_t p = 47; p < 64; p++) ps_tex[p] = 0xbf800000u;
 
             /* 3. Hardware Gouraud Barycentric Interpolating Pixel Shader (untextured, offset 0x300) */
             uint32_t *ps_untex = (uint32_t *)((char *)ctx->gpu_payload + 0x300);
@@ -644,10 +662,16 @@ void *glContextCreate(struct oops_display *disp) {
             ps_untex[21] = 0xc8190201u; /* v_interp_p2_f32 v6, v1, attr0.z */
             ps_untex[22] = 0xc81c0300u; /* v_interp_p1_f32 v7, v0, attr0.w (A) */
             ps_untex[23] = 0xc81d0301u; /* v_interp_p2_f32 v7, v1, attr0.w */
-            ps_untex[24] = 0xf800180fu; /* exp mrt0, v4, v5, v6, v7 done vm */
-            ps_untex[25] = 0x07060504u;
-            ps_untex[26] = 0xbf810000u; /* s_endpgm */
-            for (size_t p = 27; p < 64; p++) ps_untex[p] = 0xbf800000u;
+            /* 24..27: the alpha test, patched in place by gl_ps_patch_alpha_test. Four words,
+             * which is exactly what the longest form needs (a literal load is two). Left as
+             * s_nop here, which is what "no alpha test" is. */
+            for (size_t p = GL_PS_ALPHA_SLOT_UNTEX; p < GL_PS_ALPHA_SLOT_UNTEX + 4u; p++) {
+                ps_untex[p] = 0xbf800000u; /* s_nop 0 */
+            }
+            ps_untex[28] = 0xf800180fu; /* exp mrt0, v4, v5, v6, v7 done vm */
+            ps_untex[29] = 0x07060504u;
+            ps_untex[30] = 0xbf810000u; /* s_endpgm */
+            for (size_t p = 31; p < 64; p++) ps_untex[p] = 0xbf800000u;
 
             /* 4. Initialize active texture descriptor table at 0x900 */
             uint32_t *desc_table = (uint32_t *)((char *)ctx->gpu_payload + 0x900);
@@ -677,12 +701,16 @@ void glContextDestroy(void *ctx_handle) {
     gl_context_t *ctx = (gl_context_t *)ctx_handle;
     if (!ctx) return;
 
+    /* Before the branch below, because the target arm frees `ctx` itself at the end of it and
+     * the buffer storage has to go first. */
+    gl_free_all_buffers(ctx);
+
 #ifndef OOPS_HOST_BUILD
     if (ctx->agc_queue && sceAgcDriverDestroyQueue) {
         sceAgcDriverDestroyQueue(ctx->agc_queue);
         ctx->agc_queue = NULL;
     }
-    for (int i = 0; i < GL_MAX_TEXTURE_OBJECTS; i++) {
+    for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
         if (ctx->textures[i].garlic_data) {
             oops_mem_free(ctx->textures[i].garlic_data);
             ctx->textures[i].garlic_data = NULL;
@@ -696,7 +724,7 @@ void glContextDestroy(void *ctx_handle) {
     if (ctx->depth_buffer) oops_mem_free(ctx->depth_buffer);
     oops_mem_free(ctx);
 #else
-    for (int i = 0; i < GL_MAX_TEXTURE_OBJECTS; i++) {
+    for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
         if (ctx->textures[i].pixels) {
             free(ctx->textures[i].pixels);
             ctx->textures[i].pixels = NULL;
@@ -773,6 +801,89 @@ void glGetCanaryEx(GLuint *vs_canary, GLuint *ps_canary, GLuint *vs_s0, GLuint *
     if (ps_canary) *ps_canary = ctx ? ctx->canary_ps : 0;
     if (vs_s0) *vs_s0 = ctx ? ctx->canary_vs_s0 : 0;
     if (ps_s0) *ps_s0 = ctx ? ctx->canary_ps_s0 : 0;
+}
+
+/* Writes the alpha test into both pixel shaders, or takes it out.
+ *
+ * # The encodings are assembled, not remembered
+ *
+ * Every word below came from assembling the instruction in its comment for gfx1030 and reading
+ * the object back:
+ *
+ *     clang -target amdgcn-amd-amdhsa -mcpu=gfx1030 -c alpha.s
+ *
+ * That matters because this repository has no way to notice a wrong instruction encoding: it
+ * would assemble into the payload, the GPU would do something else, and the result would be a
+ * frame that is wrong rather than a build that fails. Two of the results are cross-checks
+ * against words already in the tree and agree with them - `s_endpgm` came out `0xbf810000`, and
+ * the literal-load form `0x7e18_02ff` has the same `0xff` source marker as the canary load the
+ * untextured shader already does.
+ *
+ * # Why patched rather than rebuilt
+ *
+ * The shaders are laid into the GPU payload at context creation, along with the descriptor
+ * table, and the payload is flushed from the CPU's caches once. Rebuilding a shader would mean
+ * redoing that; patching four words in place does not, and the four words are enough for every
+ * form the test takes.
+ *
+ * # Wave32
+ *
+ * The mask registers are the `_lo` halves, because this runs wave32 - `VGT_SHADER_STAGES_EN`
+ * sets `GS_W32` and `VS_W32`. A wave64 build would need `vcc` and `exec` instead, and the
+ * encodings would differ.
+ */
+void gl_ps_patch_alpha_test(gl_context_t *ctx) {
+    if (!ctx || !ctx->gpu_payload) return;
+
+    uint32_t words[4] = {
+        0xbf800000u, /* s_nop 0 */
+        0xbf800000u,
+        0xbf800000u,
+        0xbf800000u,
+    };
+
+    if (ctx->cap_alpha_test && ctx->alpha_func != GL_ALWAYS) {
+        if (ctx->alpha_func == GL_NEVER) {
+            /* Every fragment fails, so kill the whole wave's lanes and let the export write
+             * nothing. */
+            words[0] = 0xbefe0380u; /* s_mov_b32 exec_lo, 0 */
+        } else {
+            uint32_t compare;
+            switch (ctx->alpha_func) {
+                case GL_LESS:     compare = 0x7c021907u; break; /* v_cmp_lt_f32  vcc_lo, v7, v12 */
+                case GL_EQUAL:    compare = 0x7c041907u; break; /* v_cmp_eq_f32  vcc_lo, v7, v12 */
+                case GL_LEQUAL:   compare = 0x7c061907u; break; /* v_cmp_le_f32  vcc_lo, v7, v12 */
+                case GL_GREATER:  compare = 0x7c081907u; break; /* v_cmp_gt_f32  vcc_lo, v7, v12 */
+                case GL_NOTEQUAL: compare = 0x7c1a1907u; break; /* v_cmp_neq_f32 vcc_lo, v7, v12 */
+                case GL_GEQUAL:   compare = 0x7c0c1907u; break; /* v_cmp_ge_f32  vcc_lo, v7, v12 */
+                default:
+                    /* glAlphaFunc refused it, so the context cannot hold it. Leaving the nops
+                     * in place is the safe reading of an impossible state: no test at all. */
+                    compare = 0u;
+                    break;
+            }
+            if (compare != 0u) {
+                words[0] = 0x7e1802ffu;              /* v_mov_b32 v12, <literal> */
+                words[1] = gl_f32_bits(ctx->alpha_ref);
+                words[2] = compare;
+                words[3] = 0x877e6a7eu;              /* s_and_b32 exec_lo, exec_lo, vcc_lo */
+            }
+        }
+    }
+
+    uint32_t *ps_untex = (uint32_t *)((char *)ctx->gpu_payload + 0x300);
+    uint32_t *ps_tex = (uint32_t *)((char *)ctx->gpu_payload + 0x200);
+    for (size_t i = 0; i < 4; i++) {
+        ps_untex[GL_PS_ALPHA_SLOT_UNTEX + i] = words[i];
+        ps_tex[GL_PS_ALPHA_SLOT_TEX + i] = words[i];
+    }
+
+#if !defined(OOPS_HOST_BUILD) && defined(__x86_64__)
+    /* The payload is write-combined; the command processor reads what has left this core. */
+    for (size_t p = 0x200; p < 0x400; p += 64) {
+        __builtin_ia32_clflush((const void *)((const char *)ctx->gpu_payload + p));
+    }
+#endif
 }
 
 GLboolean glIsHardwareAccelerated(void) {

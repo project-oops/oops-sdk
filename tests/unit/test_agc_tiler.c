@@ -160,6 +160,156 @@ static void test_agc_display_acceleration_query(void) {
   ASSERT_EQ(oops_display_is_gpu_accelerated(NULL), 0);
 }
 
+/* Every field of the resource constant, pinned to the bit it is packed into.
+ * Half of these positions are corroborated by this collection's own descriptor
+ * decoder and half come from the published reference (tiler.h says which is
+ * which), so the point of pinning them is that a later correction to either
+ * fails loudly here instead of silently addressing the wrong memory. */
+static void test_buffer_descriptor_layout(void) {
+  uint32_t d[4];
+
+  /* Base address splits across words 0 and 1, low 48 bits only. */
+  ASSERT_EQ(agc_buffer_descriptor(d, 0x0000123456789ABCull, 0, 0, 0), 0);
+  ASSERT_EQ(d[0], 0x56789ABCu);
+  ASSERT_EQ(d[1] & 0xFFFFu, 0x1234u);
+
+  /* Stride occupies 61:48, i.e. word 1 bits 29:16, and tops out at 16383. */
+  ASSERT_EQ(agc_buffer_descriptor(d, 0, 0x3FFFu, 0, 0), 0);
+  ASSERT_EQ(d[1], 0x3FFFu << 16);
+  ASSERT_EQ(agc_buffer_descriptor(d, 0, 4u, 0, 0), 0);
+  ASSERT_EQ(d[1], 4u << 16);
+
+  /* Swizzle enable (bit 63) and add-thread-id (bit 119) stay clear: both move
+   * where an access lands and neither is wanted. */
+  ASSERT_EQ(d[1] >> 31, 0u);
+  ASSERT_EQ((d[3] >> 23) & 1u, 0u);
+
+  /* Record count is the whole of word 2. */
+  ASSERT_EQ(agc_buffer_descriptor(d, 0, 0, 0xDEADBEEFu, 0), 0);
+  ASSERT_EQ(d[2], 0xDEADBEEFu);
+
+  /* Format sits at word 3 bits 18:12, channel selects below it, out-of-bounds
+   * select at 29:28, and the resource type (31:30) is 0 for a buffer. */
+  ASSERT_EQ(agc_buffer_descriptor(d, 0, 0, 0, AGC_BUF_FMT_32_UINT), 0);
+  ASSERT_EQ((d[3] >> 12) & 0x7Fu, 20u);
+  ASSERT_EQ(d[3] & 0xFFFu, AGC_BUF_DST_SEL_IDENTITY);
+  ASSERT_EQ((d[3] >> 28) & 3u, AGC_BUF_OOB_STRUCTURED);
+  ASSERT_EQ(d[3] >> 30, 0u);
+
+  ASSERT_EQ(agc_buffer_descriptor(d, 0, 0, 0, AGC_BUF_FMT_32_32_UINT), 0);
+  ASSERT_EQ((d[3] >> 12) & 0x7Fu, 62u);
+
+  /* Channel selects are the identity mapping x=R y=G z=B w=A. */
+  ASSERT_EQ(AGC_BUF_DST_SEL_IDENTITY & 7u, 4u);
+  ASSERT_EQ((AGC_BUF_DST_SEL_IDENTITY >> 3) & 7u, 5u);
+  ASSERT_EQ((AGC_BUF_DST_SEL_IDENTITY >> 6) & 7u, 6u);
+  ASSERT_EQ((AGC_BUF_DST_SEL_IDENTITY >> 9) & 7u, 7u);
+}
+
+/* A descriptor that is wrong in a way the builder could have caught is a wrong
+ * address, not an error, so each of these refuses rather than truncating. */
+static void test_buffer_descriptor_refusals(void) {
+  uint32_t d[4];
+  ASSERT_EQ(agc_buffer_descriptor(NULL, 0, 0, 0, 0), -1);
+  ASSERT_EQ(agc_buffer_descriptor(d, 0, 0x4000u, 0, 0), -1);  /* stride > 14 bits */
+  ASSERT_EQ(agc_buffer_descriptor(d, 0, 0, 0, 0x80u), -1);    /* format > 7 bits */
+  ASSERT_EQ(agc_buffer_descriptor(d, 1ull << 48, 0, 0, 0), -1); /* base > 48 bits */
+  ASSERT_EQ(agc_buffer_descriptor(d, 0xFFFFFFFFFFFFull, 0x3FFFu, 0, 0x7Fu), 0);
+}
+
+/* The dispatch the decoded shader interface implies: 8x8 threads, eight pixels
+ * each, so one workgroup covers 64x8 pixels. */
+static void test_tiler_dispatch_params(void) {
+  uint32_t ud[AGC_TILER_USER_DATA_COUNT];
+  uint32_t gx = 0, gy = 0;
+
+  ASSERT_EQ(agc_tiler_dispatch_params(ud, &gx, &gy, 0x4000000000ull,
+                                      0x4000A00000ull, 1920, 1080), 0);
+  ASSERT_EQ(gx, 30u); /* 1920 / 64 */
+  ASSERT_EQ(gy, 135u); /* 1080 / 8 */
+
+  /* User data 0 is the width, under the assumption tiler.h records. */
+  ASSERT_EQ(ud[0], 1920u);
+
+  /* Source descriptor in slots 1..4: linear, one pixel per record. */
+  ASSERT_EQ(ud[AGC_TILER_SRC_DESC_SLOT + 0], 0x00000000u);
+  ASSERT_EQ(ud[AGC_TILER_SRC_DESC_SLOT + 1] & 0xFFFFu, 0x40u);
+  ASSERT_EQ((ud[AGC_TILER_SRC_DESC_SLOT + 1] >> 16) & 0x3FFFu, 4u);
+  ASSERT_EQ(ud[AGC_TILER_SRC_DESC_SLOT + 2], 1920u * 1080u);
+  ASSERT_EQ((ud[AGC_TILER_SRC_DESC_SLOT + 3] >> 12) & 0x7Fu, AGC_BUF_FMT_32_UINT);
+
+  /* Destination descriptor in slots 5..8: tiled, addressed as dword pairs, so
+   * its record count is the tiled byte count over eight. */
+  ASSERT_EQ(ud[AGC_TILER_DST_DESC_SLOT + 0], 0x00A00000u);
+  ASSERT_EQ((ud[AGC_TILER_DST_DESC_SLOT + 1] >> 16) & 0x3FFFu, 8u);
+  ASSERT_EQ(ud[AGC_TILER_DST_DESC_SLOT + 2],
+            (uint32_t)(agc_tile_surface_bytes(1920, 1080) / 8u));
+  ASSERT_EQ((ud[AGC_TILER_DST_DESC_SLOT + 3] >> 12) & 0x7Fu,
+            AGC_BUF_FMT_32_32_UINT);
+
+  /* 720p divides too - it is what home asks for before the backend promotes. */
+  ASSERT_EQ(agc_tiler_dispatch_params(ud, &gx, &gy, 0, 0x10000, 1280, 720), 0);
+  ASSERT_EQ(gx, 20u);
+  ASSERT_EQ(gy, 90u);
+}
+
+/* A partial workgroup would tile part of a surface and leave the rest, which
+ * looks like a working display with a corrupt edge. Refuse instead. */
+static void test_tiler_dispatch_refusals(void) {
+  uint32_t ud[AGC_TILER_USER_DATA_COUNT];
+  uint32_t gx = 0, gy = 0;
+  ASSERT_EQ(agc_tiler_dispatch_params(NULL, &gx, &gy, 0, 0, 1920, 1080), -1);
+  ASSERT_EQ(agc_tiler_dispatch_params(ud, NULL, &gy, 0, 0, 1920, 1080), -1);
+  ASSERT_EQ(agc_tiler_dispatch_params(ud, &gx, NULL, 0, 0, 1920, 1080), -1);
+  ASSERT_EQ(agc_tiler_dispatch_params(ud, &gx, &gy, 0, 0, 0, 1080), -1);
+  ASSERT_EQ(agc_tiler_dispatch_params(ud, &gx, &gy, 0, 0, 1920, 0), -1);
+  ASSERT_EQ(agc_tiler_dispatch_params(ud, &gx, &gy, 0, 0, 1900, 1080), -1);
+  ASSERT_EQ(agc_tiler_dispatch_params(ud, &gx, &gy, 0, 0, 1920, 1081), -1);
+}
+
+static void test_agc_detile_pixel_golden(void) {
+  uint32_t x = 0, y = 0;
+  /* Hardware oracle anchor point: (15, 15) -> 0x43f (byte 4348) */
+  agc_detile_pixel(0x43fu, &x, &y);
+  ASSERT_EQ(x, 15u);
+  ASSERT_EQ(y, 15u);
+
+  /* Independent emulator check: (32, 21) -> 0x294 (byte 2640) */
+  agc_detile_pixel(0x294u, &x, &y);
+  ASSERT_EQ(x, 32u);
+  ASSERT_EQ(y, 21u);
+
+  /* Origin */
+  agc_detile_pixel(0u, &x, &y);
+  ASSERT_EQ(x, 0u);
+  ASSERT_EQ(y, 0u);
+}
+
+static void test_agc_detile_surface_roundtrip(void) {
+  enum { W = 256, H = 256 };
+  size_t n = (size_t)W * H;
+  size_t tiled_words = agc_tile_surface_bytes(W, H) / sizeof(uint32_t);
+  uint32_t *orig = (uint32_t *)malloc(n * sizeof(uint32_t));
+  uint32_t *tiled = (uint32_t *)calloc(tiled_words, sizeof(uint32_t));
+  uint32_t *detiled = (uint32_t *)calloc(n, sizeof(uint32_t));
+  ASSERT_TRUE(orig != NULL && tiled != NULL && detiled != NULL);
+
+  for (size_t i = 0; i < n; i++) {
+    orig[i] = 0xff000000u | (uint32_t)i;
+  }
+
+  agc_tile_surface(tiled, orig, W, H);
+  agc_detile_surface(detiled, tiled, W, H);
+
+  for (size_t i = 0; i < n; i++) {
+    ASSERT_EQ(detiled[i], orig[i]);
+  }
+
+  free(detiled);
+  free(tiled);
+  free(orig);
+}
+
 void run_unit_tests_agc_tiler(void) {
   TEST_SUITE_BEGIN("AGC Tiler & GPU Pipeline (RDNA2 GFX10.3)");
   RUN_TEST(test_tiler_surface_bytes);
@@ -169,6 +319,12 @@ void run_unit_tests_agc_tiler(void) {
   RUN_TEST(test_tiler_bijection_1920x1080);
   RUN_TEST(test_tiler_bijection_partial_tiles);
   RUN_TEST(test_tiler_null_safety);
+  RUN_TEST(test_agc_detile_pixel_golden);
+  RUN_TEST(test_agc_detile_surface_roundtrip);
   RUN_TEST(test_agc_dcb_desc_contract);
   RUN_TEST(test_agc_display_acceleration_query);
+  RUN_TEST(test_buffer_descriptor_layout);
+  RUN_TEST(test_buffer_descriptor_refusals);
+  RUN_TEST(test_tiler_dispatch_params);
+  RUN_TEST(test_tiler_dispatch_refusals);
 }

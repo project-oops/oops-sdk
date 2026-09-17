@@ -53,6 +53,9 @@ static void test_system_services_and_multiuser(void) {
   ASSERT_EQ(oops_system_power_tick(), -1);
   ASSERT_EQ(oops_system_navigate_home(), -1);
   ASSERT_EQ(oops_system_get_enter_button(&button), -1);
+  ASSERT_EQ(oops_system_launch_app(NULL), -1);
+  ASSERT_EQ(oops_system_launch_app(""), -1);
+  ASSERT_EQ(oops_system_launch_app("PPSA90001"), -1);
 }
 
 static void test_system_pltauth_check(void) {
@@ -69,6 +72,11 @@ static void test_system_klog(void) {
   /* Null safety */
   oops_klog(NULL, NULL);
   oops_kprintf(NULL, NULL);
+  oops_log(NULL);
+
+  /* Reset log identity to test fallback behavior */
+  oops_log_init(NULL);
+  ASSERT_TRUE(oops_log_get_app_id() == NULL);
 
   oops_klog("TEST", "Hello telemetry");
 #ifdef OOPS_HOST_BUILD
@@ -79,6 +87,31 @@ static void test_system_klog(void) {
 #ifdef OOPS_HOST_BUILD
   ASSERT_STR_EQ(oops_test_get_last_klog(), "[SYS] ErrorCode: 0x00001234 (4660)\n");
 #endif
+
+  /* Set explicit app identity */
+  oops_log_init("SCSH00001");
+  ASSERT_STR_EQ(oops_log_get_app_id(), "SCSH00001");
+
+  /* Single call without sub-tag */
+  oops_log("shell starting");
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001] shell starting\n");
+#endif
+
+  /* With component sub-tag */
+  oops_klog("RENDER", "RDNA2 pipeline online");
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001:RENDER] RDNA2 pipeline online\n");
+#endif
+
+  /* If tag matches app_id, avoid duplicate [APP:APP] */
+  oops_klog("SCSH00001", "redundant tag");
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001] redundant tag\n");
+#endif
+
+  /* Reset for subsequent tests */
+  oops_log_init(NULL);
 }
 
 void run_unit_tests_system(void) {

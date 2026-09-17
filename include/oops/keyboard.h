@@ -83,6 +83,12 @@ int oops_keyboard_available(void);
  */
 int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events);
 
+/*
+ * Read active keycodes directly and map directional and action keys to
+ * OOPS_BUTTON_* bitmask. Returns 0 if keyboard is unattached or no keys held.
+ */
+uint32_t oops_keyboard_poll_buttons(void);
+
 /* Close the keyboard. */
 void oops_keyboard_close(void);
 

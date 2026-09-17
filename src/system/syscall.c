@@ -64,6 +64,16 @@ int sys_call_init(const payload_args_t *args) {
 #endif
   }
 
+  /* Check if dynamic kexport_table was staged by the injector */
+  uintptr_t uktable = (uintptr_t)args->kexport_table;
+  if (uktable >= 0x10000UL && uktable < 0x0000800000000000UL && (uktable & 7) == 0) {
+    const void *gptr = obs_kexport_lookup(args->kexport_table, "W0xkN0+ZkCE");
+    if (gptr != NULL && (uintptr_t)gptr >= 0x10000UL) {
+      s_ptr_syscall = (long)(uintptr_t)gptr + 0x0a;
+      return 0;
+    }
+  }
+
   /* Start with args->sys_dynlib_dlsym which is guaranteed to be in libkernel
    * text */
   s_ptr_syscall = (long)args->sys_dynlib_dlsym;

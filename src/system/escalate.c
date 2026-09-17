@@ -302,3 +302,21 @@ int oops_has_system_authid(void) {
 
   return (authid == OOPS_SYSTEM_AUTHID) ? 1 : 0;
 }
+
+#include "oops/krw.h"
+
+int oops_system_init_namespace(const struct payload_args *args) {
+#ifndef OOPS_HOST_BUILD
+  if (args != NULL) {
+    const payload_args_t *pa = (const payload_args_t *)args;
+    if (pa->rwpipe != NULL && pa->rwpair != NULL && pa->kpipe_addr != 0) {
+      (void)oops_kernel_pipe_init(pa->rwpipe, pa->rwpair, (uint64_t)pa->kpipe_addr,
+                                 (uint64_t)pa->kdata_base_addr);
+    }
+  }
+  return oops_escape_jail();
+#else
+  (void)args;
+  return 0;
+#endif
+}
