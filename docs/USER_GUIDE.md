@@ -4,7 +4,7 @@
 
 Welcome to the **oops-sdk** developer guide. This manual walks you through building native, freestanding C/C++ applications for PlayStation 5 (Prospero) and PlayStation 4 (Orbis) hardware using `oops-sdk`.
 
-For exhaustive function signatures, parameters, and return codes across all 21 subsystems, see the **[Complete API Reference](API_REFERENCE.md)**.
+For exhaustive function signatures, parameters, and return codes across all 25 subsystems, see the **[Complete API Reference](API_REFERENCE.md)**.
 
 ---
 
@@ -28,7 +28,7 @@ For exhaustive function signatures, parameters, and return codes across all 21 s
 
 `oops-sdk` operates strictly freestanding (`-ffreestanding -nostdlib`):
 * **Zero Vendor SDK Files**: Replaces proprietary headers with mathematically verified structures and clean-room libc stubs.
-* **No Desktop Glibc**: Primitives like `obs_strlen`, `obs_memcpy`, and `obs_memset` provide memory operations. Debug text is emitted via `obs_klog()` directly into the kernel telemetry ring.
+* **No Desktop Glibc**: `obs_strlen`, `obs_strcmp`, and `obs_strncpy` provide freestanding string handling, while the unprefixed `memcpy`/`memset`/`memcmp` (declared in `<oops/freestd.h>`, no hosted libc behind them) cover memory operations. Debug text is emitted via `oops_klog()` directly into the kernel telemetry ring.
 * **Dynamic Linking via NIDs**: The runtime resolves platform libraries (`libkernel`, `libScePad`, `libSceAudioOut`) dynamically via symbol NID hashes.
 
 ---
@@ -74,12 +74,12 @@ Open exclusive HDMI scanout (`OBS_VIDEO_BUS_MAIN`) and render 2D shapes and text
 #include <oops/oops.h>
 
 int main(void) {
-    obs_klog("[APP] Starting 2D display demo...\n");
+    oops_klog("APP", "Starting 2D display demo...\n");
 
     // 1. Open primary display (1080p, double-buffered)
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 1920, 1080);
     if (!oops_display_is_ready(disp)) {
-        obs_klog("[APP] Failed to acquire display!\n");
+        oops_klog("APP", "Failed to acquire display!\n");
         return -1;
     }
 
@@ -91,10 +91,12 @@ int main(void) {
         // 3. Clear background
         oops_draw_clear(&surf, OOPS_COLOR_BLACK);
 
-        // 4. Draw shapes
-        oops_draw_fill_rect(&surf, 100, 100, 400, 200, OOPS_COLOR_BLUE);
-        oops_draw_rect(&surf, 100, 100, 400, 200, OOPS_COLOR_WHITE);
-        oops_draw_fill_circle(&surf, 800, 300, 80, OOPS_COLOR_RED);
+        // 4. Draw shapes. oops_draw_rect() fills the whole span - there is no
+        // separate outline-only rect call. oops_draw_circle()'s last argument
+        // picks filled (1) vs outlined (0).
+        oops_draw_rect(&surf, 100, 100, 400, 200, OOPS_COLOR_BLUE);
+        oops_draw_circle(&surf, 800, 300, 80, OOPS_COLOR_RED, 1);
+        oops_draw_circle(&surf, 800, 300, 90, OOPS_COLOR_WHITE, 0);
 
         // 5. Render text using built-in bitmap font
         oops_draw_text(&surf, 120, 140, "Hello from oops-sdk!", OOPS_COLOR_WHITE, 2);
@@ -126,7 +128,7 @@ void handle_input(void) {
         // Poll gamepad 0
         if (oops_input_poll(0, &pad) == 0) {
             if (pad.buttons & OOPS_BUTTON_CROSS) {
-                obs_klog("Cross pressed!\n");
+                oops_klog("PAD", "Cross pressed!\n");
                 // Turn lightbar green and pulse strong motor
                 oops_input_set_lightbar(0, 0, 255, 0);
                 oops_input_set_rumble(0, 0, 128);
@@ -213,8 +215,8 @@ Output uncompressed 16-bit stereo PCM audio (48,000 Hz).
 #include <oops/oops.h>
 
 void play_audio(void) {
-    // Open 48kHz, 2-channel stereo port
-    oops_audio_port_t *audio = oops_audio_open(48000, 2);
+    // Open 48kHz, 2-channel stereo port, 1024-frame hardware chunks
+    oops_audio_port_t *audio = oops_audio_open(48000, 2, 1024);
     if (!audio) return;
 
     // Buffer for 1024 frames (2048 int16 samples)
@@ -245,7 +247,7 @@ When building recompilers, emulators, or dynamic runtime translation engines, al
 
 void test_jit(void) {
     if (!oops_jit_is_available()) {
-        obs_klog("JIT not available: fallback to CPU interpreter\n");
+        oops_klog("JIT", "JIT not available: fallback to CPU interpreter\n");
         return;
     }
 
@@ -284,8 +286,8 @@ void test_jit(void) {
 ### A. On-Screen Virtual Keyboard (IME)
 ```c
 oops_ime_param_t param = {
+    .user_id = -1,
     .title = "Player Name",
-    .initial_text = "Player 1",
     .max_text_len = 32
 };
 oops_dialog_ime_open(&param);
@@ -299,7 +301,7 @@ char name_buf[32];
 oops_ime_result_t res;
 oops_dialog_ime_get_result(name_buf, sizeof(name_buf), &res);
 if (res == OOPS_IME_RESULT_OK) {
-    obs_klog(name_buf);
+    oops_klog("IME", name_buf);
 }
 oops_dialog_ime_close();
 ```
@@ -338,7 +340,8 @@ Standard console SDKs require reserving fixed Direct Memory (DMEM) pools, which 
 // Allocate 16-byte aligned dynamic memory
 char *buffer = (char *)oops_malloc(4096);
 if (buffer) {
-    obs_strcpy(buffer, "Dynamic allocation successful");
+    const char *msg = "Dynamic allocation successful";
+    obs_strncpy(buffer, msg, obs_strlen(msg) + 1); // freestd.h has no obs_strcpy
     oops_free(buffer);
 }
 
@@ -357,7 +360,7 @@ Easily read assets, textures, and ROMs directly from the title directory (`/app0
 void *file_data = NULL;
 size_t file_size = 0;
 if (oops_fs_read_all("/app0/assets/config.json", &file_data, &file_size) == 0) {
-    oops_kprintf("[FS] Loaded config: %u bytes\n", (unsigned int)file_size);
+    oops_kprintf("FS", "Loaded config: %u bytes\n", (unsigned int)file_size);
 
     // Process file_data...
 
@@ -368,7 +371,7 @@ if (oops_fs_read_all("/app0/assets/config.json", &file_data, &file_size) == 0) {
 // Check file existence and query size without reading
 if (oops_fs_exists("/app0/assets/level1.bin")) {
     int64_t sz = oops_fs_file_size("/app0/assets/level1.bin");
-    oops_kprintf("[FS] level1.bin exists, size = %lld bytes\n", (long long)sz);
+    oops_kprintf("FS", "level1.bin exists, size = %lld bytes\n", (long long)sz);
 }
 ```
 
@@ -401,8 +404,8 @@ Output debug telemetry that streams directly over `pros logs` or the serial kern
 ```c
 #include <oops/system.h>
 
-oops_klog("[INIT] Subsystem online\n");
-oops_kprintf("[FRAME] Delta: %u ms | Heap active: %u KB\n",
+oops_klog("INIT", "Subsystem online\n");
+oops_kprintf("FRAME", "Delta: %u ms | Heap active: %u KB\n",
              (unsigned int)frame_ms, (unsigned int)(stats.allocated_bytes / 1024));
 ```
 
@@ -415,7 +418,7 @@ Standard native Big Apps run with full GPU and display privileges out of the box
 ```c
 // Jailbreak current process: zero UIDs, set SYSTEM_AUTHID, escape sandbox jail
 if (oops_jailbreak_process(0) == 0) {
-    obs_klog("Now running as root with full filesystem access\n");
+    oops_klog("ESCALATE", "Now running as root with full filesystem access\n");
 }
 ```
 

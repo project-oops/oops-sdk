@@ -200,7 +200,11 @@ sits behind it is not, and the staging is worth being explicit about:
 | Stage | Can be finished now? |
 |---|---|
 | Lexer | **done** - text in, tokens out, nothing hardware-shaped about it |
-| Parser, AST, type checking | yes - the language is the language |
+| Expression parser and AST | **done** - the full 1.10 precedence ladder, arena-allocated, indices not pointers |
+| Declarations and statements | **done** - blocks, selection, iteration, jumps, declarators, functions, translation unit |
+| Preprocessor | **done** for what 1.10 shaders use - `#version`, object-like macros, `#ifdef` nesting. `#if`, function-like macros and `#extension` refused by name |
+| `struct`, and the type-name ambiguity | not started - `starts_declaration` decides on one token today, which a user-defined type name will break |
+| Type checking | yes - the language is the language |
 | Instruction encoding | mostly: `clang -target amdgcn-amd-amdhsa -mcpu=gfx1030` assembles, so generated words can be checked against a disassembler without a console |
 | Anything about the shader *interface* | **no** - varyings are parameter exports, and the export count is fixed at two until `REQ-...-3a91` is measured |
 

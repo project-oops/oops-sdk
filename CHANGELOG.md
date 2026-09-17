@@ -38,6 +38,60 @@ Nothing has shipped yet - this is the initial commit.
   What changes: a missing entry point is a gap to fill rather than a boundary to point at.
   **1.x first**, because 2.0 means GLSL and a compiler, which is the largest single piece of
   work here and the reason D007 pointed at Mesa.
+- **The GLSL preprocessor** (2026-09-17): `src/gl/glsl_pp.c`, a **token filter** rather than a
+  text-to-text pass, so nothing allocates a rewritten source and every token keeps pointing at
+  the original text for diagnostics. `#version`, object-like `#define`/`#undef`,
+  `#ifdef`/`#ifndef`/`#else`/`#endif`, `#error`.
+  - **Skipping still parses the directives.** Inside a false branch the tokens go and the
+    conditionals do not, or `#ifdef A` / `#ifdef B` / `#endif` / `#endif` pairs with the wrong
+    one and surfaces hundreds of lines later as a brace mismatch.
+  - **A directive reads one token past its own line**, because the lexer emits no newlines and
+    a directive's end is a change of line number. That token is parked and served next; dropping
+    it loses the first token after every directive, which is what the first version did.
+  - **When the self-expansion flag is cleared is the whole of the difficulty.** Clearing it as
+    the expansion queue drains is one read too early - that read yields the token which would
+    re-trigger the expansion, so `#define A A` loops forever. Clearing it on return to the lexer
+    is right, and makes mutual recursion (`#define A B`, `#define B A`) terminate as well.
+    Mutation-tested: the wrong lifetime hangs rather than fails.
+  - Function-like macros, `#if`, `#extension`, `#pragma` and `#line` are **refused by name**. A
+    skipped `#extension` compiles a shader that asked for something it did not get; a skipped
+    `#if` takes the wrong branch. A directive inside a dark branch is ignored entirely, refusals
+    included - a `#pragma` in a branch that is not compiled has not been asked for.
+- **GLSL declarations and statements** (2026-09-17), completing the grammar: compound blocks,
+  `if`/`else`, `while`, `do`-`while`, `for`, the jumps, declarations with initialisers and array
+  sizes, function definitions and prototypes, and a translation unit.
+  - **A prototype has no body, which is not an empty body.** `c` absent means prototype; an
+    empty `{}` is a compound node with no statements. The two read differently and a later stage
+    needs to tell them apart.
+  - **A declarator list and the translation unit both chain through `sibling`**, so the unit has
+    to walk to the tail of a declaration rather than assume the node it just received is the
+    last. Getting that wrong drops everything after the first `float a, b;` in the file -
+    mutation-tested, because it is silent.
+  - A mutation making the declarator list parse initialisers with the comma operator **survived
+    the two-declarator test**: the first declarator's initialiser is parsed at a different call
+    site, so only three declarators can expose it. Test widened, mutation then caught.
+  - The preprocessor is refused by name rather than skipped, because skipping would silently
+    ignore a `#version` and compile something the program did not write.
+  - The dangling `else` binds to the nearest `if`, and that is **structural rather than a
+    decision**: recursive descent has the inner `if` consume the `else` before the outer frame
+    sees it. Noted in the source, because it looks like a condition someone could get wrong and
+    an attempted mutation there had nothing to bite on.
+- **The GLSL expression parser** (2026-09-17): `src/gl/glsl_parse.c`, recursive descent over
+  GLSL 1.10's full precedence ladder, building an AST in a caller-supplied arena. Nodes refer to
+  each other by **index, not pointer** - indices survive the arena moving, and a stale one is a
+  bounds check rather than a wild read, which matters where nothing catches the alternative.
+  - **Associativity is asserted, not assumed.** Getting it backwards still parses every program
+    and computes a different answer: `a-b-c` must be `(a-b)-c` and `a=b=c` must be `a=(b=c)`.
+    The tests render the tree fully parenthesised so the shape is readable in the expected
+    string rather than inferred from node counts.
+  - **The bitwise levels are present although GLSL 1.10 barely uses them**, because leaving a
+    level out of the ladder does not raise an error - it silently reassociates everything
+    around it.
+  - **A comma inside an argument list is not the sequence operator.** Parsing the list with the
+    full expression parser makes `f(a,b)` a one-argument call whose argument is `(a,b)`, which
+    type-checks differently and is very hard to see. Mutation-tested.
+  - A dropped precedence level turns out to be caught by `-Wunused-function` before any test
+    runs, which is a nicer failure than the one the tests would give.
 - **The GLSL front end started** (2026-09-17): `src/gl/glsl_lex.c`, a GLSL 1.10 lexer. GL 2.0 is
   a compiler, and this is the stage that can be finished today - pure text handling, testable to
   the same standard as everything else, and needed by any version of GL 2.0 that ever lands.

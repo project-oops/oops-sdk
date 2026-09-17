@@ -15,7 +15,7 @@ how a consumer wires it into a Makefile.
 ## Guide
 
 - **[USER_GUIDE.md](USER_GUIDE.md)** - Step-by-step developer tutorial covering Makefile setup, display scanning, DualSense polling, fixed-function 3D graphics, PCM audio, JIT compilation, and privilege escalation.
-- **[API_REFERENCE.md](API_REFERENCE.md)** - Comprehensive technical reference documenting all 21 subsystems, ~90 C functions, error codes, and hardware invariants.
+- **[API_REFERENCE.md](API_REFERENCE.md)** - Comprehensive technical reference documenting all 25 subsystem headers in `include/oops/`, their C functions, error codes, and hardware invariants.
 - **[BUILDING.md](BUILDING.md)** - `bin/oops-sdk`, what each verb does, why the build is a
   cross-compile even on Linux, and what a consumer has to do to link the result.
 
