@@ -35,16 +35,41 @@ int oops_user_get_logged_in_users(int32_t *out_user_ids, size_t max_users,
 int oops_system_get_info(oops_system_info_t *out_info);
 int oops_system_notify(const char *text);
 
+/* Log Levels */
+typedef enum oops_log_level {
+  OOPS_LOG_NONE = 0,
+  OOPS_LOG_ERROR = 1,
+  OOPS_LOG_WARN = 2,
+  OOPS_LOG_INFO = 3,
+  OOPS_LOG_DEBUG = 4,
+  OOPS_LOG_TRACE = 5
+} oops_log_level_t;
+
 /* Kernel Log & Telemetry Output (/dev/klog on target, stderr on host) */
 void oops_log_init(const char *app_id);
 const char *oops_log_get_app_id(void);
+void oops_log_set_level(oops_log_level_t level);
+oops_log_level_t oops_log_get_level(void);
 
 void oops_log(const char *fmt, ...)
     __attribute__((format(printf, 1, 2)));
 void oops_klog(const char *tag, const char *msg);
 void oops_kprintf(const char *tag, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
+void oops_klog_level(oops_log_level_t level, const char *tag, const char *msg);
+void oops_kprintf_level(oops_log_level_t level, const char *tag, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+
+#define oops_log_error(tag, ...) oops_kprintf_level(OOPS_LOG_ERROR, tag, __VA_ARGS__)
+#define oops_log_warn(tag, ...)  oops_kprintf_level(OOPS_LOG_WARN,  tag, __VA_ARGS__)
+#define oops_log_info(tag, ...)  oops_kprintf_level(OOPS_LOG_INFO,  tag, __VA_ARGS__)
+#define oops_log_debug(tag, ...) oops_kprintf_level(OOPS_LOG_DEBUG, tag, __VA_ARGS__)
+#define oops_log_trace(tag, ...) oops_kprintf_level(OOPS_LOG_TRACE, tag, __VA_ARGS__)
+
 const char *oops_test_get_last_klog(void);
+
+/* Runtime dynamic linker symbol resolution probe (prevents 0xa0020101 PLT traps) */
+int oops_symbol_is_resolved(const void *fn_ptr);
 
 /* System Service Controls (libSceSystemService) */
 int oops_system_hide_splash(void);
@@ -52,6 +77,9 @@ int oops_system_power_tick(void);
 int oops_system_navigate_home(void);
 int oops_system_get_enter_button(int *out_button); /* 0 = Circle, 1 = Cross */
 int oops_system_launch_app(const char *title_id);
+int oops_system_get_running_app_title_id(char *out_title_id, size_t max_len);
+int oops_system_is_app_suspended(int *out_is_suspended);
+int oops_system_kill_app(int app_id);
 
 /* Hardware Telemetry & Diagnostics */
 int oops_system_get_hw_info(oops_hw_info_t *out_hw);
@@ -137,6 +165,45 @@ int oops_system_init_namespace(const struct payload_args *args);
  * Returns: 0 on success, -1 on timeout or if daemon is unavailable.
  */
 int oops_system_escape_sandbox(void);
+
+/**
+ * Finish, on a platform where finishing is not permitted. Never returns.
+ *
+ * # Why a title cannot simply return or exit
+ *
+ * Measured, retail firmware 12.40, obSCEne `REQ-20260917T1450Z-2e71` (check
+ * `017-posix/process-exit-candidates`, sweep `20260917-160206`):
+ *
+ *   - `exit`, `_Exit`, `sceKernelExit`, `sceKernelExitProcess`,
+ *     `sceSystemServiceKillLocalProcess` and `sceShellCoreUtilExitApp` are all **absent**.
+ *   - `_exit` is **present** (`libkernel`, `0x8000003f0`) and raises `SIGSYS`: it reaches
+ *     FreeBSD's `SYS_exit`, syscall 1, which a `big-app` container's credentials do not permit.
+ *     The kernel logs `eboot.bin calls exit()` and then kills the process.
+ *   - returning from the entry point faults at `rip: 0x0`, because the dynamic linker transfers
+ *     control with no caller return frame - `%rbp` zero, `%rsp` holding argc.
+ *
+ * Process lifecycle belongs to `SceShellCore`. There is no userland call that ends a process
+ * cleanly, so the conforming pattern is the one obSCEne's own sweeps have always used: emit the
+ * final line, then idle, and let the host close the app (`pros close <ID>`, or
+ * `obscene-tool hw close-app <ID>`). That produces no coredump, no crash report and no hung GPU
+ * ring, where returning or calling `_exit` produces all three.
+ *
+ * # What this means for a caller
+ *
+ * **Say everything you have to say before calling this.** A harness watches the log for a
+ * completion sentinel, so the last line printed is the result - an exit code is not available to
+ * report one, and anything buffered and unflushed is lost.
+ *
+ * `sceSystemServiceNavigateToGoHome` is the alternative the same resolution names: return the
+ * display to the home screen and idle until killed. It is deliberately not done here, because a
+ * probe's caller usually wants the rendered output left on screen to be sampled.
+ *
+ * Self-contained on purpose: it binds the vendor sleep itself rather than calling
+ * `oops_time_sleep_ms`, so that a title linking `system.c` without `time.c` does not acquire an
+ * unresolved symbol. Four of them do exactly that today, and an app link ignores unresolved
+ * symbols rather than failing, so the cost would have been a trap on first use.
+ */
+__attribute__((noreturn)) void oops_system_park_until_closed(void);
 
 #ifdef __cplusplus
 }

@@ -42,6 +42,9 @@
 #define OOPS_GL_MAX_TEXTURE_OBJECTS 32
 #define OOPS_GL_MAX_BUFFER_OBJECTS 64
 #define OOPS_GL_LIGHT_COUNT 8
+/* Six, which is the specification's minimum and exactly what the hardware clipper has:
+ * PA_CL_CLIP_CNTL carries UCP_ENA_0..5 and there is no seventh bit. */
+#define OOPS_GL_CLIP_PLANE_COUNT 6
 
 typedef struct {
     GLboolean enabled;
@@ -117,9 +120,24 @@ typedef struct {
     gl_list_cmd_t cmds[GL_MAX_LIST_COMMANDS];
 } gl_display_list_t;
 
+/* The default texture of each target - the object a glTex* call acts on when nothing is bound.
+ *
+ * Reserved ids rather than object 1, which is what this used for GL_TEXTURE_2D. glGenTextures
+ * counts up from 1, so object 1 was both the default 2D texture *and* the first id handed out: a
+ * program that generated a texture and then uploaded with nothing bound wrote into its own. These
+ * are above anything that counting will reach, and there is one per target because GL has one per
+ * target - sharing them would let a 1D upload overwrite the default 2D image.
+ */
+#define OOPS_GL_DEFAULT_TEXTURE_1D 0xfffffe01u
+#define OOPS_GL_DEFAULT_TEXTURE_2D 0xfffffe02u
+
 typedef struct gl_texture_object {
     GLuint id;
     GLboolean used;
+    /* The target this object was first bound to, and the only one it may be bound to afterwards.
+     * Zero until it is first bound. GL calls rebinding to a different target an error, and it is
+     * one worth reporting: the object's image has a shape the other target cannot read. */
+    GLenum target;
     GLsizei width;
     GLsizei height;
     GLenum format;
@@ -153,6 +171,15 @@ typedef struct {
     float inv_w;
     float r, g, b, a;
     float u, v;
+    /* Signed distance from each user clip plane, in eye space. Interpolated across the triangle
+     * and tested per fragment rather than the triangle being geometrically clipped: the visible
+     * result is the same and it does not need a clipper that turns one triangle into several. */
+    float cd[OOPS_GL_CLIP_PLANE_COUNT];
+    /* The fog factor: 1 means fully the fragment's own colour, 0 fully the fog colour. Computed
+     * per vertex from the eye-space distance and interpolated, which is where the per-fragment
+     * quality comes from - folding fog into the vertex colour instead is exact only when the
+     * factor is constant across the primitive. */
+    float fog;
 } gl_screen_vertex_t;
 
 /* One entry of the attribute stack: the GL state `glPushAttrib` can save.
@@ -167,7 +194,9 @@ typedef struct {
     /* GL_CURRENT_BIT */
     float cur_color[4];
     float cur_normal[3];
-    float cur_texcoord[2];
+    /* Four, not two: glTexCoord3 and glTexCoord4 exist and q is a projective divide, so a
+     * two-component current texture coordinate cannot hold what they set. Defaults (0,0,0,1). */
+    float cur_texcoord[4];
 
     /* GL_ENABLE_BIT, and the individual buffer bits that also carry an enable */
     GLboolean cap_depth_test, cap_cull_face, cap_blend, cap_scissor_test;
@@ -198,7 +227,33 @@ typedef struct {
 
     /* GL_TEXTURE_BIT */
     GLuint bound_texture_2d;
+    GLuint bound_texture_1d;
+    GLboolean cap_texture_1d;
     GLenum tex_env_mode;
+    GLenum texgen_mode[4];
+    float texgen_object_plane[4][4];
+    float texgen_eye_plane[4][4];
+    GLboolean texgen_enabled[4];
+    /* GL_TRANSFORM_BIT */
+    float clip_plane[OOPS_GL_CLIP_PLANE_COUNT][4];
+    GLboolean clip_plane_enabled[OOPS_GL_CLIP_PLANE_COUNT];
+    /* GL_FOG_BIT */
+    GLboolean cap_fog;
+    GLenum fog_mode;
+    float fog_density;
+    float fog_start;
+    float fog_end;
+    float fog_color[4];
+    /* GL_STENCIL_BUFFER_BIT */
+    GLboolean cap_stencil_test;
+    GLenum stencil_func;
+    GLint stencil_ref;
+    GLuint stencil_value_mask;
+    GLuint stencil_writemask;
+    GLenum stencil_fail;
+    GLenum stencil_zfail;
+    GLenum stencil_zpass;
+    GLint clear_stencil;
     float tex_env_color[4];
 
     /* GL_VIEWPORT_BIT */
@@ -286,6 +341,7 @@ typedef struct gl_context {
     GLboolean cap_scissor_test;
     GLboolean cap_lighting;
     GLboolean cap_texture_2d;
+    GLboolean cap_texture_1d;
 
     /* State settings */
     GLenum depth_func;
@@ -332,7 +388,6 @@ typedef struct gl_context {
     gl_material_t mat_back;
     float light_model_ambient[4];
     GLboolean light_model_local_viewer;
-    GLboolean light_model_two_side;
 
     /* Client arrays */
     gl_client_array_t array_vertex;
@@ -343,7 +398,7 @@ typedef struct gl_context {
     /* Current attributes for immediate mode */
     float cur_color[4];
     float cur_normal[3];
-    float cur_texcoord[2];
+    float cur_texcoord[4]; /* s, t, r, q - see the attribute-stack copy of this field */
 
     /* Immediate mode buffer */
     GLenum imm_mode;
@@ -351,8 +406,10 @@ typedef struct gl_context {
     gl_vertex_t imm_verts[OOPS_GL_MAX_IMMEDIATE_VERTS];
     int imm_count;
 
-    /* Texture Management */
+    /* Texture Management. One binding per target, both live at once - that is what makes
+     * GL_TEXTURE_1D a target rather than a shape of 2D texture. */
     GLuint bound_texture_2d;
+    GLuint bound_texture_1d;
     gl_texture_object_t textures[OOPS_GL_MAX_TEXTURE_OBJECTS];
 
     /* Buffer objects. Two binding points, because GL_ARRAY_BUFFER and GL_ELEMENT_ARRAY_BUFFER
@@ -375,6 +432,72 @@ typedef struct gl_context {
     uint32_t dcb_words;
     GLboolean hw_frame_active;
     GLboolean hw_z_bound; /* the depth surface is bound in the open frame */
+    /* `glViewport` was called after this frame's registers were written, so the next draw has to
+     * re-emit them. Frames that set the viewport before drawing - which is every frame gl1-cube
+     * renders - never raise it, so their command stream is unchanged. */
+    /* Texture coordinate generation, one entry per coordinate in the order S, T, R, Q.
+     *
+     * `eye_plane` is stored **already multiplied by the inverse modelview of the moment
+     * glTexGen was called**, which is what the specification says and is the only reason
+     * GL_EYE_LINEAR differs from GL_OBJECT_LINEAR. Keeping the caller's numbers instead and
+     * transforming later would silently turn every eye-linear plane into an object-linear one.
+     * glGetTexGen returns what is stored, as the specification also says. */
+    GLenum texgen_mode[4];
+    float texgen_object_plane[4][4];
+    float texgen_eye_plane[4][4];
+    GLboolean texgen_enabled[4];
+
+    /* Fog. The distance it works from is the eye-space distance to the fragment, so the factor is
+     * computed per vertex and interpolated - see the fog field on the screen vertex. */
+    GLboolean cap_fog;
+    GLenum fog_mode;
+    float fog_density;
+    float fog_start;
+    float fog_end;
+    float fog_color[4];
+
+    /* Point size and line width, in pixels. Both are screen-space quantities, which is why the
+     * expansion that honours them has to happen after projection. */
+    float point_size;
+    float line_width;
+
+    /* Raster position, in window coordinates, plus the colour and texture coordinate latched
+     * with it. `raster_valid` is false when the position clipped, and an invalid position draws
+     * nothing - clamping it to the edge instead would put a bitmap somewhere the program never
+     * asked for, which is worse than drawing nothing. */
+    float raster_pos[4];
+    float raster_color[4];
+    float raster_texcoord[4];
+    float raster_distance;
+    GLboolean raster_valid;
+    float pixel_zoom_x;
+    float pixel_zoom_y;
+
+    /* Stencil. Eight bits per pixel in its own buffer, because on this hardware the stencil
+     * surface is separate from the depth one - DB_STENCIL_INFO and DB_STENCIL_READ/WRITE_BASE
+     * are their own registers, so Z_32_FLOAT having no stencil plane costs nothing. */
+    uint8_t *stencil_buffer;
+    size_t stencil_px;
+    GLboolean cap_stencil_test;
+    GLenum stencil_func;
+    GLint stencil_ref;
+    GLuint stencil_value_mask;
+    GLuint stencil_writemask;
+    GLenum stencil_fail;
+    GLenum stencil_zfail;
+    GLenum stencil_zpass;
+    GLint clear_stencil;
+
+    /* User clip planes, in **eye** coordinates - stored through the inverse modelview of the
+     * moment glClipPlane was called, the same rule the eye-linear texgen plane follows. */
+    float clip_plane[OOPS_GL_CLIP_PLANE_COUNT][4];
+    GLboolean clip_plane_enabled[OOPS_GL_CLIP_PLANE_COUNT];
+    GLboolean hw_clip_dirty;
+
+    GLboolean hw_vport_dirty;
+    GLboolean hw_scissor_dirty;
+    /* Which texture's descriptors are in this frame's one descriptor slot, 0 for none. */
+    GLuint hw_frame_tex;
     size_t depth_px;      /* floats in depth_buffer: the 64KB_Z_X tiled extent, both axes padded to 128 px */
     GLboolean use_hardware;
     uint32_t canary_vs;
@@ -480,7 +603,10 @@ static inline uint32_t gl_f32_bits(float f) {
  * from memory - see the table in `gl_ps_patch_alpha_test`. */
 #define GL_PS_ALPHA_SLOT_UNTEX 24u
 #define GL_PS_ALPHA_SLOT_TEX   40u
+/* The four instructions combining the sampled texel with the interpolated colour. */
+#define GL_PS_COMBINE_SLOT_TEX 36u
 void gl_ps_patch_alpha_test(gl_context_t *ctx);
+void gl_ps_patch_tex_env(gl_context_t *ctx);
 
 /* Buffer objects. `gl_find_buffer` answers NULL for name 0 and for a name never generated.
  *
@@ -507,6 +633,34 @@ float gl_cos(float rad);
 float gl_tan(float rad);
 float gl_sqrt(float val);
 float gl_pow(float base, float exp);
+float gl_exp(float x);
+
+/* The fog factor for an eye-space distance: 1 is unfogged, 0 is fully the fog colour.
+ *
+ * The three modes are the specification's. Linear divides by (end - start), so an end equal to
+ * the start would divide by zero - that case gives 0, which is the fully-fogged answer the limit
+ * approaches from either side, rather than an infinity that poisons the colour. */
+static inline float gl_fog_factor(const gl_context_t *ctx, float dist) {
+    float f;
+    switch (ctx->fog_mode) {
+        case GL_EXP:
+            f = gl_exp(-ctx->fog_density * dist);
+            break;
+        case GL_EXP2: {
+            const float d = ctx->fog_density * dist;
+            f = gl_exp(-(d * d));
+            break;
+        }
+        default: { /* GL_LINEAR */
+            const float span = ctx->fog_end - ctx->fog_start;
+            f = (span == 0.0f) ? 0.0f : (ctx->fog_end - dist) / span;
+            break;
+        }
+    }
+    if (f < 0.0f) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    return f;
+}
 
 /* Matrix operations */
 void mat4_identity(gl_mat4_t *out);
@@ -517,6 +671,60 @@ void mat4_scale(gl_mat4_t *out, float x, float y, float z);
 void mat4_frustum(gl_mat4_t *out, float l, float r, float b, float t, float n, float f);
 void mat4_ortho(gl_mat4_t *out, float l, float r, float b, float t, float n, float f);
 void mat4_transform_vec4(float *out4, const gl_mat4_t *m, const float *in4);
+GLboolean mat4_invert(gl_mat4_t *out, const gl_mat4_t *in);
+void gl_apply_texgen(const gl_context_t *ctx, gl_vertex_t *v);
+
+/* The UCP_ENA_0..5 bits of PA_CL_CLIP_CNTL (0x204), bits 0..5 per
+ * mesa/src/amd/registers/gfx103.json. */
+static inline uint32_t gl_compute_clip_cntl(const gl_context_t *ctx) {
+    uint32_t v = 0u;
+    if (!ctx) return 0u;
+    for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
+        if (ctx->clip_plane_enabled[i]) v |= (1u << i);
+    }
+    return v;
+}
+
+/* The plane the hardware clipper wants, which is **clip space, not eye space**.
+ *
+ * "Clip-Space Plane = Eye-Space Plane * Projection Matrix" - mesa/src/mesa/main/clip.c:40-51,
+ * which multiplies the eye plane by the projection's *inverse* because a plane transforms by the
+ * inverse of the transform its points take. Mesa passes the eye-space form only when a vertex
+ * shader writes a clip vertex (st_atom_clip.c:52-55); these shaders do not, so the fixed-function
+ * clipper applies and it reads clip space.
+ *
+ * Returns false when the projection cannot be inverted, leaving `out` alone - the caller then
+ * writes nothing rather than a plane made of infinities. */
+GLboolean gl_compute_clip_plane_hw(const gl_context_t *ctx, int i, float out[4]);
+void gl_hw_emit_clip_planes(const gl_context_t *ctx, uint32_t **dw_ptr);
+/* The binding a glTex* call names, as a pointer into the context so callers can read and write
+ * it. NULL for a target this implementation does not have; the caller reports GL_INVALID_ENUM. */
+static inline GLuint *gl_binding_slot(gl_context_t *ctx, GLenum target) {
+    if (!ctx) return NULL;
+    if (target == GL_TEXTURE_2D) return &ctx->bound_texture_2d;
+    if (target == GL_TEXTURE_1D) return &ctx->bound_texture_1d;
+    return NULL;
+}
+
+static inline GLuint gl_default_texture_id(GLenum target) {
+    return (target == GL_TEXTURE_1D) ? OOPS_GL_DEFAULT_TEXTURE_1D : OOPS_GL_DEFAULT_TEXTURE_2D;
+}
+
+/* **The texture a draw samples**, which is not the same question as the one above.
+ *
+ * When more than one target is enabled the specification says the highest dimensionality wins, so
+ * 2D beats 1D and a program can leave a 1D texture bound while drawing with a 2D one. Answering
+ * this with "whatever is bound to 2D" would give the wrong texture to a program using 1D, and
+ * answering it with "whichever was bound last" would give a different wrong one. */
+static inline GLuint gl_effective_texture_id(const gl_context_t *ctx) {
+    if (!ctx) return 0u;
+    if (ctx->cap_texture_2d && ctx->bound_texture_2d > 0u) return ctx->bound_texture_2d;
+    if (ctx->cap_texture_1d && ctx->bound_texture_1d > 0u) return ctx->bound_texture_1d;
+    return 0u;
+}
+
+size_t gl_unpack_row_stride(const gl_context_t *ctx, GLsizei width, size_t pixel_bytes);
+size_t gl_unpack_row_stride_bytes(const gl_context_t *ctx, size_t bytes);
 void gl_update_mvp(gl_context_t *ctx);
 void gl_update_normal_matrix(gl_context_t *ctx);
 void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *obj_norm,
@@ -579,6 +787,148 @@ static inline uint32_t gl_compute_cb_target_mask(const gl_context_t *ctx) {
     if (ctx->color_mask[2]) mask |= 0x4u; /* Blue */
     if (ctx->color_mask[3]) mask |= 0x8u; /* Alpha */
     return mask;
+}
+
+/*
+ * One GL blend factor as the colour block's `BlendOp`.
+ *
+ * Values from `oops-mesa/mesa/src/amd/registers/gfx10.json`, enum `BlendOp` - they are a closed
+ * table, so a factor with no entry is refused by falling back rather than being approximated.
+ */
+static inline uint32_t gl_blend_op(GLenum factor, uint32_t fallback) {
+    switch (factor) {
+        case GL_ZERO:                     return 0u;  /* BLEND_ZERO */
+        case GL_ONE:                      return 1u;  /* BLEND_ONE */
+        case GL_SRC_COLOR:                return 2u;  /* BLEND_SRC_COLOR */
+        case GL_ONE_MINUS_SRC_COLOR:      return 3u;  /* BLEND_ONE_MINUS_SRC_COLOR */
+        case GL_SRC_ALPHA:                return 4u;  /* BLEND_SRC_ALPHA */
+        case GL_ONE_MINUS_SRC_ALPHA:      return 5u;  /* BLEND_ONE_MINUS_SRC_ALPHA */
+        case GL_DST_ALPHA:                return 6u;  /* BLEND_DST_ALPHA */
+        case GL_ONE_MINUS_DST_ALPHA:      return 7u;  /* BLEND_ONE_MINUS_DST_ALPHA */
+        case GL_DST_COLOR:                return 8u;  /* BLEND_DST_COLOR */
+        case GL_ONE_MINUS_DST_COLOR:      return 9u;  /* BLEND_ONE_MINUS_DST_COLOR */
+        case GL_SRC_ALPHA_SATURATE:       return 10u; /* BLEND_SRC_ALPHA_SATURATE */
+        default:                          return fallback;
+    }
+}
+
+/* A GL blend equation as the colour block's `CombFunc`, same file, enum `CombFunc`. The two
+ * subtractions are not interchangeable: `COMB_SRC_MINUS_DST` is GL's `GL_FUNC_SUBTRACT` and
+ * `COMB_DST_MINUS_SRC` is `GL_FUNC_REVERSE_SUBTRACT`, and swapping them negates the result. */
+static inline uint32_t gl_blend_comb(GLenum equation) {
+    switch (equation) {
+        case GL_FUNC_SUBTRACT:         return 1u; /* COMB_SRC_MINUS_DST */
+        case GL_MIN:                   return 2u; /* COMB_MIN_DST_SRC */
+        case GL_MAX:                   return 3u; /* COMB_MAX_DST_SRC */
+        case GL_FUNC_REVERSE_SUBTRACT: return 4u; /* COMB_DST_MINUS_SRC */
+        default:                       return 0u; /* COMB_DST_PLUS_SRC, i.e. GL_FUNC_ADD */
+    }
+}
+
+/*
+ * `CB_BLEND0_CONTROL` from the GL blend state.
+ *
+ * **This was the constant `0x00002504` whenever blending was enabled**, so `glBlendFunc` and
+ * `glBlendEquation` reached the software rasteriser and never the GPU. Decoding that constant
+ * against the field layout says more than that: `COLOR_SRCBLEND` 4 and `COLOR_DESTBLEND` 5 are
+ * right - they are GL's default `SRC_ALPHA` / `ONE_MINUS_SRC_ALPHA` - but **bit 30, `ENABLE`,
+ * is clear**, and bit 13 is set where the register has no field at all. So the colour block was
+ * being told the right factors and never told to blend, which is why gl1-probe's `blend` and
+ * `blend-equation` both fail on hardware while passing on the host.
+ *
+ * Field positions and both enums from `oops-mesa/mesa/src/amd/registers/gfx103.json` and its
+ * `gfx10.json` base, which agree: `COLOR_SRCBLEND` [0,4], `COLOR_COMB_FCN` [5,7],
+ * `COLOR_DESTBLEND` [8,12], `ALPHA_SRCBLEND` [16,20], `ALPHA_COMB_FCN` [21,23],
+ * `ALPHA_DESTBLEND` [24,28], `SEPARATE_ALPHA_BLEND` [29], `ENABLE` [30].
+ *
+ * The alpha channel is always programmed and `SEPARATE_ALPHA_BLEND` always set, because oops-gl
+ * tracks a separate alpha factor pair (`glBlendFuncSeparate`) and letting the block infer alpha
+ * from the colour fields would quietly ignore it.
+ */
+static inline uint32_t gl_compute_cb_blend_control(const gl_context_t *ctx) {
+    if (!ctx || !ctx->cap_blend) return 0u;
+    const uint32_t comb = gl_blend_comb(ctx->blend_equation);
+    /* GL_MIN and GL_MAX ignore the factors entirely - the hardware takes them from the operands,
+     * so the factor fields are set to ONE to keep them from contributing. */
+    const GLboolean minmax = (ctx->blend_equation == GL_MIN || ctx->blend_equation == GL_MAX)
+                                 ? GL_TRUE : GL_FALSE;
+    const uint32_t csrc = minmax ? 1u : gl_blend_op(ctx->blend_src, 4u);
+    const uint32_t cdst = minmax ? 1u : gl_blend_op(ctx->blend_dst, 5u);
+    const uint32_t asrc = minmax ? 1u : gl_blend_op(ctx->blend_src_alpha, 4u);
+    const uint32_t adst = minmax ? 1u : gl_blend_op(ctx->blend_dst_alpha, 5u);
+    return (csrc & 0x1fu) | ((comb & 0x7u) << 5) | ((cdst & 0x1fu) << 8) |
+           ((asrc & 0x1fu) << 16) | ((comb & 0x7u) << 21) | ((adst & 0x1fu) << 24) |
+           (1u << 29) | /* SEPARATE_ALPHA_BLEND */
+           (1u << 30);  /* ENABLE - the bit the constant never set */
+}
+
+/*
+ * `PA_CL_VPORT_XSCALE`, `XOFFSET`, `YSCALE`, `YOFFSET` from the GL viewport.
+ *
+ * **The hardware path ignored `glViewport` entirely until 2026-09-17**: these four registers were
+ * computed from the render target's width and height, so the GPU mapped NDC across the whole
+ * surface whatever the viewport said. The software rasteriser has always honoured it, so the two
+ * paths disagreed and nothing on the host could see it - gl1-cube sets the viewport to exactly
+ * the framebuffer size, which is the one case where the hardcoded values are right. gl1-probe's
+ * first full hardware run found it: every check that sampled a pixel and compared it to an
+ * expected colour failed, while the two that compare one frame against another passed, because
+ * both frames were displaced identically.
+ *
+ * The formulas generalise what was there rather than replacing it. For a viewport covering the
+ * whole target they reduce to `w/2`, `w/2`, `-h/2`, `h/2` - the previous constants exactly - so
+ * the gl-cube oracle frame is unchanged.
+ *
+ * `fb_h` is the render target's height, not the viewport's: GL measures the viewport from the
+ * bottom-left and the rows grow downward, so the offset is the distance from the top of the
+ * target to the middle of the viewport.
+ */
+static inline void gl_compute_vport(const gl_context_t *ctx, uint32_t fb_h, uint32_t out[4]) {
+    const float vx = (float)ctx->vp_x;
+    const float vy = (float)ctx->vp_y;
+    const float vw = (float)ctx->vp_w;
+    const float vh = (float)ctx->vp_h;
+    out[0] = gl_f32_bits(vw * 0.5f);                    /* XSCALE  */
+    out[1] = gl_f32_bits(vx + vw * 0.5f);               /* XOFFSET */
+    out[2] = gl_f32_bits(-vh * 0.5f);                   /* YSCALE: NDC +y is up, rows grow down */
+    out[3] = gl_f32_bits((float)fb_h - vy - vh * 0.5f); /* YOFFSET */
+}
+
+/* PA_SC_VPORT_SCISSOR_0_TL / _BR from the GL scissor box.
+ *
+ * The scan converter's rectangle is y-down over the render target; GL measures its box from the
+ * bottom-left, so the same flip gl_compute_vport applies applies here. The box is clamped to the
+ * target because the register fields are unsigned and a box hanging off the left or top would
+ * otherwise wrap to an enormous coordinate.
+ *
+ * With the test disabled - and for a box covering the whole target - this is the full extent,
+ * which is what the measured recipe wrote unconditionally. A title that never calls glScissor
+ * emits the same stream it did before.
+ *
+ * Fields TL_X / BR_X [0,14], TL_Y / BR_Y [16,30], WINDOW_OFFSET_DISABLE [31], from
+ * mesa/src/amd/registers/gfx103.json (types PA_SC_WINDOW_SCISSOR_TL and _BR; the VPORT_SCISSOR
+ * registers at 0x028250 reference them). Only the viewport scissor takes the GL box: the screen,
+ * window and generic rectangles are the surface bounds and stay at the full extent.
+ */
+static inline void gl_compute_scissor(const gl_context_t *ctx, uint32_t fb_w, uint32_t fb_h,
+                                      uint32_t out[2]) {
+    int32_t l = 0, t = 0;
+    int32_t r = (int32_t)fb_w, b = (int32_t)fb_h;
+    if (ctx && ctx->cap_scissor_test) {
+        const int32_t sw = ctx->sc_w > 0 ? (int32_t)ctx->sc_w : 0;
+        const int32_t sh = ctx->sc_h > 0 ? (int32_t)ctx->sc_h : 0;
+        l = ctx->sc_x;
+        r = ctx->sc_x + sw;
+        t = (int32_t)fb_h - (ctx->sc_y + sh);
+        b = (int32_t)fb_h - ctx->sc_y;
+        if (l < 0) l = 0;
+        if (t < 0) t = 0;
+        if (r > (int32_t)fb_w) r = (int32_t)fb_w;
+        if (b > (int32_t)fb_h) b = (int32_t)fb_h;
+        if (r < l) r = l;
+        if (b < t) b = t;
+    }
+    out[0] = 0x80000000u | (((uint32_t)t & 0x7fffu) << 16) | ((uint32_t)l & 0x7fffu);
+    out[1] = (((uint32_t)b & 0x7fffu) << 16) | ((uint32_t)r & 0x7fffu);
 }
 
 /* Rendering pipeline */

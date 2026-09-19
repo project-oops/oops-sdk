@@ -30,7 +30,8 @@
 #define GL_ATTRIB_SUPPORTED                                                     \
     (GL_CURRENT_BIT | GL_POLYGON_BIT | GL_LIGHTING_BIT | GL_DEPTH_BUFFER_BIT |  \
      GL_VIEWPORT_BIT | GL_TRANSFORM_BIT | GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | \
-     GL_LIST_BIT | GL_TEXTURE_BIT | GL_SCISSOR_BIT)
+     GL_LIST_BIT | GL_TEXTURE_BIT | GL_SCISSOR_BIT | GL_STENCIL_BUFFER_BIT | \
+     GL_FOG_BIT)
 
 void glPushAttrib(GLbitfield mask) {
     gl_context_t *ctx = gl_get_ctx();
@@ -57,7 +58,7 @@ void glPushAttrib(GLbitfield mask) {
 
     for (int i = 0; i < 4; i++) e->cur_color[i] = ctx->cur_color[i];
     for (int i = 0; i < 3; i++) e->cur_normal[i] = ctx->cur_normal[i];
-    for (int i = 0; i < 2; i++) e->cur_texcoord[i] = ctx->cur_texcoord[i];
+    for (int i = 0; i < 4; i++) e->cur_texcoord[i] = ctx->cur_texcoord[i];
 
     e->cap_depth_test = ctx->cap_depth_test;
     e->cap_cull_face = ctx->cap_cull_face;
@@ -98,6 +99,14 @@ void glPushAttrib(GLbitfield mask) {
     e->bound_texture_2d = ctx->bound_texture_2d;
     e->tex_env_mode = ctx->tex_env_mode;
     for (int i = 0; i < 4; i++) e->tex_env_color[i] = ctx->tex_env_color[i];
+    for (int i = 0; i < 4; i++) {
+        e->texgen_mode[i] = ctx->texgen_mode[i];
+        e->texgen_enabled[i] = ctx->texgen_enabled[i];
+        for (int k = 0; k < 4; k++) {
+            e->texgen_object_plane[i][k] = ctx->texgen_object_plane[i][k];
+            e->texgen_eye_plane[i][k] = ctx->texgen_eye_plane[i][k];
+        }
+    }
 
     e->vp_x = ctx->vp_x; e->vp_y = ctx->vp_y;
     e->vp_w = ctx->vp_w; e->vp_h = ctx->vp_h;
@@ -106,6 +115,28 @@ void glPushAttrib(GLbitfield mask) {
 
     e->sc_x = ctx->sc_x; e->sc_y = ctx->sc_y;
     e->sc_w = ctx->sc_w; e->sc_h = ctx->sc_h;
+
+    for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
+        e->clip_plane_enabled[i] = ctx->clip_plane_enabled[i];
+        for (int k = 0; k < 4; k++) e->clip_plane[i][k] = ctx->clip_plane[i][k];
+    }
+
+    e->cap_fog = ctx->cap_fog;
+    e->fog_mode = ctx->fog_mode;
+    e->fog_density = ctx->fog_density;
+    e->fog_start = ctx->fog_start;
+    e->fog_end = ctx->fog_end;
+    for (int i = 0; i < 4; i++) e->fog_color[i] = ctx->fog_color[i];
+
+    e->cap_stencil_test = ctx->cap_stencil_test;
+    e->stencil_func = ctx->stencil_func;
+    e->stencil_ref = ctx->stencil_ref;
+    e->stencil_value_mask = ctx->stencil_value_mask;
+    e->stencil_writemask = ctx->stencil_writemask;
+    e->stencil_fail = ctx->stencil_fail;
+    e->stencil_zfail = ctx->stencil_zfail;
+    e->stencil_zpass = ctx->stencil_zpass;
+    e->clear_stencil = ctx->clear_stencil;
 
     e->matrix_mode = ctx->matrix_mode;
     e->list_base = ctx->list_base;
@@ -125,7 +156,7 @@ void glPopAttrib(void) {
     if (mask & GL_CURRENT_BIT) {
         for (int i = 0; i < 4; i++) ctx->cur_color[i] = e->cur_color[i];
         for (int i = 0; i < 3; i++) ctx->cur_normal[i] = e->cur_normal[i];
-        for (int i = 0; i < 2; i++) ctx->cur_texcoord[i] = e->cur_texcoord[i];
+        for (int i = 0; i < 4; i++) ctx->cur_texcoord[i] = e->cur_texcoord[i];
     }
 
     /* **The enables belong to more than one bit.** GL_ENABLE_BIT carries all of them, and each
@@ -142,13 +173,50 @@ void glPopAttrib(void) {
         ctx->cap_blend = e->cap_blend;
         ctx->cap_alpha_test = e->cap_alpha_test;
     }
-    if (all_enables || (mask & GL_SCISSOR_BIT)) ctx->cap_scissor_test = e->cap_scissor_test;
+    if (all_enables || (mask & GL_SCISSOR_BIT)) {
+        ctx->cap_scissor_test = e->cap_scissor_test;
+        ctx->hw_scissor_dirty = GL_TRUE;
+    }
+    if (all_enables || (mask & GL_STENCIL_BUFFER_BIT)) {
+        ctx->cap_stencil_test = e->cap_stencil_test;
+    }
+    /* The fog enable belongs to both GL_ENABLE_BIT and GL_FOG_BIT, like every other feature's
+     * enable here - so a pop of GL_FOG_BIT alone brings fog back on, not just its parameters. */
+    if (all_enables || (mask & GL_FOG_BIT)) {
+        ctx->cap_fog = e->cap_fog;
+    }
+    if (mask & GL_FOG_BIT) {
+        ctx->fog_mode = e->fog_mode;
+        ctx->fog_density = e->fog_density;
+        ctx->fog_start = e->fog_start;
+        ctx->fog_end = e->fog_end;
+        for (int i = 0; i < 4; i++) ctx->fog_color[i] = e->fog_color[i];
+    }
+    if (mask & GL_STENCIL_BUFFER_BIT) {
+        ctx->stencil_func = e->stencil_func;
+        ctx->stencil_ref = e->stencil_ref;
+        ctx->stencil_value_mask = e->stencil_value_mask;
+        ctx->stencil_writemask = e->stencil_writemask;
+        ctx->stencil_fail = e->stencil_fail;
+        ctx->stencil_zfail = e->stencil_zfail;
+        ctx->stencil_zpass = e->stencil_zpass;
+        ctx->clear_stencil = e->clear_stencil;
+    }
     if (all_enables || (mask & GL_LIGHTING_BIT)) {
         ctx->cap_lighting = e->cap_lighting;
         ctx->cap_color_material = e->cap_color_material;
     }
     if (all_enables || (mask & GL_TEXTURE_BIT)) ctx->cap_texture_2d = e->cap_texture_2d;
-    if (all_enables || (mask & GL_TRANSFORM_BIT)) ctx->cap_normalize = e->cap_normalize;
+    if (all_enables || (mask & GL_TRANSFORM_BIT)) {
+        ctx->cap_normalize = e->cap_normalize;
+        /* The clip planes are already in eye space, so they restore as stored - putting them
+         * back through a modelview inverse would transform them a second time. */
+        for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
+            ctx->clip_plane_enabled[i] = e->clip_plane_enabled[i];
+            for (int k = 0; k < 4; k++) ctx->clip_plane[i][k] = e->clip_plane[i][k];
+        }
+        ctx->hw_clip_dirty = GL_TRUE;
+    }
 
     if (mask & GL_DEPTH_BUFFER_BIT) {
         ctx->depth_func = e->depth_func;
@@ -187,6 +255,17 @@ void glPopAttrib(void) {
         ctx->bound_texture_2d = e->bound_texture_2d;
         ctx->tex_env_mode = e->tex_env_mode;
         for (int i = 0; i < 4; i++) ctx->tex_env_color[i] = e->tex_env_color[i];
+        /* The generation planes are already in eye space, so they restore as stored - putting
+         * them back through a modelview inverse here would transform them a second time. */
+        for (int i = 0; i < 4; i++) {
+            ctx->texgen_mode[i] = e->texgen_mode[i];
+            ctx->texgen_enabled[i] = e->texgen_enabled[i];
+            for (int k = 0; k < 4; k++) {
+                ctx->texgen_object_plane[i][k] = e->texgen_object_plane[i][k];
+                ctx->texgen_eye_plane[i][k] = e->texgen_eye_plane[i][k];
+            }
+        }
+        gl_ps_patch_tex_env(ctx);
     }
 
     if (mask & GL_VIEWPORT_BIT) {
@@ -199,6 +278,7 @@ void glPopAttrib(void) {
     if (mask & GL_SCISSOR_BIT) {
         ctx->sc_x = e->sc_x; ctx->sc_y = e->sc_y;
         ctx->sc_w = e->sc_w; ctx->sc_h = e->sc_h;
+        ctx->hw_scissor_dirty = GL_TRUE;
     }
 
     if (mask & GL_TRANSFORM_BIT) ctx->matrix_mode = e->matrix_mode;

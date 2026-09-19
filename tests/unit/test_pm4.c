@@ -934,7 +934,24 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
    * framebuffer read as 0xAARRGGBB. */
   uint32_t cb_info = last_context_reg(w, n, 0x31cu);
   ASSERT_NE(cb_info, REG_ABSENT);
-  ASSERT_EQ(cb_info, 0x000188a8u);
+  ASSERT_EQ((cb_info >> 11) & 0x3u, 1u); /* COMP_SWAP = SWAP_ALT */
+
+  /* Record: "BLEND_BYPASS must be clear on an 8_8_8_8 UNORM target, or the blender is skipped
+   * whatever CB_BLEND0_CONTROL says."
+   *
+   * This bit was set here until 2026-09-17, inherited from the measured primitive-draw recipe,
+   * and it cost three identical hardware runs: gl1-probe's `blend` and `blend-equation` failed
+   * while clear, rect and depth passed, and correcting CB_BLEND0_CONTROL changed nothing
+   * because the bypass is read first. Mesa derives the pair together and never emits this
+   * combination - mesa/src/amd/common/ac_descriptors.c:1426-1438 sets blend_clamp for
+   * NORM/SRGB types and blend_bypass only for UINT/SINT or the 8_24/24_8/X24_8_32_FLOAT
+   * formats, clearing blend_clamp when it does.
+   *
+   * Asserted by name as well as by value: the whole-register check below catches a regression,
+   * but prints two integers. This says which bit moved. */
+  ASSERT_EQ((cb_info >> 16) & 0x1u, 0u); /* BLEND_BYPASS clear  */
+  ASSERT_EQ((cb_info >> 15) & 0x1u, 1u); /* BLEND_CLAMP set     */
+  ASSERT_EQ(cb_info, 0x000088a8u);
 
   /* Record: "PA_CL_VPORT_YSCALE negative for GL's upward NDC y". Asserted as the sign bit of
    * the float rather than an exact value, because the magnitude is half the height and that
@@ -1031,6 +1048,284 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
  * 0..0.5 gives (0.25, 0.25), and the reversed 1..0 gives (-0.5, 0.5). A build that swapped the
  * two registers, or that sorted the arguments, fails on one of them.
  */
+/* glScissor reaches PA_SC_VPORT_SCISSOR_0_TL/_BR.
+ *
+ * Until 2026-09-17 all four scissor rectangles were patched to the render target's extent and
+ * ctx->cap_scissor_test was read only by the software rasteriser, so the box was silently
+ * ignored on hardware - the same shape of bug as the viewport, and gl1-probe's `scissor` check
+ * failed on the console while passing on the host for exactly that reason.
+ *
+ * The target here is 640x480, and GL measures its box from the bottom-left while the scan
+ * converter's rectangle is y-down, so the y coordinates come back flipped against 480.
+ */
+/* The texture environment reaches the textured pixel shader's combine slot.
+ *
+ * Until 2026-09-17 `tex_env_mode` was read only by the software rasteriser, so the hardware path
+ * multiplied whatever the mode said - GL_REPLACE returned the texel scaled by the vertex colour.
+ * That is invisible whenever the colour is white, which is why gl-cube never showed it and
+ * gl1-probe's `tex-env-modes` did: it draws the same white texel under REPLACE and MODULATE with
+ * a dark red colour and requires the two to differ.
+ */
+/* User clip planes reach PA_CL_UCP_0_X and PA_CL_CLIP_CNTL.
+ *
+ * Two registers and no shader change, because the fixed-function clipper applies whenever the
+ * vertex shader exports no clip distances - which these hand-written shaders do not
+ * (mesa/src/gallium/drivers/radeonsi/si_state.c, si_emit_clip_regs).
+ *
+ * **The plane the hardware wants is in clip space, not eye space** - "Clip-Space Plane =
+ * Eye-Space Plane * Projection Matrix", mesa/src/mesa/main/clip.c:40-51. With an identity
+ * projection the two coincide, which is why this test also checks a non-identity one: an
+ * implementation that skipped the projection transform entirely would pass the first and fail
+ * the second.
+ */
+static void test_pm4_gl_clip_planes_reach_their_registers(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[4096];
+  static _Alignas(64) uint32_t fence = 0x11111111u;
+  static _Alignas(64) uint32_t canary[16];
+
+  memset(dcb, 0, sizeof(dcb));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 4096;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = &fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+
+  /* No plane enabled: the enable register is zero and nothing is clipped. */
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x204u), 0u);
+
+  /* Plane 0 enabled, identity projection: the clip-space plane equals the eye-space one. */
+  memset(dcb, 0, sizeof(dcb));
+  ctx->dcb_words = 0;
+  ctx->hw_frame_active = GL_FALSE;
+  const GLdouble px[4] = {1.0, 0.0, 0.0, 0.0};
+  glClipPlane(GL_CLIP_PLANE0, px);
+  glEnable(GL_CLIP_PLANE0);
+
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x204u), 1u); /* UCP_ENA_0 */
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x16fu), 0x3f800000u); /* x = 1.0 */
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x170u), 0u);          /* y = 0   */
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x171u), 0u);          /* z = 0   */
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x172u), 0u);          /* w = 0   */
+
+  /* A second plane sets its own enable bit, and lands four registers along. */
+  memset(dcb, 0, sizeof(dcb));
+  ctx->dcb_words = 0;
+  ctx->hw_frame_active = GL_FALSE;
+  const GLdouble py[4] = {0.0, 1.0, 0.0, 0.0};
+  glClipPlane(GL_CLIP_PLANE2, py);
+  glEnable(GL_CLIP_PLANE2);
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+  /* Plane n occupies four consecutive registers from 0x16f + 4n, so plane 2 starts at 0x177 -
+   * **not** 0x178, which is its y. Getting that wrong reads a neighbouring component and passes
+   * or fails for the wrong reason. */
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x204u), 0x5u); /* planes 0 and 2 */
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x177u), 0u);          /* 2.x = 0 */
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x178u), 0x3f800000u); /* 2.y = 1 */
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x179u), 0u);          /* 2.z = 0 */
+
+  /* **A non-identity projection must change the register**, because the plane is transformed
+   * into clip space. glScalef on the projection by 2 in x halves the x term. */
+  memset(dcb, 0, sizeof(dcb));
+  ctx->dcb_words = 0;
+  ctx->hw_frame_active = GL_FALSE;
+  glDisable(GL_CLIP_PLANE2);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glScalef(2.0f, 1.0f, 1.0f);
+  glMatrixMode(GL_MODELVIEW);
+  glClipPlane(GL_CLIP_PLANE0, px);
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x16fu), 0x3f000000u); /* x = 0.5 */
+
+  glDisable(GL_CLIP_PLANE0);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+static void test_pm4_gl_tex_env_reaches_the_combine_slot(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(256) uint8_t payload[0x4000];
+  memset(payload, 0, sizeof(payload));
+  ctx->gpu_payload = payload;
+  uint32_t *ps_tex = (uint32_t *)((char *)payload + 0x200);
+
+  /* The multiply the shader is assembled with: one per channel, texel * colour. */
+  static const uint32_t modulate[4] = {0x10081104u, 0x100a1305u, 0x100c1506u, 0x100e1707u};
+
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  for (size_t i = 0; i < 4; i++)
+    ASSERT_EQ(ps_tex[GL_PS_COMBINE_SLOT_TEX + i], modulate[i]);
+
+  /* Replace is four s_nop: the texel already sits in the registers the export reads, so
+   * RGBA replace is exactly "leave it alone" - C = Cs, A = As. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  for (size_t i = 0; i < 4; i++)
+    ASSERT_EQ(ps_tex[GL_PS_COMBINE_SLOT_TEX + i], 0xbf800000u);
+
+  /* And back, because a mode is not a one-way door. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  for (size_t i = 0; i < 4; i++)
+    ASSERT_EQ(ps_tex[GL_PS_COMBINE_SLOT_TEX + i], modulate[i]);
+
+  /* GL_ADD and GL_DECAL are stored and reported but not implemented on this path; they must
+   * fall back to the multiply rather than to something plausible-looking. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD);
+  for (size_t i = 0; i < 4; i++)
+    ASSERT_EQ(ps_tex[GL_PS_COMBINE_SLOT_TEX + i], modulate[i]);
+
+  /* glPopAttrib restores the mode, so it has to restore the instructions with it. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  glPushAttrib(GL_TEXTURE_BIT);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  for (size_t i = 0; i < 4; i++)
+    ASSERT_EQ(ps_tex[GL_PS_COMBINE_SLOT_TEX + i], modulate[i]);
+  glPopAttrib();
+  for (size_t i = 0; i < 4; i++)
+    ASSERT_EQ(ps_tex[GL_PS_COMBINE_SLOT_TEX + i], 0xbf800000u);
+
+  ctx->gpu_payload = NULL;
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+static void test_pm4_gl_scissor_reaches_its_registers(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[4096];
+  static _Alignas(64) uint32_t fence = 0x11111111u;
+  static _Alignas(64) uint32_t canary[16];
+
+  const struct {
+    GLboolean enable;
+    GLint x, y;
+    GLsizei w, h;
+    uint32_t tl, br;
+    const char *what;
+  } cases[] = {
+    /* Disabled: the full target, which is what the measured recipe wrote unconditionally. */
+    {GL_FALSE, 0, 0, 0, 0, 0x80000000u, 0x01e00280u, "disabled"},
+    /* The lower-left quarter in GL terms is the *bottom* rows in window terms. */
+    {GL_TRUE, 0, 0, 320, 240, 0x80f00000u, 0x01e00140u, "lower-left quarter"},
+    /* An interior box: x 100..300, GL y 50..150 -> window y 330..430. */
+    {GL_TRUE, 100, 50, 200, 100, 0x814a0064u, 0x01ae012cu, "interior box"},
+    /* Hanging off the left and bottom. The register fields are unsigned, so a negative
+     * coordinate left alone would wrap to an enormous one and the box would vanish. */
+    {GL_TRUE, -50, -50, 100, 100, 0x81ae0000u, 0x01e00032u, "clamped to the target"},
+  };
+
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+    memset(dcb, 0, sizeof(dcb));
+    memset(payload, 0, sizeof(payload));
+    memset(vbo, 0, sizeof(vbo));
+    ctx->dcb_mem = dcb;
+    ctx->dcb_capacity_dw = 4096;
+    ctx->dcb_words = 0;
+    ctx->gpu_payload = payload;
+    ctx->vbo_mem = vbo;
+    ctx->fence = &fence;
+    ctx->canary = &canary;
+    ctx->use_hardware = GL_TRUE;
+    ctx->hw_frame_active = GL_FALSE;
+
+    if (cases[c].enable) {
+      glEnable(GL_SCISSOR_TEST);
+      glScissor(cases[c].x, cases[c].y, cases[c].w, cases[c].h);
+    } else {
+      glDisable(GL_SCISSOR_TEST);
+    }
+
+    glBegin(GL_TRIANGLES);
+    glVertex3f(-0.5f, -0.5f, 0.5f);
+    glVertex3f(0.5f, -0.5f, 0.5f);
+    glVertex3f(0.0f, 0.5f, 0.5f);
+    glEnd();
+
+    if (last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x094u) != cases[c].tl)
+      printf("\n[scissor case: %s]\n", cases[c].what);
+    ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x094u), cases[c].tl);
+    ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x095u), cases[c].br);
+
+    /* The other three rectangles are the surface bounds and must not follow the GL box. */
+    ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x082u), 0x01e00280u);
+    ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x091u), 0x01e00280u);
+  }
+
+  /* A box changed *after* the frame opened has to be re-emitted before the next draw, or the
+   * draw runs against the rectangle the frame started with. Same failure the viewport had. */
+  memset(dcb, 0, sizeof(dcb));
+  ctx->dcb_words = 0;
+  ctx->hw_frame_active = GL_FALSE;
+  glDisable(GL_SCISSOR_TEST);
+
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x094u), 0x80000000u);
+
+  /* Frame still open - no hw_frame_active reset here, which is the whole point. */
+  glEnable(GL_SCISSOR_TEST);
+  glScissor(10, 20, 30, 40);
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x094u), 0x81a4000au);
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x095u), 0x01cc0028u);
+
+  glDisable(GL_SCISSOR_TEST);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 static void test_pm4_gl_depth_range_reaches_the_viewport(void) {
   oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
   void *ctx_handle = glContextCreate(disp);
@@ -1164,6 +1459,9 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_hardware_texture_stream);
   RUN_TEST(test_pm4_gl_hardware_cull_and_color_mask_stream);
   RUN_TEST(test_pm4_gl_honours_the_gl_cube_oracle_record);
+  RUN_TEST(test_pm4_gl_tex_env_reaches_the_combine_slot);
+  RUN_TEST(test_pm4_gl_clip_planes_reach_their_registers);
+  RUN_TEST(test_pm4_gl_scissor_reaches_its_registers);
   RUN_TEST(test_pm4_gl_depth_range_reaches_the_viewport);
   RUN_TEST(test_pm4_gl_polygon_offset_reaches_its_registers);
   RUN_TEST(test_pm4_detects_truncated_buffer);

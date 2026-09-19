@@ -59,7 +59,12 @@ The display subsystem opens exclusive HDMI video scanout on Bus 0 (`OBS_VIDEO_BU
 * **Returns**: `1` if the display was opened and video buffers are registered with SceVideoOut; `0` on failure.
 
 ### `int oops_display_is_gpu_accelerated(const oops_display_t *disp)`
-* **Returns**: `1` if backed by hardware GPU queues (AGC/GNM); `0` if running on host fallback.
+* **Returns**: `1` if display tiling is running on the GPU's compute tiler; `0` if the CPU tiler is doing it, which is the default. Turning it on is `oops_display_try_gpu_tiler()`.
+
+### `int oops_display_try_gpu_tiler(oops_display_t *disp)`
+* **When to use**: Once, before the first flip, in an app that presents every frame. Every flip converts the linear render target into the display-tiled scanout surface, and on the CPU that is a full read of write-combined video memory and a scattered write back - the largest single cost in presenting a frame.
+* **How it decides**: Dispatches the compute tiler once and compares its output against the CPU tiler's byte for byte; a mismatch, a queue that will not create, or a dispatch that later stops retiring all fall back to the CPU path rather than present a wrong buffer.
+* **Returns**: `1` if the compute tiler is now in use, `0` if the CPU tiler stays (including after a first flip, when it refuses rather than disturb a queued buffer), `-1` for no display.
 
 ### `uint32_t *oops_display_get_framebuffer(oops_display_t *disp)`
 * **When to use**: Direct 32bpp ARGB pixel access to the back buffer before flipping.
@@ -186,6 +191,8 @@ What it is *for* is evidence: because nothing sits between the call and the pack
 * `void glGetHardwareStatus(gl_hw_status_t *out)`: Retrieves detailed GPU clock cycles, clear color test matches, and fence confirmation stats.
 * `void glRequestHardwareDump(void)`: Instructs the pipeline to log the next frame's raw PM4 packets, shader words, and descriptors to `klog` for analysis.
 * `void glSetHardwarePrelude(const GLuint *words, GLuint count)`: Words every later frame's command stream opens with, ahead of oops-gl's own state. An unvalidated experiment hook so another driver's preamble can be put in front of this one and measured.
+* `const GLuint *glGetFrameReadback(void)`: The command processor's copy of the last submitted frame's render target, in CPU-cached memory. Hash this, not the uncached target. `NULL` on the host and before the first submission.
+* `const GLuint *glGetFrameReadbackSampled(GLuint line_stride)`: The same buffer, invalidating only every `line_stride`-th cache line. The full form costs 129,600 `clflush` on a 1920x1080 target, which is wasted on a caller that samples. **A caller that reads a line this did not invalidate gets whatever the CPU had cached** - for a still frame, the previous frame's pixels.
 
 ---
 

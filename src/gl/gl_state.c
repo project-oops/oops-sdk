@@ -22,6 +22,9 @@ void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     ctx->vp_y = y;
     ctx->vp_w = width;
     ctx->vp_h = height;
+    /* The hardware carries the viewport in registers written when a frame opens, so a change
+     * after that has to be re-emitted before the next draw. */
+    ctx->hw_vport_dirty = GL_TRUE;
 }
 
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -31,6 +34,8 @@ void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
     ctx->sc_y = y;
     ctx->sc_w = width;
     ctx->sc_h = height;
+    /* Same as the viewport: the box lives in registers written when a frame opens. */
+    ctx->hw_scissor_dirty = GL_TRUE;
 }
 
 void glClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
@@ -83,6 +88,17 @@ void glClear(GLbitfield mask) {
         }
     }
 
+    /* **The stencil write mask does not gate a clear.** GL says glClear ignores it - the mask
+     * applies to the stencil *operations*, not to clearing - so a program that masks stencil
+     * writes off and then clears still gets a cleared buffer. */
+    if (mask & GL_STENCIL_BUFFER_BIT) {
+        uint8_t *sb = ctx->stencil_buffer;
+        if (sb) {
+            const size_t n = ctx->stencil_px ? ctx->stencil_px : total_px;
+            memset(sb, (int)(ctx->clear_stencil & 0xff), n);
+        }
+    }
+
     if (mask & GL_DEPTH_BUFFER_BIT) {
         float *db = ctx->depth_buffer;
         float cd = ctx->clear_depth;
@@ -120,9 +136,21 @@ void glEnable(GLenum cap) {
         case GL_DEPTH_TEST:     ctx->cap_depth_test = GL_TRUE; break;
         case GL_CULL_FACE:      ctx->cap_cull_face = GL_TRUE; break;
         case GL_BLEND:          ctx->cap_blend = GL_TRUE; break;
-        case GL_SCISSOR_TEST:   ctx->cap_scissor_test = GL_TRUE; break;
+        case GL_SCISSOR_TEST:   ctx->cap_scissor_test = GL_TRUE; ctx->hw_scissor_dirty = GL_TRUE; break;
+        case GL_TEXTURE_GEN_S:  ctx->texgen_enabled[0] = GL_TRUE; break;
+        case GL_TEXTURE_GEN_T:  ctx->texgen_enabled[1] = GL_TRUE; break;
+        case GL_TEXTURE_GEN_R:  ctx->texgen_enabled[2] = GL_TRUE; break;
+        case GL_TEXTURE_GEN_Q:  ctx->texgen_enabled[3] = GL_TRUE; break;
+        case GL_CLIP_PLANE0: case GL_CLIP_PLANE1: case GL_CLIP_PLANE2:
+        case GL_CLIP_PLANE3: case GL_CLIP_PLANE4: case GL_CLIP_PLANE5:
+            ctx->clip_plane_enabled[(int)cap - (int)GL_CLIP_PLANE0] = GL_TRUE;
+            ctx->hw_clip_dirty = GL_TRUE;
+            break;
+        case GL_STENCIL_TEST:   ctx->cap_stencil_test = GL_TRUE; break;
         case GL_LIGHTING:       ctx->cap_lighting = GL_TRUE; break;
         case GL_TEXTURE_2D:     ctx->cap_texture_2d = GL_TRUE; break;
+        case GL_TEXTURE_1D:     ctx->cap_texture_1d = GL_TRUE; break;
+        case GL_FOG:            ctx->cap_fog = GL_TRUE; break;
         case GL_NORMALIZE:      ctx->cap_normalize = GL_TRUE; break;
         case GL_COLOR_MATERIAL: ctx->cap_color_material = GL_TRUE; break;
         case GL_POLYGON_OFFSET_FILL: ctx->cap_polygon_offset_fill = GL_TRUE; break;
@@ -159,9 +187,21 @@ void glDisable(GLenum cap) {
         case GL_DEPTH_TEST:     ctx->cap_depth_test = GL_FALSE; break;
         case GL_CULL_FACE:      ctx->cap_cull_face = GL_FALSE; break;
         case GL_BLEND:          ctx->cap_blend = GL_FALSE; break;
-        case GL_SCISSOR_TEST:   ctx->cap_scissor_test = GL_FALSE; break;
+        case GL_SCISSOR_TEST:   ctx->cap_scissor_test = GL_FALSE; ctx->hw_scissor_dirty = GL_TRUE; break;
+        case GL_TEXTURE_GEN_S:  ctx->texgen_enabled[0] = GL_FALSE; break;
+        case GL_TEXTURE_GEN_T:  ctx->texgen_enabled[1] = GL_FALSE; break;
+        case GL_TEXTURE_GEN_R:  ctx->texgen_enabled[2] = GL_FALSE; break;
+        case GL_TEXTURE_GEN_Q:  ctx->texgen_enabled[3] = GL_FALSE; break;
+        case GL_CLIP_PLANE0: case GL_CLIP_PLANE1: case GL_CLIP_PLANE2:
+        case GL_CLIP_PLANE3: case GL_CLIP_PLANE4: case GL_CLIP_PLANE5:
+            ctx->clip_plane_enabled[(int)cap - (int)GL_CLIP_PLANE0] = GL_FALSE;
+            ctx->hw_clip_dirty = GL_TRUE;
+            break;
+        case GL_STENCIL_TEST:   ctx->cap_stencil_test = GL_FALSE; break;
         case GL_LIGHTING:       ctx->cap_lighting = GL_FALSE; break;
         case GL_TEXTURE_2D:     ctx->cap_texture_2d = GL_FALSE; break;
+        case GL_TEXTURE_1D:     ctx->cap_texture_1d = GL_FALSE; break;
+        case GL_FOG:            ctx->cap_fog = GL_FALSE; break;
         case GL_NORMALIZE:      ctx->cap_normalize = GL_FALSE; break;
         case GL_COLOR_MATERIAL: ctx->cap_color_material = GL_FALSE; break;
         case GL_POLYGON_OFFSET_FILL: ctx->cap_polygon_offset_fill = GL_FALSE; break;
@@ -186,8 +226,18 @@ GLboolean glIsEnabled(GLenum cap) {
         case GL_CULL_FACE:      return ctx->cap_cull_face;
         case GL_BLEND:          return ctx->cap_blend;
         case GL_SCISSOR_TEST:   return ctx->cap_scissor_test;
+        case GL_TEXTURE_GEN_S:  return ctx->texgen_enabled[0];
+        case GL_TEXTURE_GEN_T:  return ctx->texgen_enabled[1];
+        case GL_TEXTURE_GEN_R:  return ctx->texgen_enabled[2];
+        case GL_TEXTURE_GEN_Q:  return ctx->texgen_enabled[3];
+        case GL_CLIP_PLANE0: case GL_CLIP_PLANE1: case GL_CLIP_PLANE2:
+        case GL_CLIP_PLANE3: case GL_CLIP_PLANE4: case GL_CLIP_PLANE5:
+            return ctx->clip_plane_enabled[(int)cap - (int)GL_CLIP_PLANE0];
+        case GL_STENCIL_TEST:   return ctx->cap_stencil_test;
         case GL_LIGHTING:       return ctx->cap_lighting;
         case GL_TEXTURE_2D:     return ctx->cap_texture_2d;
+        case GL_TEXTURE_1D:     return ctx->cap_texture_1d;
+        case GL_FOG:            return ctx->cap_fog;
         case GL_NORMALIZE:      return ctx->cap_normalize;
         case GL_COLOR_MATERIAL: return ctx->cap_color_material;
         /* **These two were missing**, so glIsEnabled answered GL_FALSE for a capability
@@ -228,6 +278,338 @@ void glBlendEquation(GLenum mode) {
     ctx->blend_equation = mode;
 }
 
+/* -------------------------------------------------------------------------
+ * Stencil
+ * ------------------------------------------------------------------------- */
+static GLboolean gl_stencil_func_ok(GLenum f) {
+    return (f == GL_NEVER || f == GL_LESS || f == GL_LEQUAL || f == GL_GREATER ||
+            f == GL_GEQUAL || f == GL_EQUAL || f == GL_NOTEQUAL || f == GL_ALWAYS)
+               ? GL_TRUE : GL_FALSE;
+}
+
+/* GL_INCR_WRAP and GL_DECR_WRAP are GL 1.4 and deliberately absent: they are a different
+ * saturation rule, and accepting them as GL_INCR would give a stencil buffer that differs from
+ * what the program asked for only at the ends of the range - the hardest kind of wrong to see. */
+static GLboolean gl_stencil_op_ok(GLenum o) {
+    return (o == GL_KEEP || o == GL_ZERO || o == GL_REPLACE || o == GL_INCR ||
+            o == GL_DECR || o == GL_INVERT)
+               ? GL_TRUE : GL_FALSE;
+}
+
+/* -------------------------------------------------------------------------
+ * Fog
+ * ------------------------------------------------------------------------- */
+static void gl_fog_set(gl_context_t *ctx, GLenum pname, const GLfloat *v) {
+    switch (pname) {
+        case GL_FOG_MODE: {
+            const GLenum mode = (GLenum)v[0];
+            if (mode != GL_LINEAR && mode != GL_EXP && mode != GL_EXP2) {
+                gl_record_error(ctx, GL_INVALID_ENUM);
+                return;
+            }
+            ctx->fog_mode = mode;
+            return;
+        }
+        case GL_FOG_DENSITY:
+            /* Negative density is an error rather than a fog that brightens with distance. */
+            if (v[0] < 0.0f) { gl_record_error(ctx, GL_INVALID_VALUE); return; }
+            ctx->fog_density = v[0];
+            return;
+        case GL_FOG_START: ctx->fog_start = v[0]; return;
+        case GL_FOG_END:   ctx->fog_end = v[0]; return;
+        case GL_FOG_COLOR:
+            for (int i = 0; i < 4; i++) ctx->fog_color[i] = v[i];
+            return;
+        /* Colour-index fog, for a mode this does not have. Refused rather than stored, so a
+         * program cannot set it and believe it took. */
+        case GL_FOG_INDEX:
+            gl_record_error(ctx, GL_INVALID_ENUM);
+            return;
+        default:
+            gl_record_error(ctx, GL_INVALID_ENUM);
+            return;
+    }
+}
+
+void glFogfv(GLenum pname, const GLfloat *params) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    gl_fog_set(ctx, pname, params);
+}
+
+void glFogf(GLenum pname, GLfloat param) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    /* Only the colour reads four; everything else reads one, so a scalar call must not be
+     * turned into a four-element read of a single float. */
+    if (pname == GL_FOG_COLOR) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    GLfloat v[4] = {param, 0.0f, 0.0f, 0.0f};
+    gl_fog_set(ctx, pname, v);
+}
+
+void glFogi(GLenum pname, GLint param) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (pname == GL_FOG_COLOR) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    GLfloat v[4] = {(GLfloat)param, 0.0f, 0.0f, 0.0f};
+    gl_fog_set(ctx, pname, v);
+}
+
+/* **An integer fog colour is normalised, like every other integer colour here.** The distances
+ * are plain casts; only GL_FOG_COLOR converts by range. Getting that backwards gives a fog that
+ * is white whenever the caller asked for anything at all. */
+void glFogiv(GLenum pname, const GLint *params) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    if (pname == GL_FOG_COLOR) {
+        GLfloat v[4];
+        for (int i = 0; i < 4; i++) {
+            v[i] = (GLfloat)((2.0 * (double)params[i] + 1.0) / 4294967294.0);
+        }
+        gl_fog_set(ctx, pname, v);
+        return;
+    }
+    GLfloat v[4] = {(GLfloat)params[0], 0.0f, 0.0f, 0.0f};
+    gl_fog_set(ctx, pname, v);
+}
+
+/* Both are screen-space widths in pixels, and both are refused at zero or below - a zero-width
+ * line is not a thin line, it is a request the specification calls an error. */
+void glPointSize(GLfloat size) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (size <= 0.0f) { gl_record_error(ctx, GL_INVALID_VALUE); return; }
+    ctx->point_size = size;
+}
+
+void glLineWidth(GLfloat width) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (width <= 0.0f) { gl_record_error(ctx, GL_INVALID_VALUE); return; }
+    ctx->line_width = width;
+}
+
+void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (!gl_stencil_func_ok(func)) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    ctx->stencil_func = func;
+    /* The reference is clamped to the buffer's range, which the specification requires and which
+     * also keeps the comparison honest: an unclamped 300 would never equal anything an 8-bit
+     * buffer can hold, so GL_EQUAL would silently never pass. */
+    ctx->stencil_ref = (ref < 0) ? 0 : (ref > 255 ? 255 : ref);
+    ctx->stencil_value_mask = mask;
+}
+
+void glStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (!gl_stencil_op_ok(sfail) || !gl_stencil_op_ok(dpfail) || !gl_stencil_op_ok(dppass)) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    ctx->stencil_fail = sfail;
+    ctx->stencil_zfail = dpfail;
+    ctx->stencil_zpass = dppass;
+}
+
+void glStencilMask(GLuint mask) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    ctx->stencil_writemask = mask;
+}
+
+void glClearStencil(GLint s) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    ctx->clear_stencil = s & 0xff;
+}
+
+/* -------------------------------------------------------------------------
+ * User clip planes
+ * ------------------------------------------------------------------------- */
+static int gl_clip_plane_index(GLenum plane) {
+    const int i = (int)plane - (int)GL_CLIP_PLANE0;
+    return (i >= 0 && i < OOPS_GL_CLIP_PLANE_COUNT) ? i : -1;
+}
+
+/* The plane arrives in object coordinates and is stored in eye coordinates, multiplied by the
+ * inverse modelview of this moment. That is the specification's rule and it is what makes a clip
+ * plane stay put in the world while the modelview moves afterwards - storing the caller's numbers
+ * and using them directly would make the plane follow the object instead, which is a different
+ * feature that happens to look right in any scene that never moves after setting it. */
+void glClipPlane(GLenum plane, const GLdouble *equation) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !equation) return;
+    const int i = gl_clip_plane_index(plane);
+    if (i < 0) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+
+    const float p[4] = {(float)equation[0], (float)equation[1],
+                        (float)equation[2], (float)equation[3]};
+    gl_mat4_t inv;
+    if (mat4_invert(&inv, &ctx->modelview_stack[ctx->modelview_depth])) {
+        /* A plane is a row vector: p' = p * M^-1. */
+        for (int k = 0; k < 4; k++) {
+            ctx->clip_plane[i][k] = p[0] * inv.m[k * 4 + 0] + p[1] * inv.m[k * 4 + 1] +
+                                    p[2] * inv.m[k * 4 + 2] + p[3] * inv.m[k * 4 + 3];
+        }
+    } else {
+        for (int k = 0; k < 4; k++) ctx->clip_plane[i][k] = p[k];
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+    }
+    ctx->hw_clip_dirty = GL_TRUE;
+}
+
+/* Returns what is stored, which is the eye-space plane - as the specification says. */
+void glGetClipPlane(GLenum plane, GLdouble *equation) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !equation) return;
+    const int i = gl_clip_plane_index(plane);
+    if (i < 0) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    for (int k = 0; k < 4; k++) equation[k] = (GLdouble)ctx->clip_plane[i][k];
+}
+
+/* -------------------------------------------------------------------------
+ * Texture coordinate generation
+ *
+ * The coordinate index, or -1 for a coord this does not know. S, T, R and Q are consecutive but
+ * that is not relied on - a table keeps the mapping visible.
+ * ------------------------------------------------------------------------- */
+static int gl_texgen_index(GLenum coord) {
+    switch (coord) {
+        case GL_S: return 0;
+        case GL_T: return 1;
+        case GL_R: return 2;
+        case GL_Q: return 3;
+        default:   return -1;
+    }
+}
+
+/* GL_NORMAL_MAP and GL_REFLECTION_MAP are GL 1.3 cube-map modes, and there is no cube map here.
+ * Refused rather than accepted and treated as something else: a program that asks for reflection
+ * mapping and is given sphere mapping gets a picture that is wrong in a way no error reports. */
+static GLboolean gl_texgen_mode_ok(GLenum mode) {
+    return (mode == GL_OBJECT_LINEAR || mode == GL_EYE_LINEAR || mode == GL_SPHERE_MAP)
+               ? GL_TRUE : GL_FALSE;
+}
+
+static void gl_texgen_set(gl_context_t *ctx, GLenum coord, GLenum pname, const GLfloat *v) {
+    const int i = gl_texgen_index(coord);
+    if (i < 0) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+
+    if (pname == GL_TEXTURE_GEN_MODE) {
+        const GLenum mode = (GLenum)v[0];
+        if (!gl_texgen_mode_ok(mode)) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+        /* GL_SPHERE_MAP generates s and t only; asking for it on r or q is an error rather
+         * than a coordinate that quietly never changes. */
+        if (mode == GL_SPHERE_MAP && i > 1) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+        ctx->texgen_mode[i] = mode;
+        return;
+    }
+    if (pname == GL_OBJECT_PLANE) {
+        for (int k = 0; k < 4; k++) ctx->texgen_object_plane[i][k] = v[k];
+        return;
+    }
+    if (pname == GL_EYE_PLANE) {
+        /* **Stored through the inverse modelview of this moment**, which is what makes an
+         * eye-linear plane stay where it was put while the modelview moves afterwards. */
+        gl_mat4_t inv;
+        if (mat4_invert(&inv, &ctx->modelview_stack[ctx->modelview_depth])) {
+            /* The plane is a row vector: p' = p * M^-1, which is M^-T applied as a column. */
+            for (int k = 0; k < 4; k++) {
+                ctx->texgen_eye_plane[i][k] = v[0] * inv.m[k * 4 + 0] + v[1] * inv.m[k * 4 + 1] +
+                                              v[2] * inv.m[k * 4 + 2] + v[3] * inv.m[k * 4 + 3];
+            }
+        } else {
+            /* A singular modelview has no inverse; the plane is kept as given rather than
+             * filled with infinities, and the call is refused so the caller knows. */
+            for (int k = 0; k < 4; k++) ctx->texgen_eye_plane[i][k] = v[k];
+            gl_record_error(ctx, GL_INVALID_OPERATION);
+        }
+        return;
+    }
+    gl_record_error(ctx, GL_INVALID_ENUM);
+}
+
+void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    gl_texgen_set(ctx, coord, pname, params);
+}
+
+void glTexGeniv(GLenum coord, GLenum pname, const GLint *params) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    /* Four are read for a plane and one for a mode, so only the first is touched unless the
+     * parameter is a plane - reading four from a one-element array would be a fault. */
+    GLfloat f[4] = {(GLfloat)params[0], 0.0f, 0.0f, 0.0f};
+    if (pname == GL_OBJECT_PLANE || pname == GL_EYE_PLANE) {
+        for (int k = 1; k < 4; k++) f[k] = (GLfloat)params[k];
+    }
+    gl_texgen_set(ctx, coord, pname, f);
+}
+
+void glTexGendv(GLenum coord, GLenum pname, const GLdouble *params) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    GLfloat f[4] = {(GLfloat)params[0], 0.0f, 0.0f, 0.0f};
+    if (pname == GL_OBJECT_PLANE || pname == GL_EYE_PLANE) {
+        for (int k = 1; k < 4; k++) f[k] = (GLfloat)params[k];
+    }
+    gl_texgen_set(ctx, coord, pname, f);
+}
+
+/* The scalar forms set only the mode: a plane needs four values, and the specification says so
+ * by giving GL_OBJECT_PLANE and GL_EYE_PLANE no scalar spelling. */
+void glTexGeni(GLenum coord, GLenum pname, GLint param) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (pname != GL_TEXTURE_GEN_MODE) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    GLfloat f[4] = {(GLfloat)param, 0.0f, 0.0f, 0.0f};
+    gl_texgen_set(ctx, coord, pname, f);
+}
+void glTexGenf(GLenum coord, GLenum pname, GLfloat param) {
+    glTexGeni(coord, pname, (GLint)param);
+}
+void glTexGend(GLenum coord, GLenum pname, GLdouble param) {
+    glTexGeni(coord, pname, (GLint)param);
+}
+
+void glGetTexGenfv(GLenum coord, GLenum pname, GLfloat *params) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    const int i = gl_texgen_index(coord);
+    if (i < 0) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    switch (pname) {
+        case GL_TEXTURE_GEN_MODE: params[0] = (GLfloat)ctx->texgen_mode[i]; break;
+        case GL_OBJECT_PLANE:
+            for (int k = 0; k < 4; k++) params[k] = ctx->texgen_object_plane[i][k];
+            break;
+        case GL_EYE_PLANE:
+            for (int k = 0; k < 4; k++) params[k] = ctx->texgen_eye_plane[i][k];
+            break;
+        default: gl_record_error(ctx, GL_INVALID_ENUM); break;
+    }
+}
+
+void glGetTexGeniv(GLenum coord, GLenum pname, GLint *params) {
+    GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    glGetTexGenfv(coord, pname, f);
+    const int n = (pname == GL_TEXTURE_GEN_MODE) ? 1 : 4;
+    for (int k = 0; k < n; k++) params[k] = (GLint)f[k];
+}
+
+void glGetTexGendv(GLenum coord, GLenum pname, GLdouble *params) {
+    GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    glGetTexGenfv(coord, pname, f);
+    const int n = (pname == GL_TEXTURE_GEN_MODE) ? 1 : 4;
+    for (int k = 0; k < n; k++) params[k] = (GLdouble)f[k];
+}
+
 void glTexEnvi(GLenum target, GLenum pname, GLint param) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
@@ -243,6 +625,7 @@ void glTexEnvi(GLenum target, GLenum pname, GLint param) {
         return;
     }
     ctx->tex_env_mode = (GLenum)param;
+    gl_ps_patch_tex_env(ctx);
 }
 
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
@@ -267,6 +650,7 @@ void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params) {
             break;
         case GL_TEXTURE_ENV_MODE:
             ctx->tex_env_mode = (GLenum)params[0];
+            gl_ps_patch_tex_env(ctx);
             break;
         default:
             gl_record_error(ctx, GL_INVALID_ENUM);
@@ -529,6 +913,9 @@ void glGetIntegerv(GLenum pname, GLint *params) {
         case GL_TEXTURE_BINDING_2D:
             params[0] = (GLint)ctx->bound_texture_2d;
             break;
+        case GL_TEXTURE_BINDING_1D:
+            params[0] = (GLint)ctx->bound_texture_1d;
+            break;
         case GL_BLEND_SRC:
         case GL_BLEND_SRC_RGB:
             params[0] = (GLint)ctx->blend_src;
@@ -575,6 +962,44 @@ void glGetIntegerv(GLenum pname, GLint *params) {
          * bound on a texture here - not a number picked to look generous. */
         case GL_MAX_TEXTURE_SIZE:
             params[0] = 2048;
+            break;
+        /* **One texture unit, said out loud.** A program that multitextures asks this first and
+         * takes a different path when the answer is 1, so reporting it honestly is what lets that
+         * program work rather than silently drawing unit 0 twice. The unit is always GL_TEXTURE0
+         * for the same reason: glActiveTexture refuses anything else. */
+        case GL_MAX_TEXTURE_UNITS:
+            params[0] = 1;
+            break;
+        case GL_MAX_CLIP_PLANES:
+            params[0] = OOPS_GL_CLIP_PLANE_COUNT;
+            break;
+        /* **Zero, and the list that follows it is empty.** The specification allows the set of
+         * compressed formats to be empty and expects a program to ask; answering honestly is
+         * what sends it down its uncompressed path instead of into a refusal it did not plan
+         * for. GL_COMPRESSED_TEXTURE_FORMATS writes nothing, because there is nothing. */
+        case GL_NUM_COMPRESSED_TEXTURE_FORMATS:
+            params[0] = 0;
+            break;
+        case GL_COMPRESSED_TEXTURE_FORMATS:
+            break;
+        case GL_CURRENT_RASTER_POSITION_VALID: params[0] = ctx->raster_valid ? 1 : 0; break;
+        case GL_FOG_MODE:            params[0] = (GLint)ctx->fog_mode; break;
+        /* The distances as plain integers; the colour normalised back, the inverse of glFogiv. */
+        case GL_FOG_START:           params[0] = (GLint)ctx->fog_start; break;
+        case GL_FOG_END:             params[0] = (GLint)ctx->fog_end; break;
+        case GL_FOG_DENSITY:         params[0] = (GLint)ctx->fog_density; break;
+        case GL_STENCIL_BITS:        params[0] = 8; break;
+        case GL_STENCIL_FUNC:        params[0] = (GLint)ctx->stencil_func; break;
+        case GL_STENCIL_REF:         params[0] = ctx->stencil_ref; break;
+        case GL_STENCIL_VALUE_MASK:  params[0] = (GLint)ctx->stencil_value_mask; break;
+        case GL_STENCIL_WRITEMASK:   params[0] = (GLint)ctx->stencil_writemask; break;
+        case GL_STENCIL_FAIL:        params[0] = (GLint)ctx->stencil_fail; break;
+        case GL_STENCIL_PASS_DEPTH_FAIL: params[0] = (GLint)ctx->stencil_zfail; break;
+        case GL_STENCIL_PASS_DEPTH_PASS: params[0] = (GLint)ctx->stencil_zpass; break;
+        case GL_STENCIL_CLEAR_VALUE: params[0] = ctx->clear_stencil; break;
+        case GL_ACTIVE_TEXTURE:
+        case GL_CLIENT_ACTIVE_TEXTURE:
+            params[0] = GL_TEXTURE0;
             break;
         /* **The framebuffer's own extent, which is the honest answer.** There is one surface and
          * it is this size; a viewport larger than it has nothing to rasterise into. */
@@ -648,6 +1073,28 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
     if (!ctx || !params) return;
 
     switch (pname) {
+        case GL_CURRENT_RASTER_POSITION:
+            for (int i = 0; i < 4; i++) params[i] = ctx->raster_pos[i];
+            break;
+        case GL_CURRENT_RASTER_COLOR:
+            for (int i = 0; i < 4; i++) params[i] = ctx->raster_color[i];
+            break;
+        case GL_CURRENT_RASTER_TEXTURE_COORDS:
+            for (int i = 0; i < 4; i++) params[i] = ctx->raster_texcoord[i];
+            break;
+        case GL_CURRENT_RASTER_DISTANCE: params[0] = ctx->raster_distance; break;
+        case GL_CURRENT_RASTER_POSITION_VALID:
+            params[0] = ctx->raster_valid ? 1.0f : 0.0f;
+            break;
+        case GL_ZOOM_X: params[0] = ctx->pixel_zoom_x; break;
+        case GL_ZOOM_Y: params[0] = ctx->pixel_zoom_y; break;
+        case GL_FOG_DENSITY: params[0] = ctx->fog_density; break;
+        case GL_FOG_START:   params[0] = ctx->fog_start; break;
+        case GL_FOG_END:     params[0] = ctx->fog_end; break;
+        case GL_FOG_COLOR:
+            for (int i = 0; i < 4; i++) params[i] = ctx->fog_color[i];
+            break;
+        case GL_FOG_MODE:    params[0] = (GLfloat)ctx->fog_mode; break;
         case GL_MODELVIEW_MATRIX:
             for (int i = 0; i < 16; i++) {
                 params[i] = ctx->modelview_stack[ctx->modelview_depth].m[i];
@@ -935,9 +1382,15 @@ void glLightModelfv(GLenum pname, const GLfloat *params) {
         case GL_LIGHT_MODEL_LOCAL_VIEWER:
             ctx->light_model_local_viewer = (params[0] != 0.0f) ? GL_TRUE : GL_FALSE;
             break;
-        case GL_LIGHT_MODEL_TWO_SIDE:
-            ctx->light_model_two_side = (params[0] != 0.0f) ? GL_TRUE : GL_FALSE;
-            break;
+        /* **Refused, because it was doing nothing.** `GL_LIGHT_MODEL_TWO_SIDE` sets a back
+         * face to be lit with the back material and its normal reversed. That needs the
+         * *facing* of a primitive, which is a triangle property known only after the vertices
+         * are assembled - and lighting here is computed per vertex, before that exists.
+         *
+         * Until this was checked it set a field that nothing ever read: the call returned
+         * clean and two-sided lighting simply did not happen. A silent lie of exactly the kind
+         * D009 refuses, and worse than the hardware-only features `gl1-probe` found first,
+         * because those at least worked somewhere. Refusing says so; the field is gone. */
         default:
             gl_record_error(ctx, GL_INVALID_ENUM);
             break;
@@ -1072,6 +1525,39 @@ static gl_texture_object_t *gl_find_or_create_texture(gl_context_t *ctx, GLuint 
     return NULL;
 }
 
+/*
+ * **GPU-visible texture storage may not be freed while a built frame still points at it.**
+ *
+ * The hardware path is deferred: `glDrawArrays` writes PM4 into the command buffer and returns,
+ * and nothing executes until the flush. A texture's pixels live in GARLIC memory and the draw
+ * carries their *address*, not a copy - so freeing that memory between the draw call and the
+ * submission hands the sampler pages that are no longer mapped.
+ *
+ * The specification is on the caller's side here: deleting a texture that is still in use is
+ * legal, and it is the implementation that owes the storage a lifetime long enough for the draws
+ * referencing it. gl1-probe's texture check does exactly that - draws, deletes, then reads the
+ * pixels back - and on 2026-09-17 it took the console's GPU down with it:
+ *
+ *     GPU Protection fault. client:TCP(8) access:Read permission:0x3
+ *     reason: Unmapped page access, Protection fault addr(VA): 0x0000000203190000
+ *     504 wavefronts ... XNACK_ERROR MEMVIOL
+ *
+ * `TCP` is the texture cache. 504 wavefronts faulted, the GPU was reset and the user interface
+ * restarted. Flushing first is the blunt fix and the correct one: it costs a submission only
+ * when a program changes texture storage mid-frame, and it makes the free safe by making the
+ * draws that reference it finish. A deferred-free list keyed on the fence would cost less and
+ * is worth having when something needs it.
+ */
+static void gl_tex_storage_release_sync(gl_context_t *ctx) {
+#ifndef OOPS_HOST_BUILD
+    if (ctx && ctx->use_hardware && ctx->hw_frame_active) {
+        gl_hw_flush(ctx);
+    }
+#else
+    (void)ctx;
+#endif
+}
+
 static void gl_pack_descriptors(gl_texture_object_t *tex) {
     if (!tex) return;
     uint64_t va = tex->garlic_va;
@@ -1084,8 +1570,32 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     tex->img_desc[0] = (uint32_t)(va >> 8);                                   /* BASE_ADDRESS[39:8] */
     tex->img_desc[1] = (uint32_t)((va >> 40) & 0xffu) | (56u << 20) | (((w - 1u) & 3u) << 30); /* BASE_ADDRESS_HI, MIN_LOD=0, FORMAT=8_8_8_8_UNORM, WIDTH_LO */
     tex->img_desc[2] = (((w - 1u) >> 2) & 0x3fffu) | (((h - 1u) & 0x3fffu) << 14) | (1u << 31); /* WIDTH_HI, HEIGHT, RESOURCE_LEVEL */
-    tex->img_desc[3] = 0x90000000u | 0xfacu; /* TYPE=2D, SW_MODE=LINEAR_GENERAL, DST_SEL X,Y,Z,W = channels 0,1,2,3 (4,5,6,7) */
-    tex->img_desc[4] = 0u; /* DEPTH: unused for a 2D image; it does not carry the linear pitch on this GPU (measured 2026-09-14) */
+    /* TYPE=2D (9), SW_MODE=0, DST_SEL X,Y,Z,W = channels 0,1,2,3 (4,5,6,7).
+     *
+     * SW_MODE 0 is `ADDR_SW_LINEAR`, **not** `ADDR_SW_LINEAR_GENERAL`, which this comment used
+     * to call it. The two behave differently and the distinction decides the row pitch:
+     * addrlib gives LINEAR_GENERAL a pitch alignment of one element and LINEAR an alignment of
+     * `256 / elementBytes` (mesa/src/amd/addrlib/src/gfx9/gfx9addrlib.cpp:5117-5127). It cannot
+     * be the former here in any case - `ADDR_SW_LINEAR_GENERAL` is 32
+     * (mesa/src/amd/addrlib/inc/addrtypes.h:259) and SW_MODE is five bits wide,
+     * mesa/src/amd/registers/gfx10-rsrc.json:388, so 32 does not fit in the field. It is an
+     * addrlib-internal mode, not a value the hardware takes. */
+    tex->img_desc[3] = 0x90000000u | 0xfacu;
+    /* WORD4. For a 2D image DEPTH holds the low 13 bits of the row pitch and PITCH_MSB bit 13
+     * holds the top one, both as pitch - 1, and the hardware reads them only when the pitch
+     * exceeds the width - "1D, 2D, 2D_MSAA: the pitch if pitch > width, the low bits are in
+     * DEPTH", mesa/src/amd/registers/gfx10-rsrc.json:401-406 (type SQ_IMG_RSRC_WORD4_gfx103).
+     * Mesa encodes it the same way at ac_descriptors.c:711-712.
+     *
+     * Left at zero for a texture whose rows are exactly as wide as the image, which is every
+     * width that is a multiple of 64 pixels - so the descriptor gl-cube gets is unchanged. */
+    const uint32_t pitch = tex->pitch ? tex->pitch : w;
+    if (pitch > w) {
+        const uint32_t p1 = pitch - 1u;
+        tex->img_desc[4] = (p1 & 0x1fffu) | (((p1 >> 13) & 1u) << 13);
+    } else {
+        tex->img_desc[4] = 0u;
+    }
     tex->img_desc[5] = 0u;
     tex->img_desc[6] = 0u;
     tex->img_desc[7] = 0u;
@@ -1100,6 +1610,41 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     tex->samp_desc[2] = (mag << 20) | (min << 22);
     tex->samp_desc[3] = 0u;
     tex->desc_dirty = GL_TRUE;
+}
+
+/* The object a glTex* call acts on: the named target's binding, or that target's *own* default
+ * texture when nothing is bound. `create` distinguishes an upload, which may bring the default
+ * into existence, from a query, which should not.
+ *
+ * Returns NULL for a target this does not have; the caller reports GL_INVALID_ENUM. */
+/* The targets that name a binding point here. The `glTex*2D` entry points stay 2D-only - a
+ * GL_TEXTURE_1D passed to glTexImage2D is an error in GL, not a shorthand. This is for the calls
+ * that are shared between targets: the parameter setters and the queries. */
+/* Forward declarations: the copy helper is defined above the upload helper it calls, and the
+ * 1D entry points below use all three. */
+static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
+                                GLint internalformat, GLsizei width, GLsizei height,
+                                GLenum format, GLenum type, const GLvoid *pixels);
+static void gl_tex_sub_image_common(gl_context_t *ctx, GLenum target, GLint level,
+                                    GLint xoffset, GLint yoffset, GLsizei width, GLsizei height,
+                                    GLenum format, GLenum type, const GLvoid *pixels);
+static void gl_copy_tex_sub_common(gl_context_t *ctx, GLenum target, GLint level,
+                                   GLint xoffset, GLint yoffset,
+                                   GLint x, GLint y, GLsizei width, GLsizei height);
+
+static GLboolean gl_texture_target_ok(GLenum t) {
+    return (t == GL_TEXTURE_2D || t == GL_TEXTURE_1D) ? GL_TRUE : GL_FALSE;
+}
+
+static gl_texture_object_t *gl_texture_for_target(gl_context_t *ctx, GLenum target,
+                                                  GLboolean create) {
+    GLuint *slot = gl_binding_slot(ctx, target);
+    if (!slot) return NULL;
+    const GLuint id = *slot ? *slot : gl_default_texture_id(target);
+    gl_texture_object_t *tex = create ? gl_find_or_create_texture(ctx, id)
+                                      : gl_find_texture(ctx, id);
+    if (tex && tex->target == 0u) tex->target = target;
+    return tex;
 }
 
 void glGenTextures(GLsizei n, GLuint *textures) {
@@ -1131,6 +1676,7 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
         if (id == 0) continue;
         gl_texture_object_t *tex = gl_find_texture(ctx, id);
         if (tex) {
+            gl_tex_storage_release_sync(ctx);
 #ifndef OOPS_HOST_BUILD
             if (tex->garlic_data) {
                 oops_mem_free(tex->garlic_data);
@@ -1158,20 +1704,29 @@ void glBindTexture(GLenum target, GLuint texture) {
     }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
-    if (target != GL_TEXTURE_2D) {
+    GLuint *slot = gl_binding_slot(ctx, target);
+    if (!slot) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
 
     if (texture == 0) {
-        ctx->bound_texture_2d = 0;
+        *slot = 0;
         return;
     }
 
     gl_texture_object_t *tex = gl_find_or_create_texture(ctx, texture);
-    if (tex) {
-        ctx->bound_texture_2d = texture;
+    if (!tex) return;
+
+    /* **An object belongs to the target it was first bound to.** Rebinding it elsewhere is
+     * GL_INVALID_OPERATION, not a silent reinterpretation: the image inside has a shape the other
+     * target cannot read, and handing it over would sample a 1D image as a 2D one. */
+    if (tex->target != 0u && tex->target != target) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
     }
+    tex->target = target;
+    *slot = texture;
 }
 
 /* How many bytes one source pixel occupies, or zero for a combination not handled.
@@ -1208,9 +1763,14 @@ static size_t gl_unpack_pixel_bytes(GLenum format, GLenum type) {
  * `GL_UNPACK_ALIGNMENT` rounds each row's start up to 1, 2, 4 or 8 bytes. Both default to the
  * values the specification gives (0 and 4), so a caller that never calls glPixelStorei gets
  * exactly the behaviour this had before they existed. */
-static size_t gl_unpack_row_stride(const gl_context_t *ctx, GLsizei width, size_t pixel_bytes) {
+size_t gl_unpack_row_stride(const gl_context_t *ctx, GLsizei width, size_t pixel_bytes) {
     size_t row_pixels = ctx->unpack_row_length > 0 ? (size_t)ctx->unpack_row_length : (size_t)width;
-    size_t bytes = row_pixels * pixel_bytes;
+    return gl_unpack_row_stride_bytes(ctx, row_pixels * pixel_bytes);
+}
+
+/* The same alignment rule for a row whose size is already in bytes, which is what a bitmap has:
+ * one bit per pixel does not divide into a pixel size. */
+size_t gl_unpack_row_stride_bytes(const gl_context_t *ctx, size_t bytes) {
     size_t align = ctx->unpack_alignment > 0 ? (size_t)ctx->unpack_alignment : 1u;
     size_t remainder = bytes % align;
     return remainder == 0u ? bytes : bytes + (align - remainder);
@@ -1415,6 +1975,15 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
         return;
     }
     if (width == 0 || height == 0 || !pixels) return;
+
+    /* **Everything issued before this call has to have happened.** The specification requires it,
+     * and on the hardware path it is not free: drawing builds a command stream and returns, so
+     * without the flush this would read a target the GPU has not been told to draw into yet and
+     * report the previous frame - or, before any frame, the buffer as the display left it. The
+     * readback the source below prefers is filled by that same submission, so the flush is also
+     * what makes it current rather than one frame stale. On the host the flush costs nothing
+     * beyond closing an open glBegin, which the specification also wants. */
+    glFlush();
 
     const uint32_t *source = ctx->readback && ctx->hw_frames_confirmed > 0u
                                  ? (const uint32_t *)ctx->readback
@@ -1714,12 +2283,12 @@ void glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params) {
 void glGetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !params) return;
-    if (target != GL_TEXTURE_2D) {
+    if (!gl_texture_target_ok(target)) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
     const gl_texture_object_t *tex =
-        gl_find_texture(ctx, ctx->bound_texture_2d ? ctx->bound_texture_2d : 1);
+        gl_texture_for_target(ctx, target, GL_FALSE);
     /* No texture object yet is not an error - GL answers with the defaults a fresh object
      * would have, which is what a program setting up one parameter at a time reads back. */
     switch (pname) {
@@ -1765,18 +2334,26 @@ void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *p
     (void)level;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !params) return;
-    if (target != GL_TEXTURE_2D) {
+    if (!gl_texture_target_ok(target)) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
     const gl_texture_object_t *tex =
-        gl_find_texture(ctx, ctx->bound_texture_2d ? ctx->bound_texture_2d : 1);
+        gl_texture_for_target(ctx, target, GL_FALSE);
     switch (pname) {
         case GL_TEXTURE_WIDTH:
             params[0] = tex ? tex->width : 0;
             break;
         case GL_TEXTURE_HEIGHT:
             params[0] = tex ? tex->height : 0;
+            break;
+        /* No texture here is compressed, which is a fact about all of them rather than a
+         * refusal - so this answers rather than erroring, and the size query answers zero. */
+        case GL_TEXTURE_COMPRESSED:
+            params[0] = GL_FALSE;
+            break;
+        case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:
+            params[0] = 0;
             break;
         case GL_TEXTURE_INTERNAL_FORMAT:
             /* **What is stored, not what was asked for.** Every upload is converted to RGBA8
@@ -1970,7 +2547,7 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoi
     (void)level;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
-    if (target != GL_TEXTURE_2D) {
+    if (!gl_texture_target_ok(target)) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
@@ -1982,7 +2559,7 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoi
     if (!pixels) return;
 
     const gl_texture_object_t *tex =
-        gl_find_texture(ctx, ctx->bound_texture_2d ? ctx->bound_texture_2d : 1);
+        gl_texture_for_target(ctx, target, GL_FALSE);
     if (!tex || !tex->pixels) {
         /* No image under the query. The same error glTexSubImage2D raises for the same reason:
          * the caller is asking about something that was never uploaded. */
@@ -2014,14 +2591,10 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoi
  * `glTexSubImage2D` of the same pixels would. Sharing that path rather than copying it is the
  * point - a second flip written by hand is a second chance to get the flip wrong.
  */
-void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
-                         GLint x, GLint y, GLsizei width, GLsizei height) {
-    gl_context_t *ctx = gl_get_ctx();
-    if (!ctx) return;
-    if (target != GL_TEXTURE_2D) {
-        gl_record_error(ctx, GL_INVALID_ENUM);
-        return;
-    }
+/* The framebuffer-to-texture copy, target already validated - shared with glCopyTexSubImage1D. */
+static void gl_copy_tex_sub_common(gl_context_t *ctx, GLenum target, GLint level,
+                                   GLint xoffset, GLint yoffset,
+                                   GLint x, GLint y, GLsizei width, GLsizei height) {
     if (width < 0 || height < 0) {
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
@@ -2045,10 +2618,23 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
     ctx->pack_alignment = 1; /* the scratch is tight; no padding to skip */
     for (GLsizei r = 0; r < height; r++) {
         glReadPixels(x, y + r, width, 1, GL_RGBA, GL_UNSIGNED_BYTE, row);
-        glTexSubImage2D(target, level, xoffset, yoffset + r, width, 1,
-                        GL_RGBA, GL_UNSIGNED_BYTE, row);
+        /* The shared helper, not glTexSubImage2D: `target` may be GL_TEXTURE_1D here and the
+         * public 2D entry point refuses that - correctly, which is why it cannot be used. */
+        gl_tex_sub_image_common(ctx, target, level, xoffset, yoffset + r, width, 1,
+                                GL_RGBA, GL_UNSIGNED_BYTE, row);
     }
     ctx->pack_alignment = saved_pack;
+}
+
+void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                         GLint x, GLint y, GLsizei width, GLsizei height) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_TEXTURE_2D) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    gl_copy_tex_sub_common(ctx, target, level, xoffset, yoffset, x, y, width, height);
 }
 
 /* `glCopyTexImage2D(...)` - the allocating half of the copy pair.
@@ -2084,22 +2670,18 @@ void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat,
      * error left over from some earlier call would abort a copy that had every right to run.
      * What matters is whether the allocation above actually produced an image of this size. */
     gl_texture_object_t *tex =
-        gl_find_texture(ctx, ctx->bound_texture_2d ? ctx->bound_texture_2d : 1);
+        gl_texture_for_target(ctx, target, GL_FALSE);
     if (!tex || !tex->pixels || tex->width != width || tex->height != height) return;
 
     glCopyTexSubImage2D(target, level, 0, 0, x, y, width, height);
 }
 
-void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
-                     GLsizei width, GLsizei height, GLenum format, GLenum type,
-                     const GLvoid *pixels) {
+/* The sub-image upload, target already validated - shared with glTexSubImage1D, which passes
+ * yoffset 0 and height 1. */
+static void gl_tex_sub_image_common(gl_context_t *ctx, GLenum target, GLint level,
+                                    GLint xoffset, GLint yoffset, GLsizei width, GLsizei height,
+                                    GLenum format, GLenum type, const GLvoid *pixels) {
     (void)level;
-    gl_context_t *ctx = gl_get_ctx();
-    if (!ctx) return;
-    if (target != GL_TEXTURE_2D) {
-        gl_record_error(ctx, GL_INVALID_ENUM);
-        return;
-    }
     size_t pixel_bytes = gl_unpack_pixel_bytes(format, type);
     if (pixel_bytes == 0u) {
         gl_record_error(ctx, GL_INVALID_ENUM);
@@ -2110,7 +2692,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
         return;
     }
 
-    gl_texture_object_t *tex = gl_find_texture(ctx, ctx->bound_texture_2d);
+    gl_texture_object_t *tex = gl_texture_for_target(ctx, target, GL_FALSE);
     if (!tex || !tex->pixels) {
         /* Nothing to update. The specification's error for a sub-image with no image under it. */
         gl_record_error(ctx, GL_INVALID_OPERATION);
@@ -2144,16 +2726,29 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
     gl_pack_descriptors(tex);
 }
 
-void glTexImage2D(GLenum target, GLint level, GLint internalformat,
-                 GLsizei width, GLsizei height, GLint border,
-                 GLenum format, GLenum type, const GLvoid *pixels) {
-    (void)level; (void)internalformat; (void)border;
+void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                     GLsizei width, GLsizei height, GLenum format, GLenum type,
+                     const GLvoid *pixels) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     if (target != GL_TEXTURE_2D) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
+    gl_tex_sub_image_common(ctx, target, level, xoffset, yoffset, width, height,
+                            format, type, pixels);
+}
+
+/* The upload, with the target already validated by the caller.
+ *
+ * Everything below this point is the same for a 1D and a 2D image - a 1D one is stored as a
+ * height-1 2D one, which is what the sampler reads and what the descriptor describes. The only
+ * thing the two do not share is *which binding* the texture comes from, and that arrives as
+ * `target`. */
+static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
+                                GLint internalformat, GLsizei width, GLsizei height,
+                                GLenum format, GLenum type, const GLvoid *pixels) {
+    (void)level; (void)internalformat;
     if (width <= 0 || height <= 0) {
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
@@ -2167,17 +2762,37 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
         return;
     }
 
-    gl_texture_object_t *tex = gl_find_or_create_texture(ctx, ctx->bound_texture_2d ? ctx->bound_texture_2d : 1);
+    gl_texture_object_t *tex = gl_texture_for_target(ctx, target, GL_TRUE);
     if (!tex) return;
 
     size_t num_pixels = (size_t)width * (size_t)height;
-    /* The sampler takes a linear image's row pitch from its width (measured 2026-09-14: rows laid
-     * out twice as far apart, with the DEPTH field carrying that pitch or left at zero, sampled
-     * identically wrong), so rows are stored at exactly the width. Widths that are not a multiple
-     * of 64 pixels are unmeasured. */
-    size_t pitch_px = (size_t)width;
+    /* A linear image's rows are stored at a 256-byte pitch - 64 pixels at four bytes each.
+     *
+     * The note this replaces said the sampler takes the pitch from the width, measured
+     * 2026-09-14, and closed with "widths that are not a multiple of 64 pixels are unmeasured".
+     * That caveat was the whole answer: at a width of 64 pixels the row pitch *is* 256 bytes,
+     * so a texture that wide cannot tell "pitch = width" apart from "pitch = width rounded up",
+     * and the texture that measurement used was 64 wide - as gl-cube's still is.
+     *
+     * gl1-probe's textures are 2x2, where the two differ, and the split in its results says
+     * which is right: `texture-wrap` passes on hardware while `texture-2d`, `tex-env-modes`,
+     * `copy-tex` and `tex-sub-image` fail. The one that passes is the one that samples only
+     * row 0 - it holds t at 0.25 throughout and varies s. Every check that needs a second row
+     * fails, which is what a row pitch wider than the rows were written gives you.
+     *
+     * Mesa aligns a linear pitch the same way and carries it explicitly when it exceeds the
+     * width (ac_descriptors.c:697-713, "GFX10.3+ can set a custom pitch for 1D and 2D
+     * non-array, but it must be a multiple of 256B"); gl_pack_descriptors writes it.
+     *
+     * Rounding up cannot disturb what already works: for any width that is a multiple of 64
+     * the pitch is the width, the descriptor field stays inert, and the bytes are laid out
+     * exactly as before. */
+    size_t pitch_px = ((size_t)width + 63u) & ~(size_t)63u;
     size_t rgba_bytes = pitch_px * (size_t)height * 4;
 
+    /* Re-specifying a texture frees its old storage, and a draw already built into this frame
+     * may still name that address. A no-op on the host, where there is no deferred frame. */
+    gl_tex_storage_release_sync(ctx);
 #ifndef OOPS_HOST_BUILD
     if (tex->garlic_data) {
         oops_mem_free(tex->garlic_data);
@@ -2193,6 +2808,12 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
     tex->pitch = (uint32_t)pitch_px;
     (void)num_pixels;
 
+    /* Zeroed first, and unconditionally. A null `pixels` reserves storage to be filled by
+     * glTexSubImage2D, and without this the sampler reads whatever the allocator last left in
+     * GARLIC until that happens - the host branch below has always zeroed for exactly that
+     * reason, and the two should not disagree. It also covers the padding between the rows and
+     * the pitch, which no upload ever writes. */
+    memset(tex->garlic_data, 0, rgba_bytes);
     if (pixels) {
         const uint8_t *src = (const uint8_t *)pixels;
         uint8_t *dst = (uint8_t *)tex->garlic_data;
@@ -2200,12 +2821,14 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
         for (size_t y = 0; y < (size_t)height; y++) {
             gl_unpack_row(dst + y * pitch_px * 4, src + y * stride, width, format);
         }
-#if defined(__x86_64__)
-        for (size_t p = 0; p < rgba_bytes; p += 64) {
-            __builtin_ia32_clflush((const void *)((const char *)tex->garlic_data + p));
-        }
-#endif
     }
+#if defined(__x86_64__)
+    /* Outside the `if`: the zeroing above is a CPU write to write-combined memory too, and the
+     * GPU has to see it whether or not an upload followed. */
+    for (size_t p = 0; p < rgba_bytes; p += 64) {
+        __builtin_ia32_clflush((const void *)((const char *)tex->garlic_data + p));
+    }
+#endif
 #else
     if (tex->pixels) {
         free(tex->pixels);
@@ -2215,6 +2838,16 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
         gl_record_error(ctx, GL_OUT_OF_MEMORY);
         return;
     }
+    /* Zeroed first, and unconditionally - the same as the target branch above.
+     *
+     * A null pointer reserves the storage, which is legal and is how a program sets a texture
+     * up to fill with glTexSubImage2D; zeroing means a draw before the first sub-image samples
+     * black instead of whatever the allocator found. That much was always true here. What made
+     * it unconditional is the row padding: an upload writes `width` pixels into a row `pitch`
+     * wide, so with a `pixels` argument the gap between them was left as malloc returned it.
+     * test_gl_copy_tex_sub_image_matches_a_read_then_upload caught it immediately - two
+     * textures holding identical images compared unequal in the padding between their rows. */
+    memset(tex->pixels, 0, rgba_bytes);
     if (pixels) {
         const uint8_t *src = (const uint8_t *)pixels;
         uint8_t *dst = (uint8_t *)tex->pixels;
@@ -2222,12 +2855,6 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
         for (size_t y = 0; y < (size_t)height; y++) {
             gl_unpack_row(dst + y * pitch_px * 4, src + y * stride, width, format);
         }
-    } else {
-        /* A null pointer reserves the storage, which is legal and is how a program sets a
-         * texture up to fill with glTexSubImage2D. Zeroed rather than left as the allocator
-         * found it, so a draw before the first sub-image samples black instead of whatever
-         * was in that memory. */
-        memset(tex->pixels, 0, rgba_bytes);
     }
     (void)num_pixels;
 #endif
@@ -2245,15 +2872,162 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
     gl_pack_descriptors(tex);
 }
 
-void glTexParameteri(GLenum target, GLenum pname, GLint param) {
+void glTexImage2D(GLenum target, GLint level, GLint internalformat,
+                 GLsizei width, GLsizei height, GLint border,
+                 GLenum format, GLenum type, const GLvoid *pixels) {
+    (void)border;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
+    /* 2D only: GL_TEXTURE_1D here is an error, not a shorthand for a height-1 image. */
     if (target != GL_TEXTURE_2D) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
+    gl_tex_image_common(ctx, target, level, internalformat, width, height, format, type, pixels);
+}
 
-    gl_texture_object_t *tex = gl_find_or_create_texture(ctx, ctx->bound_texture_2d ? ctx->bound_texture_2d : 1);
+/* -------------------------------------------------------------------------
+ * Compressed textures, of which there are none
+ *
+ * The specification allows the set of compressed formats to be empty, and this one is.
+ * `GL_NUM_COMPRESSED_TEXTURE_FORMATS` reports 0, so a program that asks - which is what a program
+ * using compressed textures is supposed to do - takes its uncompressed path. A program that does
+ * not ask gets `GL_INVALID_ENUM`, which is the specification's answer for an internal format that
+ * is not a supported compressed one.
+ *
+ * **These are conformant, not stubs.** The distinction matters here: the payload links with
+ * `-Wl,--unresolved-symbols=ignore-all`, so leaving them out is not "an absent feature is an
+ * absent symbol" (D009) in practice - it is a call to address zero with no diagnostic. A refusal
+ * a program can read is strictly better than a crash it cannot.
+ * ------------------------------------------------------------------------- */
+static void gl_compressed_refuse(gl_context_t *ctx, GLenum target) {
+    /* An unknown target is reported as such; a known one fails on the format, because there is
+     * no compressed format this accepts. Both are GL_INVALID_ENUM, but getting the reason right
+     * matters to anyone reading the code later. */
+    (void)target;
+    gl_record_error(ctx, GL_INVALID_ENUM);
+}
+
+void glCompressedTexImage1D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLint border, GLsizei imageSize, const GLvoid *data) {
+    (void)level; (void)internalformat; (void)width; (void)border; (void)imageSize; (void)data;
+    gl_context_t *ctx = gl_get_ctx();
+    if (ctx) gl_compressed_refuse(ctx, target);
+}
+
+void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLsizei height, GLint border, GLsizei imageSize, const GLvoid *data) {
+    (void)level; (void)internalformat; (void)width; (void)height;
+    (void)border; (void)imageSize; (void)data;
+    gl_context_t *ctx = gl_get_ctx();
+    if (ctx) gl_compressed_refuse(ctx, target);
+}
+
+void glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLsizei height, GLsizei depth, GLint border, GLsizei imageSize,
+                            const GLvoid *data) {
+    (void)level; (void)internalformat; (void)width; (void)height; (void)depth;
+    (void)border; (void)imageSize; (void)data;
+    gl_context_t *ctx = gl_get_ctx();
+    if (ctx) gl_compressed_refuse(ctx, target);
+}
+
+void glCompressedTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width,
+                               GLenum format, GLsizei imageSize, const GLvoid *data) {
+    (void)level; (void)xoffset; (void)width; (void)format; (void)imageSize; (void)data;
+    gl_context_t *ctx = gl_get_ctx();
+    if (ctx) gl_compressed_refuse(ctx, target);
+}
+
+void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLsizei width, GLsizei height, GLenum format, GLsizei imageSize,
+                               const GLvoid *data) {
+    (void)level; (void)xoffset; (void)yoffset; (void)width; (void)height;
+    (void)format; (void)imageSize; (void)data;
+    gl_context_t *ctx = gl_get_ctx();
+    if (ctx) gl_compressed_refuse(ctx, target);
+}
+
+void glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                               GLenum format, GLsizei imageSize, const GLvoid *data) {
+    (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
+    (void)width; (void)height; (void)depth; (void)format; (void)imageSize; (void)data;
+    gl_context_t *ctx = gl_get_ctx();
+    if (ctx) gl_compressed_refuse(ctx, target);
+}
+
+/* No texture here is compressed, so this is GL_INVALID_OPERATION - which is what the
+ * specification says for a query against a texture whose image is uncompressed, and is a
+ * different answer from the format refusals above. */
+void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *img) {
+    (void)level; (void)img;
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (!gl_texture_target_ok(target)) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    gl_record_error(ctx, GL_INVALID_OPERATION);
+}
+
+/* -------------------------------------------------------------------------
+ * One-dimensional textures
+ *
+ * A 1D image is stored as a height-1 2D one, because that is what the sampler reads and what the
+ * descriptor describes - the row pitch rule and the upload path are unchanged. **What is not
+ * shared is the binding**: GL_TEXTURE_1D has its own binding point, its own enable and its own
+ * default texture, which is the whole reason these are separate entry points rather than callers
+ * passing height = 1.
+ *
+ * `border` must be zero. GL 1.x allows a one-texel border and this has never stored one; a
+ * non-zero border is refused rather than ignored, because a program that asks for one and is
+ * given a texture without it samples the wrong texels at the edges.
+ * ------------------------------------------------------------------------- */
+void glTexImage1D(GLenum target, GLint level, GLint internalFormat, GLsizei width,
+                  GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_TEXTURE_1D) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    if (border != 0) { gl_record_error(ctx, GL_INVALID_VALUE); return; }
+    /* The 2D path does the work, against the 1D binding - which is why the binding is resolved
+     * from the target rather than assumed. */
+    gl_tex_image_common(ctx, target, level, internalFormat, width, 1, format, type, pixels);
+}
+
+void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width,
+                     GLenum format, GLenum type, const GLvoid *pixels) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_TEXTURE_1D) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    gl_tex_sub_image_common(ctx, target, level, xoffset, 0, width, 1, format, type, pixels);
+}
+
+void glCopyTexImage1D(GLenum target, GLint level, GLenum internalFormat,
+                      GLint x, GLint y, GLsizei width, GLint border) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_TEXTURE_1D) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    if (border != 0) { gl_record_error(ctx, GL_INVALID_VALUE); return; }
+    glTexImage1D(target, level, (GLint)internalFormat, width, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    if (glGetError() != GL_NO_ERROR) return;
+    glCopyTexSubImage1D(target, level, 0, x, y, width);
+}
+
+void glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset,
+                         GLint x, GLint y, GLsizei width) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_TEXTURE_1D) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    gl_copy_tex_sub_common(ctx, target, level, xoffset, 0, x, y, width, 1);
+}
+
+void glTexParameteri(GLenum target, GLenum pname, GLint param) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (!gl_texture_target_ok(target)) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+
+    gl_texture_object_t *tex = gl_texture_for_target(ctx, target, GL_TRUE);
     if (!tex) return;
 
     switch (pname) {

@@ -199,7 +199,7 @@ static void gl_list_execute(const gl_display_list_t *list) {
             case GL_LIST_OP_VERTEX:        glVertex4f(f[0], f[1], f[2], f[3]); break;
             case GL_LIST_OP_COLOR:         glColor4f(f[0], f[1], f[2], f[3]); break;
             case GL_LIST_OP_NORMAL:        glNormal3f(f[0], f[1], f[2]); break;
-            case GL_LIST_OP_TEXCOORD:      glTexCoord2f(f[0], f[1]); break;
+            case GL_LIST_OP_TEXCOORD:      glTexCoord4f(f[0], f[1], f[2], f[3]); break;
             case GL_LIST_OP_ENABLE:        glEnable(cmd->e0); break;
             case GL_LIST_OP_DISABLE:       glDisable(cmd->e0); break;
             case GL_LIST_OP_MATRIX_MODE:   glMatrixMode(cmd->e0); break;

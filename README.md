@@ -17,7 +17,7 @@ Within the [OOPS ecosystem](../docs/THE_LOOP.md), `oops-sdk` is the **Clean-Room
 ```
 oops-sdk (Freestanding C Runtime & Hardware Abstraction)
     │
-    ├──► oops-apps (Test Titles: gl-cube, wipeout, home, pltauth-patch)
+    ├──► oops-apps (Test Titles: gl1-cube, gl1-probe, gl2-cube, seashell, pltauth-patch)
     │        │
     │        ▼
     │    Packaged by SELFish ──► Deployed by Prosperous ──► Tested on PS5

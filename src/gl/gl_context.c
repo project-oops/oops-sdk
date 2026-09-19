@@ -11,6 +11,7 @@ gl_context_t *g_gl_ctx = NULL;
 #include <stdlib.h>
 static gl_context_t s_host_ctx;
 static float s_host_depth[1920 * 1080];
+static uint8_t s_host_stencil[1920 * 1080];
 static inline __attribute__((unused)) void gl_klog_line(const char *msg) { (void)msg; }
 static inline __attribute__((unused)) void gl_klog_val(const char *tag, uint64_t val) { (void)tag; (void)val; }
 #else
@@ -326,6 +327,7 @@ void *glContextCreate(struct oops_display *disp) {
 
     gl_context_t *ctx = NULL;
     float *depth = NULL;
+    uint8_t *stencil = NULL;
 
 #ifndef OOPS_HOST_BUILD
     ctx = (gl_context_t *)oops_mem_alloc(sizeof(gl_context_t), 64, OOPS_MEM_WB_ONION);
@@ -340,11 +342,23 @@ void *glContextCreate(struct oops_display *disp) {
         oops_mem_free(ctx);
         return NULL;
     }
+    /* The stencil surface is its own allocation, at the same padded extent so the hardware path
+     * can use it unchanged when it lands. One byte per pixel, which is what GL_STENCIL_INDEX8
+     * and DB_STENCIL_INFO's only useful format both are. */
+    stencil = (uint8_t *)oops_mem_alloc(depth_px, 64 * 1024, OOPS_MEM_WC_GARLIC);
+    if (!stencil) {
+        oops_mem_free(depth);
+        oops_mem_free(ctx);
+        return NULL;
+    }
+    size_t stencil_px = depth_px;
 #else
     ctx = &s_host_ctx;
     memset(ctx, 0, sizeof(*ctx));
     depth = s_host_depth;
     size_t depth_px = (size_t)w * (size_t)h;
+    stencil = s_host_stencil;
+    size_t stencil_px = depth_px;
 #endif
 
     ctx->disp = disp;
@@ -353,6 +367,54 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->height = h;
     ctx->depth_buffer = depth;
     ctx->depth_px = depth_px;
+    ctx->stencil_buffer = stencil;
+    ctx->stencil_px = stencil_px;
+
+    /* Stencil defaults, all from the specification: the test off, GL_ALWAYS with reference 0 and
+     * both masks all-ones, every operation GL_KEEP, and the clear value 0. An all-ones write mask
+     * matters - a zero one silently makes every stencil write a no-op. */
+    /* The raster position starts at the origin and **valid**: a program that calls glDrawPixels
+     * without ever setting one draws at (0,0), which is what the specification says. */
+    ctx->raster_pos[0] = 0.0f;
+    ctx->raster_pos[1] = 0.0f;
+    ctx->raster_pos[2] = 0.0f;
+    ctx->raster_pos[3] = 1.0f;
+    ctx->raster_color[0] = 1.0f;
+    ctx->raster_color[1] = 1.0f;
+    ctx->raster_color[2] = 1.0f;
+    ctx->raster_color[3] = 1.0f;
+    ctx->raster_texcoord[0] = 0.0f;
+    ctx->raster_texcoord[1] = 0.0f;
+    ctx->raster_texcoord[2] = 0.0f;
+    ctx->raster_texcoord[3] = 1.0f;
+    ctx->raster_distance = 0.0f;
+    ctx->raster_valid = GL_TRUE;
+    ctx->pixel_zoom_x = 1.0f;
+    ctx->pixel_zoom_y = 1.0f;
+    ctx->point_size = 1.0f;
+    ctx->line_width = 1.0f;
+
+    /* Fog defaults, from the specification: GL_EXP, density 1, the range 0..1, and a **black,
+     * fully transparent** fog colour - (0,0,0,0), not opaque black. */
+    ctx->cap_fog = GL_FALSE;
+    ctx->fog_mode = GL_EXP;
+    ctx->fog_density = 1.0f;
+    ctx->fog_start = 0.0f;
+    ctx->fog_end = 1.0f;
+    ctx->fog_color[0] = 0.0f;
+    ctx->fog_color[1] = 0.0f;
+    ctx->fog_color[2] = 0.0f;
+    ctx->fog_color[3] = 0.0f;
+
+    ctx->cap_stencil_test = GL_FALSE;
+    ctx->stencil_func = GL_ALWAYS;
+    ctx->stencil_ref = 0;
+    ctx->stencil_value_mask = 0xffffffffu;
+    ctx->stencil_writemask = 0xffffffffu;
+    ctx->stencil_fail = GL_KEEP;
+    ctx->stencil_zfail = GL_KEEP;
+    ctx->stencil_zpass = GL_KEEP;
+    ctx->clear_stencil = 0;
 
     /* Viewport & Scissor defaults */
     ctx->vp_x = 0;
@@ -432,6 +494,31 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->cur_normal[2] = 1.0f;
     ctx->cur_texcoord[0] = 0.0f;
     ctx->cur_texcoord[1] = 0.0f;
+    ctx->cur_texcoord[2] = 0.0f;
+    ctx->cur_texcoord[3] = 1.0f; /* q defaults to 1: the initial coordinate is (0, 0, 0, 1) */
+
+    /* Texture generation defaults: EYE_LINEAR, with the S plane (1,0,0,0) and the T plane
+     * (0,1,0,0) and R and Q all zero. Those are the specification's initial values, and they
+     * are not all the same - a loop setting every plane to (1,0,0,0) would be wrong for T. */
+    for (int i = 0; i < 4; i++) {
+        ctx->texgen_mode[i] = GL_EYE_LINEAR;
+        ctx->texgen_enabled[i] = GL_FALSE;
+        for (int k = 0; k < 4; k++) {
+            ctx->texgen_object_plane[i][k] = 0.0f;
+            ctx->texgen_eye_plane[i][k] = 0.0f;
+        }
+    }
+    ctx->texgen_object_plane[0][0] = 1.0f; /* S: (1, 0, 0, 0) */
+    ctx->texgen_eye_plane[0][0] = 1.0f;
+    ctx->texgen_object_plane[1][1] = 1.0f; /* T: (0, 1, 0, 0) */
+    ctx->texgen_eye_plane[1][1] = 1.0f;
+
+    /* Clip planes start all-zero and all disabled, which is the specification's initial state. */
+    for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
+        ctx->clip_plane_enabled[i] = GL_FALSE;
+        for (int k = 0; k < 4; k++) ctx->clip_plane[i][k] = 0.0f;
+    }
+    ctx->hw_clip_dirty = GL_FALSE;
 
     ctx->last_error = GL_NO_ERROR;
 
@@ -446,7 +533,6 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->light_model_ambient[2] = 0.2f;
     ctx->light_model_ambient[3] = 1.0f;
     ctx->light_model_local_viewer = GL_FALSE;
-    ctx->light_model_two_side = GL_FALSE;
 
     gl_material_t default_mat;
     default_mat.ambient[0] = 0.2f; default_mat.ambient[1] = 0.2f; default_mat.ambient[2] = 0.2f; default_mat.ambient[3] = 1.0f;
@@ -832,6 +918,82 @@ void glGetCanaryEx(GLuint *vs_canary, GLuint *ps_canary, GLuint *vs_s0, GLuint *
  * sets `GS_W32` and `VS_W32`. A wave64 build would need `vcc` and `exec` instead, and the
  * encodings would differ.
  */
+/* **The draws already built this frame are still pointing at the words about to be rewritten.**
+ *
+ * On hardware a draw does not execute when it is issued; it is built into the command buffer and
+ * runs at the flush. The shader payload is one buffer shared by every draw in the frame, so
+ * rewriting a patch slot changes the program those built draws will run. The last thing a program
+ * does with a piece of shader state is usually switch it *off*, which retroactively removed it
+ * from the draws that were supposed to have it:
+ *
+ *     glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f);
+ *     glRectf(...);              // alpha 0.25 - must be discarded
+ *     glRectf(...);              // alpha 0.75 - must survive
+ *     glDisable(GL_ALPHA_TEST);  // <- patches both back to s_nop, before either has run
+ *
+ * Nothing was discarded, because by the time the GPU read the program there was no test in it.
+ * That is gl1-probe's `alpha-test` failing on hardware while passing on the host, where a draw is
+ * finished when it returns. The same applies within a frame rather than at the end of one: two
+ * draws wanting different texture environments cannot share one payload either.
+ *
+ * Submitting first is what makes the built draws keep the program they were built with, and it is
+ * the rule texture storage already follows in gl_tex_storage_release_sync. Only when the words
+ * actually change - an unconditional flush would split a frame on every glPopAttrib, and on the
+ * glDisable that follows a test which was never enabled.
+ */
+static void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst,
+                                    const uint32_t *words, size_t n) {
+#ifndef OOPS_HOST_BUILD
+    if (!ctx->use_hardware || !ctx->hw_frame_active) return;
+    for (size_t i = 0; i < n; i++) {
+        if (dst[i] != words[i]) {
+            gl_hw_flush(ctx);
+            return;
+        }
+    }
+#else
+    (void)ctx; (void)dst; (void)words; (void)n;
+#endif
+}
+
+/* The texture environment, as the four instructions that combine the sampled texel in v4..v7 with
+ * the interpolated colour in v8..v11.
+ *
+ * GL_MODULATE is the multiply the shader is assembled with. GL_REPLACE is four `s_nop`: the texel
+ * is already in the registers the export reads, and RGBA replace is exactly `C = Cs, A = As`.
+ *
+ * GL_ADD and GL_DECAL are **not** implemented here and fall back to modulate rather than to
+ * something plausible. Add needs `v_add_f32` on the three colour channels with the multiply kept
+ * on alpha, and decal is a lerp by the texel's alpha, which is three instructions per channel and
+ * does not fit four words. Neither encoding has been read back from an assembler, and this file's
+ * rule is that an instruction word is measured rather than remembered (`tools/shader/`), so they
+ * wait for that rather than being guessed. Until then the software rasteriser is the only path
+ * that honours them, and `glGetTexEnviv` still reports what was set.
+ */
+void gl_ps_patch_tex_env(gl_context_t *ctx) {
+    if (!ctx || !ctx->gpu_payload) return;
+
+    uint32_t words[4] = {
+        0x10081104u, /* v_mul_f32 v4, v4, v8  (R) */
+        0x100a1305u, /* v_mul_f32 v5, v5, v9  (G) */
+        0x100c1506u, /* v_mul_f32 v6, v6, v10 (B) */
+        0x100e1707u, /* v_mul_f32 v7, v7, v11 (A) */
+    };
+    if (ctx->tex_env_mode == GL_REPLACE) {
+        for (size_t i = 0; i < 4; i++) words[i] = 0xbf800000u; /* s_nop 0 */
+    }
+
+    uint32_t *ps_tex = (uint32_t *)((char *)ctx->gpu_payload + 0x200);
+    gl_ps_sync_payload_edit(ctx, ps_tex + GL_PS_COMBINE_SLOT_TEX, words, 4);
+    for (size_t i = 0; i < 4; i++) ps_tex[GL_PS_COMBINE_SLOT_TEX + i] = words[i];
+
+#if !defined(OOPS_HOST_BUILD) && defined(__x86_64__)
+    for (size_t p = 0x200; p < 0x300; p += 64) {
+        __builtin_ia32_clflush((const void *)((const char *)ctx->gpu_payload + p));
+    }
+#endif
+}
+
 void gl_ps_patch_alpha_test(gl_context_t *ctx) {
     if (!ctx || !ctx->gpu_payload) return;
 
@@ -873,6 +1035,11 @@ void gl_ps_patch_alpha_test(gl_context_t *ctx) {
 
     uint32_t *ps_untex = (uint32_t *)((char *)ctx->gpu_payload + 0x300);
     uint32_t *ps_tex = (uint32_t *)((char *)ctx->gpu_payload + 0x200);
+
+    /* A built frame still points at these four words - see gl_ps_sync_payload_edit. */
+    gl_ps_sync_payload_edit(ctx, ps_untex + GL_PS_ALPHA_SLOT_UNTEX, words, 4);
+    gl_ps_sync_payload_edit(ctx, ps_tex + GL_PS_ALPHA_SLOT_TEX, words, 4);
+
     for (size_t i = 0; i < 4; i++) {
         ps_untex[GL_PS_ALPHA_SLOT_UNTEX + i] = words[i];
         ps_tex[GL_PS_ALPHA_SLOT_TEX + i] = words[i];
@@ -924,13 +1091,21 @@ void glSetHardwarePrelude(const GLuint *words, GLuint count) {
     ctx->hw_prelude_words = ctx->hw_prelude ? (uint32_t)count : 0u;
 }
 
-const GLuint *glGetFrameReadback(void) {
+const GLuint *glGetFrameReadbackSampled(GLuint line_stride) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !ctx->readback || ctx->hw_frames_confirmed == 0u) return NULL;
+    if (line_stride == 0u) line_stride = 1u;
 #if defined(__x86_64__)
     size_t bytes = (size_t)ctx->width * (size_t)ctx->height * 4u;
-    for (size_t p = 0; p < bytes; p += 64) __builtin_ia32_clflush((const void *)((const char *)ctx->readback + p));
+    size_t step = (size_t)line_stride * 64u;
+    for (size_t p = 0; p < bytes; p += step) __builtin_ia32_clflush((const void *)((const char *)ctx->readback + p));
+#else
+    (void)line_stride;
 #endif
     return ctx->readback;
+}
+
+const GLuint *glGetFrameReadback(void) {
+    return glGetFrameReadbackSampled(1u);
 }
 

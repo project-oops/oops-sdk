@@ -22,6 +22,10 @@ __attribute__((weak)) int sceSystemServiceParamGetInt(int32_t paramId,
 __attribute__((weak)) int
 sceSystemServiceLaunchApp(const char *titleId, const char *const *argv,
                           const void *param);
+__attribute__((weak)) int sceSystemServiceGetMainAppTitleId(char *titleId);
+__attribute__((weak)) int sceSystemServiceIsAppSuspended(void);
+__attribute__((weak)) int sceSystemServiceKillApp(int appId, int, int, int);
+__attribute__((weak)) int sceSystemServiceGetAppIdOfBigApp(void);
 __attribute__((weak)) int
 sceSysUtilSendSystemNotificationWithText(int type, const char *msg);
 __attribute__((weak)) int sysctlbyname(const char *name, void *oldp,
@@ -41,10 +45,47 @@ __attribute__((weak)) int sceKernelGetHwModelName(char *buffer);
 __attribute__((weak)) extern void *sceAgcDriverGetDefaultOwner;
 __attribute__((weak)) extern void *sceGnmSubmitDone;
 
+int oops_symbol_is_resolved(const void *fn_ptr) {
+#if defined(OOPS_HOST_BUILD) || !defined(__x86_64__)
+  return (fn_ptr != NULL);
+#else
+  if (!fn_ptr) {
+    return 0;
+  }
+  uintptr_t addr = (uintptr_t)fn_ptr;
+  if (addr < 0x10000ULL) {
+    return 0;
+  }
+  /* If pointer points directly into system library address space
+   * (on Prospero system libraries reside >= 0x800000000ULL; main ELF is < 0x1000000ULL) */
+  if (addr >= 0x1000000ULL) {
+    return 1;
+  }
+  /* In our ELF executable text (loaded at 0x400000):
+   * Inspect the PLT stub: `ff 25 disp32` (jmpq *disp(%rip)). */
+  const unsigned char *code = (const unsigned char *)fn_ptr;
+  if (code[0] == 0xff && code[1] == 0x25) {
+    int32_t disp = *(const int32_t *)(const void *)(code + 2);
+    const uintptr_t *got_slot =
+        (const uintptr_t *)(const void *)(code + 6 + disp);
+    uintptr_t target = *got_slot;
+    /* When unresolved by the dynamic linker, got_slot contains 0 or points back
+     * to the PLT stub within our text segment (< 0x1000000ULL). Calling it triggers
+     * an unpatched trap (PRX_NOT_RESOLVED_FUNCTION / 0xa0020101). */
+    if (target < 0x1000000ULL) {
+      return 0;
+    }
+    return 1;
+  }
+  return 1;
+#endif
+}
+
 int32_t oops_user_get_initial_user_id(void) {
   int32_t user = -1;
-  if (sceUserServiceGetInitialUser) {
-    if (sceUserServiceGetInitialUser(&user) != 0 && sceUserServiceInitialize) {
+  if (oops_symbol_is_resolved((const void *)&sceUserServiceGetInitialUser)) {
+    if (sceUserServiceGetInitialUser(&user) != 0 &&
+        oops_symbol_is_resolved((const void *)&sceUserServiceInitialize)) {
       sceUserServiceInitialize(NULL);
       (void)sceUserServiceGetInitialUser(&user);
     }
@@ -63,7 +104,7 @@ int oops_user_get_name(int32_t user_id, char *out_name, size_t max_len) {
   if (user_id < 0)
     return -1;
 
-  if (sceUserServiceGetUserName) {
+  if (oops_symbol_is_resolved((const void *)&sceUserServiceGetUserName)) {
     return sceUserServiceGetUserName(user_id, out_name, max_len);
   }
   return -1;
@@ -76,7 +117,8 @@ int oops_user_get_logged_in_users(int32_t *out_user_ids, size_t max_users,
   if (out_count)
     *out_count = 0;
 
-  if (!sceUserServiceGetLoginUserIdList) {
+  if (!oops_symbol_is_resolved(
+          (const void *)&sceUserServiceGetLoginUserIdList)) {
     int32_t initial = oops_user_get_initial_user_id();
     if (initial >= 0) {
       out_user_ids[0] = initial;
@@ -141,12 +183,12 @@ int oops_system_get_info(oops_system_info_t *out_info) {
 
   /* 3. Memory specs (16 GB unified RAM standard on the hardware) */
   out_info->total_ram_mb = 16384;
-  if (sceKernelGetDirectMemorySize) {
+  if (oops_symbol_is_resolved((const void *)&sceKernelGetDirectMemorySize)) {
     out_info->direct_mem_mb = sceKernelGetDirectMemorySize() / (1024 * 1024);
   }
 
   /* 4. Kernel / firmware extraction via kern.version sysctl */
-  if (sysctlbyname) {
+  if (oops_symbol_is_resolved((const void *)&sysctlbyname)) {
     char version[128];
     size_t len = sizeof(version) - 1;
     for (size_t i = 0; i < sizeof(version); i++)
@@ -201,28 +243,28 @@ int oops_system_get_info(oops_system_info_t *out_info) {
 }
 
 int oops_system_notify(const char *text) {
-  if (!text || !sceSysUtilSendSystemNotificationWithText)
+  if (!text || !oops_symbol_is_resolved((const void *)&sceSysUtilSendSystemNotificationWithText))
     return -1;
   /* Type 0 = standard system dialogue notification popup */
   return sceSysUtilSendSystemNotificationWithText(0, text);
 }
 
 int oops_system_hide_splash(void) {
-  if (sceSystemServiceHideSplashScreen) {
+  if (oops_symbol_is_resolved((const void *)&sceSystemServiceHideSplashScreen)) {
     return sceSystemServiceHideSplashScreen();
   }
   return -1;
 }
 
 int oops_system_power_tick(void) {
-  if (sceSystemServicePowerTick) {
+  if (oops_symbol_is_resolved((const void *)&sceSystemServicePowerTick)) {
     return sceSystemServicePowerTick();
   }
   return -1;
 }
 
 int oops_system_navigate_home(void) {
-  if (sceSystemServiceNavigateToGoHome) {
+  if (oops_symbol_is_resolved((const void *)&sceSystemServiceNavigateToGoHome)) {
     return sceSystemServiceNavigateToGoHome();
   }
   return -1;
@@ -232,7 +274,7 @@ int oops_system_get_enter_button(int *out_button) {
   if (!out_button)
     return -1;
   *out_button = -1;
-  if (sceSystemServiceParamGetInt) {
+  if (oops_symbol_is_resolved((const void *)&sceSystemServiceParamGetInt)) {
     int32_t val = -1;
     /* 1000 = ORBIS_SYSTEM_SERVICE_PARAM_ID_ENTER_BUTTON_ASSIGN */
     int rc = sceSystemServiceParamGetInt(1000, &val);
@@ -249,7 +291,7 @@ int oops_system_launch_app(const char *title_id) {
   if (!title_id || title_id[0] == '\0') {
     return -1;
   }
-  if (sceSystemServiceLaunchApp) {
+  if (oops_symbol_is_resolved((const void *)&sceSystemServiceLaunchApp)) {
     int32_t user_id = oops_user_get_initial_user_id();
     struct {
       size_t size;
@@ -262,6 +304,7 @@ int oops_system_launch_app(const char *title_id) {
     }
     param.size = sizeof(param);
     param.userId = (user_id >= 0) ? user_id : 0;
+    param.checkAppSystemVer = 2; /* SkipSystemUpdateCheck (0x2) */
 
     const char *argv[2] = {title_id, 0};
     int ret = sceSystemServiceLaunchApp(title_id, argv, &param);
@@ -272,11 +315,57 @@ int oops_system_launch_app(const char *title_id) {
   return -1;
 }
 
+int oops_system_get_running_app_title_id(char *out_title_id, size_t max_len) {
+  if (!out_title_id || max_len == 0) {
+    return -1;
+  }
+  out_title_id[0] = '\0';
+  if (oops_symbol_is_resolved((const void *)&sceSystemServiceGetMainAppTitleId)) {
+    char tid[64] = {0};
+    int rc = sceSystemServiceGetMainAppTitleId(tid);
+    if (rc == 0 && tid[0] != '\0') {
+      size_t i = 0;
+      while (tid[i] && i + 1 < max_len) {
+        out_title_id[i] = tid[i];
+        i++;
+      }
+      out_title_id[i] = '\0';
+      return 0;
+    }
+  }
+  return -1;
+}
+
+int oops_system_is_app_suspended(int *out_is_suspended) {
+  if (!out_is_suspended) {
+    return -1;
+  }
+  *out_is_suspended = 0;
+  if (oops_symbol_is_resolved((const void *)&sceSystemServiceIsAppSuspended)) {
+    *out_is_suspended = (sceSystemServiceIsAppSuspended() != 0) ? 1 : 0;
+    return 0;
+  }
+  return -1;
+}
+
+int oops_system_kill_app(int app_id) {
+  if (oops_symbol_is_resolved((const void *)&sceSystemServiceKillApp)) {
+    int target = app_id;
+    if (target <= 0 && oops_symbol_is_resolved((const void *)&sceSystemServiceGetAppIdOfBigApp)) {
+      target = sceSystemServiceGetAppIdOfBigApp();
+    }
+    if (target > 0) {
+      return sceSystemServiceKillApp(target, -1, 0, 0);
+    }
+  }
+  return -1;
+}
+
 int oops_system_get_cpu_temp(int *out_temp_celsius) {
   if (!out_temp_celsius)
     return -1;
   *out_temp_celsius = -1;
-  if (!sceKernelGetCpuTemperature)
+  if (!oops_symbol_is_resolved((const void *)&sceKernelGetCpuTemperature))
     return -1;
   return sceKernelGetCpuTemperature(out_temp_celsius);
 }
@@ -285,7 +374,7 @@ int oops_system_get_soc_temp(int sensor_idx, int *out_temp_celsius) {
   if (!out_temp_celsius)
     return -1;
   *out_temp_celsius = -1;
-  if (!sceKernelGetSocSensorTemperature)
+  if (!oops_symbol_is_resolved((const void *)&sceKernelGetSocSensorTemperature))
     return -1;
   return sceKernelGetSocSensorTemperature(sensor_idx, out_temp_celsius);
 }
@@ -294,7 +383,7 @@ int oops_system_get_fan_duty(int *out_duty_pct) {
   if (!out_duty_pct)
     return -1;
   *out_duty_pct = -1;
-  if (!sceKernelGetCurrentFanDuty)
+  if (!oops_symbol_is_resolved((const void *)&sceKernelGetCurrentFanDuty))
     return -1;
   int unk = 0;
   int raw_duty = 0;
@@ -310,7 +399,7 @@ int oops_system_get_cpu_freq(uint64_t *out_freq_hz) {
   if (!out_freq_hz)
     return -1;
   *out_freq_hz = 0;
-  if (!sceKernelGetCpuFrequency)
+  if (!oops_symbol_is_resolved((const void *)&sceKernelGetCpuFrequency))
     return -1;
   long freq = sceKernelGetCpuFrequency();
   if (freq > 0) {
@@ -324,7 +413,7 @@ int oops_system_get_hw_serial(char *out_serial, size_t max_len) {
   if (!out_serial || max_len == 0)
     return -1;
   out_serial[0] = '\0';
-  if (!sceKernelGetHwSerialNumber)
+  if (!oops_symbol_is_resolved((const void *)&sceKernelGetHwSerialNumber))
     return -1;
   char buffer[1024];
   for (size_t i = 0; i < sizeof(buffer); i++)
@@ -345,7 +434,7 @@ int oops_system_get_hw_model(char *out_model, size_t max_len) {
   if (!out_model || max_len == 0)
     return -1;
   out_model[0] = '\0';
-  if (!sceKernelGetHwModelName)
+  if (!oops_symbol_is_resolved((const void *)&sceKernelGetHwModelName))
     return -1;
   char buffer[1024];
   for (size_t i = 0; i < sizeof(buffer); i++)
@@ -476,19 +565,18 @@ const char *oops_log_get_app_id(void) {
   return NULL;
 }
 
-void oops_log(const char *fmt, ...) {
-  if (fmt == NULL) return;
-  char buf[512];
-  va_list args;
-  va_start(args, fmt);
-  int len = oops_vsnprintf(buf, sizeof(buf), fmt, args);
-  va_end(args);
-  if (len < 0) return;
-  oops_klog(NULL, buf);
+static oops_log_level_t s_log_level = OOPS_LOG_INFO;
+
+void oops_log_set_level(oops_log_level_t level) {
+  s_log_level = level;
 }
 
-void oops_klog(const char *tag, const char *msg) {
-  if (msg == NULL) return;
+oops_log_level_t oops_log_get_level(void) {
+  return s_log_level;
+}
+
+void oops_klog_level(oops_log_level_t level, const char *tag, const char *msg) {
+  if (msg == NULL || level == OOPS_LOG_NONE || level > s_log_level) return;
   char buf[512];
   size_t pos = 0;
 
@@ -522,6 +610,24 @@ void oops_klog(const char *tag, const char *msg) {
     }
   }
 
+  /* Level prefix for non-INFO messages */
+  const char *lvl_prefix = NULL;
+  if (level == OOPS_LOG_ERROR) {
+    lvl_prefix = "ERROR: ";
+  } else if (level == OOPS_LOG_WARN) {
+    lvl_prefix = "WARN: ";
+  } else if (level == OOPS_LOG_DEBUG) {
+    lvl_prefix = "DEBUG: ";
+  } else if (level == OOPS_LOG_TRACE) {
+    lvl_prefix = "TRACE: ";
+  }
+
+  if (lvl_prefix != NULL) {
+    for (size_t i = 0; lvl_prefix[i] != '\0' && pos < sizeof(buf) - 2; i++) {
+      buf[pos++] = lvl_prefix[i];
+    }
+  }
+
   for (size_t i = 0; msg[i] != '\0' && pos < sizeof(buf) - 2; i++) {
     buf[pos++] = msg[i];
   }
@@ -540,6 +646,32 @@ void oops_klog(const char *tag, const char *msg) {
 #endif
 }
 
+void oops_kprintf_level(oops_log_level_t level, const char *tag, const char *fmt, ...) {
+  if (fmt == NULL || level == OOPS_LOG_NONE || level > s_log_level) return;
+  char buf[512];
+  va_list args;
+  va_start(args, fmt);
+  int len = oops_vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  if (len < 0) return;
+  oops_klog_level(level, tag, buf);
+}
+
+void oops_log(const char *fmt, ...) {
+  if (fmt == NULL) return;
+  char buf[512];
+  va_list args;
+  va_start(args, fmt);
+  int len = oops_vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  if (len < 0) return;
+  oops_klog_level(OOPS_LOG_INFO, NULL, buf);
+}
+
+void oops_klog(const char *tag, const char *msg) {
+  oops_klog_level(OOPS_LOG_INFO, tag, msg);
+}
+
 void oops_kprintf(const char *tag, const char *fmt, ...) {
   if (fmt == NULL) return;
   char buf[512];
@@ -548,7 +680,7 @@ void oops_kprintf(const char *tag, const char *fmt, ...) {
   int len = oops_vsnprintf(buf, sizeof(buf), fmt, args);
   va_end(args);
   if (len < 0) return;
-  oops_klog(tag, buf);
+  oops_klog_level(OOPS_LOG_INFO, tag, buf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -626,5 +758,45 @@ int oops_system_escape_sandbox(void) {
   /* On the host side there is no sandbox to escape. */
   (void)0;
   return 0;
+#endif
+}
+
+#ifndef OOPS_HOST_BUILD
+/*
+ * The vendor sleep, bound here rather than reached through `oops_time_sleep_ms`.
+ *
+ * `time.c` binds the same symbol the same way, and calling into it would be the tidier-looking
+ * choice. It is not taken because four titles link `system.c` and not `time.c` - `tls-probe`,
+ * `injector`, `tracer` and `pad-viz` - and a title's link ignores unresolved symbols rather than
+ * failing, so the tidier choice buys a symbol that resolves nowhere and traps when first called.
+ * A duplicated weak binding is the cheaper of the two.
+ */
+__attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
+#endif
+
+void oops_system_park_until_closed(void) {
+#ifndef OOPS_HOST_BUILD
+  for (;;) {
+    if (sceKernelUsleep) {
+      (void)sceKernelUsleep(1000000u);
+    } else {
+      /*
+       * No vendor sleep bound. Spinning is wrong for a whole second at a time, but this path
+       * only exists so that the function still honours "never returns" when the platform is not
+       * what it was measured to be - and a busy wait that keeps the log intact is better than a
+       * return that faults at zero.
+       */
+      for (unsigned i = 0; i < 1000000u; i++) {
+        __asm__ __volatile__("pause");
+      }
+    }
+  }
+#else
+  /*
+   * A host test has a real process lifecycle, so nothing on the host has any business calling
+   * this - and a host build that hangs forever is a much worse outcome than one that stops. The
+   * trap says "this was called where it makes no sense" rather than pretending to park.
+   */
+  __builtin_trap();
 #endif
 }

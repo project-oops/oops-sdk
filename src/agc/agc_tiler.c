@@ -9,6 +9,9 @@ static uint32_t s_lut_x[128];
 static uint32_t s_lut_y[128];
 static int s_lut_initialized = 0;
 
+static uint8_t s_inv_lx[16384];
+static uint8_t s_inv_ly[16384];
+
 static void init_tiler_lut(void) {
   /* RDNA2 basis vectors for 32bpp (4 bytes/pixel) in 64KB blocks, for the GFX10
    * level without RB+ that this part reports - not GFX10.3, which this comment
@@ -44,6 +47,18 @@ static void init_tiler_lut(void) {
     s_lut_x[i] = bx >> 2;
     s_lut_y[i] = by >> 2;
   }
+
+  /* Precompute the inverse permutation for 16,384 pixels per 64KB macro-tile.
+   * Writing destination memory in strictly sequential order (tile_dest[0..16383])
+   * allows the CPU to stream stores directly through Write-Combining (WC) write
+   * buffers into GDDR6 without evictions or cache line thrashing. */
+  for (uint32_t i = 0; i < 16384u; i++) {
+    uint32_t x = 0, y = 0;
+    agc_detile_pixel(i, &x, &y);
+    s_inv_lx[i] = (uint8_t)x;
+    s_inv_ly[i] = (uint8_t)y;
+  }
+
   s_lut_initialized = 1;
 }
 
@@ -155,12 +170,22 @@ void agc_tile_surface(void *dest, const void *src, uint32_t width,
       /* 16,384 pixels per 64KB block */
       uint32_t *tile_dest = dst32 + (size_t)tile_idx * (AGC_TILE_BYTES / 4u);
 
-      for (uint32_t ly = 0; ly < block_h; ly++) {
-        uint32_t y_off = s_lut_y[ly];
-        const uint32_t *src_row = src32 + (ty + ly) * width + tx;
+      const uint32_t *rows[128];
+      for (uint32_t r = 0; r < block_h; r++) {
+        rows[r] = src32 + (ty + r) * width + tx;
+      }
 
-        for (uint32_t lx = 0; lx < block_w; lx++) {
-          tile_dest[y_off ^ s_lut_x[lx]] = src_row[lx];
+      if (block_w == 128u && block_h == 128u) {
+        for (uint32_t i = 0; i < 16384u; i++) {
+          tile_dest[i] = rows[s_inv_ly[i]][s_inv_lx[i]];
+        }
+      } else {
+        for (uint32_t i = 0; i < 16384u; i++) {
+          uint32_t lx = s_inv_lx[i];
+          uint32_t ly = s_inv_ly[i];
+          if (lx < block_w && ly < block_h) {
+            tile_dest[i] = rows[ly][lx];
+          }
         }
       }
     }

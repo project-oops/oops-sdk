@@ -10,6 +10,8 @@ static void test_input_button_bitmasks(void) {
   ASSERT_EQ(OOPS_BUTTON_TRIANGLE, 1u << 12);
   ASSERT_EQ(OOPS_BUTTON_SQUARE, 1u << 15);
   ASSERT_EQ(OOPS_BUTTON_CREATE, 1u << 16);
+  ASSERT_EQ(OOPS_BUTTON_PS, 1u << 16);
+  ASSERT_EQ(OOPS_BUTTON_HOME, 1u << 16);
   ASSERT_EQ(OOPS_BUTTON_TOUCHPAD, 1u << 20);
 }
 

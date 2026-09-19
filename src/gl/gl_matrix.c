@@ -32,6 +32,33 @@ float gl_sqrt(float val) {
     return __builtin_sqrtf(val);
 }
 
+/* exp(), for the two exponential fog modes.
+ *
+ * Here rather than called from `src/math/math.c` for the same reason `gl_sqrt` and `gl_pow` are:
+ * the GL sources link on their own. The host self-tests of gl1-probe and gl1-cube compile the
+ * GL sources plus the system stubs and **not** `math.c`, so reaching into it would break two
+ * builds that have nothing wrong with them. The algorithm is the one `oops_expf` uses -
+ * reduce by log2(e), a minimax polynomial on the remainder, and scale by a power of two built
+ * from the exponent bits.
+ *
+ * Fog only ever asks for a negative argument, but the positive side is kept correct rather than
+ * clamped, because a helper that is wrong outside its current caller's range is a trap for the
+ * next one. */
+float gl_exp(float x) {
+    if (x > 88.0f) return 1e38f;
+    if (x < -88.0f) return 0.0f;
+    const float k = (float)(int)(x * 1.4426950408889634f + (x < 0.0f ? -0.5f : 0.5f));
+    const float r = x - k * 0.6931471805599453f;
+    const float r2 = r * r;
+    const float p = 1.0f + r +
+                    r2 * (0.5f + r * (0.16666667f + r * (0.041666668f + r * 0.008333333f)));
+    const int ik = (int)k;
+    const uint32_t bits = (uint32_t)(ik + 127) << 23;
+    float scale;
+    memcpy(&scale, &bits, sizeof(float));
+    return p * scale;
+}
+
 float gl_pow(float base, float p) {
     if (p == 0.0f) return 1.0f;
     if (base <= 0.0f) return 0.0f;
@@ -173,6 +200,63 @@ void mat4_transform_vec4(float *out4, const gl_mat4_t *m, const float *in4) {
     out4[1] = m->m[1] * x + m->m[5] * y + m->m[9]  * z + m->m[13] * w;
     out4[2] = m->m[2] * x + m->m[6] * y + m->m[10] * z + m->m[14] * w;
     out4[3] = m->m[3] * x + m->m[7] * y + m->m[11] * z + m->m[15] * w;
+}
+
+/* The full 4x4 inverse, by cofactors.
+ *
+ * Needed because GL_EYE_LINEAR texture generation stores its plane multiplied by the inverse of
+ * the modelview **as it was when glTexGen was called** - that is what makes an eye-linear plane
+ * stay put in eye space while the modelview moves underneath it, and it is the whole difference
+ * between GL_EYE_LINEAR and GL_OBJECT_LINEAR. The existing normal matrix is only the
+ * inverse-transpose of the upper 3x3, which cannot carry the translation a plane equation needs.
+ *
+ * Returns false and leaves `out` untouched for a singular matrix, rather than filling it with
+ * infinities: a caller that ignores the result then keeps whatever it had, which is a stale
+ * answer instead of a poisoned one.
+ */
+GLboolean mat4_invert(gl_mat4_t *out, const gl_mat4_t *in) {
+    if (!out || !in) return GL_FALSE;
+    const float *m = in->m;
+    float inv[16];
+
+    inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15]
+             + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15]
+             - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8]  =  m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15]
+             + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14]
+             - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15]
+             - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15]
+             + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9]  = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15]
+             - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] =  m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14]
+             + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2]  =  m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15]
+             + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+    inv[6]  = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15]
+             - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+    inv[10] =  m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15]
+             + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14]
+             - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+    inv[3]  = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11]
+             - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+    inv[7]  =  m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11]
+             + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11]
+             - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+    inv[15] =  m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10]
+             + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+
+    float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (det == 0.0f) return GL_FALSE;
+    det = 1.0f / det;
+    for (int i = 0; i < 16; i++) out->m[i] = inv[i] * det;
+    return GL_TRUE;
 }
 
 static gl_mat4_t *get_active_matrix(gl_context_t *ctx) {

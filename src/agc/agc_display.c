@@ -3,7 +3,10 @@
 #include "agc/tiler.h"
 #include "oops/agc.h"
 #include "oops/gpu.h"
+#include "oops/heap.h"
 #include "oops/memory.h"
+#include "oops/system.h"
+#include "oops/time.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -48,6 +51,8 @@ sceVideoOutRegisterBuffers2(int handle, int startIndex, int unk,
 __attribute__((weak)) int sceVideoOutSubmitFlip(int handle, int index,
                                                 unsigned int flipMode,
                                                 int64_t flipArg);
+typedef int sce_equeue_t;
+__attribute__((weak)) int sceVideoOutSetFlipRate(int handle, int rate);
 
 /* Flip status descriptor. The base fields occupy the first 64 bytes (confirmed
  * on 12.40). On native Prospero libSceVideoOut writes between 96 and 128+
@@ -111,6 +116,7 @@ struct agc_display {
   volatile uint32_t *fence;
   int gpu_accelerated;
   int tiling_mode;
+  int owns_scratch;
   /* The compute-tiler path, populated only by agc_display_try_gpu_tiler(). */
   oops_gpu_queue_t *gpu_queue;
   oops_gpu_shader_t *gpu_shader;
@@ -262,13 +268,28 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
   /* Setup buffer addresses:
    * Buffer 0 at 0MB
    * Buffer 1 at 10MB
-   * Linear scratch buffer at 20MB
+   * Linear scratch buffer: allocated in cached Onion memory (type 0) so CPU
+   * reads and UI rendering run at L1/L2 cache speeds rather than issuing
+   * uncached GDDR6 bus reads across Infinity Fabric. Falls back to direct
+   * Garlic memory if Onion allocation fails.
    */
   disp->target_gpu_fb[0] = (uint32_t *)disp->mapped_base;
   disp->target_gpu_fb[1] =
       (uint32_t *)((unsigned char *)disp->mapped_base + AGC_STRIDE_BYTES);
-  disp->linear_scratch_fb =
-      (uint32_t *)((unsigned char *)disp->mapped_base + 2 * AGC_STRIDE_BYTES);
+  size_t scratch_bytes = (size_t)width * (size_t)height * sizeof(uint32_t);
+  void *scratch = oops_malloc(scratch_bytes);
+  if (scratch) {
+    disp->linear_scratch_fb = (uint32_t *)scratch;
+    disp->owns_scratch = 1;
+    agc_log("agc-scratch-heap", "scratch allocated in cached heap memory",
+            (uint64_t)(uintptr_t)scratch);
+  } else {
+    disp->linear_scratch_fb =
+        (uint32_t *)((unsigned char *)disp->mapped_base + 2 * AGC_STRIDE_BYTES);
+    disp->owns_scratch = 0;
+    agc_log("agc-scratch-dmem", "scratch allocated in direct memory fallback",
+            (uint64_t)(uintptr_t)disp->linear_scratch_fb);
+  }
 
   agc_log("agc-b0-addr", "buffer 0 addr",
           (uint64_t)(uintptr_t)disp->target_gpu_fb[0]);
@@ -319,6 +340,11 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
   disp->fb_index = 0;
   disp->last_error = 0;
   disp->flip_count = 0;
+
+  if (sceVideoOutSetFlipRate) {
+    sceVideoOutSetFlipRate(disp->handle, 0); /* 0 = 60Hz */
+  }
+
   agc_display_clear(disp, 0);
   if (disp->tiling_mode == 1) {
     for (size_t i = 0; i < (size_t)width * height; i++) {
@@ -443,25 +469,6 @@ unsigned int agc_display_get_width(const agc_display_t *disp) {
 
 unsigned int agc_display_get_height(const agc_display_t *disp) {
   return disp ? disp->height : 0;
-}
-
-/* Poll the flip status until nothing is pending, or give up after about 100 ms.
- * Both entry points are linked in the eboot context and present in the app
- * context on 12.40; where either is missing there is nothing to wait on and the
- * caller proceeds as it always did. */
-static void agc_wait_for_flips(struct agc_display *disp) {
-  if (disp->handle <= 0 || !sceVideoOutGetFlipStatus || !sceKernelUsleep)
-    return;
-  for (int i = 0; i < 100; i++) {
-    struct agc_flip_status status;
-    for (size_t k = 0; k < sizeof(status); k++)
-      ((unsigned char *)&status)[k] = 0;
-    if (sceVideoOutGetFlipStatus(disp->handle, &status) != 0)
-      return;
-    if (status.num_flip_pending <= 0)
-      return;
-    sceKernelUsleep(1000);
-  }
 }
 
 /* Tiles the linear surface onto `dst` with the compute shader. Returns 0 when
@@ -595,18 +602,7 @@ int agc_display_flip(agc_display_t *disp) {
   unsigned int shown = disp->fb_index;
   disp->fb_index = (disp->fb_index + 1) % 2;
 
-  /* The buffer about to be written was submitted two flips ago. On prospero
-   * (measured; the agc path also serves trinity) the submit call queues and
-   * returns in microseconds - eight back-to-back all returned 0 in 3 to 12 us,
-   * leaving pending flips that present over the next frames (obSCEne
-   * 080-video/visual-flip; a later 32-submit burst put the hardware queue
-   * capacity at exactly 26, submit 27 refused with QUEUE_FULL 0x80290012) - so
-   * without a wait the tiler could write into a buffer that is still queued or
-   * on screen. Drain the queue first: with two buffers, pending == 0 means the
-   * other one is on screen and this one is free. */
-  if (disp->flip_count > 0) {
-    agc_wait_for_flips(disp);
-  }
+  uint64_t t_flip_start = oops_time_get_us();
 
   /* Scanout buffer preparation: linear direct copy when tiling_mode == 1,
    * CPU software display-tiling when tiling_mode == 0 (RDNA2 display-tiled). */
@@ -637,6 +633,8 @@ int agc_display_flip(agc_display_t *disp) {
                      disp->width, disp->height);
   }
 
+  uint64_t t_tile_done = oops_time_get_us();
+
   if (disp->flip_count <= 5) {
     agc_log("agc-pix-0", "target_gpu_fb first pixel", (uint64_t)disp->target_gpu_fb[shown][0]);
     agc_log("agc-scr-0", "linear_scratch_fb first pixel", (uint64_t)disp->linear_scratch_fb[0]);
@@ -644,14 +642,25 @@ int agc_display_flip(agc_display_t *disp) {
 
   disp->flip_count++;
 
+  int frc = 0;
   if (sceVideoOutSubmitFlip) {
-    int frc = sceVideoOutSubmitFlip(disp->handle, (int)shown, 1, 0);
+    frc = sceVideoOutSubmitFlip(disp->handle, (int)shown, 1, 0);
     if (frc != 0 || disp->flip_count <= 5) {
       agc_log("agc-flip-rc", "SubmitFlip rc", (uint64_t)(uint32_t)frc);
     }
-    return frc;
   }
-  return 0;
+
+  uint64_t t_submit_done = oops_time_get_us();
+
+  if (disp->flip_count <= 10 || (disp->flip_count % 60) == 0) {
+    oops_kprintf("AGC", "flip %lu: tile=%lu submit=%lu total=%lu\n",
+                 (unsigned long)disp->flip_count,
+                 (unsigned long)(t_tile_done - t_flip_start),
+                 (unsigned long)(t_submit_done - t_tile_done),
+                 (unsigned long)(t_submit_done - t_flip_start));
+  }
+
+  return frc;
 }
 
 void agc_display_clear(agc_display_t *disp, uint32_t color) {
@@ -715,6 +724,11 @@ void agc_display_close(agc_display_t *disp) {
   if (disp->shader_payload) {
     oops_mem_free(disp->shader_payload);
     disp->shader_payload = (void *)0;
+  }
+  if (disp->owns_scratch && disp->linear_scratch_fb) {
+    oops_free(disp->linear_scratch_fb);
+    disp->linear_scratch_fb = (uint32_t *)0;
+    disp->owns_scratch = 0;
   }
   disp->shader_obj = (void *)0;
 

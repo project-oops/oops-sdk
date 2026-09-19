@@ -1,5 +1,17 @@
 # AGC oracle record: the GL cube frame on PS5 firmware 12.40
 
+> **The program was renamed on 2026-09-17**, after this record was taken: `oops-apps/src/gl-cube`
+> is now `oops-apps/src/gl1-cube`, and its entry point `gl_cube_start` is `gl1_cube_start`. The
+> rename pairs it with `gl2-cube`, which will carry the GL 2.0 oracle once there is a GL 2.0
+> back end to record.
+>
+> **The title id `GLCB00001` did not change, and the text below is left as it was measured.**
+> This document describes something that happened on a console on 2026-09-14; editing it to
+> match today's directory layout would make it a description of a run that was never made. The
+> paths named below are the paths as they were. The record's own name - "the gl-cube oracle
+> record", as `test_pm4_gl_honours_the_gl_cube_oracle_record` and several source comments call
+> it - is likewise left alone, because it names this artefact rather than the app.
+
 What a real console did with one exact command stream, kept so that Orbistoun can check its
 own RDNA2 path against it. Everything below was measured on the target part, not a stand-in,
 and is `runtime` evidence in the vocabulary of orbistoun's `docs/PROVENANCE.md`: learned from
@@ -46,7 +58,9 @@ below records having already been measured once.
 - The pixel shader must copy the SGPR after its user data into m0 before `v_interp`: s0 with no user data, s2 with two. `SPI_SHADER_PGM_RSRC2_PS` `USER_SGPR` sits in bits 5:1 (the value 2 loads one SGPR, 4 loads two).
 - The NGG stage's user data 0 arrives in s8. `VGT_GS_OUT_PRIM_TYPE` must be TRISTRIP (2) for triangles; POINTLIST turns each triangle into a point and starves the compositor.
 - `DB_Z_INFO` with `SW_MODE` 64KB_Z_X and no HTILE (`TILE_SURFACE_ENABLE` 0, `DB_HTILE_DATA_BASE` 0) gives a working depth test; the surface needs the 128 x 128 block extent.
-- A 2D image descriptor: base address in 256-byte units (word 0 bits 31:0 = address bits 39:8, word 1 bits 7:0 = bits 47:40); `DST_SEL` X, Y, Z, W = 4, 5, 6, 7 reads channels 0..3 of `FMT_8_8_8_8` as R, G, B, A; a linear image's row pitch comes from its width, and the `DEPTH` field does not carry it (rows laid twice as far apart sample identically wrong with DEPTH = pitch - 1 or 0).
+- A 2D image descriptor: base address in 256-byte units (word 0 bits 31:0 = address bits 39:8, word 1 bits 7:0 = bits 47:40); `DST_SEL` X, Y, Z, W = 4, 5, 6, 7 reads channels 0..3 of `FMT_8_8_8_8` as R, G, B, A; a linear image's row pitch is its **width rounded up to 64 pixels** (256 bytes at four bytes each), and the `DEPTH` field is not what delivers it.
+
+  **Corrected 2026-09-17.** This read "the row pitch comes from its width", on a measurement whose own caveat was that widths which are not a multiple of 64 pixels were untried - and at 64 pixels the row *is* 256 bytes, so that measurement could not tell the two apart. gl-cube's texture is 64 wide, which is why its frame is unaffected either way and why the dumps below are unchanged. The correction is `SW_MODE = 0`, which is `ADDR_SW_LINEAR` and not `ADDR_SW_LINEAR_GENERAL`: addrlib aligns the first to `256 / elementBytes` elements and the second to one (`mesa/src/amd/addrlib/src/gfx9/gfx9addrlib.cpp:5117-5127`), and `ADDR_SW_LINEAR_GENERAL` is 32 (`mesa/src/amd/addrlib/inc/addrtypes.h:259`) against a five-bit field, so it cannot be the mode programmed here. gl1-probe's 2x2 textures are the width that tells them apart, and its hardware results split exactly as the wider pitch predicts. Confirmation on hardware is obSCEne `REQ-20260917T1605Z-8b12`.
 - `DMA_DATA` (0xc0055000) with SRC_SEL DATA and DST_SEL TC_L2 fills memory; with both SRC_SEL and DST_SEL at TC_L2 it copies; `WAIT_REG_MEM` (0xc0053c00, function EQUAL, memory space) holds the CP on the fence; `RELEASE_MEM` with DATA_SEL 3 writes a 64-bit GPU clock counter that runs at 100 MHz (99.75 ticks per microsecond of CPU time over 17.9 s, measured).
 - GPU reads of `WC_GARLIC` direct memory work (the texture is sampled from it).
 

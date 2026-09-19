@@ -37,6 +37,8 @@ extern "C" {
 #define OOPS_BUTTON_CREATE                                                     \
   (1u << 16) /* Prospero Create / Orbis Share; bit contested with Prosperous's \
                 Home */
+#define OOPS_BUTTON_PS (1u << 16)   /* PlayStation / Home button (when pad privilege is enabled) */
+#define OOPS_BUTTON_HOME (1u << 16) /* Alias for OOPS_BUTTON_PS */
 #define OOPS_BUTTON_TOUCHPAD (1u << 20)
 
 #define OOPS_MAX_PADS 4

@@ -11,27 +11,48 @@ Everything below this line used to be a list of what I remembered was missing. O
 was replaced with a diff: the entry points Mesa's `include/GL/gl.h` declares (GL 1.0-1.3, 455 of
 them) against the ones `include/GL/gl.h` here declares.
 
-| | |
-|---|---|
-| Present in both | **161** |
-| Missing | **294** |
+| | 2026-09-17, morning | 2026-09-17, evening |
+|---|---|---|
+| Present in both | **161** | **350** |
+| Missing | **294** | **108** |
 
-That number is much less alarming than it looks, and saying why is the point of measuring it:
+The morning column is what this document described for most of its life. The evening one is after
+a day of filling it in, and the remaining 108 are no longer a mixture:
 
-- **~160** are further *spellings* of things that exist - `glColor3b`, `glVertex4s`,
-  `glTexCoord3i` and the rest of the type-and-arity grid. Cheap whenever they are wanted.
-- **34** are `*ARB` aliases of the multitexture calls.
-- The remaining **~100** are genuinely distinct features, and they cluster: the imaging subset
+- **101** are families this deliberately does not have, and mostly should not: the imaging subset
   (colour tables, convolution, histogram, minmax), evaluators and the `glMap*` surface grid,
-  selection and feedback mode, the accumulation buffer, colour-index mode, `glBitmap` /
-  `glDrawPixels` / `glCopyPixels`, raster position, polygon and line stipple, texture coordinate
-  generation, user clip planes, 1D and 3D textures, compressed textures, multitexture, fog and
-  stencil.
+  selection and feedback mode, the accumulation buffer, colour-index mode, polygon and line
+  stipple, `glPixelMap`/`glPixelTransfer`.
+- **7** are genuinely wanted and genuinely not done: `glTexImage3D`, `glTexSubImage3D`,
+  `glCopyTexSubImage3D`, and `glFogf`/`glFogfv`/`glFogi`/`glFogiv`.
 
-**Not all of those are worth having.** The imaging subset, evaluators, selection/feedback, the
-accumulation buffer and colour-index mode are features that were already unusual when this
-hardware's ancestors were new. They are listed so the gap is honest, not because they are
-planned.
+**Not all of the 101 are worth having.** The imaging subset, evaluators, selection/feedback, the
+accumulation buffer and colour-index mode were already unusual when this hardware's ancestors were
+new. They are listed so the gap is honest, not because they are planned.
+
+> **The counts come from a diff, not a memory**, and the method is worth stating because the
+> numbers move: `grep -oE '\bgl[A-Z][A-Za-z0-9_]*'` over Mesa's `include/GL/gl.h` and over this
+> one, sorted and compared. Mesa's side is 458 names by that measure; 24 names exist only here -
+> the context calls, the GL 1.5 buffer objects and the GL 2.0 shader surface - and are not part
+> of either column.
+
+## An absent entry point is not absent
+
+**`-Wl,--unresolved-symbols=ignore-all` is in the payload link.** A program calling a GL entry
+point this does not declare therefore links cleanly and calls **address zero** at run time: a
+`SIGSEGV` at `rip: 0x0000000000000000`, with no build diagnostic and nothing in the log naming the
+symbol. That is not a theoretical reading - it is the crash signature that was familiar all day
+from a different cause.
+
+So D009's "an absent feature is an absent symbol" does not hold its usual meaning here. Omitting an
+entry point does not produce a clean failure; it produces the worst kind. Where a refusal is
+*conformant* - one texture unit, an empty compressed-format set - this now declares the entry point
+and refuses, which is strictly better than a crash and is what the specification asks for anyway.
+
+**Whether to extend that to features which are simply unimplemented - 3D textures and fog - is an
+open decision and is deliberately not taken here.** Declaring them and returning `GL_INVALID_ENUM`
+would turn a null jump into a readable error; leaving them out keeps D009 literal. The evidence is
+recorded so the choice can be made rather than drifted into.
 
 ## Done
 
@@ -64,23 +85,33 @@ planned.
 | **Integer lighting forms** | `glLighti*`, `glMateriali*`, `glLightModeli*`. **A colour converts by range, not by cast** - `INT_TO_FLOAT` per Mesa, so `GL_AMBIENT` with `INT_MAX` is 1.0 while a position is a plain cast |
 | **Transpose matrices** | `glLoadTransposeMatrix{f,d}`, `glMultTransposeMatrix{f,d}` |
 | **Residency** | `glAreTexturesResident`, `glPrioritizeTextures` - nothing is ever evicted, so everything that exists is resident and an unknown name is an error rather than a "no" |
+| **The rest of the type-and-arity grid** | every remaining `glVertex`/`glColor`/`glTexCoord`/`glNormal` spelling. **Integer colours and normals normalise; positions and texture coordinates do not** - conversions from Mesa's `macros.h`, and normals use the same macros as colours rather than a plain cast. `glTexCoord4`'s `q` is a projective divide, which widened the current texture coordinate to four components |
+| **Multitexture, one unit** | `glMultiTexCoord*`, `glActiveTexture`, `glClientActiveTexture` and their `*ARB` spellings. `GL_MAX_TEXTURE_UNITS` reports 1 and a unit above `GL_TEXTURE0` is `GL_INVALID_ENUM`, which is what the specification requires of a one-unit implementation |
+| **Texture coordinate generation** | `glTexGen*`, `glGetTexGen*`, the four enables. Object-linear, eye-linear and sphere map; the cube-map modes refused. `GL_EYE_PLANE` is stored through the inverse modelview of the moment it was set, which needed a full 4x4 `mat4_invert` |
+| **User clip planes** | `glClipPlane`, `glGetClipPlane`, `GL_CLIP_PLANE0..5`. Two registers and no shader change; **three coordinate spaces**, object in, eye stored, clip in the register |
+| **Stencil (software)** | `glStencilFunc`, `glStencilOp`, `glStencilMask`, `glClearStencil`, and `GL_STENCIL_BUFFER_BIT` on the attribute stack. The hardware surface is outstanding - see below |
+| **Raster position and pixel operations** | all 24 `glRasterPos*` spellings, `glDrawPixels`, `glBitmap`, `glCopyPixels`, `glPixelZoom`. An invalid raster position draws **nothing**; `glBitmap` moves the position even when it draws nothing |
+| **1D textures** | `glTexImage1D`, `glTexSubImage1D`, `glCopyTexImage1D`, `glCopyTexSubImage1D`. **Its own binding point**, its own enable and its own default texture, with 2D winning when both are enabled |
+| **Compressed textures** | the seven entry points, with **no formats**: `GL_NUM_COMPRESSED_TEXTURE_FORMATS` is 0 and every upload is refused, which is what the specification says an implementation with an empty format set does |
 
 ## Left in 1.x, with what it costs
 
 ### Cheap and additive - no hardware risk
 
-Nothing in this group touches a register or a shader, so the cost is writing it.
+Nothing in this group touched a register or a shader, so the cost was writing it.
 
-Not much, and that is the point of having measured. What is left in this group is the tail of
-families already here rather than anything structural.
+**This group is now empty**: the type-and-arity grid, multitexture on one unit, texture
+generation, the raster position family, 1D textures and the compressed-texture refusals all
+landed on 2026-09-17 and have moved to **Done** above.
 
-**Note the ~100 "genuinely distinct features" in the gap above are mostly not in this group.**
-Per D009 an absent feature is an absent symbol, so `glFog*`, `glStencil*`, `glAccum*`, the
-evaluators, selection and feedback, the stipples, `glBitmap` and `glTexGen*` are not entry
-points waiting to be written - they are features waiting to be decided on, and most of them
-should stay absent.
+> The paragraph that stood here said the ~100 genuinely distinct features were "waiting to be
+> decided on, and most of them should stay absent", and listed `glStencil*`, `glBitmap` and
+> `glTexGen*` among them. Four of those were decided the other way and are implemented; the
+> judgement about the imaging subset, evaluators, selection/feedback, the accumulation buffer and
+> colour-index mode stands. The list was a snapshot of what had not been costed yet, not a ruling,
+> and reading it as one is how a gap stays a gap.
 
-### Not cheap, despite looking it
+### Not cheap, despite looking it - and now done
 
 **`glTexImage1D`** was on the cheap list and should not have been. A 1D texture is not a
 height-1 2D texture as far as the API is concerned: `GL_TEXTURE_1D` is **its own binding
@@ -89,9 +120,15 @@ live at once and `glEnable(GL_TEXTURE_1D)` is a separate switch that 2D override
 1D image into the 2D slot would give a texture that stores correctly and **never samples**,
 which is the silent-success failure this port refuses everywhere else.
 
-The real cost is a second binding point in the context, a second enable, and the priority rule
-between them in the sampler path and in the hardware descriptor build. That is a day's work,
-not a forwarder - so it sits here until it is worth spending.
+The cost was as described - a second binding point, a second enable, and the priority rule in the
+sampler path and the descriptor build - and it was spent on 2026-09-17. The upload, sub-upload and
+copy bodies turned out to be target-agnostic already, so they became shared helpers and only the
+public `*2D` entry points validate.
+
+It also uncovered something this paragraph did not predict: **the default 2D texture was object 1,
+and `glGenTextures` counts up from 1.** A program that generated a texture and then uploaded with
+nothing bound wrote into its own. Each target now has a reserved default id above anything counting
+reaches.
 
 
 ### Needs a shader-interface change - real risk to the oracle frame
@@ -124,9 +161,19 @@ console.
 > suite and gone wrong only on hardware. `DB_Z_INFO` and the colour-surface registers *were*
 > pinned throughout, as the stencil paragraph below says.
 
-**Stencil** (`glStencilFunc`, `glStencilOp`, `glStencilMask`) has the same shape one level down:
-the depth buffer is `Z_32_FLOAT` with no stencil plane, so it needs a different depth format and
-a reallocated buffer, and `DB_Z_INFO` is pinned by that test.
+**Stencil** (`glStencilFunc`, `glStencilOp`, `glStencilMask`, `glClearStencil`) **is implemented
+in software as of 2026-09-17** - the test, all six operations, the write mask, and the ordering
+against the alpha and depth tests. Only the hardware path is outstanding.
+
+> This paragraph used to say stencil "has the same shape one level down: the depth buffer is
+> `Z_32_FLOAT` with no stencil plane, so it needs a different depth format and a reallocated
+> buffer, and `DB_Z_INFO` is pinned by that test." **That was wrong on this part.** Stencil is a
+> *separate surface* with its own registers - `DB_STENCIL_INFO` at context offset `0x011`,
+> `DB_STENCIL_READ_BASE` at `0x013`, `DB_STENCIL_WRITE_BASE` at `0x015`, `DB_STENCILREFMASK` at
+> `0x10C` (`mesa/src/amd/registers/gfx103.json`) - so `Z_32_FLOAT` having no stencil plane costs
+> nothing and `DB_Z_INFO` does not have to move. The depth block already writes every one of
+> those registers, zeroed. What is missing is a surface and the `DB_STENCIL_INFO` value that
+> turns it on, which is obSCEne `REQ-20260917T1845Z-3d5b`.
 
 **Multitexture** (`glActiveTexture`, `glClientActiveTexture`, `glMultiTexCoord*`) is the same
 blocker again, and this is what it costs, measured rather than guessed:
@@ -144,7 +191,15 @@ So the API surface is large (the measurement above counts ~50 `glMultiTexCoord` 
 dependency as fog. It is not the "next big software item" it looked like from the entry-point
 count alone.
 
-### Costed, waiting on one measurement
+### Costed, waiting on one measurement - clip planes since implemented
+
+> **Implemented 2026-09-17.** The costing below held: two registers and no shader change. Both
+> paths are written - the software rasteriser interpolates a signed distance per plane and
+> discards per fragment, ahead of the depth test - and gl1-probe has a `clip-plane` check, so the
+> next hardware run answers on **oops-gl's own stage**. That matters because the question below
+> stayed open through three obSCEne measurements, every one of which rebuilt the stage by hand
+> with the passthrough `VGT_SHADER_STAGES_EN` rather than the `0x00c12010` this programmes. The
+> register offsets and the third coordinate space the hardware wants are in the CHANGELOG entry.
 
 **User clip planes** (`glClipPlane`, `glGetClipPlane`, `GL_CLIP_PLANE0..5`) looked like a
 vertex-stage rewrite and are not. Mesa's `si_emit_clip_regs`
@@ -168,12 +223,21 @@ So it is two registers and no shader change:
 Offsets and field positions from `oops-mesa/mesa/src/amd/registers/gfx103.json` - the `gfx103`
 family file, not a general one.
 
-**What stops it being written today** is that this pipeline runs NGG in *passthrough*
-(`VGT_SHADER_STAGES_EN = 0x02002000`). The clipper sits in the primitive assembler, downstream
-of the geometry engine, so on Mesa's model passthrough should not affect it - but passthrough has
-already produced one surprise here, obSCEne having measured that it will not assemble points or
-lines at all. Writing this against the assumption and finding out on hardware is the failure this
-project keeps not having. Filed as `REQ-...-8c4d`.
+**What stops it being written today**, corrected on 2026-09-17. This paragraph used to say the
+pipeline runs NGG in *passthrough* (`VGT_SHADER_STAGES_EN = 0x02002000`) and reasoned from there.
+**It does not**: `gl_draw.c:657` programmes `0x00c12010`, which is non-passthrough NGG. The same
+confusion - obSCEne's fixture uses the passthrough value, oops-gl does not - has already cost two
+probe resolutions that measured the wrong stage, so it is written down here rather than left as
+something to rediscover.
+
+What is actually known, from `REQ-...-8c4d` re-filed as `REQ-...-b2c7` and resolved on
+2026-09-17: writing `PA_CL_UCP_0_X` and setting `UCP_ENA_0` does **not** stall the geometry
+engine - all three arms produced byte-identical hardware outcomes. But all three were identical
+*failures*: nothing drew in any of them, because the console fired a `BIG_APP` power transition
+whose ShellUI preemption ran past 363 ms against the probe's 200 ms canary timeout. So the
+negative is sound and the positive is still unmeasured, and **whether user clip planes clip is
+open**. Re-asked as `REQ-...-c3f1`, which is the same probe with a timeout that outlasts a
+power transition.
 
 ### Measured shut
 
@@ -204,9 +268,13 @@ sits behind it is not, and the staging is worth being explicit about:
 | Declarations and statements | **done** - blocks, selection, iteration, jumps, declarators, functions, translation unit |
 | Preprocessor | **done** for what 1.10 shaders use - `#version`, object-like macros, `#ifdef` nesting. `#if`, function-like macros and `#extension` refused by name |
 | `struct`, and the type-name ambiguity | not started - `starts_declaration` decides on one token today, which a user-defined type name will break |
-| Type checking | yes - the language is the language |
-| Instruction encoding | mostly: `clang -target amdgcn-amd-amdhsa -mcpu=gfx1030` assembles, so generated words can be checked against a disassembler without a console |
-| Anything about the shader *interface* | **no** - varyings are parameter exports, and the export count is fixed at two until `REQ-...-3a91` is measured |
+| Types, scopes, expression checking | **done** - operator rules, swizzles, constructors, shadowing |
+| Statement checking, function signatures, l-values | **done** - the front end is complete for what 1.10 shaders use |
+| `struct`, arrays beyond a size, built-in functions | not started; all software, none of it blocked |
+| Code generation | **blocked, and no longer on obSCEne.** `REQ-...-f9d3` resolved on 2026-09-17: on oops-gl's own non-passthrough NGG stage (`0x00c12010`) a synthetic probe's inline vertex assembly never launches a wavefront (`canary-vs 0xaaaaaaaa`) without the ring descriptors and user-SGPR bindings oops-gl configures - so the question cannot be asked in isolation and re-filing it would ask the same thing a third time. Three parameter exports now have to be measured **from a payload of ours on a console**, which makes gl2-cube's first hardware run the gate rather than a probe sweep |
+| Instruction encoding | **started** - `src/gl/glsl_emit.c`. VOP1/VOP2 formats, the constant forms, and `mat4 * vec4`, every field verified against clang's own output |
+| Instruction selection from the AST | **started** - `src/gl/glsl_gen.c`. A value is consecutive VGPRs, one per component, `mat4` column-major; a bump allocator with a per-statement mark; `+ - *` component-wise, scalar broadcast either way round, `mat4 * vec4`, unary minus, swizzle reads, `vecN`/`matN` constructors (and `matN(s)` fills the **diagonal**, which is a different rule from `vecN(s)`), assignment, declarations with initialisers, blocks. Everything else - `/`, integer arithmetic, comparisons, calls, swizzle writes, compound assignment - sets `error` and emits nothing, because an instruction whose encoding has not been read out of an assembler is not guessed |
+| Anything about the shader *interface* | **no** - varyings are parameter exports, and the export count is fixed at two. `REQ-...-3a91` and its re-file `REQ-...-f9d3` both came back unable to answer it from a synthetic probe, so the measurement has to come from one of our own payloads |
 
 So the back end is gated on the same measurement fog, stencil and multitexture are. The front
 end is not, and none of it is wasted whichever way that measurement goes.

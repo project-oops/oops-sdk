@@ -428,6 +428,7 @@ void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count,
 #define GL_CURRENT_BIT                          0x00000001
 #define GL_POLYGON_BIT                          0x00000008
 #define GL_LIGHTING_BIT                         0x00000040
+#define GL_FOG_BIT                              0x00000080
 #define GL_DEPTH_BUFFER_BIT_ATTRIB              0x00000100
 #define GL_VIEWPORT_BIT                         0x00000800
 #define GL_TRANSFORM_BIT                        0x00001000
@@ -571,6 +572,381 @@ void glTexCoord2iv(const GLint *v);
 void glNormal3d(GLdouble nx, GLdouble ny, GLdouble nz);
 void glNormal3dv(const GLdouble *v);
 
+/* Fog.
+ *
+ * A per-fragment blend towards the fog colour by distance, which is much of what this generation
+ * of 3D looked like. The three modes are the specification's: linear between a start and an end,
+ * and two exponentials by density. Fog does **not** touch alpha, so the alpha test sees the same
+ * value with fog on or off.
+ *
+ * `GL_FOG_INDEX` belongs to colour-index mode, which this does not have, and is refused. */
+#define GL_FOG                                  0x0B60
+#define GL_FOG_INDEX                            0x0B61
+#define GL_FOG_DENSITY                          0x0B62
+#define GL_FOG_START                            0x0B63
+#define GL_FOG_END                              0x0B64
+#define GL_FOG_MODE                             0x0B65
+#define GL_FOG_COLOR                            0x0B66
+#define GL_EXP                                  0x0800
+#define GL_EXP2                                 0x0801
+
+void glFogf(GLenum pname, GLfloat param);
+void glFogi(GLenum pname, GLint param);
+void glFogfv(GLenum pname, const GLfloat *params);
+void glFogiv(GLenum pname, const GLint *params);
+
+/* Points and lines.
+ *
+ * **Drawn as triangles, because the geometry engine will not take one or two vertices.** That is
+ * measured, not assumed: obSCEne submitted a one-vertex point and a two-vertex line on retail
+ * hardware across five sweeps - including one on oops-gl's own `VGT_SHADER_STAGES_EN` - and every
+ * run recorded `fence-hit 0`. The pipe stops rather than the primitive drawing wrongly.
+ *
+ * What that measurement closed is the *native* primitive, not the feature. A line is a screen
+ * width quad and a point is a square, both of which are triangles, and this already expands
+ * `GL_QUADS` the same way. So the geometry engine never sees fewer than three vertices and no
+ * stage this does not build is needed. */
+#define GL_POINT_SIZE                           0x0B11
+#define GL_POINT_SIZE_RANGE                     0x0B12
+#define GL_POINT_SIZE_GRANULARITY               0x0B13
+#define GL_LINE_WIDTH                           0x0B21
+#define GL_LINE_WIDTH_RANGE                     0x0B22
+#define GL_LINE_WIDTH_GRANULARITY               0x0B23
+
+void glPointSize(GLfloat size);
+void glLineWidth(GLfloat width);
+
+/* Compressed textures.
+ *
+ * **This implementation supports no compressed formats, and says so.**
+ * `GL_NUM_COMPRESSED_TEXTURE_FORMATS` is 0 and every `glCompressedTexImage*` call is refused with
+ * `GL_INVALID_ENUM`, which is what the specification says a driver with no compressed formats
+ * does - the set is allowed to be empty, and a program is expected to query it. That makes these
+ * entry points *conformant*, not stubs: a program that asks first takes its uncompressed path,
+ * and one that does not gets an error it can read instead of a call to address zero.
+ *
+ * `GL_TEXTURE_COMPRESSED` reports false for every texture, which is true of all of them. */
+#define GL_COMPRESSED_RGB                       0x84ED
+#define GL_COMPRESSED_RGBA                      0x84EE
+#define GL_TEXTURE_COMPRESSION_HINT             0x84EF
+#define GL_TEXTURE_COMPRESSED_IMAGE_SIZE        0x86A0
+#define GL_TEXTURE_COMPRESSED                   0x86A1
+#define GL_NUM_COMPRESSED_TEXTURE_FORMATS       0x86A2
+#define GL_COMPRESSED_TEXTURE_FORMATS           0x86A3
+
+void glCompressedTexImage1D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLint border, GLsizei imageSize, const GLvoid *data);
+void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLsizei height, GLint border, GLsizei imageSize, const GLvoid *data);
+void glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLsizei height, GLsizei depth, GLint border, GLsizei imageSize,
+                            const GLvoid *data);
+void glCompressedTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width,
+                               GLenum format, GLsizei imageSize, const GLvoid *data);
+void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLsizei width, GLsizei height, GLenum format, GLsizei imageSize,
+                               const GLvoid *data);
+void glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                               GLenum format, GLsizei imageSize, const GLvoid *data);
+void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *img);
+
+/* One-dimensional textures.
+ *
+ * **GL_TEXTURE_1D is its own binding point, not a height-1 GL_TEXTURE_2D.** Both can be bound at
+ * once and each has its own enable, and when both are enabled the higher dimensionality wins -
+ * so a 1D texture can be set up and left alone while 2D drawing continues over it. Treating them
+ * as one binding would give a program its 2D texture back where it asked for its 1D one. */
+#define GL_TEXTURE_1D                           0x0DE0
+#define GL_TEXTURE_BINDING_1D                   0x8068
+#define GL_TEXTURE_BINDING_2D                   0x8069
+
+void glTexImage1D(GLenum target, GLint level, GLint internalFormat, GLsizei width,
+                  GLint border, GLenum format, GLenum type, const GLvoid *pixels);
+void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width,
+                     GLenum format, GLenum type, const GLvoid *pixels);
+void glCopyTexImage1D(GLenum target, GLint level, GLenum internalFormat,
+                      GLint x, GLint y, GLsizei width, GLint border);
+void glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset,
+                         GLint x, GLint y, GLsizei width);
+
+/* Raster position, and the pixel operations that draw at it.
+ *
+ * The raster position is a point put through the whole vertex transform - modelview, projection,
+ * clip, viewport - and then remembered. `glDrawPixels` and `glBitmap` draw there. A position that
+ * clipped is **invalid**, and an invalid position draws nothing at all rather than drawing at the
+ * edge, which is the specification's rule and the reason the validity flag is queryable. */
+#define GL_CURRENT_RASTER_COLOR                 0x0B04
+#define GL_CURRENT_RASTER_TEXTURE_COORDS        0x0B06
+#define GL_CURRENT_RASTER_POSITION              0x0B07
+#define GL_CURRENT_RASTER_POSITION_VALID        0x0B08
+#define GL_CURRENT_RASTER_DISTANCE              0x0B09
+#define GL_ZOOM_X                               0x0D16
+#define GL_ZOOM_Y                               0x0D17
+#define GL_BITMAP                               0x1A00
+#define GL_COLOR                                0x1800
+
+void glRasterPos2f(GLfloat x, GLfloat y);
+void glRasterPos3f(GLfloat x, GLfloat y, GLfloat z);
+void glRasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+void glRasterPos2d(GLdouble x, GLdouble y);
+void glRasterPos3d(GLdouble x, GLdouble y, GLdouble z);
+void glRasterPos4d(GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+void glRasterPos2i(GLint x, GLint y);
+void glRasterPos3i(GLint x, GLint y, GLint z);
+void glRasterPos4i(GLint x, GLint y, GLint z, GLint w);
+void glRasterPos2s(GLshort x, GLshort y);
+void glRasterPos3s(GLshort x, GLshort y, GLshort z);
+void glRasterPos4s(GLshort x, GLshort y, GLshort z, GLshort w);
+void glRasterPos2fv(const GLfloat *v);
+void glRasterPos3fv(const GLfloat *v);
+void glRasterPos4fv(const GLfloat *v);
+void glRasterPos2dv(const GLdouble *v);
+void glRasterPos3dv(const GLdouble *v);
+void glRasterPos4dv(const GLdouble *v);
+void glRasterPos2iv(const GLint *v);
+void glRasterPos3iv(const GLint *v);
+void glRasterPos4iv(const GLint *v);
+void glRasterPos2sv(const GLshort *v);
+void glRasterPos3sv(const GLshort *v);
+void glRasterPos4sv(const GLshort *v);
+
+void glPixelZoom(GLfloat xfactor, GLfloat yfactor);
+void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type,
+                  const GLvoid *pixels);
+void glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type);
+void glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig,
+              GLfloat xmove, GLfloat ymove, const GLubyte *bitmap);
+
+/* Stencil.
+ *
+ * `GL_REPLACE` is shared with the texture environment and `GL_INVERT` with the logic ops; both
+ * are single values in GL's one enum space, so they are defined once here. */
+#define GL_STENCIL_CLEAR_VALUE                  0x0B91
+#define GL_STENCIL_FUNC                         0x0B92
+#define GL_STENCIL_VALUE_MASK                   0x0B93
+#define GL_STENCIL_FAIL                         0x0B94
+#define GL_STENCIL_PASS_DEPTH_FAIL              0x0B95
+#define GL_STENCIL_PASS_DEPTH_PASS              0x0B96
+#define GL_STENCIL_REF                          0x0B97
+#define GL_STENCIL_WRITEMASK                    0x0B98
+#define GL_STENCIL_BITS                         0x0D57
+#define GL_STENCIL_INDEX                        0x1901
+#define GL_KEEP                                 0x1E00
+#define GL_INCR                                 0x1E02
+#define GL_DECR                                 0x1E03
+#define GL_INVERT                               0x150A
+
+void glStencilFunc(GLenum func, GLint ref, GLuint mask);
+void glStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass);
+void glStencilMask(GLuint mask);
+void glClearStencil(GLint s);
+
+/* User clip planes.
+ *
+ * Six of them, which is the minimum the specification requires and what this hardware's
+ * fixed-function clipper has. The plane is given in object coordinates and stored in eye
+ * coordinates, so it stays where it was put while the modelview moves afterwards. */
+#define GL_CLIP_PLANE0                          0x3000
+#define GL_CLIP_PLANE1                          0x3001
+#define GL_CLIP_PLANE2                          0x3002
+#define GL_CLIP_PLANE3                          0x3003
+#define GL_CLIP_PLANE4                          0x3004
+#define GL_CLIP_PLANE5                          0x3005
+#define GL_MAX_CLIP_PLANES                      0x0D32
+
+void glClipPlane(GLenum plane, const GLdouble *equation);
+void glGetClipPlane(GLenum plane, GLdouble *equation);
+
+/* Texture coordinate generation.
+ *
+ * The coordinate is computed from the vertex instead of being taken from glTexCoord, per
+ * coordinate and per mode. GL_SPHERE_MAP is the one most old code wants - it is how a reflective
+ * surface is faked without a cube map. */
+#define GL_S                                    0x2000
+#define GL_T                                    0x2001
+#define GL_R                                    0x2002
+#define GL_Q                                    0x2003
+#define GL_TEXTURE_GEN_S                        0x0C60
+#define GL_TEXTURE_GEN_T                        0x0C61
+#define GL_TEXTURE_GEN_R                        0x0C62
+#define GL_TEXTURE_GEN_Q                        0x0C63
+#define GL_TEXTURE_GEN_MODE                     0x2500
+#define GL_OBJECT_PLANE                         0x2501
+#define GL_EYE_PLANE                            0x2502
+#define GL_EYE_LINEAR                           0x2400
+#define GL_OBJECT_LINEAR                        0x2401
+#define GL_SPHERE_MAP                           0x2402
+#define GL_NORMAL_MAP                           0x8511
+#define GL_REFLECTION_MAP                       0x8512
+
+void glTexGeni(GLenum coord, GLenum pname, GLint param);
+void glTexGenf(GLenum coord, GLenum pname, GLfloat param);
+void glTexGend(GLenum coord, GLenum pname, GLdouble param);
+void glTexGeniv(GLenum coord, GLenum pname, const GLint *params);
+void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params);
+void glTexGendv(GLenum coord, GLenum pname, const GLdouble *params);
+void glGetTexGeniv(GLenum coord, GLenum pname, GLint *params);
+void glGetTexGenfv(GLenum coord, GLenum pname, GLfloat *params);
+void glGetTexGendv(GLenum coord, GLenum pname, GLdouble *params);
+
+/* Multitexture (GL 1.3, and ARB_multitexture before it).
+ *
+ * **This implementation has one texture unit**, and says so: GL_MAX_TEXTURE_UNITS reports 1, and
+ * every call naming a unit above GL_TEXTURE0 is refused with GL_INVALID_ENUM. That is what the
+ * specification requires of a one-unit implementation - a unit beyond the maximum *is* an invalid
+ * enum - so a program that asks for a second unit is told no rather than being silently given
+ * unit 0's texture twice, which would draw a plausible and wrong picture.
+ *
+ * A second unit needs a third parameter export from the vertex shader, which is a hardware
+ * measurement this does not have (see the roadmap, and obSCEne REQ-20260917T1652Z-7c40). When it
+ * arrives, the refusal above is the only thing that has to change. */
+#define GL_TEXTURE0                             0x84C0
+#define GL_ACTIVE_TEXTURE                       0x84E0
+#define GL_CLIENT_ACTIVE_TEXTURE                0x84E1
+#define GL_MAX_TEXTURE_UNITS                    0x84E2
+
+void glActiveTexture(GLenum texture);
+void glClientActiveTexture(GLenum texture);
+void glMultiTexCoord1f(GLenum target, GLfloat s);
+void glMultiTexCoord2f(GLenum target, GLfloat s, GLfloat t);
+void glMultiTexCoord3f(GLenum target, GLfloat s, GLfloat t, GLfloat r);
+void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q);
+void glMultiTexCoord1d(GLenum target, GLdouble s);
+void glMultiTexCoord2d(GLenum target, GLdouble s, GLdouble t);
+void glMultiTexCoord3d(GLenum target, GLdouble s, GLdouble t, GLdouble r);
+void glMultiTexCoord4d(GLenum target, GLdouble s, GLdouble t, GLdouble r, GLdouble q);
+void glMultiTexCoord1i(GLenum target, GLint s);
+void glMultiTexCoord2i(GLenum target, GLint s, GLint t);
+void glMultiTexCoord3i(GLenum target, GLint s, GLint t, GLint r);
+void glMultiTexCoord4i(GLenum target, GLint s, GLint t, GLint r, GLint q);
+void glMultiTexCoord1s(GLenum target, GLshort s);
+void glMultiTexCoord2s(GLenum target, GLshort s, GLshort t);
+void glMultiTexCoord3s(GLenum target, GLshort s, GLshort t, GLshort r);
+void glMultiTexCoord4s(GLenum target, GLshort s, GLshort t, GLshort r, GLshort q);
+void glMultiTexCoord1fv(GLenum target, const GLfloat *v);
+void glMultiTexCoord2fv(GLenum target, const GLfloat *v);
+void glMultiTexCoord3fv(GLenum target, const GLfloat *v);
+void glMultiTexCoord4fv(GLenum target, const GLfloat *v);
+void glMultiTexCoord1dv(GLenum target, const GLdouble *v);
+void glMultiTexCoord2dv(GLenum target, const GLdouble *v);
+void glMultiTexCoord3dv(GLenum target, const GLdouble *v);
+void glMultiTexCoord4dv(GLenum target, const GLdouble *v);
+void glMultiTexCoord1iv(GLenum target, const GLint *v);
+void glMultiTexCoord2iv(GLenum target, const GLint *v);
+void glMultiTexCoord3iv(GLenum target, const GLint *v);
+void glMultiTexCoord4iv(GLenum target, const GLint *v);
+void glMultiTexCoord1sv(GLenum target, const GLshort *v);
+void glMultiTexCoord2sv(GLenum target, const GLshort *v);
+void glMultiTexCoord3sv(GLenum target, const GLshort *v);
+void glMultiTexCoord4sv(GLenum target, const GLshort *v);
+
+/* The ARB spellings are the same functions. They are separate symbols rather than macros because
+ * a program may take their address, and because `-Wl,--unresolved-symbols=ignore-all` turns an
+ * absent symbol into a jump to zero rather than a link error. */
+void glActiveTextureARB(GLenum texture);
+void glClientActiveTextureARB(GLenum texture);
+void glMultiTexCoord1fARB(GLenum target, GLfloat s);
+void glMultiTexCoord2fARB(GLenum target, GLfloat s, GLfloat t);
+void glMultiTexCoord3fARB(GLenum target, GLfloat s, GLfloat t, GLfloat r);
+void glMultiTexCoord4fARB(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q);
+void glMultiTexCoord1dARB(GLenum target, GLdouble s);
+void glMultiTexCoord2dARB(GLenum target, GLdouble s, GLdouble t);
+void glMultiTexCoord3dARB(GLenum target, GLdouble s, GLdouble t, GLdouble r);
+void glMultiTexCoord4dARB(GLenum target, GLdouble s, GLdouble t, GLdouble r, GLdouble q);
+void glMultiTexCoord1iARB(GLenum target, GLint s);
+void glMultiTexCoord2iARB(GLenum target, GLint s, GLint t);
+void glMultiTexCoord3iARB(GLenum target, GLint s, GLint t, GLint r);
+void glMultiTexCoord4iARB(GLenum target, GLint s, GLint t, GLint r, GLint q);
+void glMultiTexCoord1sARB(GLenum target, GLshort s);
+void glMultiTexCoord2sARB(GLenum target, GLshort s, GLshort t);
+void glMultiTexCoord3sARB(GLenum target, GLshort s, GLshort t, GLshort r);
+void glMultiTexCoord4sARB(GLenum target, GLshort s, GLshort t, GLshort r, GLshort q);
+void glMultiTexCoord1fvARB(GLenum target, const GLfloat *v);
+void glMultiTexCoord2fvARB(GLenum target, const GLfloat *v);
+void glMultiTexCoord3fvARB(GLenum target, const GLfloat *v);
+void glMultiTexCoord4fvARB(GLenum target, const GLfloat *v);
+void glMultiTexCoord1dvARB(GLenum target, const GLdouble *v);
+void glMultiTexCoord2dvARB(GLenum target, const GLdouble *v);
+void glMultiTexCoord3dvARB(GLenum target, const GLdouble *v);
+void glMultiTexCoord4dvARB(GLenum target, const GLdouble *v);
+void glMultiTexCoord1ivARB(GLenum target, const GLint *v);
+void glMultiTexCoord2ivARB(GLenum target, const GLint *v);
+void glMultiTexCoord3ivARB(GLenum target, const GLint *v);
+void glMultiTexCoord4ivARB(GLenum target, const GLint *v);
+void glMultiTexCoord1svARB(GLenum target, const GLshort *v);
+void glMultiTexCoord2svARB(GLenum target, const GLshort *v);
+void glMultiTexCoord3svARB(GLenum target, const GLshort *v);
+void glMultiTexCoord4svARB(GLenum target, const GLshort *v);
+
+/* The rest of the type-and-arity grid.
+ *
+ * Declared because the payload link ignores unresolved symbols: a spelling that is missing here
+ * is not a compile error in the calling program, it is a call to address zero at run time. */
+void glVertex2s(GLshort x, GLshort y);
+void glVertex3s(GLshort x, GLshort y, GLshort z);
+void glVertex4s(GLshort x, GLshort y, GLshort z, GLshort w);
+void glVertex4i(GLint x, GLint y, GLint z, GLint w);
+void glVertex2sv(const GLshort *v);
+void glVertex3sv(const GLshort *v);
+void glVertex4sv(const GLshort *v);
+void glVertex4iv(const GLint *v);
+void glVertex4dv(const GLdouble *v);
+
+void glColor3b(GLbyte red, GLbyte green, GLbyte blue);
+void glColor3s(GLshort red, GLshort green, GLshort blue);
+void glColor3i(GLint red, GLint green, GLint blue);
+void glColor3us(GLushort red, GLushort green, GLushort blue);
+void glColor3ui(GLuint red, GLuint green, GLuint blue);
+void glColor4b(GLbyte red, GLbyte green, GLbyte blue, GLbyte alpha);
+void glColor4s(GLshort red, GLshort green, GLshort blue, GLshort alpha);
+void glColor4i(GLint red, GLint green, GLint blue, GLint alpha);
+void glColor4us(GLushort red, GLushort green, GLushort blue, GLushort alpha);
+void glColor4ui(GLuint red, GLuint green, GLuint blue, GLuint alpha);
+void glColor3bv(const GLbyte *v);
+void glColor3sv(const GLshort *v);
+void glColor3iv(const GLint *v);
+void glColor3usv(const GLushort *v);
+void glColor3uiv(const GLuint *v);
+void glColor4bv(const GLbyte *v);
+void glColor4sv(const GLshort *v);
+void glColor4iv(const GLint *v);
+void glColor4usv(const GLushort *v);
+void glColor4uiv(const GLuint *v);
+
+void glNormal3b(GLbyte nx, GLbyte ny, GLbyte nz);
+void glNormal3s(GLshort nx, GLshort ny, GLshort nz);
+void glNormal3i(GLint nx, GLint ny, GLint nz);
+void glNormal3bv(const GLbyte *v);
+void glNormal3sv(const GLshort *v);
+void glNormal3iv(const GLint *v);
+
+void glTexCoord1d(GLdouble s);
+void glTexCoord1i(GLint s);
+void glTexCoord1s(GLshort s);
+void glTexCoord2s(GLshort s, GLshort t);
+void glTexCoord3f(GLfloat s, GLfloat t, GLfloat r);
+void glTexCoord3d(GLdouble s, GLdouble t, GLdouble r);
+void glTexCoord3i(GLint s, GLint t, GLint r);
+void glTexCoord3s(GLshort s, GLshort t, GLshort r);
+void glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat q);
+void glTexCoord4d(GLdouble s, GLdouble t, GLdouble r, GLdouble q);
+void glTexCoord4i(GLint s, GLint t, GLint r, GLint q);
+void glTexCoord4s(GLshort s, GLshort t, GLshort r, GLshort q);
+void glTexCoord1fv(const GLfloat *v);
+void glTexCoord1dv(const GLdouble *v);
+void glTexCoord1iv(const GLint *v);
+void glTexCoord1sv(const GLshort *v);
+void glTexCoord2sv(const GLshort *v);
+void glTexCoord3fv(const GLfloat *v);
+void glTexCoord3dv(const GLdouble *v);
+void glTexCoord3iv(const GLint *v);
+void glTexCoord3sv(const GLshort *v);
+void glTexCoord4fv(const GLfloat *v);
+void glTexCoord4dv(const GLdouble *v);
+void glTexCoord4iv(const GLint *v);
+void glTexCoord4sv(const GLshort *v);
+
 /* Fixed-Function Lighting & Materials */
 void glLightfv(GLenum light, GLenum pname, const GLfloat *params);
 void glLightf(GLenum light, GLenum pname, GLfloat param);
@@ -666,8 +1042,17 @@ void glSetHardwarePrelude(const GLuint *words, GLuint count);
 
 /* The command processor's copy of the last submitted frame's render target, taken after the
  * end-of-pipe cache flush and before the timestamp, in CPU-cached memory: hash this, not the
- * uncached target. NULL on the host and before the first submission. */
+ * uncached target. NULL on the host and before the first submission.
+ *
+ * The buffer is CPU-cached, so its lines have to be invalidated before the copy the GPU just
+ * wrote is visible - and on a 1920x1080 target that is 129,600 `clflush`, which is not free and
+ * is wasted on a caller that reads one word in sixty-four. `line_stride` says how many cache
+ * lines to skip between invalidations: 1 for every line, 4 for a caller stepping 64 words, and
+ * so on. **A caller that reads a line this did not invalidate gets whatever the CPU had cached**,
+ * which for a still frame is the previous frame's pixels. `glGetFrameReadback()` is the
+ * every-line form and is what a caller that reads the whole frame wants. */
 const GLuint *glGetFrameReadback(void);
+const GLuint *glGetFrameReadbackSampled(GLuint line_stride);
 
 /* OOPS-GL Context Lifecycle (EGL/GLX equivalent) */
 struct oops_display;

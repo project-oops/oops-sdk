@@ -49,13 +49,23 @@ static void test_system_services_and_multiuser(void) {
   (void)oops_user_get_logged_in_users(users, 4, &count);
 
   ASSERT_EQ(oops_system_get_enter_button(NULL), -1);
+  ASSERT_EQ(oops_system_get_enter_button(&button), -1);
   ASSERT_EQ(oops_system_hide_splash(), -1);
   ASSERT_EQ(oops_system_power_tick(), -1);
   ASSERT_EQ(oops_system_navigate_home(), -1);
-  ASSERT_EQ(oops_system_get_enter_button(&button), -1);
   ASSERT_EQ(oops_system_launch_app(NULL), -1);
   ASSERT_EQ(oops_system_launch_app(""), -1);
   ASSERT_EQ(oops_system_launch_app("PPSA90001"), -1);
+
+  char title_id[32];
+  int suspended = 0;
+  ASSERT_EQ(oops_system_get_running_app_title_id(NULL, 32), -1);
+  ASSERT_EQ(oops_system_get_running_app_title_id(title_id, 0), -1);
+  ASSERT_EQ(oops_system_get_running_app_title_id(title_id, sizeof(title_id)), -1);
+  ASSERT_EQ(oops_system_is_app_suspended(NULL), -1);
+  ASSERT_EQ(oops_system_is_app_suspended(&suspended), -1);
+  ASSERT_EQ(oops_system_kill_app(-1), -1);
+  ASSERT_EQ(oops_system_kill_app(123), -1);
 }
 
 static void test_system_pltauth_check(void) {
@@ -109,6 +119,33 @@ static void test_system_klog(void) {
 #ifdef OOPS_HOST_BUILD
   ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001] redundant tag\n");
 #endif
+
+  /* Log level testing */
+  ASSERT_TRUE(oops_log_get_level() == OOPS_LOG_INFO);
+  oops_log_set_level(OOPS_LOG_ERROR);
+  ASSERT_TRUE(oops_log_get_level() == OOPS_LOG_ERROR);
+
+  /* Debug message must be filtered out at ERROR level */
+  oops_log_debug("INP", "filtered debug message");
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001] redundant tag\n");
+#endif
+
+  /* Error message must pass and include prefix */
+  oops_log_error("INP", "fatal fault %d", 42);
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001:INP] ERROR: fatal fault 42\n");
+#endif
+
+  /* Debug level enables debug messages */
+  oops_log_set_level(OOPS_LOG_DEBUG);
+  oops_log_debug("INP", "visible debug message");
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001:INP] DEBUG: visible debug message\n");
+#endif
+
+  /* Restore default INFO level */
+  oops_log_set_level(OOPS_LOG_INFO);
 
   /* Reset for subsequent tests */
   oops_log_init(NULL);

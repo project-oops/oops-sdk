@@ -42,6 +42,26 @@ int oops_display_get_last_error(const oops_display_t *disp);
 const char *oops_display_get_backend_name(const oops_display_t *disp);
 int oops_display_get_video_handle(const oops_display_t *disp);
 
+/*
+ * Move display tiling from the CPU to a compute shader, if the hardware agrees.
+ *
+ * Every flip converts the linear render target into the display-tiled scanout surface. On the
+ * CPU that is a read of the whole frame out of write-combined video memory and a scattered write
+ * back into it - 2,073,600 words each way at 1920x1080, with no caching on either side, and it
+ * is the single largest cost in presenting a frame.
+ *
+ * This runs the compute tiler once, compares its output against the CPU tiler's byte for byte,
+ * and only then lets later flips use it; a mismatch, a queue that will not create or a dispatch
+ * that stops retiring all fall back to the CPU path rather than presenting a wrong buffer.
+ *
+ * **Call it before the first flip.** It writes a test pattern through both scanout buffers, so
+ * afterwards it refuses (returning 0) rather than disturb a buffer that is on screen or queued.
+ *
+ * Returns 1 if the compute tiler is now in use, 0 if the CPU tiler stays, -1 for no display.
+ * Not calling it is what every caller did before this existed, and leaves the CPU tiler in place.
+ */
+int oops_display_try_gpu_tiler(oops_display_t *disp);
+
 /* Drawing and presentation */
 void oops_display_clear(oops_display_t *disp, uint32_t color);
 int oops_display_flip(oops_display_t *disp);

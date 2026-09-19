@@ -50,7 +50,13 @@ OBJS := \
     $(BUILD)/gl/gl_draw.o \
     $(BUILD)/gl/gl_list.o \
     $(BUILD)/gl/gl_attrib.o \
+    $(BUILD)/gl/gl_raster.o \
     $(BUILD)/gl/glsl_lex.o \
+    $(BUILD)/gl/glsl_parse.o \
+    $(BUILD)/gl/glsl_pp.o \
+    $(BUILD)/gl/glsl_sema.o \
+    $(BUILD)/gl/glsl_emit.o \
+    $(BUILD)/gl/glsl_gen.o \
     $(BUILD)/input/input.o \
     $(BUILD)/input/keyboard.o \
     $(BUILD)/input/mouse.o \
@@ -161,7 +167,13 @@ TEST_SRCS := \
     src/gl/gl_draw.c \
     src/gl/gl_list.c \
     src/gl/gl_attrib.c \
-    src/gl/glsl_lex.c
+    src/gl/gl_raster.c \
+    src/gl/glsl_lex.c \
+    src/gl/glsl_parse.c \
+    src/gl/glsl_pp.c \
+    src/gl/glsl_sema.c \
+    src/gl/glsl_emit.c \
+    src/gl/glsl_gen.c
 
 HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -D_GNU_SOURCE -DOOPS_HOST_BUILD $(OOPS_TARGET_FLAGS)
 

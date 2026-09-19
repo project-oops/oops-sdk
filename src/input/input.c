@@ -1,9 +1,12 @@
 #include "oops/input.h"
+#include "oops/system.h"
 #include "pad_layout.h"
 #include <stddef.h>
 
 /* Platform symbols from libScePad and libSceUserService */
 __attribute__((weak)) int scePadInit(void);
+__attribute__((weak)) int scePadSetProcessPrivilege(int privilege);
+__attribute__((weak)) int scePadGetHandle(int userId, int type, int index);
 __attribute__((weak)) int scePadOpen(int userId, int type, int index,
                                      const void *param);
 __attribute__((weak)) int scePadClose(int handle);
@@ -18,6 +21,7 @@ __attribute__((weak)) int scePadResetOrientation(int handle);
  * payload contexts, so whether it resolves is the availability check. Its
  * parameter layout is still unconfirmed. */
 __attribute__((weak)) int scePadSetTriggerEffect(int handle, const void *param);
+__attribute__((weak)) int sceUserServiceGetForegroundUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceGetLoginUserIdList(void *list);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
@@ -34,7 +38,14 @@ static void try_resolve_user_id(void) {
     return;
   }
   if (sceUserServiceInitialize) {
-    sceUserServiceInitialize(NULL);
+    struct {
+      int priority;
+    } params = {256};
+    sceUserServiceInitialize(&params);
+  }
+  if (sceUserServiceGetForegroundUser &&
+      sceUserServiceGetForegroundUser(&s_user_id) == 0 && s_user_id >= 0) {
+    return;
   }
   if (sceUserServiceGetInitialUser &&
       sceUserServiceGetInitialUser(&s_user_id) == 0 && s_user_id >= 0) {
@@ -57,7 +68,7 @@ static void try_resolve_user_id(void) {
     }
   }
   /* Fallback to primary retail user ID if user service list unpopulated */
-  if (s_user_id < 0 && (scePadOpen || scePadInit)) {
+  if (s_user_id < 0 && (scePadOpen || scePadInit || scePadGetHandle)) {
     s_user_id = 0x10000000;
   }
 }
@@ -74,10 +85,7 @@ void oops_input_map_record(oops_pad_state_t *out_state,
   out_state->l2_trigger = raw->analogButtons.l2;
   out_state->r2_trigger = raw->analogButtons.r2;
 
-  /* The driver's flag, alone. The old fallback took a non-zero stick byte as a
-   * sign of life, but a centred stick reads 128, so it reported a pad on every
-   * successful read: obSCEne 100-input/oops-sdk-poll on 12.40 showed
-   * connected=1 with nothing attached. */
+  /* The driver's flag, alone. */
   out_state->connected = raw->connected ? 1 : 0;
 
   /* Touchpad touch points */
@@ -107,22 +115,41 @@ int oops_input_init(void) {
   if (s_initialized)
     return s_init_rc;
 
+  if (scePadSetProcessPrivilege) {
+    int prc = scePadSetProcessPrivilege(1);
+    oops_log_debug("INPUT", "scePadSetProcessPrivilege(1) returned %d", prc);
+  }
+
   if (scePadInit) {
-    scePadInit();
+    int irc = scePadInit();
+    oops_log_debug("INPUT", "scePadInit returned %d", irc);
   }
 
   if (sceUserServiceGetInitialUser) {
     if (sceUserServiceGetInitialUser(&s_user_id) != 0 &&
         sceUserServiceInitialize) {
-      sceUserServiceInitialize(NULL);
+      struct {
+        int priority;
+      } params = {256};
+      sceUserServiceInitialize(&params);
       (void)sceUserServiceGetInitialUser(&s_user_id);
     }
   }
 
   try_resolve_user_id();
+  oops_log_debug("INPUT", "resolved user_id=0x%x (%d)", (unsigned int)s_user_id, (int)s_user_id);
 
-  if (s_user_id >= 0 && scePadOpen) {
-    s_pad_handles[0] = scePadOpen(s_user_id, 0, 0, NULL);
+  if (s_user_id >= 0) {
+    if (scePadGetHandle) {
+      s_pad_handles[0] = scePadGetHandle(s_user_id, 0, 0);
+      oops_log_debug("INPUT", "scePadGetHandle(user=0x%x, port=0) returned handle %d",
+                     (unsigned int)s_user_id, s_pad_handles[0]);
+    }
+    if (s_pad_handles[0] < 0 && scePadOpen) {
+      s_pad_handles[0] = scePadOpen(s_user_id, 0, 0, NULL);
+      oops_log_debug("INPUT", "scePadOpen(user=0x%x, port=0) returned handle %d",
+                     (unsigned int)s_user_id, s_pad_handles[0]);
+    }
   }
 
   /* A failed init stays failed: later calls report this result, not a success
@@ -141,26 +168,36 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
   }
 
   /* Lazy-open port if uninitialized but requested */
-  if (s_pad_handles[port] < 0 && scePadOpen) {
+  if (s_pad_handles[port] < 0 && (scePadOpen || scePadGetHandle)) {
     if (s_pad_retry_cooldown[port] > 0) {
       s_pad_retry_cooldown[port]--;
       return -1;
     }
     try_resolve_user_id();
     if (s_user_id >= 0) {
-      s_pad_handles[port] = scePadOpen(s_user_id, 0, (int)port, NULL);
-      if (s_pad_handles[port] < 0 && s_user_id != 0x10000000) {
-        s_pad_handles[port] = scePadOpen(0x10000000, 0, (int)port, NULL);
+      if (scePadGetHandle) {
+        s_pad_handles[port] = scePadGetHandle(s_user_id, 0, (int)port);
+      }
+      if (s_pad_handles[port] < 0 && scePadOpen) {
+        s_pad_handles[port] = scePadOpen(s_user_id, 0, (int)port, NULL);
+        if (s_pad_handles[port] < 0 && s_user_id != 0x10000000) {
+          s_pad_handles[port] = scePadOpen(0x10000000, 0, (int)port, NULL);
+        }
       }
     }
     if (s_pad_handles[port] < 0) {
       s_pad_retry_cooldown[port] = 120; /* retry at most once every 120 frames (~2 seconds) */
       return -1;
     }
+    oops_log_debug("INPUT", "lazy open port %u succeeded, handle=%d", port, s_pad_handles[port]);
   }
 
   int handle = s_pad_handles[port];
   if (handle < 0 || (!scePadReadState && !scePadRead)) {
+    static int s_unavail_tick = 0;
+    if ((s_unavail_tick++ % 300) == 0) {
+      oops_log_debug("INPUT", "poll: port %u unavailable (handle=%d)", port, handle);
+    }
     return -1;
   }
 
@@ -176,10 +213,36 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
     rc = (scePadRead(handle, &raw, 1) > 0) ? 0 : -1;
   }
   if (rc != 0) {
+    static int s_err_tick = 0;
+    if ((s_err_tick++ % 180) == 0) {
+      oops_log_debug("INPUT", "poll: port %u read failed rc=0x%x (%d)", port, (unsigned int)rc, rc);
+      if (sceUserServiceGetForegroundUser) {
+        int32_t fg_user = -1;
+        if (sceUserServiceGetForegroundUser(&fg_user) == 0 && fg_user >= 0 && fg_user != s_user_id) {
+          s_user_id = fg_user;
+          if (scePadGetHandle) {
+            s_pad_handles[port] = scePadGetHandle(s_user_id, 0, (int)port);
+          }
+        }
+      }
+    }
     return -1;
   }
 
   oops_input_map_record(out_state, &raw);
+
+  /* Verbose telemetry when buttons change, when non-zero, or periodically */
+  static uint32_t s_last_polled_buttons[OOPS_MAX_PADS] = {0};
+  static int s_poll_ticks[OOPS_MAX_PADS] = {0};
+  s_poll_ticks[port]++;
+  if (out_state->buttons != s_last_polled_buttons[port] ||
+      (out_state->buttons != 0 && (s_poll_ticks[port] % 30) == 0) ||
+      (s_poll_ticks[port] % 300) == 0) {
+    oops_log_debug("INPUT", "port %u: conn=%d raw_conn=%d btn=0x%04x sticks=(%d,%d) rc=%d",
+                   port, out_state->connected, (int)raw.connected,
+                   (unsigned int)out_state->buttons, (int)out_state->left_stick_x, (int)out_state->left_stick_y, rc);
+    s_last_polled_buttons[port] = out_state->buttons;
+  }
   return 0;
 }
 

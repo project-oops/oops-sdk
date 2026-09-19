@@ -80,6 +80,17 @@ int oops_display_is_gpu_accelerated(const oops_display_t *disp) {
 #endif
 }
 
+int oops_display_try_gpu_tiler(oops_display_t *disp) {
+  if (!disp)
+    return -1;
+#if OOPS_TARGET_IS_PROSPERO
+  return agc_display_try_gpu_tiler(disp->agc);
+#else
+  /* The GNM backend has no compute tiler; the CPU path is all there is. */
+  return 0;
+#endif
+}
+
 uint32_t *oops_display_get_framebuffer(oops_display_t *disp) {
   if (!disp)
     return (uint32_t *)0;
