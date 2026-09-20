@@ -289,6 +289,58 @@ int gnm_display_flip(gnm_display_t *disp) {
   return 0;
 }
 
+/* The framebuffer here *is* a scanout buffer, and the one on screen is the other:
+ * the last flipped, which `fb_index` has moved past. A caller's image goes
+ * straight into that one - scanned out as it is written, which is what drawing
+ * to a front buffer looks like - and the framebuffer is left alone. Before the
+ * first flip nothing is on screen, so the image is flipped there once, and the
+ * same buffer stays the one on screen. */
+int gnm_display_present(gnm_display_t *disp, const uint32_t *pixels) {
+  if (!disp || !disp->ready || disp->handle < 0 || !pixels)
+    return -1;
+  const unsigned int on_screen = (disp->fb_index + 1u) % 2u;
+  uint32_t *dst = disp->buffers[on_screen];
+  for (size_t i = 0; i < (size_t)disp->width * disp->height; i++)
+    dst[i] = pixels[i];
+  if (disp->flip_seq != 0)
+    return 0;
+  disp->flip_seq++;
+  int rc = sceVideoOutSubmitFlip(disp->handle, (int)on_screen, 1,
+                                 (int64_t)disp->flip_seq);
+  if (rc != 0)
+    disp->last_error = rc;
+  return rc;
+}
+
+int gnm_display_read_shown(gnm_display_t *disp, uint32_t *pixels) {
+  if (!disp || !disp->ready || !pixels)
+    return -1;
+  const uint32_t *src = disp->buffers[(disp->fb_index + 1u) % 2u];
+  for (size_t i = 0; i < (size_t)disp->width * disp->height; i++)
+    pixels[i] = src[i];
+  return 0;
+}
+
+/* The framebuffer is the next scanout buffer already, in rows; the flip waits
+ * for its own completion, so the next buffer is free as soon as it returns. */
+int gnm_display_scanout_layout(const gnm_display_t *disp) {
+  return disp && disp->ready ? 1 : 0;
+}
+
+uint32_t *gnm_display_scanout(gnm_display_t *disp, int which) {
+  if (!disp || !disp->ready)
+    return (uint32_t *)0;
+  return disp->buffers[which ? (disp->fb_index + 1u) % 2u : disp->fb_index];
+}
+
+int gnm_display_wait_scanout(gnm_display_t *disp) {
+  return disp && disp->ready ? 0 : -1;
+}
+
+int gnm_display_flip_scanout(gnm_display_t *disp) {
+  return gnm_display_flip(disp);
+}
+
 int gnm_display_set_flip_rate(gnm_display_t *disp, unsigned int rate) {
   if (!disp || disp->handle < 0)
     return -1;

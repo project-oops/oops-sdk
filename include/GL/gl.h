@@ -96,6 +96,36 @@ typedef long           GLsizeiptr;
 #define GL_BLEND_SRC_RGB                        0x80C9
 #define GL_BLEND_DST_ALPHA                      0x80CA
 #define GL_BLEND_SRC_ALPHA                      0x80CB
+/* Constant-colour factors and the colour they read (GL 1.4; the imaging subset before it). */
+#define GL_CONSTANT_COLOR                       0x8001
+#define GL_ONE_MINUS_CONSTANT_COLOR             0x8002
+#define GL_CONSTANT_ALPHA                       0x8003
+#define GL_ONE_MINUS_CONSTANT_ALPHA             0x8004
+#define GL_BLEND_COLOR                          0x8005
+
+/* Logic operations. GL_LOGIC_OP is the 1.0 name for GL_INDEX_LOGIC_OP - the colour-index
+ * one, which this library has no colour-index mode to apply to - so only GL_COLOR_LOGIC_OP
+ * is a capability here. */
+#define GL_LOGIC_OP                             0x0BF1
+#define GL_INDEX_LOGIC_OP                       0x0BF1
+#define GL_COLOR_LOGIC_OP                       0x0BF2
+#define GL_LOGIC_OP_MODE                        0x0BF0
+#define GL_CLEAR                                0x1500
+#define GL_AND                                  0x1501
+#define GL_AND_REVERSE                          0x1502
+#define GL_COPY                                 0x1503
+#define GL_AND_INVERTED                         0x1504
+#define GL_NOOP                                 0x1505
+#define GL_XOR                                  0x1506
+#define GL_OR                                   0x1507
+#define GL_NOR                                  0x1508
+#define GL_EQUIV                                0x1509
+/* GL_INVERT (0x150A) is shared with the stencil operations and defined there. */
+#define GL_OR_REVERSE                           0x150B
+#define GL_COPY_INVERTED                        0x150C
+#define GL_OR_INVERTED                          0x150D
+#define GL_NAND                                 0x150E
+#define GL_SET                                  0x150F
 
 /* Culling & Front Face */
 #define GL_CW                                   0x0900
@@ -103,17 +133,37 @@ typedef long           GLsizeiptr;
 #define GL_FRONT                                0x0404
 #define GL_BACK                                 0x0405
 #define GL_FRONT_AND_BACK                       0x0408
+/* The rest of GL 1.0's colour buffer names, for glDrawBuffer and glReadBuffer (Mesa
+ * include/GL/gl.h). The visual is double-buffered and mono, with no auxiliary buffers. */
+#define GL_FRONT_LEFT                           0x0400
+#define GL_FRONT_RIGHT                          0x0401
+#define GL_BACK_LEFT                            0x0402
+#define GL_BACK_RIGHT                           0x0403
+#define GL_LEFT                                 0x0406
+#define GL_RIGHT                                0x0407
+#define GL_AUX0                                 0x0409
+#define GL_AUX1                                 0x040A
+#define GL_AUX2                                 0x040B
+#define GL_AUX3                                 0x040C
 
 /* Capabilities */
 #define GL_CULL_FACE                            0x0B44
 #define GL_LIGHTING                             0x0B50
 #define GL_LIGHT_MODEL_LOCAL_VIEWER             0x0B51
 #define GL_LIGHT_MODEL_TWO_SIDE                 0x0B52
+#define GL_COLOR_MATERIAL_FACE                  0x0B55
+#define GL_COLOR_MATERIAL_PARAMETER             0x0B56
 #define GL_LIGHT_MODEL_AMBIENT                  0x0B53
 #define GL_COLOR_MATERIAL                       0x0B57
 #define GL_DEPTH_TEST                           0x0B71
 #define GL_STENCIL_TEST                         0x0B90
 #define GL_NORMALIZE                            0x0BA1
+/* GL 1.2: normals rescaled by the modelview's uniform scale rather than normalised, and the
+ * specular term kept apart from the rest of the lit colour and added after texturing. */
+#define GL_RESCALE_NORMAL                       0x803A
+#define GL_LIGHT_MODEL_COLOR_CONTROL            0x81F8
+#define GL_SINGLE_COLOR                         0x81F9
+#define GL_SEPARATE_SPECULAR_COLOR              0x81FA
 #define GL_VIEWPORT                             0x0BA2
 #define GL_BLEND                                0x0BE2
 #define GL_SCISSOR_TEST                         0x0C11
@@ -161,6 +211,10 @@ typedef long           GLsizeiptr;
 #define GL_UNSIGNED_INT                         0x1405
 #define GL_FLOAT                                0x1406
 #define GL_DOUBLE                               0x140A
+/* glCallLists' byte-string name types (GL 1.0) - big-endian 2, 3 and 4 bytes a name. */
+#define GL_2_BYTES                              0x1407
+#define GL_3_BYTES                              0x1408
+#define GL_4_BYTES                              0x1409
 
 /* Shading Model */
 #define GL_FLAT                                 0x1D00
@@ -202,10 +256,111 @@ typedef long           GLsizeiptr;
 #define GL_CLAMP                                0x2900
 #define GL_REPEAT                               0x2901
 #define GL_CLAMP_TO_EDGE                        0x812F
+#define GL_CLAMP_TO_BORDER                      0x812D /* GL 1.3 */
+#define GL_MIRRORED_REPEAT                      0x8370 /* GL 1.4 */
+#define GL_TEXTURE_BORDER_COLOR                 0x1004
+#define GL_TEXTURE_PRIORITY                     0x8066
+#define GL_TEXTURE_RESIDENT                     0x8067
+/* GL 1.2's level-of-detail parameters */
+#define GL_TEXTURE_MIN_LOD                      0x813A
+#define GL_TEXTURE_MAX_LOD                      0x813B
+#define GL_TEXTURE_BASE_LEVEL                   0x813C
+#define GL_TEXTURE_MAX_LEVEL                    0x813D
+/* GL 1.4's level-of-detail bias: per texture (glTexParameter) and per unit (glTexEnv with the
+ * GL_TEXTURE_FILTER_CONTROL target), summed and clamped to GL_MAX_TEXTURE_LOD_BIAS - 14 here, as
+ * Mesa's MAX_TEXTURE_LOD_BIAS. */
+#define GL_TEXTURE_LOD_BIAS                     0x8501
+#define GL_TEXTURE_FILTER_CONTROL               0x8500
+#define GL_MAX_TEXTURE_LOD_BIAS                 0x84FD
+#define OOPS_GL_MAX_TEXTURE_LOD_BIAS            14.0f
+/* GL 1.4's automatic mipmaps: with GL_GENERATE_MIPMAP on, a change to the base level rebuilds the
+ * levels above it by averaging; GL_GENERATE_MIPMAP_HINT is recorded. */
+#define GL_GENERATE_MIPMAP                      0x8191
+#define GL_GENERATE_MIPMAP_HINT                 0x8192
+/* GL 1.4's depth textures (1D and 2D, uploaded as GL_DEPTH_COMPONENT) and the shadow comparison:
+ * under GL_COMPARE_R_TO_TEXTURE each texel is 1 where r GL_TEXTURE_COMPARE_FUNC the texel holds,
+ * 0 otherwise, filtered after comparing; GL_DEPTH_TEXTURE_MODE says whether the result reads as
+ * luminance, intensity or alpha. Stored as 32-bit floats. **Both paths sample them** since
+ * 2026-09-20: on a console the image format is 32_FLOAT, the sampler's own DEPTH_COMPARE_FUNC
+ * does the comparison, and the pixel shader hands it the clamped reference.
+ *
+ * The `_ARB` spellings below are GL_ARB_depth_texture's and GL_ARB_shadow's; both extensions add
+ * enums only, and both are in the extension string. */
+#define GL_DEPTH_COMPONENT16                    0x81A5
+#define GL_DEPTH_COMPONENT24                    0x81A6
+#define GL_DEPTH_COMPONENT32                    0x81A7
+#define GL_TEXTURE_DEPTH_SIZE                   0x884A
+#define GL_DEPTH_TEXTURE_MODE                   0x884B
+#define GL_TEXTURE_COMPARE_MODE                 0x884C
+#define GL_TEXTURE_COMPARE_FUNC                 0x884D
+#define GL_COMPARE_R_TO_TEXTURE                 0x884E
+/* **Spelled as their values, not as the core names.** A hosted title includes this header and
+ * Mesa's `GL/glext.h`, which defines the same extension enums; a macro redefined with a
+ * *different* token sequence is a diagnostic under `-Werror` even when the value is the same,
+ * while an identical one is legal and silent. So every alias below is the literal, which is what
+ * the `GL_TEXTUREn_ARB` block further down has always done. Defining them in terms of the core
+ * names broke both oops-mesa probes on 2026-09-20. */
+#define GL_DEPTH_COMPONENT16_ARB                0x81A5
+#define GL_DEPTH_COMPONENT24_ARB                0x81A6
+#define GL_DEPTH_COMPONENT32_ARB                0x81A7
+#define GL_TEXTURE_DEPTH_SIZE_ARB               0x884A
+#define GL_DEPTH_TEXTURE_MODE_ARB               0x884B
+#define GL_TEXTURE_COMPARE_MODE_ARB             0x884C
+#define GL_TEXTURE_COMPARE_FUNC_ARB             0x884D
+#define GL_COMPARE_R_TO_TEXTURE_ARB             0x884E
+#define GL_NONE                                 0
 #define GL_RGB                                  0x1907
 #define GL_RGBA                                 0x1908
+
+/* Internal formats (GL 1.1). Each names a base format - the components a texture keeps and how
+ * the texture environment combines them - and a resolution the implementation may round: every
+ * one here is stored at eight bits a component, and the size queries say so. */
+#define GL_ALPHA4                               0x803B
+#define GL_ALPHA8                               0x803C
+#define GL_ALPHA12                              0x803D
+#define GL_ALPHA16                              0x803E
+#define GL_LUMINANCE4                           0x803F
+#define GL_LUMINANCE8                           0x8040
+#define GL_LUMINANCE12                          0x8041
+#define GL_LUMINANCE16                          0x8042
+#define GL_LUMINANCE4_ALPHA4                    0x8043
+#define GL_LUMINANCE6_ALPHA2                    0x8044
+#define GL_LUMINANCE8_ALPHA8                    0x8045
+#define GL_LUMINANCE12_ALPHA4                   0x8046
+#define GL_LUMINANCE12_ALPHA12                  0x8047
+#define GL_LUMINANCE16_ALPHA16                  0x8048
+#define GL_INTENSITY                            0x8049
+#define GL_INTENSITY4                           0x804A
+#define GL_INTENSITY8                           0x804B
+#define GL_INTENSITY12                          0x804C
+#define GL_INTENSITY16                          0x804D
+#define GL_R3_G3_B2                             0x2A10
+#define GL_RGB4                                 0x804F
+#define GL_RGB5                                 0x8050
 #define GL_RGB8                                 0x8051
+#define GL_RGB10                                0x8052
+#define GL_RGB12                                0x8053
+#define GL_RGB16                                0x8054
+#define GL_RGBA2                                0x8055
+#define GL_RGBA4                                0x8056
+#define GL_RGB5_A1                              0x8057
 #define GL_RGBA8                                0x8058
+#define GL_RGB10_A2                             0x8059
+#define GL_RGBA12                               0x805A
+#define GL_RGBA16                               0x805B
+#define GL_TEXTURE_RED_SIZE                     0x805C
+#define GL_TEXTURE_GREEN_SIZE                   0x805D
+#define GL_TEXTURE_BLUE_SIZE                    0x805E
+#define GL_TEXTURE_ALPHA_SIZE                   0x805F
+#define GL_TEXTURE_LUMINANCE_SIZE               0x8060
+#define GL_TEXTURE_INTENSITY_SIZE               0x8061
+
+/* Proxy targets (GL 1.1, 1.2): glTexImage against one allocates nothing and reports through
+ * glGetTexLevelParameter whether the image would have fitted - a zero width if not, and no
+ * error. */
+#define GL_PROXY_TEXTURE_1D                     0x8063
+#define GL_PROXY_TEXTURE_2D                     0x8064
+#define GL_PROXY_TEXTURE_3D                     0x8070
 
 /* Texture Environment */
 #define GL_TEXTURE_ENV                          0x2300
@@ -215,6 +370,44 @@ typedef long           GLsizeiptr;
 #define GL_DECAL                                0x2101
 #define GL_ADD                                  0x0104
 #define GL_REPLACE                              0x1E01
+
+/* The combiner (GL 1.3): GL_TEXTURE_ENV_MODE GL_COMBINE, whose colour and alpha are each a
+ * function of up to three arguments - each a source's colour or alpha, or one minus it - scaled
+ * by 1, 2 or 4. GL_DOT3_RGB and GL_DOT3_RGBA are the colour functions for bump mapping.
+ * **Combined on both paths**: the console's pixel shader has a sixty-four-word slot the driver
+ * writes the combiner into as instructions, one per channel for the simple forms and a generated
+ * program for the rest (`tools/shader/combine.s`). */
+#define GL_COMBINE                              0x8570
+#define GL_COMBINE_RGB                          0x8571
+#define GL_COMBINE_ALPHA                        0x8572
+#define GL_RGB_SCALE                            0x8573
+#define GL_ADD_SIGNED                           0x8574
+#define GL_INTERPOLATE                          0x8575
+#define GL_CONSTANT                             0x8576
+#define GL_PRIMARY_COLOR                        0x8577
+#define GL_PREVIOUS                             0x8578
+#define GL_SUBTRACT                             0x84E7
+#define GL_SOURCE0_RGB                          0x8580
+#define GL_SOURCE1_RGB                          0x8581
+#define GL_SOURCE2_RGB                          0x8582
+#define GL_SOURCE0_ALPHA                        0x8588
+#define GL_SOURCE1_ALPHA                        0x8589
+#define GL_SOURCE2_ALPHA                        0x858A
+#define GL_OPERAND0_RGB                         0x8590
+#define GL_OPERAND1_RGB                         0x8591
+#define GL_OPERAND2_RGB                         0x8592
+#define GL_OPERAND0_ALPHA                       0x8598
+#define GL_OPERAND1_ALPHA                       0x8599
+#define GL_OPERAND2_ALPHA                       0x859A
+/* GL 1.5's names for the same six (Mesa include/GL/glext.h, GL_VERSION_1_5). */
+#define GL_SRC0_RGB                             0x8580
+#define GL_SRC1_RGB                             0x8581
+#define GL_SRC2_RGB                             0x8582
+#define GL_SRC0_ALPHA                           0x8588
+#define GL_SRC1_ALPHA                           0x8589
+#define GL_SRC2_ALPHA                           0x858A
+#define GL_DOT3_RGB                             0x86AE
+#define GL_DOT3_RGBA                            0x86AF
 
 /* Blend Equations */
 #define GL_BLEND_EQUATION                       0x8009
@@ -240,6 +433,8 @@ GLboolean glIsEnabled(GLenum cap);
 void glBlendFunc(GLenum sfactor, GLenum dfactor);
 void glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha);
 void glBlendEquation(GLenum mode);
+void glBlendColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
+void glLogicOp(GLenum opcode);
 void glDepthFunc(GLenum func);
 void glDepthMask(GLboolean flag);
 void glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
@@ -269,11 +464,40 @@ void glGetPointerv(GLenum pname, GLvoid **params);
 #define GL_TEXTURE_WIDTH                        0x1000
 #define GL_TEXTURE_HEIGHT                       0x1001
 #define GL_TEXTURE_INTERNAL_FORMAT              0x1003
+#define GL_TEXTURE_COMPONENTS                   0x1003 /* GL 1.0's name for it */
 #define GL_TEXTURE_BORDER                       0x1005
 #define GL_VERTEX_ARRAY_POINTER                 0x808E
 #define GL_NORMAL_ARRAY_POINTER                 0x808F
 #define GL_COLOR_ARRAY_POINTER                  0x8090
 #define GL_TEXTURE_COORD_ARRAY_POINTER          0x8092
+/* The rest of each array's description, for glGetIntegerv. */
+#define GL_VERTEX_ARRAY_SIZE                    0x807A
+#define GL_VERTEX_ARRAY_TYPE                    0x807B
+#define GL_VERTEX_ARRAY_STRIDE                  0x807C
+#define GL_NORMAL_ARRAY_TYPE                    0x807E
+#define GL_NORMAL_ARRAY_STRIDE                  0x807F
+#define GL_COLOR_ARRAY_SIZE                     0x8081
+#define GL_COLOR_ARRAY_TYPE                     0x8082
+#define GL_COLOR_ARRAY_STRIDE                   0x8083
+#define GL_TEXTURE_COORD_ARRAY_SIZE             0x8088
+#define GL_TEXTURE_COORD_ARRAY_TYPE             0x8089
+#define GL_TEXTURE_COORD_ARRAY_STRIDE           0x808A
+#define GL_VERTEX_ARRAY_BUFFER_BINDING          0x8896
+#define GL_NORMAL_ARRAY_BUFFER_BINDING          0x8897
+#define GL_COLOR_ARRAY_BUFFER_BINDING           0x8898
+#define GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING   0x889A
+#define GL_EDGE_FLAG_ARRAY_BUFFER_BINDING       0x889B
+
+/* GL 1.4's secondary colour: a second per-vertex colour, added to the primary after texturing
+ * when GL_COLOR_SUM is enabled (or lighting keeps the specular term apart), and its array. */
+#define GL_COLOR_SUM                            0x8458
+#define GL_CURRENT_SECONDARY_COLOR              0x8459
+#define GL_SECONDARY_COLOR_ARRAY_SIZE           0x845A
+#define GL_SECONDARY_COLOR_ARRAY_TYPE           0x845B
+#define GL_SECONDARY_COLOR_ARRAY_STRIDE         0x845C
+#define GL_SECONDARY_COLOR_ARRAY_POINTER        0x845D
+#define GL_SECONDARY_COLOR_ARRAY                0x845E
+#define GL_SECONDARY_COLOR_ARRAY_BUFFER_BINDING 0x889C
 
 /* `glInterleavedArrays` sets the four client arrays from one buffer holding them interleaved,
  * which is how a lot of 1.x code feeds geometry. It is the pointer calls it would otherwise
@@ -315,15 +539,73 @@ void glInterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer);
 #define GL_BUFFER_SIZE                          0x8764
 #define GL_BUFFER_USAGE                         0x8765
 #define GL_STREAM_DRAW                          0x88E0
+#define GL_STREAM_READ                          0x88E1
+#define GL_STREAM_COPY                          0x88E2
 #define GL_STATIC_DRAW                          0x88E4
+#define GL_STATIC_READ                          0x88E5
+#define GL_STATIC_COPY                          0x88E6
 #define GL_DYNAMIC_DRAW                         0x88E8
+#define GL_DYNAMIC_READ                         0x88E9
+#define GL_DYNAMIC_COPY                         0x88EA
+/* Mapping: a buffer's store handed to the program to read or write in place until it unmaps.
+ * The store is process memory here, so the pointer is the store itself. While mapped the buffer
+ * may not be updated, read back or drawn from - GL_INVALID_OPERATION. */
+#define GL_READ_ONLY                            0x88B8
+#define GL_WRITE_ONLY                           0x88B9
+#define GL_READ_WRITE                           0x88BA
+#define GL_BUFFER_ACCESS                        0x88BB
+#define GL_BUFFER_MAPPED                        0x88BC
+#define GL_BUFFER_MAP_POINTER                   0x88BD
 void glGenBuffers(GLsizei n, GLuint *buffers);
 void glDeleteBuffers(GLsizei n, const GLuint *buffers);
 void glBindBuffer(GLenum target, GLuint buffer);
 void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage);
 void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data);
+void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, GLvoid *data);
+GLvoid *glMapBuffer(GLenum target, GLenum access);
+GLboolean glUnmapBuffer(GLenum target);
 GLboolean glIsBuffer(GLuint buffer);
 void glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params);
+void glGetBufferPointerv(GLenum target, GLenum pname, GLvoid **params);
+
+/* GL 1.5's occlusion queries: the samples that pass the depth test between glBeginQuery and
+ * glEndQuery of GL_SAMPLES_PASSED. Counted exactly by the software rasteriser, and **by the GPU
+ * on the console** since 2026-09-20 - two ZPASS_DONE events bracket the query and the answer is
+ * the sum over the render backends. GL_QUERY_COUNTER_BITS is 32 on both paths; it was 0 on the
+ * console, GL 1.5's way of saying the count carries no information. A query whose draws never
+ * test depth is the one case the console still does not count, and it says so in the log: the
+ * counters need a bound depth surface. Results are always available - the count is known when
+ * glEndQuery returns, because that is where the frame is submitted.
+ *
+ * The `_ARB` spellings are GL_ARB_occlusion_query's, which is in the extension string. Its
+ * GL_SAMPLES_PASSED_ARB is the same token as the core one. */
+#define GL_SAMPLES_PASSED                       0x8914
+#define GL_QUERY_COUNTER_BITS                   0x8864
+#define GL_CURRENT_QUERY                        0x8865
+#define GL_QUERY_RESULT                         0x8866
+#define GL_QUERY_RESULT_AVAILABLE               0x8867
+/* The literals, not the core names - see GL_DEPTH_COMPONENT16_ARB for why. */
+#define GL_SAMPLES_PASSED_ARB                   0x8914
+#define GL_QUERY_COUNTER_BITS_ARB               0x8864
+#define GL_CURRENT_QUERY_ARB                    0x8865
+#define GL_QUERY_RESULT_ARB                     0x8866
+#define GL_QUERY_RESULT_AVAILABLE_ARB           0x8867
+void glGenQueries(GLsizei n, GLuint *ids);
+void glDeleteQueries(GLsizei n, const GLuint *ids);
+GLboolean glIsQuery(GLuint id);
+void glBeginQuery(GLenum target, GLuint id);
+void glEndQuery(GLenum target);
+void glGetQueryiv(GLenum target, GLenum pname, GLint *params);
+void glGetQueryObjectiv(GLuint id, GLenum pname, GLint *params);
+void glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params);
+void glGenQueriesARB(GLsizei n, GLuint *ids);
+void glDeleteQueriesARB(GLsizei n, const GLuint *ids);
+GLboolean glIsQueryARB(GLuint id);
+void glBeginQueryARB(GLenum target, GLuint id);
+void glEndQueryARB(GLenum target);
+void glGetQueryivARB(GLenum target, GLenum pname, GLint *params);
+void glGetQueryObjectivARB(GLuint id, GLenum pname, GLint *params);
+void glGetQueryObjectuivARB(GLuint id, GLenum pname, GLuint *params);
 
 /* The bound texture, read back. Unlike glReadPixels this does **not** flip: a texture has no
  * window origin, so row 0 of the result is row 0 of what was uploaded. */
@@ -356,6 +638,19 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoi
 #define GL_CLIENT_ATTRIB_STACK_DEPTH            0x0BB1
 #define GL_MODELVIEW_STACK_DEPTH                0x0BA3
 #define GL_PROJECTION_STACK_DEPTH               0x0BA4
+#define GL_TEXTURE_STACK_DEPTH                  0x0BA5
+/* State queries the specification's tables list that were not declared until 2026-09-19 - found
+ * by querying every table name (values from Mesa include/GL/gl.h:250-491, :1443-1444). */
+#define GL_LIST_MODE                            0x0B30
+#define GL_MAX_LIST_NESTING                     0x0B31
+#define GL_LIST_INDEX                           0x0B33
+#define GL_CURRENT_RASTER_INDEX                 0x0B05
+#define GL_AUX_BUFFERS                          0x0C00
+#define GL_DOUBLEBUFFER                         0x0C32
+#define GL_STEREO                               0x0C33
+#define GL_SUBPIXEL_BITS                        0x0D50
+#define GL_MAX_ELEMENTS_VERTICES                0x80E8
+#define GL_MAX_ELEMENTS_INDICES                 0x80E9
 #define GL_TEXTURE_MATRIX                       0x0BA8
 #define GL_COLOR_CLEAR_VALUE                    0x0C22
 #define GL_COLOR_WRITEMASK                      0x0C23
@@ -408,6 +703,25 @@ void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *point
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer);
 
+/* GL 1.4: the current secondary colour, every type normalised as glColor's are, and its array. */
+void glSecondaryColor3f(GLfloat red, GLfloat green, GLfloat blue);
+void glSecondaryColor3d(GLdouble red, GLdouble green, GLdouble blue);
+void glSecondaryColor3b(GLbyte red, GLbyte green, GLbyte blue);
+void glSecondaryColor3s(GLshort red, GLshort green, GLshort blue);
+void glSecondaryColor3i(GLint red, GLint green, GLint blue);
+void glSecondaryColor3ub(GLubyte red, GLubyte green, GLubyte blue);
+void glSecondaryColor3us(GLushort red, GLushort green, GLushort blue);
+void glSecondaryColor3ui(GLuint red, GLuint green, GLuint blue);
+void glSecondaryColor3fv(const GLfloat *v);
+void glSecondaryColor3dv(const GLdouble *v);
+void glSecondaryColor3bv(const GLbyte *v);
+void glSecondaryColor3sv(const GLshort *v);
+void glSecondaryColor3iv(const GLint *v);
+void glSecondaryColor3ubv(const GLubyte *v);
+void glSecondaryColor3usv(const GLushort *v);
+void glSecondaryColor3uiv(const GLuint *v);
+void glSecondaryColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
+
 /* Draw Operations */
 void glDrawArrays(GLenum mode, GLint first, GLsizei count);
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices);
@@ -419,12 +733,17 @@ void glArrayElement(GLint i);
  * may use or ignore; this one ignores it, which the specification allows. */
 void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count,
                          GLenum type, const GLvoid *indices);
+/* GL 1.4: several glDrawArrays or glDrawElements of one mode in a call - every count checked
+ * before any is drawn, and an empty one skipped. */
+void glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount);
+void glMultiDrawElements(GLenum mode, const GLsizei *count, GLenum type,
+                         const GLvoid *const *indices, GLsizei drawcount);
 
 /* Immediate Mode Emulation */
-/* The attribute stack. A mask naming state this subset does not have - accumulation buffer,
- * stencil, fog, evaluators, stipple, hints, pixel mode, points, lines - is refused, because a
- * push that silently saved nothing is the leak this exists to prevent. GL_ALL_ATTRIB_BITS is
- * narrowed to what exists rather than refused. */
+/* The attribute stack. Every GL 1.x attribute group exists; a bit outside them is refused.
+ * GL_ALL_ATTRIB_BITS is narrowed to those groups. GL_POINT_BIT, GL_LINE_BIT, GL_HINT_BIT,
+ * GL_MULTISAMPLE_BIT, GL_EVAL_BIT, GL_PIXEL_MODE_BIT, GL_POLYGON_STIPPLE_BIT and
+ * GL_ACCUM_BUFFER_BIT are declared with the state they save. */
 #define GL_CURRENT_BIT                          0x00000001
 #define GL_POLYGON_BIT                          0x00000008
 #define GL_LIGHTING_BIT                         0x00000040
@@ -436,7 +755,9 @@ void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count,
 #define GL_LIST_BIT                             0x00020000
 #define GL_TEXTURE_BIT                          0x00040000
 #define GL_SCISSOR_BIT                          0x00080000
-#define GL_ALL_ATTRIB_BITS                      0x000FFFFF
+/* The Khronos value (Mesa include/GL/gl.h:683). This header had GL 1.0's 0x000FFFFF, which
+ * leaves out GL_MULTISAMPLE_BIT; glPushAttrib accepts either as "all". */
+#define GL_ALL_ATTRIB_BITS                      0xFFFFFFFF
 void glPushAttrib(GLbitfield mask);
 void glPopAttrib(void);
 
@@ -447,6 +768,7 @@ void glPopAttrib(void);
 #define GL_CLIENT_PIXEL_STORE_BIT               0x00000001
 #define GL_CLIENT_VERTEX_ARRAY_BIT              0x00000002
 #define GL_CLIENT_ALL_ATTRIB_BITS               0xFFFFFFFF
+#define GL_ALL_CLIENT_ATTRIB_BITS               0xFFFFFFFF /* the spelling Mesa's gl.h also has */
 void glPushClientAttrib(GLbitfield mask);
 void glPopClientAttrib(void);
 
@@ -467,25 +789,364 @@ void glRectsv(const GLshort *v1, const GLshort *v2);
 #define GL_ALPHA_TEST                           0x0BC0
 void glAlphaFunc(GLenum func, GLclampf ref);
 
-/* Nudges a filled polygon's depth, so coplanar geometry can be drawn over it. Enabled with
- * GL_POLYGON_OFFSET_FILL; the line and point variants need glPolygonMode. */
+/* Nudges a polygon's depth, so coplanar geometry can be drawn over it. Each enable covers the
+ * polygons glPolygonMode draws that way: GL_POLYGON_OFFSET_FILL the filled ones,
+ * GL_POLYGON_OFFSET_LINE the outlines, GL_POLYGON_OFFSET_POINT the corner points. None of them
+ * touches a GL_LINES or GL_POINTS primitive. */
 #define GL_POLYGON_OFFSET_FILL                  0x8037
+#define GL_POLYGON_OFFSET_POINT                 0x2A01
+#define GL_POLYGON_OFFSET_LINE                  0x2A02
 void glPolygonOffset(GLfloat factor, GLfloat units);
+
+/* How a polygon is drawn, per face: filled, as its boundary edges, or as its boundary vertices.
+ * An outline is the polygon's own edges - never the diagonals a quad or polygon is triangulated
+ * with - and edge flags mark which of those count. */
+#define GL_POINT                                0x1B00
+#define GL_LINE                                 0x1B01
+#define GL_FILL                                 0x1B02
+#define GL_POLYGON_MODE                         0x0B40
+#define GL_EDGE_FLAG                            0x0B43
+#define GL_EDGE_FLAG_ARRAY                      0x8079
+#define GL_EDGE_FLAG_ARRAY_STRIDE               0x808C
+#define GL_EDGE_FLAG_ARRAY_POINTER              0x8093
+void glPolygonMode(GLenum face, GLenum mode);
+void glEdgeFlag(GLboolean flag);
+void glEdgeFlagv(const GLboolean *flag);
+void glEdgeFlagPointer(GLsizei stride, const GLvoid *pointer);
+
+/* Colour-index state. This is an RGBA context - GL_INDEX_MODE answers GL_FALSE and GL_RGBA_MODE
+ * GL_TRUE - and in an RGBA context the specification keeps the current index, the index write
+ * mask, the clear index and the index array exactly as state and uses none of them to draw. So
+ * storing and reporting them is the complete implementation, not a stand-in for one. The index
+ * is a plain number, not a normalised colour: every spelling converts by cast. */
+#define GL_CURRENT_INDEX                        0x0B01
+#define GL_INDEX_CLEAR_VALUE                    0x0C20
+#define GL_INDEX_WRITEMASK                      0x0C21
+#define GL_INDEX_MODE                           0x0C30
+#define GL_RGBA_MODE                            0x0C31
+#define GL_INDEX_BITS                           0x0D51
+#define GL_INDEX_ARRAY                          0x8077
+#define GL_INDEX_ARRAY_TYPE                     0x8085
+#define GL_INDEX_ARRAY_STRIDE                   0x8086
+#define GL_INDEX_ARRAY_POINTER                  0x8091
+#define GL_INDEX_ARRAY_BUFFER_BINDING           0x8899
+void glIndexf(GLfloat c);
+void glIndexd(GLdouble c);
+void glIndexi(GLint c);
+void glIndexs(GLshort c);
+void glIndexub(GLubyte c);
+void glIndexfv(const GLfloat *c);
+void glIndexdv(const GLdouble *c);
+void glIndexiv(const GLint *c);
+void glIndexsv(const GLshort *c);
+void glIndexubv(const GLubyte *c);
+void glClearIndex(GLfloat c);
+void glIndexMask(GLuint mask);
+void glIndexPointer(GLenum type, GLsizei stride, const GLvoid *pointer);
+
+/* Multisampling (GL 1.3). There is no multisample buffer - GL_SAMPLE_BUFFERS and GL_SAMPLES are
+ * 0 - and with none, the specification says these enables and the coverage value have no effect
+ * on rendering. They are still state: GL_MULTISAMPLE starts enabled, and all of it is queried and
+ * saved with GL_MULTISAMPLE_BIT. */
+#define GL_MULTISAMPLE                          0x809D
+#define GL_SAMPLE_ALPHA_TO_COVERAGE             0x809E
+#define GL_SAMPLE_ALPHA_TO_ONE                  0x809F
+#define GL_SAMPLE_COVERAGE                      0x80A0
+#define GL_SAMPLE_BUFFERS                       0x80A8
+#define GL_SAMPLES                              0x80A9
+#define GL_SAMPLE_COVERAGE_VALUE                0x80AA
+#define GL_SAMPLE_COVERAGE_INVERT               0x80AB
+#define GL_MULTISAMPLE_BIT                      0x20000000
+void glSampleCoverage(GLclampf value, GLboolean invert);
+
+/* Dithering. On by default, and **a flag with no effect here** - which is what Mesa's hardware
+ * drivers make of it too: the colour block rounds, and the specification leaves the dithering
+ * algorithm to the implementation. Accepted and reported so the glDisable(GL_DITHER) most 1.x
+ * programs start with is not an error. */
+#define GL_DITHER                               0x0BD0
+
+/* The attribute groups for state that exists and had no bit to save it with. */
+#define GL_POINT_BIT                            0x00000002
+#define GL_LINE_BIT                             0x00000004
+#define GL_HINT_BIT                             0x00008000
+
+/* Evaluators: Bezier curves and surfaces, evaluated on the CPU into ordinary glVertex, glNormal,
+ * glColor and glTexCoord calls. A map is a target's control points over a domain; glEvalCoord
+ * evaluates every enabled map of its dimension at one point and issues the vertex, and
+ * glMapGrid with glEvalMesh walks a grid of such points as points, lines or quad strips.
+ * Evaluating never changes the current colour, normal or texture coordinate. A colour-index map
+ * is kept and reported and, this being an RGBA context, evaluates to nothing. */
+#define GL_AUTO_NORMAL                          0x0D80
+#define GL_MAP1_COLOR_4                         0x0D90
+#define GL_MAP1_INDEX                           0x0D91
+#define GL_MAP1_NORMAL                          0x0D92
+#define GL_MAP1_TEXTURE_COORD_1                 0x0D93
+#define GL_MAP1_TEXTURE_COORD_2                 0x0D94
+#define GL_MAP1_TEXTURE_COORD_3                 0x0D95
+#define GL_MAP1_TEXTURE_COORD_4                 0x0D96
+#define GL_MAP1_VERTEX_3                        0x0D97
+#define GL_MAP1_VERTEX_4                        0x0D98
+#define GL_MAP2_COLOR_4                         0x0DB0
+#define GL_MAP2_INDEX                           0x0DB1
+#define GL_MAP2_NORMAL                          0x0DB2
+#define GL_MAP2_TEXTURE_COORD_1                 0x0DB3
+#define GL_MAP2_TEXTURE_COORD_2                 0x0DB4
+#define GL_MAP2_TEXTURE_COORD_3                 0x0DB5
+#define GL_MAP2_TEXTURE_COORD_4                 0x0DB6
+#define GL_MAP2_VERTEX_3                        0x0DB7
+#define GL_MAP2_VERTEX_4                        0x0DB8
+#define GL_MAP1_GRID_DOMAIN                     0x0DD0
+#define GL_MAP1_GRID_SEGMENTS                   0x0DD1
+#define GL_MAP2_GRID_DOMAIN                     0x0DD2
+#define GL_MAP2_GRID_SEGMENTS                   0x0DD3
+#define GL_COEFF                                0x0A00
+#define GL_ORDER                                0x0A01
+#define GL_DOMAIN                               0x0A02
+#define GL_MAX_EVAL_ORDER                       0x0D30
+#define GL_EVAL_BIT                             0x00010000
+void glMap1f(GLenum target, GLfloat u1, GLfloat u2, GLint stride, GLint order,
+             const GLfloat *points);
+void glMap1d(GLenum target, GLdouble u1, GLdouble u2, GLint stride, GLint order,
+             const GLdouble *points);
+void glMap2f(GLenum target, GLfloat u1, GLfloat u2, GLint ustride, GLint uorder,
+             GLfloat v1, GLfloat v2, GLint vstride, GLint vorder, const GLfloat *points);
+void glMap2d(GLenum target, GLdouble u1, GLdouble u2, GLint ustride, GLint uorder,
+             GLdouble v1, GLdouble v2, GLint vstride, GLint vorder, const GLdouble *points);
+void glGetMapfv(GLenum target, GLenum query, GLfloat *v);
+void glGetMapdv(GLenum target, GLenum query, GLdouble *v);
+void glGetMapiv(GLenum target, GLenum query, GLint *v);
+void glEvalCoord1f(GLfloat u);
+void glEvalCoord1d(GLdouble u);
+void glEvalCoord1fv(const GLfloat *u);
+void glEvalCoord1dv(const GLdouble *u);
+void glEvalCoord2f(GLfloat u, GLfloat v);
+void glEvalCoord2d(GLdouble u, GLdouble v);
+void glEvalCoord2fv(const GLfloat *u);
+void glEvalCoord2dv(const GLdouble *u);
+void glMapGrid1f(GLint un, GLfloat u1, GLfloat u2);
+void glMapGrid1d(GLint un, GLdouble u1, GLdouble u2);
+void glMapGrid2f(GLint un, GLfloat u1, GLfloat u2, GLint vn, GLfloat v1, GLfloat v2);
+void glMapGrid2d(GLint un, GLdouble u1, GLdouble u2, GLint vn, GLdouble v1, GLdouble v2);
+void glEvalPoint1(GLint i);
+void glEvalPoint2(GLint i, GLint j);
+void glEvalMesh1(GLenum mode, GLint i1, GLint i2);
+void glEvalMesh2(GLenum mode, GLint i1, GLint i2, GLint j1, GLint j2);
+
+/* Selection and feedback: the other two render modes, in which primitives are transformed,
+ * lit and clipped and then reported instead of drawn. GL_SELECT records a hit - the name stack
+ * and the depth range - for every primitive that survives clipping and culling, which is how a
+ * GL 1.x program picks with the mouse (a pick matrix around the cursor, then the scene drawn
+ * again). GL_FEEDBACK writes each clipped primitive's window coordinates, colours and texture
+ * coordinates into the caller's buffer. Nothing reaches the framebuffer in either, glClear
+ * included. glRenderMode answers how much was written, or -1 if the buffer overflowed. */
+#define GL_RENDER                               0x1C00
+#define GL_FEEDBACK                             0x1C01
+#define GL_SELECT                               0x1C02
+#define GL_RENDER_MODE                          0x0C40
+#define GL_2D                                   0x0600
+#define GL_3D                                   0x0601
+#define GL_3D_COLOR                             0x0602
+#define GL_3D_COLOR_TEXTURE                     0x0603
+#define GL_4D_COLOR_TEXTURE                     0x0604
+#define GL_PASS_THROUGH_TOKEN                   0x0700
+#define GL_POINT_TOKEN                          0x0701
+#define GL_LINE_TOKEN                           0x0702
+#define GL_POLYGON_TOKEN                        0x0703
+#define GL_BITMAP_TOKEN                         0x0704
+#define GL_DRAW_PIXEL_TOKEN                     0x0705
+#define GL_COPY_PIXEL_TOKEN                     0x0706
+#define GL_LINE_RESET_TOKEN                     0x0707
+#define GL_FEEDBACK_BUFFER_POINTER              0x0DF0
+#define GL_FEEDBACK_BUFFER_SIZE                 0x0DF1
+#define GL_FEEDBACK_BUFFER_TYPE                 0x0DF2
+#define GL_SELECTION_BUFFER_POINTER             0x0DF3
+#define GL_SELECTION_BUFFER_SIZE                0x0DF4
+#define GL_MAX_NAME_STACK_DEPTH                 0x0D37
+#define GL_NAME_STACK_DEPTH                     0x0D70
+/* Pixel transfer: what happens to every pixel rectangle's colours on the way in - glDrawPixels,
+ * glCopyPixels, the texture uploads and copies - and on the way out of glReadPixels. Each
+ * component is scaled and biased, then with GL_MAP_COLOR looked up in its GL_PIXEL_MAP_x_TO_x
+ * table, then clamped. The colour-index and stencil maps, the index shift and offset and the
+ * depth scale and bias are kept and reported, and act on no pixels here: the index, stencil and
+ * depth pixel formats they apply to are refused. glGetTexImage is not transferred, as in Mesa. */
+#define GL_MAP_COLOR                            0x0D10
+#define GL_MAP_STENCIL                          0x0D11
+#define GL_INDEX_SHIFT                          0x0D12
+#define GL_INDEX_OFFSET                         0x0D13
+#define GL_RED_SCALE                            0x0D14
+#define GL_RED_BIAS                             0x0D15
+#define GL_GREEN_SCALE                          0x0D18
+#define GL_GREEN_BIAS                           0x0D19
+#define GL_BLUE_SCALE                           0x0D1A
+#define GL_BLUE_BIAS                            0x0D1B
+#define GL_ALPHA_SCALE                          0x0D1C
+#define GL_ALPHA_BIAS                           0x0D1D
+#define GL_DEPTH_SCALE                          0x0D1E
+#define GL_DEPTH_BIAS                           0x0D1F
+#define GL_PIXEL_MAP_I_TO_I                     0x0C70
+#define GL_PIXEL_MAP_S_TO_S                     0x0C71
+#define GL_PIXEL_MAP_I_TO_R                     0x0C72
+#define GL_PIXEL_MAP_I_TO_G                     0x0C73
+#define GL_PIXEL_MAP_I_TO_B                     0x0C74
+#define GL_PIXEL_MAP_I_TO_A                     0x0C75
+#define GL_PIXEL_MAP_R_TO_R                     0x0C76
+#define GL_PIXEL_MAP_G_TO_G                     0x0C77
+#define GL_PIXEL_MAP_B_TO_B                     0x0C78
+#define GL_PIXEL_MAP_A_TO_A                     0x0C79
+#define GL_PIXEL_MAP_I_TO_I_SIZE                0x0CB0
+#define GL_PIXEL_MAP_S_TO_S_SIZE                0x0CB1
+#define GL_PIXEL_MAP_I_TO_R_SIZE                0x0CB2
+#define GL_PIXEL_MAP_I_TO_G_SIZE                0x0CB3
+#define GL_PIXEL_MAP_I_TO_B_SIZE                0x0CB4
+#define GL_PIXEL_MAP_I_TO_A_SIZE                0x0CB5
+#define GL_PIXEL_MAP_R_TO_R_SIZE                0x0CB6
+#define GL_PIXEL_MAP_G_TO_G_SIZE                0x0CB7
+#define GL_PIXEL_MAP_B_TO_B_SIZE                0x0CB8
+#define GL_PIXEL_MAP_A_TO_A_SIZE                0x0CB9
+#define GL_MAX_PIXEL_MAP_TABLE                  0x0D34
+#define GL_PIXEL_MODE_BIT                       0x00000020
+void glPixelTransferf(GLenum pname, GLfloat param);
+void glPixelTransferi(GLenum pname, GLint param);
+void glPixelMapfv(GLenum map, GLsizei mapsize, const GLfloat *values);
+void glPixelMapuiv(GLenum map, GLsizei mapsize, const GLuint *values);
+void glPixelMapusv(GLenum map, GLsizei mapsize, const GLushort *values);
+void glGetPixelMapfv(GLenum map, GLfloat *values);
+void glGetPixelMapuiv(GLenum map, GLuint *values);
+void glGetPixelMapusv(GLenum map, GLushort *values);
+
+/* Stipple. A stippled line is cut into its dashes before it is widened - a 16-bit pattern, each
+ * bit covering `factor` pixels along the line's major axis, counting on across a strip and
+ * starting again for each separate line and each outlined polygon - so the dashes are drawn
+ * like any line, on both paths. A stippled polygon keeps the fragments whose window position
+ * finds a 1 in a 32x32 mask, bottom row first - **on both paths** since 2026-09-20, the console
+ * getting the fragment's position in the pixel shader and killing the lanes whose bit is clear
+ * (`tools/shader/polygon-stipple.s`). */
+#define GL_LINE_STIPPLE                         0x0B24
+#define GL_LINE_STIPPLE_PATTERN                 0x0B25
+#define GL_LINE_STIPPLE_REPEAT                  0x0B26
+#define GL_POLYGON_STIPPLE                      0x0B42
+#define GL_POLYGON_STIPPLE_BIT                  0x00000010
+void glLineStipple(GLint factor, GLushort pattern);
+void glPolygonStipple(const GLubyte *mask);
+void glGetPolygonStipple(GLubyte *mask);
+
+/* 3D textures (GL 1.2): their own binding, enable and default texture, a third coordinate r with
+ * its own wrap mode, mip levels that halve depth as well, and images addressed slice by slice
+ * with GL_UNPACK_IMAGE_HEIGHT. GL_TEXTURE_3D beats 2D and 1D when several are enabled. **Both
+ * paths sample them** since 2026-09-20: on a console the descriptor carries TYPE 0xa and the
+ * last slice, the vertex carries r in its third parameter, and the pixel shader samples with
+ * three coordinates. A volume with no image yet is drawn untextured and says so once in the log.
+ * The mip chain is still level 0 only - a volume's levels halve depth as well, which the chain
+ * builder here does not lay out. */
+#define GL_TEXTURE_3D                           0x806F
+#define GL_TEXTURE_BINDING_3D                   0x806A
+/* Cube maps (GL 1.3): six square faces, each uploaded through glTexImage2D against its own
+ * target, looked up by a direction - (s, t, r), usually generated by GL_REFLECTION_MAP or
+ * GL_NORMAL_MAP. **Sampled on both paths** since 2026-09-20: on a console the six faces upload
+ * as one array and the pixel shader finds the face from the direction. An incomplete cube map is
+ * drawn untextured on both, which is what GL does with one. */
+#define GL_TEXTURE_CUBE_MAP                     0x8513
+#define GL_TEXTURE_BINDING_CUBE_MAP             0x8514
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X          0x8515
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_X          0x8516
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_Y          0x8517
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_Y          0x8518
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_Z          0x8519
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_Z          0x851A
+#define GL_PROXY_TEXTURE_CUBE_MAP               0x851B
+#define GL_MAX_CUBE_MAP_TEXTURE_SIZE            0x851C
+#define GL_TEXTURE_WRAP_R                       0x8072
+#define GL_TEXTURE_DEPTH                        0x8071
+#define GL_MAX_3D_TEXTURE_SIZE                  0x8073
+#define GL_PACK_IMAGE_HEIGHT                    0x806C
+#define GL_UNPACK_IMAGE_HEIGHT                  0x806E
+void glTexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width,
+                  GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type,
+                  const GLvoid *pixels);
+void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                     GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
+                     const GLvoid *pixels);
+void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                         GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+
+/* The accumulation buffer: a signed 16-bit colour per pixel, kept on the CPU and allocated the
+ * first time it is used. glAccum adds the colour buffer into it (GL_ACCUM), loads it from the
+ * colour buffer (GL_LOAD), scales or offsets it (GL_MULT, GL_ADD), or writes it back scaled
+ * (GL_RETURN) through the colour mask. Every operation, and glClear's GL_ACCUM_BUFFER_BIT, keeps
+ * to the scissor box when the scissor test is on. Motion blur and antialiasing by jitter are what
+ * it is for. The colour-buffer and depth-buffer sizes are reported alongside it. */
+#define GL_ACCUM                                0x0100
+#define GL_LOAD                                 0x0101
+#define GL_RETURN                               0x0102
+#define GL_MULT                                 0x0103
+#define GL_ACCUM_CLEAR_VALUE                    0x0B80
+#define GL_ACCUM_RED_BITS                       0x0D58
+#define GL_ACCUM_GREEN_BITS                     0x0D59
+#define GL_ACCUM_BLUE_BITS                      0x0D5A
+#define GL_ACCUM_ALPHA_BITS                     0x0D5B
+#define GL_ACCUM_BUFFER_BIT                     0x00000200
+#define GL_RED_BITS                             0x0D52
+#define GL_GREEN_BITS                           0x0D53
+#define GL_BLUE_BITS                            0x0D54
+#define GL_ALPHA_BITS                           0x0D55
+#define GL_DEPTH_BITS                           0x0D56
+void glAccum(GLenum op, GLfloat value);
+void glClearAccum(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
+
+GLint glRenderMode(GLenum mode);
+void glSelectBuffer(GLsizei size, GLuint *buffer);
+void glFeedbackBuffer(GLsizei size, GLenum type, GLfloat *buffer);
+void glInitNames(void);
+void glLoadName(GLuint name);
+void glPushName(GLuint name);
+void glPopName(void);
+void glPassThrough(GLfloat token);
 
 /* Where NDC z lands in the depth buffer. `near` above `far` reverses the buffer, which is a
  * technique rather than a mistake, so it is accepted. */
 void glDepthRange(GLclampd near_val, GLclampd far_val);
 
-/* Pixel formats the texture upload converts, and the unpack state that says how a client's
- * rows are laid out. A format not listed here is refused rather than converted wrongly. */
+/* Pixel rectangles in the program's memory, for every call that reads or writes one. Formats:
+ * GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_RGB, GL_BGR, GL_RGBA, GL_BGRA, GL_LUMINANCE and
+ * GL_LUMINANCE_ALPHA. Types: GL_UNSIGNED_BYTE, GL_BYTE, GL_UNSIGNED_SHORT, GL_SHORT,
+ * GL_UNSIGNED_INT, GL_INT, GL_FLOAT, and GL 1.2's packed types below (a packed type with a
+ * format it does not fit is GL_INVALID_OPERATION). Every glPixelStorei parameter of GL 1.2 is
+ * kept, on both the unpack and pack sides. Colour-index, stencil and depth rectangles are
+ * refused. */
 #define GL_BGR                                  0x80E0
 #define GL_BGRA                                 0x80E1
 #define GL_LUMINANCE                            0x1909
 #define GL_LUMINANCE_ALPHA                      0x190A
 #define GL_ALPHA                                0x1906
-#define GL_UNPACK_ALIGNMENT                     0x0CF5
+#define GL_RED                                  0x1903
+#define GL_GREEN                                0x1904
+#define GL_BLUE                                 0x1905
+#define GL_UNSIGNED_BYTE_3_3_2                  0x8032
+#define GL_UNSIGNED_BYTE_2_3_3_REV              0x8362
+#define GL_UNSIGNED_SHORT_5_6_5                 0x8363
+#define GL_UNSIGNED_SHORT_5_6_5_REV             0x8364
+#define GL_UNSIGNED_SHORT_4_4_4_4               0x8033
+#define GL_UNSIGNED_SHORT_4_4_4_4_REV           0x8365
+#define GL_UNSIGNED_SHORT_5_5_5_1               0x8034
+#define GL_UNSIGNED_SHORT_1_5_5_5_REV           0x8366
+#define GL_UNSIGNED_INT_8_8_8_8                 0x8035
+#define GL_UNSIGNED_INT_8_8_8_8_REV             0x8367
+#define GL_UNSIGNED_INT_10_10_10_2              0x8036
+#define GL_UNSIGNED_INT_2_10_10_10_REV          0x8368
+#define GL_UNPACK_SWAP_BYTES                    0x0CF0
+#define GL_UNPACK_LSB_FIRST                     0x0CF1
 #define GL_UNPACK_ROW_LENGTH                    0x0CF2
+#define GL_UNPACK_SKIP_ROWS                     0x0CF3
+#define GL_UNPACK_SKIP_PIXELS                   0x0CF4
+#define GL_UNPACK_ALIGNMENT                     0x0CF5
+#define GL_UNPACK_SKIP_IMAGES                   0x806D
+#define GL_PACK_SWAP_BYTES                      0x0D00
+#define GL_PACK_LSB_FIRST                       0x0D01
+#define GL_PACK_ROW_LENGTH                      0x0D02
+#define GL_PACK_SKIP_ROWS                       0x0D03
+#define GL_PACK_SKIP_PIXELS                     0x0D04
 #define GL_PACK_ALIGNMENT                       0x0D05
+#define GL_PACK_SKIP_IMAGES                     0x806B
 void glPixelStorei(GLenum pname, GLint param);
 void glPixelStoref(GLenum pname, GLfloat param);
 /* The framebuffer, read back. GL's origin is the bottom-left corner, so row 0 of the result is
@@ -579,7 +1240,8 @@ void glNormal3dv(const GLdouble *v);
  * and two exponentials by density. Fog does **not** touch alpha, so the alpha test sees the same
  * value with fog on or off.
  *
- * `GL_FOG_INDEX` belongs to colour-index mode, which this does not have, and is refused. */
+ * `GL_FOG_INDEX` belongs to colour-index mode: kept and reported, never drawn with, like the rest
+ * of colour-index state in an RGBA context. */
 #define GL_FOG                                  0x0B60
 #define GL_FOG_INDEX                            0x0B61
 #define GL_FOG_DENSITY                          0x0B62
@@ -590,10 +1252,36 @@ void glNormal3dv(const GLdouble *v);
 #define GL_EXP                                  0x0800
 #define GL_EXP2                                 0x0801
 
+/* GL 1.4's fog coordinate: with GL_FOG_COORD_SRC set to GL_FOG_COORD, fog reads a per-vertex
+ * value the program supplies instead of the eye distance. GL 1.5 renamed the enums; both
+ * spellings are the same values. */
+#define GL_FOG_COORDINATE_SOURCE                0x8450
+#define GL_FOG_COORDINATE                       0x8451
+#define GL_FRAGMENT_DEPTH                       0x8452
+#define GL_CURRENT_FOG_COORDINATE               0x8453
+#define GL_FOG_COORDINATE_ARRAY_TYPE            0x8454
+#define GL_FOG_COORDINATE_ARRAY_STRIDE          0x8455
+#define GL_FOG_COORDINATE_ARRAY_POINTER         0x8456
+#define GL_FOG_COORDINATE_ARRAY                 0x8457
+#define GL_FOG_COORDINATE_ARRAY_BUFFER_BINDING  0x889D
+#define GL_FOG_COORD_SRC                        0x8450
+#define GL_FOG_COORD                            0x8451
+#define GL_CURRENT_FOG_COORD                    0x8453
+#define GL_FOG_COORD_ARRAY_TYPE                 0x8454
+#define GL_FOG_COORD_ARRAY_STRIDE               0x8455
+#define GL_FOG_COORD_ARRAY_POINTER              0x8456
+#define GL_FOG_COORD_ARRAY                      0x8457
+#define GL_FOG_COORD_ARRAY_BUFFER_BINDING       0x889D
+
 void glFogf(GLenum pname, GLfloat param);
 void glFogi(GLenum pname, GLint param);
 void glFogfv(GLenum pname, const GLfloat *params);
 void glFogiv(GLenum pname, const GLint *params);
+void glFogCoordf(GLfloat coord);
+void glFogCoordd(GLdouble coord);
+void glFogCoordfv(const GLfloat *coord);
+void glFogCoorddv(const GLdouble *coord);
+void glFogCoordPointer(GLenum type, GLsizei stride, const GLvoid *pointer);
 
 /* Points and lines.
  *
@@ -612,9 +1300,47 @@ void glFogiv(GLenum pname, const GLint *params);
 #define GL_LINE_WIDTH                           0x0B21
 #define GL_LINE_WIDTH_RANGE                     0x0B22
 #define GL_LINE_WIDTH_GRANULARITY               0x0B23
+#define GL_ALIASED_POINT_SIZE_RANGE             0x846D
+#define GL_ALIASED_LINE_WIDTH_RANGE             0x846E
+/* Sizes and widths are drawn as the specification draws aliased ones: rounded to the nearest
+ * integer, at least 1, and at most OOPS_GL_MAX_POINT_LINE_SIZE - the range every
+ * *_RANGE query reports. **Smoothed** (GL_POINT_SMOOTH, GL_LINE_SMOOTH) they are not rounded but
+ * taken in steps of OOPS_GL_SMOOTH_GRANULARITY, which the *_GRANULARITY queries - GL 1.2's
+ * GL_SMOOTH_* names for the same enums - report. */
+#define OOPS_GL_MAX_POINT_LINE_SIZE             256
+#define OOPS_GL_SMOOTH_GRANULARITY              0.125f
+#define GL_SMOOTH_POINT_SIZE_RANGE              0x0B12
+#define GL_SMOOTH_POINT_SIZE_GRANULARITY        0x0B13
+#define GL_SMOOTH_LINE_WIDTH_RANGE              0x0B22
+#define GL_SMOOTH_LINE_WIDTH_GRANULARITY        0x0B23
+/* Antialiasing: each fragment's alpha multiplied by the fraction of its pixel the point, line
+ * or polygon covers. The software rasteriser does all three. **The console does points and
+ * lines** since 2026-09-20 - the CPU widens the primitive into a quad and writes each corner's
+ * offset from the centre where the pixel shader can interpolate it. It still draws a *textured*
+ * smooth primitive aliased, the parameter that offset rides in being the texture coordinate, and
+ * GL_POLYGON_SMOOTH always: a polygon's coverage is three edge fades rather than one distance,
+ * and it needs the pixels a triangle only partly covers, which the rasteriser does not raise.
+ * Both say so in the log the first time they matter. */
+#define GL_POINT_SMOOTH                         0x0B10
+#define GL_LINE_SMOOTH                          0x0B20
+#define GL_POLYGON_SMOOTH                       0x0B41
 
 void glPointSize(GLfloat size);
 void glLineWidth(GLfloat width);
+
+/* GL 1.4's point parameters: every point's size clamped to [GL_POINT_SIZE_MIN,
+ * GL_POINT_SIZE_MAX], and with GL_POINT_DISTANCE_ATTENUATION (a, b, c) divided first by
+ * sqrt(a + b d + c d^2), d the point's eye distance - points that shrink into the distance.
+ * GL_POINT_FADE_THRESHOLD_SIZE is kept and reported: its fade applies to multisampled points,
+ * and there is no multisample buffer here. */
+#define GL_POINT_SIZE_MIN                       0x8126
+#define GL_POINT_SIZE_MAX                       0x8127
+#define GL_POINT_FADE_THRESHOLD_SIZE            0x8128
+#define GL_POINT_DISTANCE_ATTENUATION           0x8129
+void glPointParameterf(GLenum pname, GLfloat param);
+void glPointParameterfv(GLenum pname, const GLfloat *params);
+void glPointParameteri(GLenum pname, GLint param);
+void glPointParameteriv(GLenum pname, const GLint *params);
 
 /* Compressed textures.
  *
@@ -625,7 +1351,15 @@ void glLineWidth(GLfloat width);
  * entry points *conformant*, not stubs: a program that asks first takes its uncompressed path,
  * and one that does not gets an error it can read instead of a call to address zero.
  *
- * `GL_TEXTURE_COMPRESSED` reports false for every texture, which is true of all of them. */
+ * `GL_TEXTURE_COMPRESSED` reports false for every texture, which is true of all of them.
+ *
+ * The generic compressed formats are accepted as the internal format of an *uncompressed* upload,
+ * which the specification allows: with no specific compressed format available, each is replaced
+ * by its base format, and `GL_TEXTURE_INTERNAL_FORMAT` answers that base format. */
+#define GL_COMPRESSED_ALPHA                     0x84E9
+#define GL_COMPRESSED_LUMINANCE                 0x84EA
+#define GL_COMPRESSED_LUMINANCE_ALPHA           0x84EB
+#define GL_COMPRESSED_INTENSITY                 0x84EC
 #define GL_COMPRESSED_RGB                       0x84ED
 #define GL_COMPRESSED_RGBA                      0x84EE
 #define GL_TEXTURE_COMPRESSION_HINT             0x84EF
@@ -684,7 +1418,18 @@ void glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset,
 #define GL_ZOOM_X                               0x0D16
 #define GL_ZOOM_Y                               0x0D17
 #define GL_BITMAP                               0x1A00
+/* glCopyPixels' buffers, and the depth and stencil pixel formats glReadPixels, glDrawPixels and a
+ * depth texture's uploads take. Depth goes through GL_DEPTH_SCALE and GL_DEPTH_BIAS; a stencil
+ * index through GL_INDEX_SHIFT/OFFSET and GL_MAP_STENCIL. On the hardware path the depth and
+ * stencil buffers are the GPU's tiled surfaces, which these read and write through their tiling -
+ * see GL_ROADMAP.md. */
 #define GL_COLOR                                0x1800
+#define GL_DEPTH                                0x1801
+#define GL_STENCIL                              0x1802
+#define GL_DEPTH_COMPONENT                      0x1902
+/* Colour indices, which an RGBA context takes as images - glDrawPixels and the texture uploads,
+ * through GL_INDEX_SHIFT/OFFSET and the GL_PIXEL_MAP_I_TO_R/G/B/A maps - and never reads back. */
+#define GL_COLOR_INDEX                          0x1900
 
 void glRasterPos2f(GLfloat x, GLfloat y);
 void glRasterPos3f(GLfloat x, GLfloat y, GLfloat z);
@@ -711,6 +1456,25 @@ void glRasterPos2sv(const GLshort *v);
 void glRasterPos3sv(const GLshort *v);
 void glRasterPos4sv(const GLshort *v);
 
+/* GL 1.4: the raster position set directly in window coordinates - no transform, no clip test,
+ * z mapped through the depth range, the colour and texture coordinate the current ones unlit. */
+void glWindowPos2f(GLfloat x, GLfloat y);
+void glWindowPos2d(GLdouble x, GLdouble y);
+void glWindowPos2i(GLint x, GLint y);
+void glWindowPos2s(GLshort x, GLshort y);
+void glWindowPos3f(GLfloat x, GLfloat y, GLfloat z);
+void glWindowPos3d(GLdouble x, GLdouble y, GLdouble z);
+void glWindowPos3i(GLint x, GLint y, GLint z);
+void glWindowPos3s(GLshort x, GLshort y, GLshort z);
+void glWindowPos2fv(const GLfloat *v);
+void glWindowPos2dv(const GLdouble *v);
+void glWindowPos2iv(const GLint *v);
+void glWindowPos2sv(const GLshort *v);
+void glWindowPos3fv(const GLfloat *v);
+void glWindowPos3dv(const GLdouble *v);
+void glWindowPos3iv(const GLint *v);
+void glWindowPos3sv(const GLshort *v);
+
 void glPixelZoom(GLfloat xfactor, GLfloat yfactor);
 void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type,
                   const GLvoid *pixels);
@@ -736,6 +1500,10 @@ void glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig,
 #define GL_INCR                                 0x1E02
 #define GL_DECR                                 0x1E03
 #define GL_INVERT                               0x150A
+/* GL 1.4: increment and decrement that wrap round the stencil buffer's range rather than
+ * saturating at its ends. */
+#define GL_INCR_WRAP                            0x8507
+#define GL_DECR_WRAP                            0x8508
 
 void glStencilFunc(GLenum func, GLint ref, GLuint mask);
 void glStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass);
@@ -792,19 +1560,92 @@ void glGetTexGendv(GLenum coord, GLenum pname, GLdouble *params);
 
 /* Multitexture (GL 1.3, and ARB_multitexture before it).
  *
- * **This implementation has one texture unit**, and says so: GL_MAX_TEXTURE_UNITS reports 1, and
- * every call naming a unit above GL_TEXTURE0 is refused with GL_INVALID_ENUM. That is what the
- * specification requires of a one-unit implementation - a unit beyond the maximum *is* an invalid
- * enum - so a program that asks for a second unit is told no rather than being silently given
- * unit 0's texture twice, which would draw a plausible and wrong picture.
+ * **Two texture units** since 2026-09-19, GL 1.3's minimum (section 2.6) - one before, which was
+ * short of it. GL_MAX_TEXTURE_UNITS reports 2, and a unit past it is refused with
+ * GL_INVALID_ENUM rather than quietly written somewhere else. The console applies unit 0 alone
+ * until its pixel shader takes a second coordinate, and logs once when a draw uses unit 1.
  *
  * A second unit needs a third parameter export from the vertex shader, which is a hardware
  * measurement this does not have (see the roadmap, and obSCEne REQ-20260917T1652Z-7c40). When it
  * arrives, the refusal above is the only thing that has to change. */
 #define GL_TEXTURE0                             0x84C0
+/* The rest of GL 1.3's unit names (Mesa include/GL/gl.h:1710-1740), which were left out while
+ * there was one unit to name. Two units exist; a name past GL_MAX_TEXTURE_UNITS is refused. */
+#define GL_TEXTURE1                             0x84C1
+#define GL_TEXTURE2                             0x84C2
+#define GL_TEXTURE3                             0x84C3
+#define GL_TEXTURE4                             0x84C4
+#define GL_TEXTURE5                             0x84C5
+#define GL_TEXTURE6                             0x84C6
+#define GL_TEXTURE7                             0x84C7
+#define GL_TEXTURE8                             0x84C8
+#define GL_TEXTURE9                             0x84C9
+#define GL_TEXTURE10                            0x84CA
+#define GL_TEXTURE11                            0x84CB
+#define GL_TEXTURE12                            0x84CC
+#define GL_TEXTURE13                            0x84CD
+#define GL_TEXTURE14                            0x84CE
+#define GL_TEXTURE15                            0x84CF
+#define GL_TEXTURE16                            0x84D0
+#define GL_TEXTURE17                            0x84D1
+#define GL_TEXTURE18                            0x84D2
+#define GL_TEXTURE19                            0x84D3
+#define GL_TEXTURE20                            0x84D4
+#define GL_TEXTURE21                            0x84D5
+#define GL_TEXTURE22                            0x84D6
+#define GL_TEXTURE23                            0x84D7
+#define GL_TEXTURE24                            0x84D8
+#define GL_TEXTURE25                            0x84D9
+#define GL_TEXTURE26                            0x84DA
+#define GL_TEXTURE27                            0x84DB
+#define GL_TEXTURE28                            0x84DC
+#define GL_TEXTURE29                            0x84DD
+#define GL_TEXTURE30                            0x84DE
+#define GL_TEXTURE31                            0x84DF
 #define GL_ACTIVE_TEXTURE                       0x84E0
 #define GL_CLIENT_ACTIVE_TEXTURE                0x84E1
 #define GL_MAX_TEXTURE_UNITS                    0x84E2
+/* GL 1.3's transposed-matrix queries, the glGet side of glLoadTransposeMatrix (Mesa
+ * include/GL/gl.h, GL_VERSION_1_3). */
+#define GL_TRANSPOSE_MODELVIEW_MATRIX           0x84E3
+#define GL_TRANSPOSE_PROJECTION_MATRIX          0x84E4
+#define GL_TRANSPOSE_TEXTURE_MATRIX             0x84E5
+/* GL_ARB_multitexture's spellings of the same enums, beside its *ARB entry points declared below. */
+#define GL_TEXTURE0_ARB                         0x84C0
+#define GL_TEXTURE1_ARB                         0x84C1
+#define GL_TEXTURE2_ARB                         0x84C2
+#define GL_TEXTURE3_ARB                         0x84C3
+#define GL_TEXTURE4_ARB                         0x84C4
+#define GL_TEXTURE5_ARB                         0x84C5
+#define GL_TEXTURE6_ARB                         0x84C6
+#define GL_TEXTURE7_ARB                         0x84C7
+#define GL_TEXTURE8_ARB                         0x84C8
+#define GL_TEXTURE9_ARB                         0x84C9
+#define GL_TEXTURE10_ARB                        0x84CA
+#define GL_TEXTURE11_ARB                        0x84CB
+#define GL_TEXTURE12_ARB                        0x84CC
+#define GL_TEXTURE13_ARB                        0x84CD
+#define GL_TEXTURE14_ARB                        0x84CE
+#define GL_TEXTURE15_ARB                        0x84CF
+#define GL_TEXTURE16_ARB                        0x84D0
+#define GL_TEXTURE17_ARB                        0x84D1
+#define GL_TEXTURE18_ARB                        0x84D2
+#define GL_TEXTURE19_ARB                        0x84D3
+#define GL_TEXTURE20_ARB                        0x84D4
+#define GL_TEXTURE21_ARB                        0x84D5
+#define GL_TEXTURE22_ARB                        0x84D6
+#define GL_TEXTURE23_ARB                        0x84D7
+#define GL_TEXTURE24_ARB                        0x84D8
+#define GL_TEXTURE25_ARB                        0x84D9
+#define GL_TEXTURE26_ARB                        0x84DA
+#define GL_TEXTURE27_ARB                        0x84DB
+#define GL_TEXTURE28_ARB                        0x84DC
+#define GL_TEXTURE29_ARB                        0x84DD
+#define GL_TEXTURE30_ARB                        0x84DE
+#define GL_TEXTURE31_ARB                        0x84DF
+#define GL_ACTIVE_TEXTURE_ARB                   0x84E0
+#define GL_CLIENT_ACTIVE_TEXTURE_ARB            0x84E1
+#define GL_MAX_TEXTURE_UNITS_ARB                0x84E2
 
 void glActiveTexture(GLenum texture);
 void glClientActiveTexture(GLenum texture);
@@ -987,18 +1828,26 @@ void glTexEnviv(GLenum target, GLenum pname, const GLint *params);
 void glGetTexEnvfv(GLenum target, GLenum pname, GLfloat *params);
 void glGetTexEnviv(GLenum target, GLenum pname, GLint *params);
 
-/* `glHint` is advisory, so ignoring one is allowed - but naming a hint for a feature that does
- * not exist is not. Only GL_PERSPECTIVE_CORRECTION_HINT names something real here; the fog,
- * point and line hints are refused, because this draws none of those. */
+/* `glHint` is advisory: every target is recorded and reported, and none changes a pixel - which
+ * is all a hint is entitled to. (The fog, point and line hints were refused while this drew no
+ * fog, points or lines; it draws all three now.) GL_TEXTURE_COMPRESSION_HINT is declared with the
+ * compressed-texture calls below. */
 #define GL_PERSPECTIVE_CORRECTION_HINT          0x0C50
+#define GL_POINT_SMOOTH_HINT                    0x0C51
+#define GL_LINE_SMOOTH_HINT                     0x0C52
+#define GL_POLYGON_SMOOTH_HINT                  0x0C53
+#define GL_FOG_HINT                             0x0C54
 #define GL_DONT_CARE                            0x1100
 #define GL_FASTEST                              0x1101
 #define GL_NICEST                               0x1102
 void glHint(GLenum target, GLenum mode);
 
-/* **There is one surface**, the one the display flips, and GL_BACK names it. GL_FRONT, GL_NONE
- * and the attachments are refused rather than accepted-and-ignored: GL_NONE in particular would
- * have a program believe it had switched drawing off. */
+/* **Two colour buffers.** GL_BACK names the one glSwapBuffers presents. GL_FRONT names the
+ * picture on screen, a surface of oops-gl's own that glFlush and glFinish present while it is
+ * drawn into (since 2026-09-19). GL_FRONT_AND_BACK and GL_LEFT name both. GL_NONE switches
+ * colour writes off. The right and auxiliary buffers do not exist and are GL_INVALID_OPERATION.
+ * A draw into both reaches both on either path (on the console through a second colour target
+ * and a second export, since 2026-09-20). */
 #define GL_DRAW_BUFFER                          0x0C01
 #define GL_READ_BUFFER                          0x0C02
 void glDrawBuffer(GLenum buf);
@@ -1061,6 +1910,151 @@ void  glContextDestroy(void *ctx);
 void  glContextMakeCurrent(void *ctx);
 void *glGetCurrentContext(void);
 void  glSwapBuffers(void);
+
+/*
+ * **What version this context reports** (2026-09-20).
+ *
+ * `glGetString(GL_VERSION)` answers "1.1 oops-gl fixed-function subset" by default, because 1.1
+ * is the honest class of what is implemented everywhere. But a port is often written against a
+ * later 1.x and checks the badge before using something this library does have - the texture
+ * objects and `glDrawArrays` of 1.1, the 3D textures and `glDrawRangeElements` of 1.2, the
+ * multitexture and compressed formats of 1.3, the secondary colour and fog coordinate of 1.4,
+ * the buffer objects and occlusion queries of 1.5 - and refuses to run against a badge that
+ * reads lower than the feature it is about to call.
+ *
+ * So the version is the caller's to state: `glContextSetVersion(1, 4)` makes the string begin
+ * "1.4", and `glGetString` reports it from then on. **This changes no behaviour at all** - it
+ * changes what the library says it is. The suffix stays, so a caller reading past the number
+ * still learns this is a subset, and every call that was unimplemented before is unimplemented
+ * after.
+ *
+ * `major` must be 1 and `minor` at most 5; anything else is GL_INVALID_VALUE and the version is
+ * left as it was. A line goes to the log each time, naming what was asked for, so a frame that
+ * misbehaves can be read against the badge the program set.
+ *
+ * The default is the build's: `OOPS_GL_DEFAULT_VERSION_MINOR`, 1 unless the build says otherwise.
+ */
+GLboolean glContextSetVersion(GLuint major, GLuint minor);
+void glContextGetVersion(GLuint *major, GLuint *minor);
+
+/*
+ * **The extension spellings of entry points this library already has** (2026-09-19).
+ *
+ * A program written against the OpenGL of that era - which is what a homebrew port usually is -
+ * reads `glGetString(GL_EXTENSIONS)`, finds an extension, and then calls *that extension's*
+ * names: `glGenBuffersARB`, `glSecondaryColor3fEXT`, `glWindowPos2iARB`. The core spellings it
+ * would otherwise need arrived in later versions it does not assume.
+ *
+ * `glGetString` here advertises an extension only where the extension's own entry points exist
+ * (gl_state.c). These are those entry points: each is the core function under its published
+ * name, so the promise the string makes is one this library keeps.
+ */
+typedef GLintptr GLintptrARB;
+typedef GLsizeiptr GLsizeiptrARB;
+
+/* GL_ARB_vertex_buffer_object */
+void glBindBufferARB(GLenum target, GLuint buffer);
+void glDeleteBuffersARB(GLsizei n, const GLuint *buffers);
+void glGenBuffersARB(GLsizei n, GLuint *buffers);
+GLboolean glIsBufferARB(GLuint buffer);
+void glBufferDataARB(GLenum target, GLsizeiptrARB size, const GLvoid *data, GLenum usage);
+void glBufferSubDataARB(GLenum target, GLintptrARB offset, GLsizeiptrARB size, const GLvoid *data);
+void glGetBufferSubDataARB(GLenum target, GLintptrARB offset, GLsizeiptrARB size, GLvoid *data);
+void *glMapBufferARB(GLenum target, GLenum access);
+GLboolean glUnmapBufferARB(GLenum target);
+void glGetBufferParameterivARB(GLenum target, GLenum pname, GLint *params);
+void glGetBufferPointervARB(GLenum target, GLenum pname, GLvoid **params);
+
+/* GL_EXT_secondary_color */
+void glSecondaryColor3bEXT(GLbyte r, GLbyte g, GLbyte b);
+void glSecondaryColor3bvEXT(const GLbyte *v);
+void glSecondaryColor3dEXT(GLdouble r, GLdouble g, GLdouble b);
+void glSecondaryColor3dvEXT(const GLdouble *v);
+void glSecondaryColor3fEXT(GLfloat r, GLfloat g, GLfloat b);
+void glSecondaryColor3fvEXT(const GLfloat *v);
+void glSecondaryColor3iEXT(GLint r, GLint g, GLint b);
+void glSecondaryColor3ivEXT(const GLint *v);
+void glSecondaryColor3sEXT(GLshort r, GLshort g, GLshort b);
+void glSecondaryColor3svEXT(const GLshort *v);
+void glSecondaryColor3ubEXT(GLubyte r, GLubyte g, GLubyte b);
+void glSecondaryColor3ubvEXT(const GLubyte *v);
+void glSecondaryColor3uiEXT(GLuint r, GLuint g, GLuint b);
+void glSecondaryColor3uivEXT(const GLuint *v);
+void glSecondaryColor3usEXT(GLushort r, GLushort g, GLushort b);
+void glSecondaryColor3usvEXT(const GLushort *v);
+void glSecondaryColorPointerEXT(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
+
+/* GL_EXT_fog_coord */
+void glFogCoordfEXT(GLfloat coord);
+void glFogCoordfvEXT(const GLfloat *coord);
+void glFogCoorddEXT(GLdouble coord);
+void glFogCoorddvEXT(const GLdouble *coord);
+void glFogCoordPointerEXT(GLenum type, GLsizei stride, const GLvoid *pointer);
+
+/* GL_EXT_draw_range_elements, GL_EXT_multi_draw_arrays */
+void glDrawRangeElementsEXT(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type,
+                            const GLvoid *indices);
+void glMultiDrawArraysEXT(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount);
+void glMultiDrawElementsEXT(GLenum mode, const GLsizei *count, GLenum type,
+                            const GLvoid *const *indices, GLsizei drawcount);
+
+/* GL_ARB_window_pos */
+void glWindowPos2dARB(GLdouble x, GLdouble y);
+void glWindowPos2dvARB(const GLdouble *p);
+void glWindowPos2fARB(GLfloat x, GLfloat y);
+void glWindowPos2fvARB(const GLfloat *p);
+void glWindowPos2iARB(GLint x, GLint y);
+void glWindowPos2ivARB(const GLint *p);
+void glWindowPos2sARB(GLshort x, GLshort y);
+void glWindowPos2svARB(const GLshort *p);
+void glWindowPos3dARB(GLdouble x, GLdouble y, GLdouble z);
+void glWindowPos3dvARB(const GLdouble *p);
+void glWindowPos3fARB(GLfloat x, GLfloat y, GLfloat z);
+void glWindowPos3fvARB(const GLfloat *p);
+void glWindowPos3iARB(GLint x, GLint y, GLint z);
+void glWindowPos3ivARB(const GLint *p);
+void glWindowPos3sARB(GLshort x, GLshort y, GLshort z);
+void glWindowPos3svARB(const GLshort *p);
+
+/* GL_EXT_blend_color, GL_EXT_blend_minmax */
+void glBlendColorEXT(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
+void glBlendEquationEXT(GLenum mode);
+
+/* GL_ARB_transpose_matrix */
+void glLoadTransposeMatrixfARB(const GLfloat *m);
+void glLoadTransposeMatrixdARB(const GLdouble *m);
+void glMultTransposeMatrixfARB(const GLfloat *m);
+void glMultTransposeMatrixdARB(const GLdouble *m);
+
+/* GL_ARB_point_parameters, GL_EXT_point_parameters */
+void glPointParameterfARB(GLenum pname, GLfloat param);
+void glPointParameterfvARB(GLenum pname, const GLfloat *params);
+void glPointParameterfEXT(GLenum pname, GLfloat param);
+void glPointParameterfvEXT(GLenum pname, const GLfloat *params);
+
+/* GL_EXT_texture3D (2026-09-20). Two entry points and the enums under their extension
+ * spellings - `glCopyTexSubImage3D` belongs to GL 1.2 and to GL_EXT_copy_texture, not here. */
+/* The literals, not the core names - see GL_DEPTH_COMPONENT16_ARB above for why. */
+#define GL_PACK_SKIP_IMAGES_EXT                 0x806B
+#define GL_PACK_IMAGE_HEIGHT_EXT                0x806C
+#define GL_UNPACK_SKIP_IMAGES_EXT               0x806D
+#define GL_UNPACK_IMAGE_HEIGHT_EXT              0x806E
+#define GL_TEXTURE_3D_EXT                       0x806F
+#define GL_PROXY_TEXTURE_3D_EXT                 0x8070
+#define GL_TEXTURE_DEPTH_EXT                    0x8071
+#define GL_TEXTURE_WRAP_R_EXT                   0x8072
+#define GL_MAX_3D_TEXTURE_SIZE_EXT              0x8073
+#define GL_TEXTURE_BINDING_3D_EXT               0x806A
+/* **`internalformat` is a `GLenum` here and a `GLint` in the core call.** The EXT extension
+ * predates GL 1.2 and declares it that way, so a program written against the extension passes
+ * one - and declaring it otherwise is a conflicting declaration the moment this header meets a
+ * real `GL/glext.h`, which is how it was found. */
+void glTexImage3DEXT(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                     GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type,
+                     const GLvoid *pixels);
+void glTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                        GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
+                        const GLvoid *pixels);
 
 #ifdef __cplusplus
 }

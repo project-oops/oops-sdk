@@ -1,0 +1,6 @@
+rx-check: 166-agc/primitive-draw, color-target rows, 128x128
+control control-linear: 65536 of 65536 bytes dumped
+control control-linear: 6144 of 16384 pixels drawn over the fill
+arm1-rx (CB_COLOR0_ATTRIB3 0x08c6c000): 65536 of 65536 bytes dumped; detiled, 16384 of 16384 pixels equal the control; read as rows, 10408; MATCHES
+arm2-rx-mesa (CB_COLOR0_ATTRIB3 0x0dc6c000): 65536 of 65536 bytes dumped; detiled, 16384 of 16384 pixels equal the control; read as rows, 10408; MATCHES
+VERDICT: the colour block draws 64KB_R_X as the display scans it; CB_COLOR0_ATTRIB3 0x08c6c000 (arm1-rx)

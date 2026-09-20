@@ -14,6 +14,15 @@ extern "C" {
  * buffer is therefore larger than the linear one whenever width or height is
  * not a multiple of 128: 1920x1080 is 15x9 tiles, 8,847,360 bytes against
  * 8,294,400 linear.
+ *
+ * Both halves are measured, as of 2026-09-20. The vectors *inside* a tile are
+ * addrlib's for 64KB_R_X under the part's derived GB_ADDR_CONFIG, and obSCEne's
+ * `-2d7f` has a 128 x 128 render dumped whole agreeing with them on every one of
+ * its 16,384 pixels (`-a91a` had anchored one: dword 0x43f is texel (15,15)).
+ * The order of the tiles *across* a surface was addrlib's computation - a linear
+ * run of 64 KB blocks, pipeBankXor 0 - until `-4b19` dumped a 2x2-block render
+ * whole: tools/rx-check detiles it under every block order and only this one
+ * gives a shape the draw could have made. See src/gl/gl_rx.h for both.
  */
 #define AGC_TILE_DIM 128u
 #define AGC_TILE_BYTES 0x10000u /* 128 * 128 * 4 */
@@ -69,6 +78,31 @@ static inline void agc_detile_pixel(uint32_t offset_dwords, uint32_t *out_x,
     *out_y = y0 | (y1 << 1) | (y2 << 2) | (y3 << 3) | (y4 << 4) | (y5 << 5) |
              (y6 << 6);
   }
+}
+
+/*
+ * The other direction: the 32-bit dword offset within a 64KB macro-tile of the
+ * pixel at (x, y), each in [0..127]. It is the XOR of one basis vector per set
+ * bit, and the vectors are agc_tiler.c's (there as byte addresses, here in
+ * dwords). test_agc_tiler.c checks every one of the 16,384 pixels round-trips
+ * through agc_detile_pixel, so the two directions cannot drift apart. For a
+ * caller that addresses single pixels of a tiled surface in place - oops-gl's
+ * CPU paths into a scanout buffer it draws - rather than converting a whole
+ * surface.
+ */
+static inline uint32_t agc_tile_pixel(uint32_t x, uint32_t y) {
+  static const uint32_t x_dw[7] = {0x0001u, 0x0002u, 0x0020u, 0x0040u,
+                                   0x0880u, 0x0200u, 0x2100u};
+  static const uint32_t y_dw[7] = {0x0004u, 0x0008u, 0x0010u, 0x0440u,
+                                   0x0080u, 0x0100u, 0x1200u};
+  uint32_t off = 0;
+  for (unsigned b = 0; b < 7u; b++) {
+    if ((x >> b) & 1u)
+      off ^= x_dw[b];
+    if ((y >> b) & 1u)
+      off ^= y_dw[b];
+  }
+  return off;
 }
 
 /*

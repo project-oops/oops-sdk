@@ -1,10 +1,13 @@
 #include "oops/draw.h"
+#include "agc/tiler.h"
 #include "tests/test_common.h"
 #include <limits.h>
+#include <stdlib.h>
+#include <string.h>
 
 static void test_draw_surface_clear_and_pixel(void) {
   uint32_t buf[32 * 32];
-  oops_surface_t surf = {buf, 32, 32, 32};
+  oops_surface_t surf = {buf, 32, 32, 32, OOPS_SURFACE_LINEAR};
 
   oops_draw_clear(&surf, OOPS_COLOR_RED);
   for (int i = 0; i < 32 * 32; i++) {
@@ -23,7 +26,7 @@ static void test_draw_surface_clear_and_pixel(void) {
 
 static void test_draw_rect_clipping(void) {
   uint32_t buf[20 * 20];
-  oops_surface_t surf = {buf, 20, 20, 20};
+  oops_surface_t surf = {buf, 20, 20, 20, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&surf, OOPS_COLOR_BLACK);
 
   /* Normal rect inside */
@@ -47,7 +50,7 @@ static void test_draw_rect_clipping(void) {
  * that ends before 0 too. */
 static void test_draw_rect_extreme_extents(void) {
   uint32_t buf[20 * 20];
-  oops_surface_t surf = {buf, 20, 20, 20};
+  oops_surface_t surf = {buf, 20, 20, 20, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&surf, OOPS_COLOR_BLACK);
 
   oops_draw_rect(&surf, 10, 0, INT_MAX, 1, OOPS_COLOR_RED);
@@ -74,7 +77,7 @@ static void test_draw_rect_extreme_extents(void) {
 
 static void test_draw_alpha_blend(void) {
   uint32_t buf[10 * 10];
-  oops_surface_t surf = {buf, 10, 10, 10};
+  oops_surface_t surf = {buf, 10, 10, 10, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&surf,
                   OOPS_RGB(0, 0, 0)); /* Destination: solid black (0,0,0) */
 
@@ -94,7 +97,7 @@ static void test_draw_alpha_blend(void) {
 
 static void test_draw_line_and_circle(void) {
   uint32_t buf[20 * 20];
-  oops_surface_t surf = {buf, 20, 20, 20};
+  oops_surface_t surf = {buf, 20, 20, 20, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&surf, OOPS_COLOR_BLACK);
 
   /* Diagonal line */
@@ -109,7 +112,7 @@ static void test_draw_line_and_circle(void) {
 
 static void test_draw_text_and_blit(void) {
   uint32_t buf[64 * 64];
-  oops_surface_t surf = {buf, 64, 64, 64};
+  oops_surface_t surf = {buf, 64, 64, 64, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&surf, OOPS_COLOR_BLACK);
 
   int nx = oops_draw_text(&surf, 0, 0, "TEST", OOPS_COLOR_WHITE, 1);
@@ -117,7 +120,7 @@ static void test_draw_text_and_blit(void) {
 
   /* Blit sub-surface */
   uint32_t sprite_buf[8 * 8];
-  oops_surface_t sprite = {sprite_buf, 8, 8, 8};
+  oops_surface_t sprite = {sprite_buf, 8, 8, 8, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&sprite, OOPS_COLOR_MAGENTA);
 
   oops_draw_blit(&surf, 20, 20, &sprite, 0, 0, 8, 8);
@@ -132,7 +135,7 @@ static void test_draw_clear_respects_pitch(void) {
   uint32_t buf[8 * 16];
   for (int i = 0; i < 8 * 16; i++)
     buf[i] = OOPS_COLOR_BLACK;
-  oops_surface_t surf = {buf, 8, 8, 16}; /* 8 wide, 8 tall, rows 16 apart */
+  oops_surface_t surf = {buf, 8, 8, 16, OOPS_SURFACE_LINEAR}; /* 8 wide, 8 tall, rows 16 apart */
 
   oops_draw_clear(&surf, OOPS_COLOR_RED);
   for (int y = 0; y < 8; y++) {
@@ -158,7 +161,7 @@ static void test_draw_sprite_and_blit_blend(void) {
   ASSERT_EQ(src.pitch, 2);
 
   uint32_t buf[4 * 4];
-  oops_surface_t dst = {buf, 4, 4, 4};
+  oops_surface_t dst = {buf, 4, 4, 4, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&dst, OOPS_COLOR_BLACK);
 
   oops_draw_blit_blend(&dst, 1, 1, &src, 0, 0, 2, 2);
@@ -179,7 +182,7 @@ static void test_draw_sprite_and_blit_blend(void) {
 
 static void test_draw_gradient(void) {
   uint32_t buf[1 * 16];
-  oops_surface_t s = {buf, 16, 1, 16};
+  oops_surface_t s = {buf, 16, 1, 16, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&s, OOPS_COLOR_BLACK);
   /* Horizontal black->white across 16 px: left end black, right end white,
    * monotonic. */
@@ -200,7 +203,7 @@ static void test_draw_text_width_and_lowercase(void) {
   /* Lower case is no longer folded to upper: 'a' and 'A' render differently,
    * and 'a' is not the blank glyph. */
   uint32_t a[8 * 8], A[8 * 8];
-  oops_surface_t sa = {a, 8, 8, 8}, sA = {A, 8, 8, 8};
+  oops_surface_t sa = {a, 8, 8, 8, OOPS_SURFACE_LINEAR}, sA = {A, 8, 8, 8, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&sa, OOPS_COLOR_BLACK);
   oops_draw_clear(&sA, OOPS_COLOR_BLACK);
   oops_draw_text(&sa, 0, 0, "a", OOPS_COLOR_WHITE, 1);
@@ -218,7 +221,7 @@ static void test_draw_text_width_and_lowercase(void) {
   /* And 'a' must be its own glyph, not the '?' substitution an out-of-range
    * char would give. */
   uint32_t q[8 * 8];
-  oops_surface_t sq = {q, 8, 8, 8};
+  oops_surface_t sq = {q, 8, 8, 8, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&sq, OOPS_COLOR_BLACK);
   oops_draw_text(&sq, 0, 0, "?", OOPS_COLOR_WHITE, 1);
   int not_qmark = 0;
@@ -233,7 +236,7 @@ static void test_draw_text_width_and_lowercase(void) {
  * double-composites its centre. */
 static void test_draw_blend_primitives(void) {
   uint32_t buf[16 * 16];
-  oops_surface_t s = {buf, 16, 16, 16};
+  oops_surface_t s = {buf, 16, 16, 16, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&s, OOPS_COLOR_BLACK);
 
   oops_draw_pixel_blend(
@@ -289,6 +292,70 @@ static void test_draw_png_decode(void) {
   ASSERT_EQ(decoded_pixel, 0xFFFF0000u);
 }
 
+/* One scene through every drawing call, onto whichever surface. */
+static void draw_rx_scene(oops_surface_t *s, const oops_surface_t *sprite) {
+  oops_draw_clear(s, 0xff102030u);
+  oops_draw_rect(s, 3, 4, 150, 20, OOPS_COLOR_RED);
+  oops_draw_rect(s, 190, 140, 40, 40, OOPS_COLOR_GREEN); /* clipped at both edges */
+  oops_draw_rect_blend(s, 100, 10, 90, 130, 0x80ffffffu);
+  oops_draw_rect_gradient(s, 10, 30, 120, 60, 0xff0000ffu, 0x80ff0000u, 1);
+  oops_draw_line(s, 0, 149, 199, 0, OOPS_COLOR_YELLOW);
+  oops_draw_line_blend(s, 0, 0, 199, 149, 0x80ff00ffu);
+  oops_draw_circle(s, 60, 110, 30, OOPS_COLOR_CYAN, 1);
+  oops_draw_circle(s, 150, 70, 45, OOPS_COLOR_WHITE, 0);
+  oops_draw_circle_blend(s, 128, 128, 20, 0x60ff8000u, 1);
+  oops_draw_pixel(s, 127, 127, OOPS_COLOR_BLUE);
+  oops_draw_pixel(s, 128, 128, OOPS_COLOR_BLUE);
+  oops_draw_pixel_blend(s, 129, 127, 0x80000000u);
+  oops_draw_text(s, 20, 130, "Tiled Q9 @ 64KB_R_X", OOPS_COLOR_WHITE, 1);
+  oops_draw_text(s, 110, 100, "RX", OOPS_COLOR_GREEN, 3);
+  oops_draw_blit(s, 170, 120, sprite, 0, 0, 16, 16);
+  oops_draw_blit_blend(s, 120, 125, sprite, 4, 4, 12, 12);
+}
+
+/* **Drawing in the GPU's 64KB_R_X layout** (OOPS_SURFACE_RX, since 2026-09-19): the same scene
+ * drawn on a linear surface and on a tiled one comes out the same pixel for pixel, the tiled one
+ * read through agc_tile_pixel. It is 200 x 150, so blocks reach past it on both axes, and the
+ * padding the scene cannot reach keeps its fill. Blits run both ways between the layouts. */
+static void test_draw_rx_layout_matches_linear(void) {
+  enum { W = 200, H = 150, PITCH = 256, WORDS = 4 * 16384 };
+  uint32_t *lin = (uint32_t *)malloc((size_t)W * H * sizeof(uint32_t));
+  uint32_t *rx = (uint32_t *)malloc((size_t)WORDS * sizeof(uint32_t));
+  uint32_t *back = (uint32_t *)calloc((size_t)W * H, sizeof(uint32_t));
+  static uint32_t sprite_px[16 * 16];
+  ASSERT_TRUE(lin && rx && back);
+  for (int i = 0; i < 16 * 16; i++) sprite_px[i] = (i & 1) ? 0x80ff00ffu : 0xff00ff00u;
+  oops_surface_t sprite = {sprite_px, 16, 16, 16, OOPS_SURFACE_LINEAR};
+  oops_surface_t sl = {lin, W, H, W, OOPS_SURFACE_LINEAR};
+  oops_surface_t sr = {rx, W, H, PITCH, OOPS_SURFACE_RX};
+  for (size_t i = 0; i < WORDS; i++) rx[i] = 0x5a5a5a5au;
+
+  draw_rx_scene(&sl, &sprite);
+  draw_rx_scene(&sr, &sprite);
+
+  size_t differ = 0;
+  for (uint32_t y = 0; y < H; y++) {
+    for (uint32_t x = 0; x < W; x++) {
+      const size_t t = (size_t)((y >> 7) * 2u + (x >> 7)) * 16384u +
+                       agc_tile_pixel(x & 127u, y & 127u);
+      differ += rx[t] != lin[y * W + x];
+    }
+  }
+  ASSERT_EQ(differ, 0u);
+  size_t padding = 0;
+  for (size_t i = 0; i < WORDS; i++) padding += rx[i] == 0x5a5a5a5au;
+  ASSERT_EQ(padding, (size_t)WORDS - (size_t)W * H);
+
+  /* And out again: a tiled source blitted onto a linear surface is the linear scene. */
+  oops_surface_t sb = {back, W, H, W, OOPS_SURFACE_LINEAR};
+  oops_draw_blit(&sb, 0, 0, &sr, 0, 0, W, H);
+  ASSERT_EQ(memcmp(back, lin, (size_t)W * H * sizeof(uint32_t)), 0);
+
+  free(back);
+  free(rx);
+  free(lin);
+}
+
 void run_unit_tests_draw(void) {
 
   TEST_SUITE_BEGIN("2D Graphics Canvas & Primitives");
@@ -304,4 +371,5 @@ void run_unit_tests_draw(void) {
   RUN_TEST(test_draw_text_width_and_lowercase);
   RUN_TEST(test_draw_blend_primitives);
   RUN_TEST(test_draw_png_decode);
+  RUN_TEST(test_draw_rx_layout_matches_linear);
 }

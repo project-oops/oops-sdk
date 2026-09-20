@@ -1,4 +1,5 @@
 #include "oops/display.h"
+#include "oops/draw.h"
 #include "oops/target.h"
 
 #if OOPS_TARGET_IS_PROSPERO
@@ -11,6 +12,8 @@
 
 struct oops_display {
   oops_display_backend_t backend;
+  /* A renderer draws the scanout buffers in place (oops_display_use_scanout). */
+  int use_scanout;
 #if OOPS_TARGET_IS_PROSPERO
   agc_display_t *agc;
 #else
@@ -32,6 +35,7 @@ oops_display_t *oops_display_open(oops_display_backend_t backend,
     oops_display_close(disp);
   }
   disp->backend = backend;
+  disp->use_scanout = 0;
 
 #if OOPS_TARGET_IS_PROSPERO
   /* Prospero / Trinity native target: AGC graphics */
@@ -182,6 +186,100 @@ int oops_display_flip(oops_display_t *disp) {
 #endif
 }
 
+int oops_display_present(oops_display_t *disp, const uint32_t *pixels) {
+  if (!disp)
+    return -1;
+#if OOPS_TARGET_IS_PROSPERO
+  return agc_display_present(disp->agc, pixels);
+#else
+  return gnm_display_present(disp->gnm, pixels);
+#endif
+}
+
+int oops_display_read_shown(oops_display_t *disp, uint32_t *pixels) {
+  if (!disp)
+    return -1;
+#if OOPS_TARGET_IS_PROSPERO
+  return agc_display_read_shown(disp->agc, pixels);
+#else
+  return gnm_display_read_shown(disp->gnm, pixels);
+#endif
+}
+
+oops_display_scanout_layout_t
+oops_display_scanout_layout(const oops_display_t *disp) {
+  if (!disp)
+    return OOPS_DISPLAY_SCANOUT_NONE;
+#if OOPS_TARGET_IS_PROSPERO
+  return (oops_display_scanout_layout_t)agc_display_scanout_layout(disp->agc);
+#else
+  return (oops_display_scanout_layout_t)gnm_display_scanout_layout(disp->gnm);
+#endif
+}
+
+uint32_t *oops_display_scanout(oops_display_t *disp, int which) {
+  if (!disp)
+    return (uint32_t *)0;
+#if OOPS_TARGET_IS_PROSPERO
+  return agc_display_scanout(disp->agc, which);
+#else
+  return gnm_display_scanout(disp->gnm, which);
+#endif
+}
+
+int oops_display_wait_scanout(oops_display_t *disp) {
+  if (!disp)
+    return -1;
+#if OOPS_TARGET_IS_PROSPERO
+  return agc_display_wait_scanout(disp->agc);
+#else
+  return gnm_display_wait_scanout(disp->gnm);
+#endif
+}
+
+int oops_display_flip_scanout(oops_display_t *disp) {
+  if (!disp)
+    return -1;
+#if OOPS_TARGET_IS_PROSPERO
+  return agc_display_flip_scanout(disp->agc);
+#else
+  return gnm_display_flip_scanout(disp->gnm);
+#endif
+}
+
+oops_display_scanout_layout_t oops_display_use_scanout(oops_display_t *disp) {
+  const oops_display_scanout_layout_t layout = oops_display_scanout_layout(disp);
+  if (layout != OOPS_DISPLAY_SCANOUT_NONE)
+    disp->use_scanout = 1;
+  return layout;
+}
+
+/* Here rather than with the drawing calls, because which buffer the next flip
+ * shows is the display's to know. A program that flips its framebuffer draws
+ * on that, linear. A renderer drawing the scanout buffers in place has the next
+ * one described in its own layout, so a CPU overlay - a HUD over a GL frame -
+ * lands in what is flipped rather than in a framebuffer nothing shows. */
+oops_surface_t oops_display_get_surface(oops_display_t *disp) {
+  oops_surface_t surf = {NULL, 0, 0, 0, OOPS_SURFACE_LINEAR};
+  if (!disp)
+    return surf;
+  surf.width = oops_display_get_width(disp);
+  surf.height = oops_display_get_height(disp);
+  if (disp->use_scanout) {
+    surf.pixels = oops_display_scanout(disp, 0);
+    if (oops_display_scanout_layout(disp) == OOPS_DISPLAY_SCANOUT_RX) {
+      surf.layout = OOPS_SURFACE_RX;
+      surf.pitch = (surf.width + 127u) & ~127u;
+    } else {
+      surf.pitch = surf.width;
+    }
+    return surf;
+  }
+  surf.pixels = oops_display_get_framebuffer(disp);
+  surf.pitch = surf.width;
+  return surf;
+}
+
 void oops_display_close(oops_display_t *disp) {
   if (!disp)
     return;
@@ -245,6 +343,37 @@ __attribute__((weak)) void gnm_display_clear(gnm_display_t *disp,
   (void)color;
 }
 __attribute__((weak)) int gnm_display_flip(gnm_display_t *disp) {
+  (void)disp;
+  return -1;
+}
+__attribute__((weak)) int gnm_display_present(gnm_display_t *disp,
+                                              const uint32_t *pixels) {
+  (void)disp;
+  (void)pixels;
+  return -1;
+}
+__attribute__((weak)) int gnm_display_read_shown(gnm_display_t *disp,
+                                                 uint32_t *pixels) {
+  (void)disp;
+  (void)pixels;
+  return -1;
+}
+__attribute__((weak)) int
+gnm_display_scanout_layout(const gnm_display_t *disp) {
+  (void)disp;
+  return 0;
+}
+__attribute__((weak)) uint32_t *gnm_display_scanout(gnm_display_t *disp,
+                                                    int which) {
+  (void)disp;
+  (void)which;
+  return (uint32_t *)0;
+}
+__attribute__((weak)) int gnm_display_wait_scanout(gnm_display_t *disp) {
+  (void)disp;
+  return -1;
+}
+__attribute__((weak)) int gnm_display_flip_scanout(gnm_display_t *disp) {
   (void)disp;
   return -1;
 }
@@ -313,6 +442,37 @@ __attribute__((weak)) void agc_display_clear(agc_display_t *disp,
   (void)color;
 }
 __attribute__((weak)) int agc_display_flip(agc_display_t *disp) {
+  (void)disp;
+  return -1;
+}
+__attribute__((weak)) int agc_display_present(agc_display_t *disp,
+                                              const uint32_t *pixels) {
+  (void)disp;
+  (void)pixels;
+  return -1;
+}
+__attribute__((weak)) int agc_display_read_shown(agc_display_t *disp,
+                                                 uint32_t *pixels) {
+  (void)disp;
+  (void)pixels;
+  return -1;
+}
+__attribute__((weak)) int
+agc_display_scanout_layout(const agc_display_t *disp) {
+  (void)disp;
+  return 0;
+}
+__attribute__((weak)) uint32_t *agc_display_scanout(agc_display_t *disp,
+                                                    int which) {
+  (void)disp;
+  (void)which;
+  return (uint32_t *)0;
+}
+__attribute__((weak)) int agc_display_wait_scanout(agc_display_t *disp) {
+  (void)disp;
+  return -1;
+}
+__attribute__((weak)) int agc_display_flip_scanout(agc_display_t *disp) {
   (void)disp;
   return -1;
 }

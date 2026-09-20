@@ -24,6 +24,17 @@ int agc_display_get_last_error(const agc_display_t *disp);
 int agc_display_get_video_handle(const agc_display_t *disp);
 void agc_display_clear(agc_display_t *disp, uint32_t color);
 int agc_display_flip(agc_display_t *disp);
+/* A caller's linear image on screen, tiled and flipped as agc_display_flip does
+ * its own; the display's linear surface is untouched. */
+int agc_display_present(agc_display_t *disp, const uint32_t *pixels);
+/* The image on screen, detiled into a linear width x height image. */
+int agc_display_read_shown(agc_display_t *disp, uint32_t *pixels);
+/* The scanout buffers for a renderer that draws them itself - see
+ * oops_display_scanout_layout in <oops/display.h>, whose values these return. */
+int agc_display_scanout_layout(const agc_display_t *disp);
+uint32_t *agc_display_scanout(agc_display_t *disp, int which);
+int agc_display_wait_scanout(agc_display_t *disp);
+int agc_display_flip_scanout(agc_display_t *disp);
 void agc_display_close(agc_display_t *disp);
 
 /*

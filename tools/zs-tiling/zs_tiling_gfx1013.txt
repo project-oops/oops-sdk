@@ -1,0 +1,17 @@
+zs-tiling: ADDR_SW_64KB_Z_X, family 0x8F revision 0x82, pipeBankXor 0
+
+  depth, Z_32_FLOAT, 32 bits a pixel
+    block 128 x 128; a 3 x 2 block surface is pitch 384, height 256, 393216 bytes
+    x basis {0x00004, 0x00010, 0x00040, 0x00100, 0x02200, 0x00800, 0x08400}
+    y basis {0x00008, 0x00020, 0x00080, 0x01100, 0x00200, 0x00400, 0x04800}
+    linear per block, blocks row-major: 0 of 98304 pixels disagree
+    control, 8 pipes: a different basis, as it must be
+
+  stencil, STENCIL_8, 8 bits a pixel
+    block 256 x 256; a 3 x 2 block surface is pitch 768, height 512, 393216 bytes
+    x basis {0x00001, 0x00004, 0x00010, 0x00140, 0x00200, 0x00800, 0x02400, 0x08000}
+    y basis {0x00002, 0x00008, 0x00020, 0x00100, 0x00280, 0x00400, 0x01800, 0x04000}
+    linear per block, blocks row-major: 0 of 393216 pixels disagree
+    control, 8 pipes: a different basis, as it must be
+
+  VERDICT: each surface is block-linear in these vectors; usable

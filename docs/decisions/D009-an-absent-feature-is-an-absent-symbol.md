@@ -39,6 +39,12 @@ other reason"**:
 `glEnable` has to exist to enable depth testing, so it is the right place to say that fog does
 not exist here. `glFogf` has no other job.
 
+> The second row is the absent set as it stood on 2026-09-17. By 2026-09-19 **all of it had been
+> implemented** - fog and stencil in software, `glBitmap`, `glDrawPixels`, `glTexGen*`,
+> `glIndex*`, the evaluators, selection, both stipples and `glAccum*` - which is the answer the
+> last section below gives. With 3D textures the same day, every core GL 1.0-1.3 entry point is
+> declared; `GL_ROADMAP.md` keeps what is still absent below the entry-point level.
+
 **A feature that is partly present still refuses rather than half-works.** `glBegin(GL_POINTS)`
 is refused because points cannot be drawn (measured, `REQ-...-9b71`), and `glBegin` stays.
 

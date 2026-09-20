@@ -18,6 +18,9 @@ how a consumer wires it into a Makefile.
 - **[API_REFERENCE.md](API_REFERENCE.md)** - Comprehensive technical reference documenting all 25 subsystem headers in `include/oops/`, their C functions, error codes, and hardware invariants.
 - **[BUILDING.md](BUILDING.md)** - `bin/oops-sdk`, what each verb does, why the build is a
   cross-compile even on Linux, and what a consumer has to do to link the result.
+- **[PORTING.md](PORTING.md)** - for someone holding a GL 1.x program: what of GL, GLU, GLUT and
+  the C library is here, what is absent and fails to link rather than misbehaving, the entry
+  point a payload needs, and the symbol-table check that catches what a clean build does not.
 
 ## Project memory
 

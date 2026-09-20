@@ -4,6 +4,53 @@
 
 #include "GL/gl.h"
 #include "GL/glu.h"
+#include "GL/glut.h"
+
+/*
+ * **Every extension spelling is the same value as the core one it aliases.**
+ *
+ * These were written as `#define GL_DEPTH_COMPONENT16_ARB GL_DEPTH_COMPONENT16`, which cannot be
+ * wrong, and on 2026-09-20 that turned out to be unbuildable: a hosted title includes this
+ * header and Mesa's `GL/glext.h`, which defines the same names as literals, and a macro
+ * redefined with a *different* token sequence is a diagnostic under `-Werror` even when the
+ * value is identical. They are literals now - and a literal can be mistyped, which the old form
+ * could not. That is the whole reason for what follows.
+ *
+ * Compile-time, because a wrong one should stop the build rather than wait for a test to run
+ * the one call that uses it. A port passes `GL_TEXTURE_WRAP_R_EXT` to `glTexParameteri` and
+ * gets `GL_INVALID_ENUM` if the digit is wrong, which is a long way from the typo.
+ */
+_Static_assert(GL_DEPTH_COMPONENT16_ARB == GL_DEPTH_COMPONENT16, "alias value");
+_Static_assert(GL_DEPTH_COMPONENT24_ARB == GL_DEPTH_COMPONENT24, "alias value");
+_Static_assert(GL_DEPTH_COMPONENT32_ARB == GL_DEPTH_COMPONENT32, "alias value");
+_Static_assert(GL_TEXTURE_DEPTH_SIZE_ARB == GL_TEXTURE_DEPTH_SIZE, "alias value");
+_Static_assert(GL_DEPTH_TEXTURE_MODE_ARB == GL_DEPTH_TEXTURE_MODE, "alias value");
+_Static_assert(GL_TEXTURE_COMPARE_MODE_ARB == GL_TEXTURE_COMPARE_MODE, "alias value");
+_Static_assert(GL_TEXTURE_COMPARE_FUNC_ARB == GL_TEXTURE_COMPARE_FUNC, "alias value");
+_Static_assert(GL_COMPARE_R_TO_TEXTURE_ARB == GL_COMPARE_R_TO_TEXTURE, "alias value");
+_Static_assert(GL_SAMPLES_PASSED_ARB == GL_SAMPLES_PASSED, "alias value");
+_Static_assert(GL_QUERY_COUNTER_BITS_ARB == GL_QUERY_COUNTER_BITS, "alias value");
+_Static_assert(GL_CURRENT_QUERY_ARB == GL_CURRENT_QUERY, "alias value");
+_Static_assert(GL_QUERY_RESULT_ARB == GL_QUERY_RESULT, "alias value");
+_Static_assert(GL_QUERY_RESULT_AVAILABLE_ARB == GL_QUERY_RESULT_AVAILABLE, "alias value");
+_Static_assert(GL_PACK_SKIP_IMAGES_EXT == GL_PACK_SKIP_IMAGES, "alias value");
+_Static_assert(GL_PACK_IMAGE_HEIGHT_EXT == GL_PACK_IMAGE_HEIGHT, "alias value");
+_Static_assert(GL_UNPACK_SKIP_IMAGES_EXT == GL_UNPACK_SKIP_IMAGES, "alias value");
+_Static_assert(GL_UNPACK_IMAGE_HEIGHT_EXT == GL_UNPACK_IMAGE_HEIGHT, "alias value");
+_Static_assert(GL_TEXTURE_3D_EXT == GL_TEXTURE_3D, "alias value");
+_Static_assert(GL_PROXY_TEXTURE_3D_EXT == GL_PROXY_TEXTURE_3D, "alias value");
+_Static_assert(GL_TEXTURE_DEPTH_EXT == GL_TEXTURE_DEPTH, "alias value");
+_Static_assert(GL_TEXTURE_WRAP_R_EXT == GL_TEXTURE_WRAP_R, "alias value");
+_Static_assert(GL_MAX_3D_TEXTURE_SIZE_EXT == GL_MAX_3D_TEXTURE_SIZE, "alias value");
+_Static_assert(GL_TEXTURE_BINDING_3D_EXT == GL_TEXTURE_BINDING_3D, "alias value");
+_Static_assert(GL_ACTIVE_TEXTURE_ARB == GL_ACTIVE_TEXTURE, "alias value");
+_Static_assert(GL_CLIENT_ACTIVE_TEXTURE_ARB == GL_CLIENT_ACTIVE_TEXTURE, "alias value");
+_Static_assert(GL_MAX_TEXTURE_UNITS_ARB == GL_MAX_TEXTURE_UNITS, "alias value");
+/* The texture-unit selectors are a run of thirty-two; the two ends and a middle one pin it. */
+_Static_assert(GL_TEXTURE0_ARB == GL_TEXTURE0, "alias value");
+_Static_assert(GL_TEXTURE7_ARB == GL_TEXTURE7, "alias value");
+_Static_assert(GL_TEXTURE31_ARB == GL_TEXTURE31, "alias value");
+_Static_assert(GL_TEXTURE31 - GL_TEXTURE0 == 31, "the selectors are consecutive");
 #include "oops/display.h"
 /* The texture tests read a texture's own storage rather than a sampled result: a sampled check
  * would also pass if an update landed in the wrong place and the sampler happened to fetch the
@@ -254,6 +301,10 @@ static void test_gl_texture_rendering(void) {
         0, 0, 255, 255
     };
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue_pixels);
+    /* A filter that reads no mipmaps: with the default GL_NEAREST_MIPMAP_LINEAR and one level,
+     * the texture is incomplete and draws untextured - as on any GL. This test sampled an
+     * incomplete texture until completeness was implemented on 2026-09-19. */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glEnable(GL_TEXTURE_2D);
 
     glMatrixMode(GL_PROJECTION);
@@ -534,6 +585,7 @@ static void test_gl_texture_env_modes(void) {
     glBindTexture(GL_TEXTURE_2D, tex_id);
     uint32_t white_tex[4] = {0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff};
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, white_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); /* complete with one level */
     glEnable(GL_TEXTURE_2D);
 
     glViewport(0, 0, 320, 240);
@@ -657,7 +709,14 @@ static void test_gl_unsupported_primitive_mode_is_refused(void) {
     glVertex3f( 0.9f, 0.0f, 0.0f);
     glEnd();
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
-    ASSERT_TRUE(fb[240 / 2 * 320 + 320 / 2] != 0xff000000u);
+    /* **One row thick.** The line lies exactly between two rows of pixel centres, on its quad's
+     * edges; both rows were drawn until the rasteriser's tie rule (2026-09-19), a width-1 line
+     * two pixels thick. Now exactly one of them is. */
+    {
+        const GLboolean above = (GLboolean)(fb[(240 / 2 - 1) * 320 + 320 / 2] != 0xff000000u);
+        const GLboolean below = (GLboolean)(fb[240 / 2 * 320 + 320 / 2] != 0xff000000u);
+        ASSERT_TRUE(above != below);
+    }
 
     /* An enum that is not a primitive mode at all is still refused. */
     glBegin((GLenum)0xdeadbeefu);
@@ -787,37 +846,258 @@ static void test_gl_strings_are_honest_and_parseable(void) {
     ASSERT_TRUE(version[0] >= '0' && version[0] <= '9');
     ASSERT_TRUE(strncmp((const char *)version, "1.1", 3) == 0);
 
+    /* **The version is the caller's to state** (2026-09-20). A port written against a later 1.x
+     * checks the badge before calling something this library does have, so it can say what it
+     * targets - and nothing else changes: the suffix still says subset, and the same calls are
+     * implemented either way. */
+    GLuint maj = 0u, min = 9u;
+    glContextGetVersion(&maj, &min);
+    ASSERT_EQ(maj, 1u);
+    ASSERT_EQ(min, 1u);
+    ASSERT_EQ(glContextSetVersion(1, 4), GL_TRUE);
+    version = glGetString(GL_VERSION);
+    ASSERT_TRUE(strncmp((const char *)version, "1.4", 3) == 0);
+    ASSERT_TRUE(strstr((const char *)version, "subset") != NULL);
+    glContextGetVersion(&maj, &min);
+    ASSERT_EQ(min, 4u);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    /* Not above 1.x, and a refusal leaves the version alone rather than half-setting it. */
+    ASSERT_EQ(glContextSetVersion(2, 0), GL_FALSE);
+    ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+    ASSERT_EQ(glContextSetVersion(1, 6), GL_FALSE);
+    ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+    version = glGetString(GL_VERSION);
+    ASSERT_TRUE(strncmp((const char *)version, "1.4", 3) == 0);
+
+    ASSERT_EQ(glContextSetVersion(1, 1), GL_TRUE);
+    version = glGetString(GL_VERSION);
+    ASSERT_TRUE(strncmp((const char *)version, "1.1", 3) == 0);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
     /* The brand that used to be in GL_RENDERER is not in any of them (conventions 2). */
     const GLubyte *renderer = glGetString(GL_RENDERER);
     ASSERT_TRUE(renderer != NULL);
     ASSERT_TRUE(strstr((const char *)renderer, "PlayStation") == NULL);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **The extension list names no extension, because none of them is supported.**
+    /* **The extension list names what this library implements under the name a program looks
+     * for** (2026-09-19; empty before that).
      *
-     * An extension string is a promise about that extension's own entry points. This used to
-     * say `GL_EXT_vertex_array` while `glVertexPointerEXT`, `glDrawArraysEXT` and
-     * `glArrayElementEXT` did not exist - only the core spellings did. The same reasoning kept
-     * `GL_ARB_vertex_buffer_object` out when buffer objects landed.
+     * An extension string is a promise about that extension's own entry points, which is why it
+     * was empty while only the core spellings existed. The entry points are here now
+     * (test_gl_extension_entry_points_are_the_core_ones), so the extensions are listed - and
+     * those that need no entry point, only state, beside them.
      *
-     * Asserted by the rule rather than by the exact text, so a genuinely supported extension
-     * can be added later: every name in the list must end in a suffix this library actually
-     * provides entry points for, and today there are none. */
+     * Asserted by the rule and by both ends: every name begins with `GL_` and appears once;
+     * extensions whose entry points exist are named; extensions this library does not keep on
+     * every path are not. This context is the software rasteriser, which applies both texture
+     * units, so GL_ARB_multitexture is on its list. */
     const GLubyte *ext = glGetString(GL_EXTENSIONS);
-    ASSERT_TRUE(ext != NULL); /* empty, not NULL: "no extensions" is a real answer */
-    ASSERT_EQ(ext[0], '\0');
-    ASSERT_TRUE(strstr((const char *)ext, "GL_EXT_vertex_array") == NULL);
+    ASSERT_TRUE(ext != NULL);
+    ASSERT_TRUE(ext[0] != '\0');
+    const char *ext_s = (const char *)ext;
+    ASSERT_TRUE(strncmp(ext_s, "GL_", 3) == 0);
+    ASSERT_TRUE(strstr(ext_s, "  ") == NULL);
+    ASSERT_TRUE(ext_s[strlen(ext_s) - 1] != ' ');
+    for (const char *p = strchr(ext_s, ' '); p; p = strchr(p + 1, ' ')) {
+        ASSERT_TRUE(strncmp(p + 1, "GL_", 3) == 0);
+    }
+    static const char *const listed[] = {
+        "GL_ARB_multitexture", "GL_ARB_vertex_buffer_object", "GL_ARB_window_pos",
+        "GL_ARB_transpose_matrix", "GL_ARB_point_parameters", "GL_ARB_texture_env_combine",
+        "GL_ARB_texture_env_dot3", "GL_ARB_texture_mirrored_repeat", "GL_EXT_secondary_color",
+        "GL_EXT_fog_coord", "GL_EXT_draw_range_elements", "GL_EXT_multi_draw_arrays",
+        "GL_EXT_blend_color", "GL_EXT_blend_minmax", "GL_EXT_blend_subtract", "GL_EXT_bgra",
+        "GL_EXT_stencil_wrap", "GL_EXT_separate_specular_color", "GL_EXT_texture_lod_bias",
+        /* Since 2026-09-20: it adds no entry point, only targets, enums and the two cube-map
+         * generation modes, and both paths keep all of them. */
+        "GL_ARB_texture_cube_map",
+        /* Since 2026-09-20, when the console gained the volume sample. Its two entry points
+         * arrived with it - the check below calls them. */
+        "GL_EXT_texture3D",
+        /* Since 2026-09-20, when the console gained the comparison sample. Neither adds an entry
+         * point: a depth texture is glTexImage2D with a GL_DEPTH_COMPONENT internal format and
+         * the comparison is glTexParameteri, both of which every path has. */
+        "GL_ARB_depth_texture", "GL_ARB_shadow",
+        /* Since 2026-09-20, when the GPU started counting. Its eight entry points arrived with
+         * it - the check below calls them. */
+        "GL_ARB_occlusion_query",
+    };
+    for (size_t i = 0; i < sizeof(listed) / sizeof(listed[0]); i++) {
+        const char *first = strstr(ext_s, listed[i]);
+        ASSERT_TRUE(first != NULL);
+        ASSERT_TRUE(strstr(first + 1, listed[i]) == NULL); /* once */
+    }
+    /* Not listed: no entry points of its own here. `glVertexPointer` and its kin are core, not
+     * GL_EXT_vertex_array's `glVertexPointerEXT`. */
+    static const char *const absent[] = {
+        "GL_EXT_vertex_array",
+    };
+    for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+        ASSERT_TRUE(strstr(ext_s, absent[i]) == NULL);
+    }
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* An unrecognised name is NULL plus an error, not an empty string that reads as a real
-     * answer of "nothing". The contrast with GL_EXTENSIONS above is the point: empty is the
-     * true answer to "which extensions", and no answer at all is the true answer to a name
-     * this does not know. */
+    /* An unrecognised name is NULL plus an error, not an empty string, which would read as a
+     * real answer of "nothing" rather than as a refusal. */
     ASSERT_TRUE(glGetString((GLenum)0x1234u) == NULL);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
     glContextDestroy(ctx);
     oops_display_close(disp);
+}
+
+/* **Every extension in the list has its entry points, and they are the core functions**
+ * (2026-09-19). A port finds an extension in glGetString's list and calls that extension's own
+ * names; each one here is checked to do what the core spelling does. They exist at all only
+ * because the linker resolved them, which is half the point - the other half is that they are
+ * not stubs. */
+static void test_gl_extension_entry_points_are_the_core_ones(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+  void *ctx_handle = glContextCreate(disp);
+  (void)glGetError();
+  GLint iv[4];
+  GLfloat fv[16];
+
+  /* GL_ARB_vertex_buffer_object: a buffer generated, filled, read back and mapped through the
+   * ARB names, and seen by the core ones. */
+  GLuint buf = 0;
+  glGenBuffersARB(1, &buf);
+  ASSERT_TRUE(buf != 0u);
+  ASSERT_EQ(glIsBufferARB(buf), GL_TRUE);
+  glBindBufferARB(GL_ARRAY_BUFFER, buf);
+  glGetIntegerv(GL_ARRAY_BUFFER_BINDING, iv);
+  ASSERT_EQ(iv[0], (GLint)buf);
+  static const GLfloat data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  glBufferDataARB(GL_ARRAY_BUFFER, (GLsizeiptrARB)sizeof(data), data, GL_STATIC_DRAW);
+  glGetBufferParameterivARB(GL_ARRAY_BUFFER, GL_BUFFER_SIZE, iv);
+  ASSERT_EQ(iv[0], (GLint)sizeof(data));
+  GLfloat back[4] = {0};
+  glGetBufferSubDataARB(GL_ARRAY_BUFFER, 0, (GLsizeiptrARB)sizeof(back), back);
+  ASSERT_TRUE(back[2] == 3.0f);
+  const GLfloat two = 9.0f;
+  glBufferSubDataARB(GL_ARRAY_BUFFER, (GLintptrARB)sizeof(GLfloat), (GLsizeiptrARB)sizeof(two), &two);
+  void *mapped = glMapBufferARB(GL_ARRAY_BUFFER, GL_READ_ONLY);
+  ASSERT_TRUE(mapped != NULL && ((const GLfloat *)mapped)[1] == 9.0f);
+  void *ptr = NULL;
+  glGetBufferPointervARB(GL_ARRAY_BUFFER, GL_BUFFER_MAP_POINTER, &ptr);
+  ASSERT_TRUE(ptr == mapped);
+  ASSERT_EQ(glUnmapBufferARB(GL_ARRAY_BUFFER), GL_TRUE);
+  glBindBufferARB(GL_ARRAY_BUFFER, 0);
+  glDeleteBuffersARB(1, &buf);
+  ASSERT_EQ(glIsBufferARB(buf), GL_FALSE);
+
+  /* GL_EXT_secondary_color and GL_EXT_fog_coord: the current values the core queries report. */
+  glSecondaryColor3fEXT(0.25f, 0.5f, 0.75f);
+  glGetFloatv(GL_CURRENT_SECONDARY_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 0.25f && fv[1] == 0.5f && fv[2] == 0.75f);
+  static const GLubyte sec_ub[3] = {255, 0, 255};
+  glSecondaryColor3ubvEXT(sec_ub);
+  glGetFloatv(GL_CURRENT_SECONDARY_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 1.0f && fv[1] == 0.0f);
+  glFogCoordfEXT(2.5f);
+  glGetFloatv(GL_CURRENT_FOG_COORD, fv);
+  ASSERT_TRUE(fv[0] == 2.5f);
+
+  /* GL_ARB_window_pos, GL_ARB_transpose_matrix, GL_ARB_point_parameters, GL_EXT_blend_*. */
+  glWindowPos2iARB(7, 9);
+  glGetFloatv(GL_CURRENT_RASTER_POSITION, fv);
+  ASSERT_TRUE(fv[0] == 7.0f && fv[1] == 9.0f); /* the position as given, z from the depth range */
+  static const GLfloat rows[16] = {1, 2, 3, 4, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  glMatrixMode(GL_MODELVIEW);
+  glLoadTransposeMatrixfARB(rows);
+  glGetFloatv(GL_MODELVIEW_MATRIX, fv);
+  ASSERT_TRUE(fv[0] == 1.0f && fv[1] == 0.0f && fv[4] == 2.0f && fv[12] == 4.0f);
+  glLoadIdentity();
+  glPointParameterfARB(GL_POINT_SIZE_MIN, 2.0f);
+  glGetFloatv(GL_POINT_SIZE_MIN, fv);
+  ASSERT_TRUE(fv[0] == 2.0f);
+  glPointParameterfEXT(GL_POINT_SIZE_MIN, 1.0f);
+  glBlendColorEXT(0.5f, 0.25f, 0.125f, 1.0f);
+  glGetFloatv(GL_BLEND_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 0.5f && fv[2] == 0.125f);
+  glBlendEquationEXT(GL_FUNC_SUBTRACT);
+  glGetIntegerv(GL_BLEND_EQUATION, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_FUNC_SUBTRACT);
+  glBlendEquationEXT(GL_FUNC_ADD);
+
+  /* GL_ARB_occlusion_query: a query generated, run and read through the ARB names and seen by
+   * the core ones - `glGetQueryiv(GL_CURRENT_QUERY)` and `glIsQuery` reporting what an ARB begin
+   * did is what says these share the state rather than each keeping their own.
+   *
+   * `glIsQuery` is false for a generated-but-never-begun name, which is GL's rule and Mesa's
+   * (`main/queryobj.c`): the name is reserved, the object exists only once begun. */
+  {
+    GLuint aq = 0;
+    glGenQueriesARB(1, &aq);
+    ASSERT_TRUE(aq != 0u);
+    ASSERT_EQ(glIsQueryARB(aq), GL_FALSE);
+    glGetQueryivARB(GL_SAMPLES_PASSED_ARB, GL_QUERY_COUNTER_BITS_ARB, iv);
+    ASSERT_EQ(iv[0], 32);
+    glBeginQueryARB(GL_SAMPLES_PASSED_ARB, aq);
+    /* The core calls see what the ARB one did: the name is current, and the object now exists. */
+    glGetQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, iv);
+    ASSERT_EQ(iv[0], (GLint)aq);
+    ASSERT_EQ(glIsQuery(aq), GL_TRUE);
+    glEndQueryARB(GL_SAMPLES_PASSED_ARB);
+    glGetQueryObjectivARB(aq, GL_QUERY_RESULT_AVAILABLE_ARB, iv);
+    ASSERT_EQ(iv[0], (GLint)GL_TRUE);
+    GLuint samples = 0xffffffffu;
+    glGetQueryObjectuivARB(aq, GL_QUERY_RESULT_ARB, &samples);
+    ASSERT_EQ(samples, 0u); /* nothing was drawn between the two */
+    glDeleteQueriesARB(1, &aq);
+    ASSERT_EQ(glIsQueryARB(aq), GL_FALSE);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  }
+
+  /* GL_EXT_texture3D: a volume uploaded and sub-uploaded through the EXT names, and the core
+   * queries reporting what they made - the enums under their EXT spellings too, which are what
+   * a program of that era writes. */
+  {
+    GLuint vol = 0;
+    static const GLubyte voxels[2 * 2 * 2 * 4] = {0};
+    static const GLubyte one[4] = {9, 9, 9, 255};
+    glGenTextures(1, &vol);
+    glBindTexture(GL_TEXTURE_3D_EXT, vol);
+    glTexImage3DEXT(GL_TEXTURE_3D_EXT, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, voxels);
+    glGetTexLevelParameteriv(GL_TEXTURE_3D, 0, GL_TEXTURE_DEPTH_EXT, iv);
+    ASSERT_EQ(iv[0], 2);
+    glTexSubImage3DEXT(GL_TEXTURE_3D_EXT, 0, 1, 1, 1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, one);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glGetIntegerv(GL_TEXTURE_BINDING_3D_EXT, iv);
+    ASSERT_EQ(iv[0], (GLint)vol);
+    glBindTexture(GL_TEXTURE_3D_EXT, 0);
+    glDeleteTextures(1, &vol);
+  }
+
+  /* GL_EXT_draw_range_elements and GL_EXT_multi_draw_arrays draw what the core spellings draw:
+   * a red pixel each, through the arrays. */
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  static const GLfloat quad[8] = {-1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f};
+  static const GLubyte idx[6] = {0, 1, 2, 0, 2, 3};
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(2, GL_FLOAT, 0, quad);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glDrawRangeElementsEXT(GL_TRIANGLES, 0, 3, 6, GL_UNSIGNED_BYTE, idx);
+  ASSERT_EQ(fb[32 * 64 + 32] & 0x00ffffffu, 0x00ff0000u);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColor3f(0.0f, 1.0f, 0.0f);
+  static const GLint first[1] = {0};
+  static const GLsizei counts[1] = {4};
+  glMultiDrawArraysEXT(GL_QUADS, first, counts, 1);
+  ASSERT_EQ(fb[32 * 64 + 32] & 0x00ffffffu, 0x0000ff00u);
+  glDisableClientState(GL_VERTEX_ARRAY);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
 }
 
 /* Capabilities, client arrays and matrix modes this subset does not have are refused.
@@ -839,12 +1119,22 @@ static void test_gl_unsupported_state_enums_are_refused(void) {
      * them.
      *
      * **GL_STENCIL_TEST used to be the first example here and is implemented now**, as
-     * GL_ALPHA_TEST and GL_FOG were before it. That is this test doing its job twice over: a refusal that
-     * stops being a refusal shows up as a failure rather than as silence. */
-    glEnable((GLenum)0x0B20u); /* GL_LINE_SMOOTH */
+     * GL_ALPHA_TEST and GL_FOG were before it, and GL_LINE_SMOOTH after it. That is this test
+     * doing its job again and again: a refusal that stops being a refusal shows up as a failure
+     * rather than as silence. GL 1.4's GL_COLOR_SUM stood here until 2026-09-19, and was the
+     * last GL 1.x core enable to go; GL 2.0's GL_POINT_SPRITE is next. */
+    glEnable((GLenum)0x8861u); /* GL_POINT_SPRITE */
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-    glDisable((GLenum)0x0BD0u); /* GL_DITHER */
+    /* GL_CONVOLUTION_1D: the imaging subset, which is optional and not advertised, so refusing
+     * it is conformant for good. (GL_DITHER stood here until 2026-09-19; it is on by default in
+     * every GL context and is accepted as state now.) */
+    glDisable((GLenum)0x8010u);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+    ASSERT_EQ(glIsEnabled(GL_DITHER), GL_TRUE);
+    glDisable(GL_DITHER);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_EQ(glIsEnabled(GL_DITHER), GL_FALSE);
+    glEnable(GL_DITHER);
     /* And the ones that left this list are accepted, each with its own state. */
     glEnable(GL_ALPHA_TEST);
     glAlphaFunc(GL_GREATER, 0.5f);
@@ -869,8 +1159,13 @@ static void test_gl_unsupported_state_enums_are_refused(void) {
     ASSERT_EQ(glIsEnabled(GL_DEPTH_TEST), GL_FALSE);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* Client arrays. */
-    glEnableClientState((GLenum)0x8077u); /* GL_INDEX_ARRAY */
+    /* Client arrays. GL_INDEX_ARRAY was the refused example until 2026-09-19; it is colour-index
+     * state, which an RGBA context keeps, so it is accepted now. An enum that is no array at all
+     * is what is refused. */
+    glEnableClientState(GL_INDEX_ARRAY);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glDisableClientState(GL_INDEX_ARRAY);
+    glEnableClientState((GLenum)GL_TEXTURE_2D);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glEnableClientState(GL_VERTEX_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
@@ -944,6 +1239,846 @@ static void test_gl_hardware_badge_does_not_overclaim(void) {
  * glFrustum, glLoadMatrixf, glMultMatrixf and glScalef were reachable and untested. Each is
  * arithmetic that is silently wrong when it is wrong - geometry still appears, in the wrong
  * place - so the values are checked against what the specification says they should be. */
+/*
+ * GLU's image and coordinate functions - what a port calls that GL itself does not provide.
+ *
+ * The mipmap check is the one with teeth: a chain built by sampling the *original* at each level
+ * looks right at level 1 and wrong further down, where a level must be the average of everything
+ * above it. A 4x4 of known values makes that visible - the 1x1 level is the mean of all sixteen
+ * texels only if each level was built from the one above.
+ */
+static void test_gl_glu_scales_projects_and_builds_mipmaps(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
+    void *ctx = glContextCreate(disp);
+
+    /* **gluScaleImage**, halving: each output pixel is the average of its 2x2 footprint. */
+    static const GLubyte in4[4 * 4 * 4] = {
+        0,0,0,255,      40,0,0,255,     80,0,0,255,     120,0,0,255,
+        4,0,0,255,      44,0,0,255,     84,0,0,255,     124,0,0,255,
+        8,0,0,255,      48,0,0,255,     88,0,0,255,     128,0,0,255,
+        12,0,0,255,     52,0,0,255,     92,0,0,255,     132,0,0,255,
+    };
+    GLubyte out2[2 * 2 * 4];
+    ASSERT_EQ(gluScaleImage(GL_RGBA, 4, 4, GL_UNSIGNED_BYTE, in4, 2, 2, GL_UNSIGNED_BYTE, out2), 0);
+    /* Top-left output covers (0,0), (40,0), (4,0), (44,0): mean 22. */
+    ASSERT_TRUE(out2[0] >= 21 && out2[0] <= 23);
+    ASSERT_TRUE(out2[4] >= 101 && out2[4] <= 103); /* 80, 120, 84, 124 -> 102 */
+    ASSERT_EQ(out2[3], 255);
+
+    /* Magnification replicates rather than interpolating, as GLU's box filter does. */
+    GLubyte out8[8 * 1 * 4];
+    ASSERT_EQ(gluScaleImage(GL_RGBA, 4, 1, GL_UNSIGNED_BYTE, in4, 8, 1, GL_UNSIGNED_BYTE, out8), 0);
+    ASSERT_EQ(out8[0], 0);
+    ASSERT_EQ(out8[4], 0);
+    ASSERT_EQ(out8[8], 40);
+
+    /* Its errors are GLU's, and nothing reaches glGetError. */
+    (void)glGetError();
+    ASSERT_EQ(gluScaleImage(GL_RGBA, 0, 4, GL_UNSIGNED_BYTE, in4, 2, 2, GL_UNSIGNED_BYTE, out2),
+              GLU_INVALID_VALUE);
+    ASSERT_EQ(gluScaleImage(GL_RGBA, 4, 4, GL_BITMAP, in4, 2, 2, GL_UNSIGNED_BYTE, out2),
+              GLU_INVALID_ENUM);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    /* **gluBuild2DMipmaps**: every level down to 1x1, each the average of the one above. */
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    ASSERT_EQ(gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGBA, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, in4), 0);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    GLint w = 0, h = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+    ASSERT_EQ(w, 4);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH, &w);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_HEIGHT, &h);
+    ASSERT_EQ(w, 2);
+    ASSERT_EQ(h, 2);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 2, GL_TEXTURE_WIDTH, &w);
+    ASSERT_EQ(w, 1);
+    GLubyte back[4];
+    glGetTexImage(GL_TEXTURE_2D, 2, GL_RGBA, GL_UNSIGNED_BYTE, back);
+    /* The mean of all sixteen reds is 66. Sampling the original at 1x1 would give one corner. */
+    ASSERT_TRUE(back[0] >= 65 && back[0] <= 67);
+
+    /* The caller's unpack state is put back, not left as the builder needed it. */
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 7);
+    ASSERT_EQ(gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGBA, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, in4), 0);
+    GLint v = 0;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &v);
+    ASSERT_EQ(v, 8);
+    glGetIntegerv(GL_UNPACK_ROW_LENGTH, &v);
+    ASSERT_EQ(v, 7);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+
+    /* **gluProject and gluUnProject** are each other's inverse, through a projection that is not
+     * the identity - an orthographic one would hide a mistake in the w divide. */
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(60.0, 4.0 / 3.0, 1.0, 100.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glTranslatef(0.0f, 0.0f, -10.0f);
+    GLdouble mv[16], pr[16];
+    GLint vp[4] = {0, 0, 320, 240};
+    glGetDoublev(GL_MODELVIEW_MATRIX, mv);
+    glGetDoublev(GL_PROJECTION_MATRIX, pr);
+    GLdouble wx = 0.0, wy = 0.0, wz = 0.0;
+    ASSERT_EQ(gluProject(1.0, 2.0, -3.0, mv, pr, vp, &wx, &wy, &wz), GL_TRUE);
+    /* In front of the eye and inside the viewport, right of centre and above it. */
+    ASSERT_TRUE(wz > 0.0 && wz < 1.0);
+    ASSERT_TRUE(wx > 160.0 && wx < 320.0);
+    ASSERT_TRUE(wy > 120.0 && wy < 240.0);
+    GLdouble ox = 0.0, oy = 0.0, oz = 0.0;
+    ASSERT_EQ(gluUnProject(wx, wy, wz, mv, pr, vp, &ox, &oy, &oz), GL_TRUE);
+    ASSERT_TRUE(ox > 0.999 && ox < 1.001);
+    ASSERT_TRUE(oy > 1.999 && oy < 2.001);
+    ASSERT_TRUE(oz > -3.001 && oz < -2.999);
+
+    /* A point on the eye plane has no window position, and says so rather than dividing by 0.
+     * The modelview translates by -10, so that plane is object z = +10, not -10. */
+    ASSERT_EQ(gluProject(0.0, 0.0, 10.0, mv, pr, vp, &wx, &wy, &wz), GL_FALSE);
+
+    ASSERT_TRUE(gluGetString(GLU_VERSION) != (const GLubyte *)0);
+    ASSERT_TRUE(gluGetString(GL_RGBA) == (const GLubyte *)0);
+
+    glDeleteTextures(1, &tex);
+    glContextDestroy(ctx);
+    oops_display_close(disp);
+}
+
+/*
+ * The GLUT shim's main loop, which is the part a port depends on and the part that cannot be
+ * checked by reading it: that a reshape arrives before the first display, that display runs only
+ * when one has been posted and idle runs otherwise, that a timer fires, and that the loop can be
+ * left - a console program whose only exit is a window close has none otherwise.
+ */
+static int s_glut_display, s_glut_idle, s_glut_reshape, s_glut_timer;
+static int s_glut_reshape_w, s_glut_reshape_h, s_glut_reshape_first;
+
+static void glut_test_display(void) {
+    if (!s_glut_display && !s_glut_reshape) s_glut_reshape_first = 0; /* display came first */
+    s_glut_display++;
+    if (s_glut_display >= 2) glutLeaveMainLoop();
+}
+static void glut_test_idle(void) {
+    s_glut_idle++;
+    /* The second pass has nothing posted, so this runs; post once from here to prove the loop
+     * goes back to the display callback, and leave from there. */
+    if (s_glut_idle == 1) glutPostRedisplay();
+    if (s_glut_idle > 8) glutLeaveMainLoop(); /* a guard, not the expected way out */
+}
+static void glut_test_reshape(int w, int h) {
+    s_glut_reshape++;
+    s_glut_reshape_w = w;
+    s_glut_reshape_h = h;
+}
+static void glut_test_timer(int value) { s_glut_timer += value; }
+
+static void test_gl_glut_main_loop_dispatches_and_can_be_left(void) {
+    s_glut_display = s_glut_idle = s_glut_reshape = s_glut_timer = 0;
+    s_glut_reshape_first = 1;
+    glutInit((int *)0, (char **)0);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(320, 240);
+    glutInitWindowPosition(17, 23); /* accepted and ignored: one window */
+    ASSERT_EQ(glutCreateWindow("test"), 1);
+    ASSERT_EQ(glutGet(GLUT_WINDOW_WIDTH), 320);
+    ASSERT_EQ(glutGet(GLUT_WINDOW_HEIGHT), 240);
+    ASSERT_EQ(glutGet(GLUT_WINDOW_RGBA), 1);
+    ASSERT_EQ(glutGet(GLUT_DISPLAY_MODE_POSSIBLE), 1);
+
+    glutDisplayFunc(glut_test_display);
+    glutIdleFunc(glut_test_idle);
+    glutReshapeFunc(glut_test_reshape);
+    glutTimerFunc(0u, glut_test_timer, 7);
+    glutMainLoop();
+
+    /* It returned, which is the point of glutLeaveMainLoop. */
+    ASSERT_TRUE(s_glut_reshape_first);
+    ASSERT_EQ(s_glut_reshape, 1);
+    ASSERT_EQ(s_glut_reshape_w, 320);
+    ASSERT_EQ(s_glut_reshape_h, 240);
+    /* Twice: once for the redisplay the loop posts itself at the start, once for the one the
+     * idle callback posted. Idle ran in between, which is the alternation GLUT promises. */
+    ASSERT_EQ(s_glut_display, 2);
+    ASSERT_TRUE(s_glut_idle >= 1);
+    ASSERT_EQ(s_glut_timer, 7); /* due immediately, fired once, not repeatedly */
+
+    /* Colour index is the one mode this cannot give, and says so rather than drawing nothing. */
+    glutInitDisplayMode(GLUT_INDEX);
+    ASSERT_EQ(glutGet(GLUT_DISPLAY_MODE_POSSIBLE), 0);
+    glutDestroyWindow(1);
+}
+
+/*
+ * The quadrics, checked through feedback - which reports the vertices a primitive was assembled
+ * from, so the geometry can be read back without a framebuffer.
+ *
+ * Two things are pinned here because a port cannot see either of them go wrong in its own source:
+ * the **texture convention** (s = 0 at +y, 0.25 at +x - a sphere whose s runs the other way looks
+ * plausible until the label on it reads backwards) and the **winding** (GLU_OUTSIDE must come out
+ * counter-clockwise seen from outside, or the whole surface vanishes under the default cull).
+ */
+static void test_gl_glu_quadrics_wind_and_texture_as_the_spec_says(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx = glContextCreate(disp);
+    GLUquadric *q = gluNewQuadric();
+    ASSERT_TRUE(q != (GLUquadric *)0);
+
+    /* Feedback reports **window** coordinates, so the transform is set up to be inverted exactly:
+     * with this projection and viewport, object (x, y, z) arrives as (x + 1, y + 1, (1 - z) / 2),
+     * and GLU_OBJ_* below takes it back. A round trip through a positive x and y scale and a
+     * doubly negated z keeps the handedness, so the winding test below still means what it says. */
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glViewport(0, 0, 2, 2);
+    /* GL_4D_COLOR_TEXTURE reports x, y, z, w, four colours and four texture coordinates: twelve
+     * floats a vertex, with s at 8 and t at 9. */
+    #define GLU_FB_V 12
+    #define GLU_OBJ_X(p) ((p)[0] - 1.0f)
+    #define GLU_OBJ_Y(p) ((p)[1] - 1.0f)
+    #define GLU_OBJ_Z(p) (1.0f - 2.0f * (p)[2])
+
+    /* A sphere of radius 0.5 - inside the view volume, so nothing is clipped away. Its vertices
+     * sit on that sphere. With four slices the ring vertices land on the axes, where the
+     * specification names s. */
+    gluQuadricTexture(q, GL_TRUE);
+    static GLfloat fb[8192];
+    glFeedbackBuffer(8192, GL_4D_COLOR_TEXTURE, fb);
+    glRenderMode(GL_FEEDBACK);
+    gluSphere(q, 0.5, 4, 2);
+    GLint n = glRenderMode(GL_RENDER);
+    ASSERT_TRUE(n > 0);
+
+    /* GL_4D_COLOR_TEXTURE: a token, then per vertex x, y, z, w, four colours, four texture
+     * coordinates - 13 floats a vertex. Walk the buffer and check every vertex. */
+    int checked = 0, at_plus_y = 0, at_plus_x = 0;
+    for (GLint i = 0; i < n;) {
+        const GLfloat tok = fb[i];
+        int verts = 0;
+        if (tok == GL_POLYGON_TOKEN) {
+            verts = (int)fb[i + 1];
+            i += 2;
+        } else if (tok == GL_LINE_TOKEN || tok == GL_LINE_RESET_TOKEN) {
+            verts = 2;
+            i += 1;
+        } else if (tok == GL_POINT_TOKEN) {
+            verts = 1;
+            i += 1;
+        } else {
+            break;
+        }
+        for (int v = 0; v < verts && i + GLU_FB_V <= n; v++, i += GLU_FB_V) {
+            const GLfloat x = GLU_OBJ_X(&fb[i]), y = GLU_OBJ_Y(&fb[i]), z = GLU_OBJ_Z(&fb[i]);
+            const GLfloat s = fb[i + 8], t = fb[i + 9];
+            const GLfloat len = (GLfloat)((double)x * x + (double)y * y + (double)z * z);
+            ASSERT_TRUE(len > 0.24f && len < 0.26f); /* on the sphere of radius 0.5 */
+            ASSERT_TRUE(s >= -0.001f && s <= 1.001f);
+            ASSERT_TRUE(t >= -0.001f && t <= 1.001f);
+            /* s = 0 at +y and 0.25 at +x, on the equator (z = 0 with two stacks). */
+            if (z > -0.01f && z < 0.01f) {
+                if (y > 0.49f && s < 0.01f) at_plus_y = 1;
+                if (x > 0.49f && s > 0.24f && s < 0.26f) at_plus_x = 1;
+            }
+            checked++;
+        }
+    }
+    ASSERT_TRUE(checked > 8);
+    ASSERT_TRUE(at_plus_y);
+    ASSERT_TRUE(at_plus_x);
+
+    /* **Winding.** A GLU_OUTSIDE sphere's triangles face outwards: the cross product of a
+     * polygon's first two edges points the same way as the polygon's own position. Under the
+     * default GL_CCW front face that is what keeps it on screen when culling is on. */
+    glRenderMode(GL_FEEDBACK);
+    gluSphere(q, 0.5, 8, 4);
+    n = glRenderMode(GL_RENDER);
+    int polys = 0, outward = 0;
+    for (GLint i = 0; i < n;) {
+        if (fb[i] != GL_POLYGON_TOKEN) { i++; continue; }
+        const int verts = (int)fb[i + 1];
+        const GLfloat *v = &fb[i + 2];
+        if (verts >= 3 && i + 2 + verts * GLU_FB_V <= n) {
+            const GLfloat p0[3] = {GLU_OBJ_X(v), GLU_OBJ_Y(v), GLU_OBJ_Z(v)};
+            const GLfloat *v1 = v + GLU_FB_V, *v2 = v + 2 * GLU_FB_V;
+            const GLfloat p1[3] = {GLU_OBJ_X(v1), GLU_OBJ_Y(v1), GLU_OBJ_Z(v1)};
+            const GLfloat p2[3] = {GLU_OBJ_X(v2), GLU_OBJ_Y(v2), GLU_OBJ_Z(v2)};
+            const GLfloat ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
+            const GLfloat bx = p2[0] - p0[0], by = p2[1] - p0[1], bz = p2[2] - p0[2];
+            const GLfloat cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx;
+            /* The face's own position stands in for its outward direction, the sphere being at
+             * the origin. */
+            if (cx * p0[0] + cy * p0[1] + cz * p0[2] > 0.0f) outward++;
+            polys++;
+        }
+        i += 2 + verts * GLU_FB_V;
+    }
+    ASSERT_TRUE(polys > 8);
+    ASSERT_EQ(outward, polys);
+
+    /* GLU_INSIDE turns them all round - the same test, the other sign. */
+    gluQuadricOrientation(q, GLU_INSIDE);
+    glRenderMode(GL_FEEDBACK);
+    gluSphere(q, 0.5, 8, 4);
+    n = glRenderMode(GL_RENDER);
+    int inward = 0;
+    polys = 0;
+    for (GLint i = 0; i < n;) {
+        if (fb[i] != GL_POLYGON_TOKEN) { i++; continue; }
+        const int verts = (int)fb[i + 1];
+        const GLfloat *v = &fb[i + 2];
+        if (verts >= 3 && i + 2 + verts * GLU_FB_V <= n) {
+            const GLfloat p0[3] = {GLU_OBJ_X(v), GLU_OBJ_Y(v), GLU_OBJ_Z(v)};
+            const GLfloat *v1 = v + GLU_FB_V, *v2 = v + 2 * GLU_FB_V;
+            const GLfloat p1[3] = {GLU_OBJ_X(v1), GLU_OBJ_Y(v1), GLU_OBJ_Z(v1)};
+            const GLfloat p2[3] = {GLU_OBJ_X(v2), GLU_OBJ_Y(v2), GLU_OBJ_Z(v2)};
+            const GLfloat ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
+            const GLfloat bx = p2[0] - p0[0], by = p2[1] - p0[1], bz = p2[2] - p0[2];
+            const GLfloat cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx;
+            if (cx * p0[0] + cy * p0[1] + cz * p0[2] < 0.0f) inward++;
+            polys++;
+        }
+        i += 2 + verts * GLU_FB_V;
+    }
+    ASSERT_TRUE(polys > 8);
+    ASSERT_EQ(inward, polys);
+    gluQuadricOrientation(q, GLU_OUTSIDE);
+
+    /* A cone's normals lean with its slope: a cylinder of base 1 and top 0 over height 1 has
+     * nz = 1/sqrt(2), not 0. Read the normal back through lighting-free feedback by checking the
+     * vertices instead: the side runs from radius 1 at z = 0 to a point at z = 1. */
+    glRenderMode(GL_FEEDBACK);
+    gluCylinder(q, 0.5, 0.0, 0.5, 6, 1);
+    n = glRenderMode(GL_RENDER);
+    int saw_base = 0, saw_apex = 0;
+    for (GLint i = 0; i < n;) {
+        if (fb[i] != GL_POLYGON_TOKEN) { i++; continue; }
+        const int verts = (int)fb[i + 1];
+        for (int v = 0; v < verts && i + 2 + (v + 1) * GLU_FB_V <= n; v++) {
+            const GLfloat *p = &fb[i + 2 + v * GLU_FB_V];
+            const GLfloat x = GLU_OBJ_X(p), y = GLU_OBJ_Y(p), z = GLU_OBJ_Z(p);
+            const GLfloat r2 = x * x + y * y;
+            if (z > -0.01f && z < 0.01f && r2 > 0.24f && r2 < 0.26f) saw_base = 1;
+            if (z > 0.49f && z < 0.51f && r2 < 0.01f) saw_apex = 1;
+        }
+        i += 2 + verts * GLU_FB_V;
+    }
+    ASSERT_TRUE(saw_base && saw_apex);
+
+    /* A disk's texture coordinates: (1, 0.5) at (outer, 0, 0), (0.5, 1) at (0, outer, 0). */
+    glRenderMode(GL_FEEDBACK);
+    gluDisk(q, 0.0, 0.5, 4, 1);
+    n = glRenderMode(GL_RENDER);
+    int at_x = 0, at_y = 0;
+    for (GLint i = 0; i < n;) {
+        if (fb[i] != GL_POLYGON_TOKEN) { i++; continue; }
+        const int verts = (int)fb[i + 1];
+        for (int v = 0; v < verts && i + 2 + (v + 1) * GLU_FB_V <= n; v++) {
+            const GLfloat *p = &fb[i + 2 + v * GLU_FB_V];
+            const GLfloat x = GLU_OBJ_X(p), y = GLU_OBJ_Y(p);
+            if (x > 0.49f && y > -0.01f && y < 0.01f) {
+                if (p[8] > 0.99f && p[9] > 0.49f && p[9] < 0.51f) at_x = 1;
+            }
+            if (y > 0.49f && x > -0.01f && x < 0.01f) {
+                if (p[9] > 0.99f && p[8] > 0.49f && p[8] < 0.51f) at_y = 1;
+            }
+        }
+        i += 2 + verts * GLU_FB_V;
+    }
+    ASSERT_TRUE(at_x && at_y);
+
+    /* Bad arguments reach the error callback, and nothing is recorded in glGetError. */
+    (void)glGetError();
+    gluSphere(q, -1.0, 4, 2);
+    gluDisk(q, 3.0, 1.0, 4, 1);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    gluDeleteQuadric(q);
+    #undef GLU_FB_V
+    #undef GLU_OBJ_X
+    #undef GLU_OBJ_Y
+    #undef GLU_OBJ_Z
+    glContextDestroy(ctx);
+    oops_display_close(disp);
+}
+
+/*
+ * **The Platonic solids are the solids they claim**, read back through feedback.
+ *
+ * `glut.c` derives their faces from their vertices rather than carrying a table, which is what
+ * keeps them clean-room - so what needs checking is the derivation, not a transcription. Five
+ * things, and between them nothing can be wrong and look right:
+ *
+ *  - the face count and the vertices a face has: 4 triangles, 8, 20, and 12 pentagons;
+ *  - every vertex at the radius GLUT's manual documents - 1 for the octahedron and the
+ *    icosahedron, sqrt(3) for the tetrahedron and the dodecahedron;
+ *  - **Euler's formula**, V - E + F = 2, with V counted from the distinct vertices that came
+ *    back and E from the faces. A derivation that found one face twice, or missed one, or built
+ *    a pentagon out of the wrong five vertices, fails here;
+ *  - **the winding**, counter-clockwise seen from outside, or the whole solid vanishes under the
+ *    default cull - the same trap the GLU quadrics have;
+ *  - **the pentagons are flat**, which says the five vertices really are one face of the
+ *    dodecahedron and not five that merely happen to be furthest along a direction.
+ */
+static void test_gl_platonic_solids_are_the_solids_they_claim(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx = glContextCreate(disp);
+
+    /* The same invertible transform the quadric test uses, at twice the size: these solids reach
+     * out to sqrt(3), and a vertex outside the view volume would be clipped rather than
+     * reported. Object (x, y, z) arrives as (x/2 + 1, y/2 + 1, (1 - z/2) / 2). */
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(-2.0, 2.0, -2.0, 2.0, -2.0, 2.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glViewport(0, 0, 2, 2);
+    #define PLA_V 12
+    #define PLA_X(p) (2.0f * ((p)[0] - 1.0f))
+    #define PLA_Y(p) (2.0f * ((p)[1] - 1.0f))
+    #define PLA_Z(p) (2.0f - 4.0f * (p)[2])
+
+    static const struct {
+        void (*draw)(void);
+        int faces;
+        int face_verts;
+        float radius2;
+        const char *name;
+    } solids[4] = {
+        {glutSolidTetrahedron, 4, 3, 3.0f, "tetrahedron"},
+        {glutSolidOctahedron, 8, 3, 1.0f, "octahedron"},
+        {glutSolidIcosahedron, 20, 3, 1.0f, "icosahedron"},
+        {glutSolidDodecahedron, 12, 5, 3.0f, "dodecahedron"},
+    };
+
+    static GLfloat fb[16384];
+    for (int s = 0; s < 4; s++) {
+        glFeedbackBuffer(16384, GL_4D_COLOR_TEXTURE, fb);
+        glRenderMode(GL_FEEDBACK);
+        solids[s].draw();
+        const GLint n = glRenderMode(GL_RENDER);
+        ASSERT_TRUE(n > 0);
+
+        float uniq[32][3];
+        int edge[64][2];
+        int nuniq = 0, faces = 0, nedge = 0;
+        for (GLint i = 0; i < n;) {
+            ASSERT_EQ(fb[i], (GLfloat)GL_POLYGON_TOKEN);
+            const int verts = (int)fb[i + 1];
+            i += 2;
+            /* A polygon comes back as the triangles it was assembled from, so a pentagon is
+             * three of them: the count checked is the face's, recovered below. */
+            ASSERT_EQ(verts, 3);
+            float p[3][3];
+            int id[3];
+            for (int v = 0; v < 3; v++, i += PLA_V) {
+                ASSERT_TRUE(i + PLA_V <= n);
+                p[v][0] = PLA_X(&fb[i]);
+                p[v][1] = PLA_Y(&fb[i]);
+                p[v][2] = PLA_Z(&fb[i]);
+                const float r2 = p[v][0] * p[v][0] + p[v][1] * p[v][1] + p[v][2] * p[v][2];
+                ASSERT_TRUE(r2 > solids[s].radius2 - 0.01f && r2 < solids[s].radius2 + 0.01f);
+                int seen = -1;
+                for (int u = 0; u < nuniq; u++) {
+                    const float dx = uniq[u][0] - p[v][0], dy = uniq[u][1] - p[v][1],
+                                dz = uniq[u][2] - p[v][2];
+                    if (dx * dx + dy * dy + dz * dz < 1e-4f) { seen = u; break; }
+                }
+                if (seen < 0 && nuniq < 32) {
+                    uniq[nuniq][0] = p[v][0];
+                    uniq[nuniq][1] = p[v][1];
+                    uniq[nuniq][2] = p[v][2];
+                    seen = nuniq++;
+                }
+                id[v] = seen;
+            }
+            /* Every distinct undirected edge of every triangle. A fanned pentagon adds two
+             * diagonals that are not edges of the solid, which the count below takes back. */
+            for (int e = 0; e < 3; e++) {
+                const int a = id[e], b = id[(e + 1) % 3];
+                int known = 0;
+                for (int k = 0; k < nedge; k++) {
+                    if ((edge[k][0] == a && edge[k][1] == b) ||
+                        (edge[k][0] == b && edge[k][1] == a)) { known = 1; break; }
+                }
+                if (!known && nedge < 64) {
+                    edge[nedge][0] = a;
+                    edge[nedge][1] = b;
+                    nedge++;
+                }
+            }
+            /* Counter-clockwise seen from outside: the triangle's own normal agrees with where
+             * it sits. Every triangle of a fanned pentagon inherits the face's winding. */
+            const float e1[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]};
+            const float e2[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+            const float nx = e1[1] * e2[2] - e1[2] * e2[1];
+            const float ny = e1[2] * e2[0] - e1[0] * e2[2];
+            const float nz = e1[0] * e2[1] - e1[1] * e2[0];
+            ASSERT_TRUE(nx * p[0][0] + ny * p[0][1] + nz * p[0][2] > 0.0f);
+            faces++;
+        }
+        /* A pentagon arrives as three triangles, a triangle as one. */
+        ASSERT_EQ(faces, solids[s].faces * (solids[s].face_verts - 2));
+        /* **Euler's formula on the edges that came back**, not on a count assumed from the face
+         * table: V - E + F = 2, with E the distinct edges of the triangles less the two
+         * diagonals each fanned pentagon contributed. A derivation that built a face out of the
+         * wrong vertices fails here as well as on the planarity check below. */
+        const int E = nedge - solids[s].faces * (solids[s].face_verts - 3);
+        ASSERT_EQ(E, solids[s].faces * solids[s].face_verts / 2);
+        ASSERT_EQ(nuniq - E + solids[s].faces, 2);
+    }
+
+    /* **The pentagons are flat.** Each of the dodecahedron's faces arrives as three triangles
+     * that must share one plane; a face built from the wrong five vertices would not. Checked on
+     * the first face, whose three triangles are the first three polygons back. */
+    glFeedbackBuffer(16384, GL_4D_COLOR_TEXTURE, fb);
+    glRenderMode(GL_FEEDBACK);
+    glutSolidDodecahedron();
+    {
+        const GLint n = glRenderMode(GL_RENDER);
+        ASSERT_TRUE(n > 0);
+        float plane[3] = {0.0f, 0.0f, 0.0f}, d0 = 0.0f;
+        int tri = 0;
+        for (GLint i = 0; i < n && tri < 3;) {
+            i += 2;
+            float p[3][3];
+            for (int v = 0; v < 3; v++, i += PLA_V) {
+                p[v][0] = PLA_X(&fb[i]);
+                p[v][1] = PLA_Y(&fb[i]);
+                p[v][2] = PLA_Z(&fb[i]);
+            }
+            if (tri == 0) {
+                const float e1[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]};
+                const float e2[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+                plane[0] = e1[1] * e2[2] - e1[2] * e2[1];
+                plane[1] = e1[2] * e2[0] - e1[0] * e2[2];
+                plane[2] = e1[0] * e2[1] - e1[1] * e2[0];
+                const float len = (float)((double)plane[0] * plane[0] +
+                                          (double)plane[1] * plane[1] +
+                                          (double)plane[2] * plane[2]);
+                ASSERT_TRUE(len > 1e-6f);
+                d0 = plane[0] * p[0][0] + plane[1] * p[0][1] + plane[2] * p[0][2];
+            }
+            for (int v = 0; v < 3; v++) {
+                const float d = plane[0] * p[v][0] + plane[1] * p[v][1] + plane[2] * p[v][2];
+                ASSERT_TRUE(d - d0 < 0.01f && d0 - d < 0.01f);
+            }
+            tri++;
+        }
+        ASSERT_EQ(tri, 3);
+    }
+
+    #undef PLA_V
+    #undef PLA_X
+    #undef PLA_Y
+    #undef PLA_Z
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glContextDestroy(ctx);
+    oops_display_close(disp);
+}
+
+/*
+ * **The bitmap font draws the letters it is a picture of.**
+ *
+ * `glut_font.c` writes its glyphs as rows of `#` and `.` in source order and turns them into
+ * bitmap bytes - which means the conversion is the part that can be wrong, and it can be wrong
+ * in ways that still look like a font: rows upside down (a bitmap's first row is its bottom
+ * one), bits mirrored, the baseline in the wrong place so every descender sits on the line.
+ *
+ * So this checks the picture. 'F' is the glyph to check it with: it is asymmetric both ways, so
+ * a vertical flip and a horizontal mirror each break it differently. Then the baseline, through
+ * a letter with a descender and one without; then the advance; then that every printable
+ * character has ink and the space has none, which catches an off-by-one in the table index.
+ */
+static void test_gl_bitmap_font_draws_what_it_is_a_picture_of(void) {
+    enum { FW = 64, FH = 32 };
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, FW, FH);
+    void *ctx = glContextCreate(disp);
+    uint32_t *fb = oops_display_get_framebuffer(disp);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0.0, (GLdouble)FW, 0.0, (GLdouble)FH, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glViewport(0, 0, FW, FH);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glColor3f(1.0f, 1.0f, 1.0f);
+    /* The framebuffer's row 0 is the top; GL's y counts up from the bottom. */
+    #define FONT_PIX(x, y) (fb[(size_t)(FH - 1 - (y)) * FW + (size_t)(x)] & 0x00ffffffu)
+
+    ASSERT_EQ(glutBitmapWidth(GLUT_BITMAP_8_BY_13, 'W'), 8);
+    ASSERT_EQ(glutBitmapWidth(GLUT_BITMAP_9_BY_15, 'i'), 9);
+    ASSERT_EQ(glutBitmapHeight(GLUT_BITMAP_8_BY_13), 13);
+    ASSERT_EQ(glutBitmapHeight(GLUT_BITMAP_9_BY_15), 15);
+    ASSERT_EQ(glutBitmapLength(GLUT_BITMAP_8_BY_13, (const unsigned char *)"abc"), 24);
+    ASSERT_EQ(glutBitmapLength(GLUT_BITMAP_9_BY_15, (const unsigned char *)""), 0);
+
+    /* 'F': five columns wide, seven rows tall, with the crossbar on the fourth row from the top
+     * and nothing below the baseline. Drawn with the baseline at y = 8. */
+    glClear(GL_COLOR_BUFFER_BIT);
+    glRasterPos2i(4, 8);
+    glutBitmapCharacter(GLUT_BITMAP_8_BY_13, 'F');
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    /* The top row of 'F' is its full bar: five pixels, six rows above the baseline. */
+    for (int x = 0; x < 5; x++) ASSERT_EQ(FONT_PIX(4 + x, 8 + 6), 0x00ffffffu);
+    /* The crossbar, three rows down from the top, is four wide - so the fifth column is clear,
+     * which is what a horizontal mirror would fill. */
+    for (int x = 0; x < 4; x++) ASSERT_EQ(FONT_PIX(4 + x, 8 + 3), 0x00ffffffu);
+    ASSERT_EQ(FONT_PIX(4 + 4, 8 + 3), 0x00000000u);
+    /* The bottom row is the stem alone: one pixel, on the baseline. A vertical flip would put
+     * the full bar here instead. */
+    ASSERT_EQ(FONT_PIX(4, 8), 0x00ffffffu);
+    ASSERT_EQ(FONT_PIX(4 + 1, 8), 0x00000000u);
+    ASSERT_EQ(FONT_PIX(4 + 4, 8), 0x00000000u);
+    /* And nothing below the baseline. */
+    for (int x = 0; x < 8; x++) {
+        ASSERT_EQ(FONT_PIX(4 + x, 7), 0x00000000u);
+        ASSERT_EQ(FONT_PIX(4 + x, 6), 0x00000000u);
+    }
+
+    /* **A descender goes below the baseline**, which is the whole of what the bitmap's origin
+     * decides - a 'g' level with an 'F' means yorig is 0. */
+    glClear(GL_COLOR_BUFFER_BIT);
+    glRasterPos2i(4, 8);
+    glutBitmapCharacter(GLUT_BITMAP_8_BY_13, 'g');
+    {
+        int below = 0;
+        for (int x = 0; x < 8; x++) {
+            for (int y = 6; y < 8; y++) if (FONT_PIX(4 + x, y) != 0u) below++;
+        }
+        ASSERT_TRUE(below > 0);
+    }
+
+    /* **The advance**: two characters, the second eight pixels along, and the raster position
+     * left where the next one goes. */
+    glClear(GL_COLOR_BUFFER_BIT);
+    glRasterPos2i(2, 8);
+    glutBitmapString(GLUT_BITMAP_8_BY_13, (const unsigned char *)"II");
+    {
+        GLfloat rp[4];
+        glGetFloatv(GL_CURRENT_RASTER_POSITION, rp);
+        ASSERT_TRUE(rp[0] == 18.0f);
+        /* 'I' is a serifed bar: its top row is three pixels starting one column in. */
+        for (int x = 0; x < 3; x++) {
+            ASSERT_EQ(FONT_PIX(2 + 1 + x, 8 + 6), 0x00ffffffu);
+            ASSERT_EQ(FONT_PIX(2 + 8 + 1 + x, 8 + 6), 0x00ffffffu);
+        }
+        ASSERT_EQ(FONT_PIX(2 + 5, 8 + 6), 0x00000000u); /* the gap between them */
+    }
+
+    /* **Every printable character has ink, and the space has none.** A table indexed one entry
+     * out draws the wrong letter everywhere, which reads as a font until you try to read it;
+     * this catches the ends of the range instead. */
+    for (int c = 32; c <= 126; c++) {
+        glClear(GL_COLOR_BUFFER_BIT);
+        glRasterPos2i(4, 8);
+        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, c);
+        int lit = 0;
+        for (int i = 0; i < FW * FH; i++) if ((fb[i] & 0x00ffffffu) != 0u) lit++;
+        if (c == ' ') {
+            ASSERT_EQ(lit, 0);
+        } else {
+            ASSERT_TRUE(lit > 0);
+        }
+    }
+    /* Outside the range: nothing drawn, and the position still moves - so a string with a stray
+     * byte stays aligned. */
+    glClear(GL_COLOR_BUFFER_BIT);
+    glRasterPos2i(4, 8);
+    glutBitmapCharacter(GLUT_BITMAP_8_BY_13, 1);
+    {
+        int lit = 0;
+        for (int i = 0; i < FW * FH; i++) if ((fb[i] & 0x00ffffffu) != 0u) lit++;
+        ASSERT_EQ(lit, 0);
+        GLfloat rp[4];
+        glGetFloatv(GL_CURRENT_RASTER_POSITION, rp);
+        ASSERT_TRUE(rp[0] == 12.0f);
+    }
+
+    /* A font this does not have draws nothing and moves nothing, rather than picking one. */
+    ASSERT_EQ(glutBitmapWidth((void *)0, 'A'), 0);
+    ASSERT_EQ(glutBitmapHeight((void *)0), 0);
+
+    #undef FONT_PIX
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glContextDestroy(ctx);
+    oops_display_close(disp);
+}
+
+/*
+ * **The newest surface, given what a sloppy port gives it.**
+ *
+ * Everything added on 2026-09-20 - the extended texture targets, the occlusion queries, the
+ * bitmap font - was written against code that calls it correctly. A port does not: it passes a
+ * depth of zero, deletes an object while it is bound, asks for a character it does not have, and
+ * runs out of query names. On a console every one of those is a fault rather than a diagnostic,
+ * so what they have to do is refuse.
+ */
+static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx = glContextCreate(disp);
+    (void)glGetError();
+    GLint iv[4];
+
+    /*
+     * **A negative size is an error and a zero size is not.** GL draws that line, and a zero
+     * means no image at all - which is how a program releases a level it no longer wants. This
+     * library refused zero with GL_INVALID_VALUE until 2026-09-20, which was its one behavioural
+     * difference from the specification.
+     */
+    {
+        static const GLubyte vol[2 * 2 * 2 * 4] = {0};
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_3D, t);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, -1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        glEnable(GL_TEXTURE_3D);
+        ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx), t);
+        /* **The release**: accepted, and the level is gone, so the texture is incomplete and a
+         * draw with it is untextured rather than one that reads storage nothing allocated. */
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 0, 0, 0, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        glGetTexLevelParameteriv(GL_TEXTURE_3D, 0, GL_TEXTURE_WIDTH, iv);
+        ASSERT_EQ(iv[0], 0);
+        ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx), 0u);
+        glBegin(GL_TRIANGLES);
+        glTexCoord3f(0.5f, 0.5f, 0.5f);
+        glVertex3f(-0.5f, -0.5f, 0.0f); glVertex3f(0.5f, -0.5f, 0.0f); glVertex3f(0.0f, 0.5f, 0.0f);
+        glEnd();
+        /* And it can be given an image again afterwards. */
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+        ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx), t);
+        glDisable(GL_TEXTURE_3D);
+        glDeleteTextures(1, &t);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    }
+
+    /* The same for a 2D texture and for one mip level of it, which is the shape a loader that
+     * nulls levels out actually uses. */
+    {
+        static const GLubyte px[4 * 4 * 4] = {0};
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        glEnable(GL_TEXTURE_2D);
+        ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx), t); /* chain complete */
+        glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 0, 0, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        /* Level 1 gone: a filter that reads the chain no longer has one, so the texture is
+         * incomplete - which is GL's own answer and not this library's invention. */
+        ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx), 0u);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx), t); /* base level alone is enough */
+        glDisable(GL_TEXTURE_2D);
+        glDeleteTextures(1, &t);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    }
+
+    /* **A cube map whose faces disagree** is incomplete, which GL draws untextured rather than
+     * refusing - and which the upload must not try to build an array out of. */
+    {
+        static const GLubyte px[4 * 4 * 4] = {0};
+        GLuint c = 0;
+        glGenTextures(1, &c);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, c);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        for (int f = 0; f < 6; f++) {
+            const GLsizei d = (f == 3) ? 4 : 2; /* one face the wrong size */
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f, 0, GL_RGBA, d, d, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, px);
+        }
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        glEnable(GL_TEXTURE_CUBE_MAP);
+        ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx), 0u); /* incomplete: no texture */
+        glBegin(GL_TRIANGLES);
+        glTexCoord3f(1.0f, 0.0f, 0.0f);
+        glVertex3f(-0.5f, -0.5f, 0.0f); glVertex3f(0.5f, -0.5f, 0.0f); glVertex3f(0.0f, 0.5f, 0.0f);
+        glEnd();
+        glDisable(GL_TEXTURE_CUBE_MAP);
+        glDeleteTextures(1, &c);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    }
+
+    /* **The comparison state on a colour texture.** GL 1.4 says the mode applies to a depth
+     * texture and is ignored otherwise, so setting it must be accepted and must change nothing
+     * about how the colour is read. */
+    {
+        static const GLubyte one[4] = {10, 20, 30, 255};
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, one);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_R_TO_TEXTURE);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, iv);
+        ASSERT_EQ(iv[0], (GLint)GL_COMPARE_R_TO_TEXTURE); /* kept, as state */
+        glDeleteTextures(1, &t);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    }
+
+    /* Occlusion queries: every way a program gets the order wrong. */
+    {
+        GLuint q = 0, q2 = 0;
+        glGenQueries(1, &q);
+        glEndQuery(GL_SAMPLES_PASSED); /* no matching begin */
+        ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+        glGetQueryObjectuiv(q, GL_QUERY_RESULT, (GLuint *)iv); /* never begun */
+        ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+        glBeginQuery(GL_SAMPLES_PASSED, q);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        glGetQueryObjectuiv(q, GL_QUERY_RESULT, (GLuint *)iv); /* still running */
+        ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+        glGenQueries(1, &q2);
+        glBeginQuery(GL_SAMPLES_PASSED, q2); /* one active query a target */
+        ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+        /* **Deleting the active one** has to release it, or nothing can ever begin again. */
+        glDeleteQueries(1, &q);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        glBeginQuery(GL_SAMPLES_PASSED, q2);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        glEndQuery(GL_SAMPLES_PASSED);
+        glGetQueryObjectuiv(q2, GL_QUERY_RESULT, (GLuint *)iv);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        glDeleteQueries(1, &q2);
+        glDeleteQueries(-1, &q2);
+        ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+        glDeleteQueries(1, NULL); /* a null array is nothing to delete, not a fault */
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    }
+
+    /* The font, given bytes it has no glyph for. Nothing is drawn and nothing faults; the
+     * position still moves, so a string with a stray byte stays aligned. */
+    {
+        ASSERT_EQ(glutBitmapWidth(GLUT_BITMAP_8_BY_13, 0), 8);
+        ASSERT_EQ(glutBitmapWidth(GLUT_BITMAP_8_BY_13, 255), 8);
+        ASSERT_EQ(glutBitmapLength(GLUT_BITMAP_8_BY_13, NULL), 0);
+        glutBitmapString(GLUT_BITMAP_8_BY_13, NULL);
+        glutBitmapString((void *)0, (const unsigned char *)"x");
+        glRasterPos2i(0, 0);
+        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, 0);
+        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, 255);
+        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, -1);
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    }
+
+    glContextDestroy(ctx);
+    oops_display_close(disp);
+}
+
 static void test_gl_matrix_builders_match_their_definitions(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -1125,10 +2260,10 @@ static void test_gl_first_error_is_the_one_retained(void) {
 
     /* An enum error, then a value error. The enum one came first and must be what is read.
      *
-     * GL_DITHER rather than GL_FOG, which used to be the generator here and is implemented
-     * now - the enum has to be one this genuinely does not have, or the test stops testing what
-     * it says. */
-    glEnable((GLenum)0x0BD0u);          /* GL_DITHER: GL_INVALID_ENUM */
+     * GL_CONVOLUTION_1D rather than GL_FOG or GL_DITHER, which have each been the generator here
+     * and are accepted now - the enum has to be one this genuinely does not have, or the test
+     * stops testing what it says. The imaging subset is optional, so this one stays refused. */
+    glEnable((GLenum)0x8010u);          /* GL_CONVOLUTION_1D: GL_INVALID_ENUM */
     glDrawArrays(GL_TRIANGLES, 0, -4);  /* GL_INVALID_VALUE */
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
@@ -1136,7 +2271,7 @@ static void test_gl_first_error_is_the_one_retained(void) {
      * happens first, proving the order is what decides rather than the error code. */
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glDrawArrays(GL_TRIANGLES, 0, -4);  /* GL_INVALID_VALUE */
-    glEnable((GLenum)0x0BD0u);          /* GL_DITHER: GL_INVALID_ENUM */
+    glEnable((GLenum)0x8010u);          /* GL_CONVOLUTION_1D: GL_INVALID_ENUM */
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
@@ -1189,9 +2324,11 @@ static void test_gl_scalar_twins_agree_with_their_vector_forms(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glTexParameterf((GLenum)0x1234u, GL_TEXTURE_MIN_FILTER, (GLfloat)GL_NEAREST);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-    /* The target was validated and the parameter was not: GL_TEXTURE_WRAP_R is a real GL
-     * parameter this subset does not keep, and it used to be dropped in silence. */
-    glTexParameteri(GL_TEXTURE_2D, (GLenum)0x8072u, GL_REPEAT); /* GL_TEXTURE_WRAP_R */
+    /* The target was validated and the parameter was not: GL 3.3's GL_TEXTURE_SWIZZLE_R is a real
+     * parameter this does not keep, and one like it used to be dropped in silence.
+     * (GL_TEXTURE_WRAP_R, GL_TEXTURE_MIN_LOD and then GL 1.4's GL_TEXTURE_COMPARE_MODE were the
+     * example until each became one this keeps - the last of GL 1.x's, 2026-09-19.) */
+    glTexParameteri(GL_TEXTURE_2D, (GLenum)0x8E42u, 0); /* GL_TEXTURE_SWIZZLE_R */
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glDeleteTextures(1, &tex);
 
@@ -1209,11 +2346,15 @@ static void test_gl_scalar_twins_agree_with_their_vector_forms(void) {
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glLightModelf(GL_LIGHT_MODEL_LOCAL_VIEWER, 0.0f);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
-    /* **This used to assert GL_NO_ERROR**, which encoded a bug rather than a behaviour:
-     * GL_LIGHT_MODEL_TWO_SIDE set a field nothing read, so the call returned clean and
-     * two-sided lighting simply never happened. It needs a primitive's facing, which is not
-     * known where lighting is computed per vertex, so it is refused now. */
+    /* GL_LIGHT_MODEL_TWO_SIDE set a field nothing read, then was refused; since 2026-09-19 it is
+     * kept and lights back faces (test_gl_two_sided_lighting). */
     glLightModelf(GL_LIGHT_MODEL_TWO_SIDE, 1.0f);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    GLint two_side = 0;
+    glGetIntegerv(GL_LIGHT_MODEL_TWO_SIDE, &two_side);
+    ASSERT_EQ(two_side, 1);
+    glLightModelf(GL_LIGHT_MODEL_TWO_SIDE, 0.0f);
+    glLightModelf((GLenum)0x1234u, 1.0f); /* the light model's refusal, still */
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
     /* glNormal3fv is glNormal3f with the components in the same order. Checked by lighting a
@@ -1417,11 +2558,20 @@ static void test_gl_tex_image_refuses_a_format_it_cannot_convert(void) {
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_BGRA, GL_UNSIGNED_BYTE, data);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-  /* A real GL format this does not convert. */
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, (GLenum)0x1908u /* GL_RGBA */, GL_FLOAT, data);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM); /* the type, not the format */
+  /* A real GL format this does not convert - GL 3.0's GL_DEPTH_STENCIL. (GL_FLOAT was the
+   * example of a type it did not convert until 2026-09-19, and then colour index; both convert
+   * now.) */
+  static const GLfloat one_float[4] = {1.0f, 0.5f, 0.0f, 1.0f};
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_FLOAT, one_float);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, (GLenum)0x84F9u /* GL_DEPTH_STENCIL */,
+               GL_UNSIGNED_BYTE, data);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, (GLenum)0x1234u, GL_UNSIGNED_BYTE, data);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  /* A packed type with a format it does not fit is GL_INVALID_OPERATION, not an enum error. */
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_SHORT_5_6_5, data);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
 
   /* A sub-image outside the texture is an error rather than a clamp or an overrun. */
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
@@ -1557,12 +2707,15 @@ static void test_gl_display_list_refusals(void) {
   glNewList(run + 1u, GL_COMPILE);
   ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
 
-  /* **The vertex-array draws cannot be compiled**, and say so rather than being dropped. */
+  /* **The vertex-array draws compile** - as the glBegin/element/glEnd sequence they stand for,
+   * read out of the arrays now. They were refused with GL_INVALID_OPERATION until 2026-09-19;
+   * test_gl_display_list_records_what_gl_compiles checks that the values are the compile-time
+   * ones. */
   static const GLfloat verts[9] = {-0.5f, -0.5f, 0.0f, 0.5f, -0.5f, 0.0f, 0.0f, 0.5f, 0.0f};
   glEnableClientState(GL_VERTEX_ARRAY);
   glVertexPointer(3, GL_FLOAT, 0, verts);
   glDrawArrays(GL_TRIANGLES, 0, 3);
-  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
   glEndList();
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
@@ -1570,7 +2723,6 @@ static void test_gl_display_list_refusals(void) {
   glEndList();
   ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
 
-  /* Outside a list the same draw is fine - the refusal is about compiling, not the call. */
   glDrawArrays(GL_TRIANGLES, 0, 3);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
   glDisableClientState(GL_VERTEX_ARRAY);
@@ -1582,14 +2734,209 @@ static void test_gl_display_list_refusals(void) {
   glCallList(999999u);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-  /* An index type glCallLists cannot read is refused before it reads one. */
+  /* A type outside GL_BYTE..GL_4_BYTES is refused before it reads one. (GL_FLOAT was the
+   * refused example until 2026-09-19, when glCallLists took all ten of GL 1.0's types.) */
   static const GLubyte names[2] = {1, 2};
-  glCallLists(2, GL_FLOAT, names);
+  glCallLists(2, GL_DOUBLE, names);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glCallLists(2, GL_UNSIGNED_BYTE, names);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
   glContextDestroy(ctx);
+  oops_display_close(disp);
+}
+
+/* **Everything the specification compiles is compiled** - and each property that makes a list a
+ * list rather than a macro is checked on its own: compiling changes nothing, pointers are copied
+ * when compiled, images unpack through the pixel-store state of compile time, arrays keep the
+ * values they held, the list base applies when the list runs, GL_COMPILE_AND_EXECUTE records
+ * once, and a compiled call's error is raised when it runs.
+ *
+ * Until 2026-09-19 a list recorded 21 operations and ran everything else at compile time; the
+ * first block is the gears demo's shape, which drew every gear in the last material set.
+ */
+static void test_gl_display_list_records_what_gl_compiles(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  const int centre = (H / 2) * W + (W / 2);
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  (void)glGetError();
+
+  /* 1. A material per list, as the gears demo has it. Compiling sets nothing; each call sets its
+   *    own. The value arrays are changed after compiling, so a list that kept the pointer would
+   *    read the wrong numbers. */
+  GLfloat red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  GLfloat blue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+  GLfloat shine = 42.0f;
+  GLfloat before[4], now[4];
+  glGetMaterialfv(GL_FRONT, GL_DIFFUSE, before);
+  const GLuint gear = glGenLists(2);
+  glNewList(gear, GL_COMPILE);
+  glMaterialfv(GL_FRONT, GL_DIFFUSE, red);
+  glMaterialfv(GL_FRONT, GL_SHININESS, &shine); /* one value, and only one is read */
+  glEndList();
+  glNewList(gear + 1u, GL_COMPILE);
+  glMaterialfv(GL_FRONT, GL_DIFFUSE, blue);
+  glEndList();
+  red[0] = 0.25f;
+  blue[2] = 0.25f;
+  shine = 1.0f;
+  glGetMaterialfv(GL_FRONT, GL_DIFFUSE, now);
+  ASSERT_TRUE(now[0] == before[0] && now[2] == before[2]); /* compiling set nothing */
+  glCallList(gear);
+  glGetMaterialfv(GL_FRONT, GL_DIFFUSE, now);
+  ASSERT_TRUE(now[0] == 1.0f && now[2] == 0.0f);           /* the compile-time red */
+  glGetMaterialfv(GL_FRONT, GL_SHININESS, now);
+  ASSERT_TRUE(now[0] == 42.0f);
+  glCallList(gear + 1u);
+  glGetMaterialfv(GL_FRONT, GL_DIFFUSE, now);
+  ASSERT_TRUE(now[0] == 0.0f && now[2] == 1.0f);           /* and its own blue */
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* 2. A matrix, copied at compile time. */
+  GLfloat m[16] = {2,0,0,0, 0,2,0,0, 0,0,2,0, 0,0,0,1};
+  const GLuint mat = glGenLists(1);
+  glNewList(mat, GL_COMPILE);
+  glLoadMatrixf(m);
+  glEndList();
+  m[0] = 9.0f;
+  GLfloat mv[16];
+  glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+  ASSERT_TRUE(mv[0] == 1.0f);                              /* compiling loaded nothing */
+  glCallList(mat);
+  glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+  ASSERT_TRUE(mv[0] == 2.0f && mv[5] == 2.0f);
+  glLoadIdentity();
+
+  /* 3. An image, through the unpack state of *compile* time. A 2x2 corner of a 3-wide client
+   *    image, compiled with GL_UNPACK_ROW_LENGTH 3; the state and the image are both changed
+   *    before the list runs, and the texture must still get the corner. */
+  static GLubyte img[3 * 2 * 4];
+  for (int i = 0; i < 3 * 2 * 4; i++) img[i] = (GLubyte)(10 + i);
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, 3);
+  const GLuint upload = glGenLists(1);
+  glNewList(upload, GL_COMPILE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glEndList();
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  for (int i = 0; i < 3 * 2 * 4; i++) img[i] = 0u;
+  glCallList(upload);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  GLubyte got[2 * 2 * 4];
+  memset(got, 0, sizeof(got));
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
+  ASSERT_EQ(got[0], 10);        /* row 0, pixel 0 */
+  ASSERT_EQ(got[4], 14);        /* row 0, pixel 1 */
+  ASSERT_EQ(got[8], 10 + 12);   /* row 1 starts one *client* row (3 pixels) on, not two */
+  ASSERT_EQ(got[12], 10 + 16);
+  glBindTexture(GL_TEXTURE_2D, 0);
+
+  /* 4. An array draw keeps the values the arrays held when it was compiled. */
+  static GLfloat verts[9] = {-1.0f, -1.0f, 0.0f, 3.0f, -1.0f, 0.0f, -1.0f, 3.0f, 0.0f};
+  static GLfloat cols[12] = {1,0,0,1, 1,0,0,1, 1,0,0,1};
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+  glVertexPointer(3, GL_FLOAT, 0, verts);
+  glColorPointer(4, GL_FLOAT, 0, cols);
+  const GLuint drawn = glGenLists(1);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glNewList(drawn, GL_COMPILE);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  glEndList();
+  ASSERT_EQ(fb[centre] & 0x00ffffffu, 0u);                /* compiling drew nothing */
+  for (int i = 0; i < 3; i++) { cols[i * 4 + 0] = 0.0f; cols[i * 4 + 2] = 1.0f; }
+  glDisableClientState(GL_COLOR_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glCallList(drawn);
+  ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x00ff0000u);       /* red, as compiled - not blue */
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* 5. glCallLists applies the list base current when the list *runs*. */
+  const GLuint pair = glGenLists(3);
+  glNewList(pair + 1u, GL_COMPILE); glBlendFunc(GL_ZERO, GL_ZERO); glEndList();
+  glNewList(pair + 2u, GL_COMPILE); glBlendFunc(GL_ONE, GL_ONE); glEndList();
+  static const GLubyte one[1] = {1};
+  const GLuint caller = glGenLists(1);
+  glListBase(pair);
+  glNewList(caller, GL_COMPILE);
+  glCallLists(1, GL_UNSIGNED_BYTE, one);
+  glEndList();
+  glListBase(pair + 1u);
+  glCallList(caller);
+  GLint src = 0;
+  glGetIntegerv(GL_BLEND_SRC, &src);
+  ASSERT_EQ((GLenum)src, (GLenum)GL_ONE); /* (pair + 1) + 1, not pair + 1 */
+  glListBase(0u);
+
+  /* 6. GL_COMPILE_AND_EXECUTE records a called list as one call, not as its contents, and an
+   *    entry point that calls another entry point records once. */
+  const GLuint cae = glGenLists(1);
+  glNewList(cae, GL_COMPILE_AND_EXECUTE);
+  glCallList(gear);
+  glEndList();
+  ASSERT_EQ(ctx->lists[cae - 1u].count, 1u);
+  glGetMaterialfv(GL_FRONT, GL_DIFFUSE, now);
+  ASSERT_TRUE(now[0] == 1.0f);                             /* and it did execute */
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glNewList(cae, GL_COMPILE_AND_EXECUTE);
+  glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, 4, 4, 0); /* its body calls glCopyTexSubImage2D */
+  glEndList();
+  ASSERT_EQ(ctx->lists[cae - 1u].count, 1u);
+  glBindTexture(GL_TEXTURE_2D, 0);
+
+  /* 7. A compiled call's error is raised when it runs, not when it is recorded. */
+  const GLuint bad = glGenLists(1);
+  (void)glGetError();
+  glNewList(bad, GL_COMPILE);
+  glBlendFunc(GL_TEXTURE_2D, GL_ONE);
+  glEndList();
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glCallList(bad);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+  /* 8. A bitmap, as bitmap fonts in lists use it: rows packed through the unpack alignment of
+   *    compile time (1), replayed after it has become 4 - which would read row 1 from byte 4. */
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glOrtho(0.0, (GLdouble)W, 0.0, (GLdouble)H, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glClear(GL_COLOR_BUFFER_BIT);
+  static const GLubyte glyph[2] = {0xf0, 0x0f};
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  const GLuint font = glGenLists(1);
+  glNewList(font, GL_COMPILE);
+  glBitmap(8, 2, 0.0f, 0.0f, 9.0f, 0.0f, glyph);
+  glEndList();
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glRasterPos2i(2, 2);
+  glCallList(font);
+  int lit = 0;
+  for (int i = 0; i < W * H; i++) if ((fb[i] & 0x00ffffffu) == 0x00ffffffu) lit++;
+  ASSERT_EQ(lit, 8);
+  GLfloat rp[4];
+  glGetFloatv(GL_CURRENT_RASTER_POSITION, rp);
+  ASSERT_TRUE(rp[0] == 11.0f); /* moved by xmove */
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* 9. Redefining a list replaces its contents rather than appending to them. */
+  glNewList(mat, GL_COMPILE);
+  glLoadIdentity();
+  glEndList();
+  ASSERT_EQ(ctx->lists[mat - 1u].count, 1u);
+
+  glContextDestroy(ctx_handle);
   oops_display_close(disp);
 }
 
@@ -1685,9 +3032,16 @@ static void test_gl_read_pixels_formats_and_bounds(void) {
   ASSERT_EQ(rgb[0], 0x11); ASSERT_EQ(rgb[2], 0x33);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-  /* A type this cannot pack is refused rather than written as bytes. */
-  glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, rgba);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  /* Floats are read back as fractions of one (GL_FLOAT was this test's refused type until
+   * 2026-09-19); a colour-index read is refused rather than written as bytes - an RGBA buffer
+   * holds no indices, which is GL_INVALID_OPERATION now that the format itself is known. */
+  GLfloat fl[4] = {0};
+  glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, fl);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_FLOAT_NEAR(fl[0], 17.0f / 255.0f, 1e-6f);
+  ASSERT_FLOAT_NEAR(fl[3], 68.0f / 255.0f, 1e-6f);
+  glReadPixels(0, 0, 1, 1, GL_COLOR_INDEX, GL_UNSIGNED_BYTE, rgba);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
   glReadPixels(0, 0, -1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
   ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
 
@@ -1723,8 +3077,8 @@ static void test_gl_alpha_test_patches_both_shaders(void) {
   ctx->gpu_payload = payload;
   (void)glGetError();
 
-  const uint32_t *untex = (const uint32_t *)((const char *)payload + 0x300);
-  const uint32_t *tex = (const uint32_t *)((const char *)payload + 0x200);
+  const uint32_t *untex = (const uint32_t *)((const char *)payload + OOPS_GL_PS_UNTEX_OFFSET);
+  const uint32_t *tex = (const uint32_t *)((const char *)payload + OOPS_GL_PS_TEX_OFFSET);
 
   /* Off: four s_nop, in both shaders. */
   glDisable(GL_ALPHA_TEST);
@@ -1892,15 +3246,56 @@ static void test_gl_attrib_stack_saves_and_restores(void) {
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
   glPopAttrib();
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  /* So is GL 1.0's spelling of "all", 0x000FFFFF, which this header used until 2026-09-19 and a
+   * program built against an old header still passes. */
+  glPushAttrib(0x000FFFFFu);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glPopAttrib();
 
-  /* A mask naming state this does not have is refused, because a push that saved nothing is
-   * the leak this function exists to prevent.
+  /* The groups whose state existed without a bit to save it: line width, point size, hints and
+   * the multisample state. Each was refused as a group this "does not have". */
+  glLineWidth(2.0f);
+  glPointSize(3.0f);
+  glHint(GL_FOG_HINT, GL_NICEST);
+  glSampleCoverage(0.5f, GL_TRUE);
+  glPushAttrib(GL_LINE_BIT | GL_POINT_BIT | GL_HINT_BIT | GL_MULTISAMPLE_BIT);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glLineWidth(7.0f);
+  glPointSize(9.0f);
+  glHint(GL_FOG_HINT, GL_FASTEST);
+  glSampleCoverage(1.0f, GL_FALSE);
+  glDisable(GL_MULTISAMPLE);
+  glPopAttrib();
+  GLfloat fv = 0.0f;
+  glGetFloatv(GL_LINE_WIDTH, &fv);
+  ASSERT_TRUE(fv == 2.0f);
+  glGetFloatv(GL_POINT_SIZE, &fv);
+  ASSERT_TRUE(fv == 3.0f);
+  GLint iv = 0;
+  glGetIntegerv(GL_FOG_HINT, &iv);
+  ASSERT_EQ((GLenum)iv, (GLenum)GL_NICEST);
+  glGetFloatv(GL_SAMPLE_COVERAGE_VALUE, &fv);
+  ASSERT_TRUE(fv == 0.5f);
+  ASSERT_EQ(glIsEnabled(GL_MULTISAMPLE), GL_TRUE);
+  glLineWidth(1.0f);
+  glPointSize(1.0f);
+
+  /* A mask naming no group is refused, because a push that saved nothing is the leak this
+   * function exists to prevent.
    *
-   * **GL_STENCIL_BUFFER_BIT and then GL_FOG_BIT used to be the examples and are supported
-   * now**, which is this assertion doing its job: the list of what cannot be saved has to shrink
-   * as features land, or it becomes a lie in the other direction. The accumulation buffer is the
-   * example left, and is a feature this deliberately does not have. */
-  glPushAttrib(0x00000200u); /* GL_ACCUM_BUFFER_BIT */
+   * **GL_STENCIL_BUFFER_BIT, GL_FOG_BIT and last GL_ACCUM_BUFFER_BIT used to be the examples of
+   * groups this could not save**, which is this assertion doing its job: the list shrank as each
+   * feature landed, and on 2026-09-19 it emptied. The accumulation group now saves its clear
+   * value; a bit no GL 1.x group uses is what is left to refuse. */
+  glClearAccum(0.25f, 0.0f, 0.0f, 0.0f);
+  glPushAttrib(GL_ACCUM_BUFFER_BIT);
+  glClearAccum(1.0f, 1.0f, 1.0f, 1.0f);
+  glPopAttrib();
+  GLfloat acv[4] = {0};
+  glGetFloatv(GL_ACCUM_CLEAR_VALUE, acv);
+  ASSERT_TRUE(acv[0] == 0.25f && acv[1] == 0.0f);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glPushAttrib(0x00100000u);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
   /* The fog bit saves and restores real state - including the enable, which GL_FOG_BIT carries
@@ -1957,7 +3352,7 @@ static void test_gl_attrib_stack_saves_and_restores(void) {
   /* **The alpha test lives in the shader, so a pop has to rewrite it** - unlike everything else
    * here, which the next frame picks up from the context. */
   glDisable(GL_ALPHA_TEST);
-  const uint32_t *untex = (const uint32_t *)((const char *)payload + 0x300);
+  const uint32_t *untex = (const uint32_t *)((const char *)payload + OOPS_GL_PS_UNTEX_OFFSET);
   glPushAttrib(GL_COLOR_BUFFER_BIT);
   glEnable(GL_ALPHA_TEST);
   glAlphaFunc(GL_GREATER, 0.25f);
@@ -2107,7 +3502,7 @@ static void test_gl_client_attrib_stack_is_its_own_stack(void) {
   ASSERT_EQ(ctx->array_vertex.stride, 0);
   ASSERT_TRUE(ctx->array_vertex.pointer == NULL); /* offset 0 into the buffer */
   ASSERT_EQ(ctx->array_vertex.enabled, GL_TRUE);
-  ASSERT_EQ(ctx->array_texcoord.enabled, GL_FALSE);
+  ASSERT_EQ(ctx->array_texcoord[0].enabled, GL_FALSE);
   /* **The buffer an array reads from is part of the array**, so it is part of what this saves.
    * gl_client_array_t carries it, which makes the struct copy enough - pinned here so a later
    * change to field-by-field copying cannot quietly drop it. Between the push and the pop the
@@ -2283,7 +3678,7 @@ static void test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification(v
   glVertex3f(3.0f, 1.0f, 0.0f);
   glVertex3f(3.0f, 0.0f, 1.0f);
   glEnd();
-  ASSERT_TRUE(ctx->imm_verts[0].u == 7.0f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][0] == 7.0f);
 
   /* Moving the modelview does not change an object-linear coordinate. */
   glTranslatef(100.0f, 0.0f, 0.0f);
@@ -2292,7 +3687,7 @@ static void test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification(v
   glVertex3f(3.0f, 1.0f, 0.0f);
   glVertex3f(3.0f, 0.0f, 1.0f);
   glEnd();
-  ASSERT_TRUE(ctx->imm_verts[0].u == 7.0f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][0] == 7.0f);
 
   /* Eye-linear: the plane is fixed in eye space when it is specified. Specify (1,0,0,0) under
    * an identity modelview, then translate by 10 in x. The vertex at object x = 3 is now at eye
@@ -2308,7 +3703,7 @@ static void test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification(v
   glVertex3f(3.0f, 1.0f, 0.0f);
   glVertex3f(3.0f, 0.0f, 1.0f);
   glEnd();
-  ASSERT_TRUE(ctx->imm_verts[0].u > 12.99f && ctx->imm_verts[0].u < 13.01f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][0] > 12.99f && ctx->imm_verts[0].tc[0][0] < 13.01f);
 
   /* A coordinate whose generation is off keeps what glTexCoord set - generating s while
    * supplying t by hand is the ordinary way this is used. */
@@ -2320,7 +3715,7 @@ static void test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification(v
   glVertex3f(3.0f, 1.0f, 0.0f);
   glVertex3f(3.0f, 0.0f, 1.0f);
   glEnd();
-  ASSERT_TRUE(ctx->imm_verts[0].v == 0.875f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][1] == 0.875f);
 
   /* Sphere mapping lands inside the map. It is only defined for s and t; asking for it on r is
    * refused rather than silently generating nothing. */
@@ -2337,16 +3732,16 @@ static void test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification(v
   glVertex3f(0.6f, 0.5f, -2.0f);
   glVertex3f(0.5f, 0.6f, -2.0f);
   glEnd();
-  ASSERT_TRUE(ctx->imm_verts[0].u >= 0.0f && ctx->imm_verts[0].u <= 1.0f);
-  ASSERT_TRUE(ctx->imm_verts[0].v >= 0.0f && ctx->imm_verts[0].v <= 1.0f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][0] >= 0.0f && ctx->imm_verts[0].tc[0][0] <= 1.0f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][1] >= 0.0f && ctx->imm_verts[0].tc[0][1] <= 1.0f);
 
-  /* The cube-map modes have no cube map behind them and are refused, not aliased onto sphere
-   * mapping - a program asking for reflection mapping and given sphere mapping draws a wrong
-   * picture with GL_NO_ERROR throughout. */
+  /* The cube-map modes were refused while there was no cube map; they are accepted for s, t and
+   * r now (test_gl_cube_maps), and refused for q, which is no direction. */
   glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_REFLECTION_MAP);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glTexGeni(GL_Q, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-  glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP);
 
   /* An unknown coordinate is refused. */
   glTexGeni(GL_TEXTURE_2D, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
@@ -2448,11 +3843,17 @@ static void test_gl_fog_blends_by_eye_distance(void) {
   ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x000000ffu); /* drew, as fog colour */
   glDisable(GL_ALPHA_TEST);
 
-  /* Refusals: a scalar colour, colour-index fog, a negative density, an unknown mode. */
+  /* Refusals: a scalar colour, a negative density, an unknown mode. Colour-index fog is state,
+   * kept and reported (it was refused until 2026-09-19). */
   glFogf(GL_FOG_COLOR, 1.0f);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glFogi(GL_FOG_INDEX, 3);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  {
+    GLint fi = 0;
+    glGetIntegerv(GL_FOG_INDEX, &fi);
+    ASSERT_EQ(fi, 3);
+  }
   glFogf(GL_FOG_DENSITY, -1.0f);
   ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
   glFogi(GL_FOG_MODE, (GLint)GL_NEAREST);
@@ -2460,6 +3861,5135 @@ static void test_gl_fog_blends_by_eye_distance(void) {
 
   #undef FOG_DRAW_AT
   glDisable(GL_FOG);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* glLogicOp: the stored bits combined with the fragment's, instead of blending.
+ *
+ * Checked with values whose bytes differ in every combination a truth table distinguishes, and
+ * with the opcodes where getting GL's enum order backwards shows: GL_AND_REVERSE (s & ~d) and
+ * GL_AND_INVERTED (~s & d) swap if the table is read the wrong way round, and GL_XOR does not -
+ * so XOR alone would pass a broken mapping.
+ */
+static void test_gl_logic_op_combines_stored_bits(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  const int centre = (H / 2) * W + (W / 2);
+
+  /* Destination 0x3c3c55ff-ish, source 0xf0 0x0f 0xaa 0xff (R, G, B, A). */
+  #define LOGIC_DRAW() do {                                          \
+      glClearColor(60.0f / 255.0f, 60.0f / 255.0f, 85.0f / 255.0f, 1.0f); \
+      glClear(GL_COLOR_BUFFER_BIT);                                   \
+      glColor4ub(0xf0, 0x0f, 0xaa, 0xff);                            \
+      glRectf(-1.0f, -1.0f, 1.0f, 1.0f);                             \
+    } while (0)
+
+  /* Defaults: off, and GL_COPY (Mesa main/blend.c:1158-1159). */
+  ASSERT_EQ(glIsEnabled(GL_COLOR_LOGIC_OP), GL_FALSE);
+  GLint mode = 0;
+  glGetIntegerv(GL_LOGIC_OP_MODE, &mode);
+  ASSERT_EQ((GLenum)mode, GL_COPY);
+
+  glEnable(GL_COLOR_LOGIC_OP);
+  ASSERT_EQ(glIsEnabled(GL_COLOR_LOGIC_OP), GL_TRUE);
+
+  glLogicOp(GL_XOR);
+  LOGIC_DRAW();
+  ASSERT_EQ(fb[centre], 0x00cc33ffu); /* A ff^ff, R f0^3c, G 0f^3c, B aa^55 */
+
+  glLogicOp(GL_AND_REVERSE); /* s & ~d */
+  LOGIC_DRAW();
+  ASSERT_EQ(fb[centre], 0x00c003aau);
+
+  glLogicOp(GL_AND_INVERTED); /* ~s & d */
+  LOGIC_DRAW();
+  ASSERT_EQ(fb[centre], 0x000c3055u);
+
+  glLogicOp(GL_INVERT); /* ~d, whatever the source */
+  LOGIC_DRAW();
+  ASSERT_EQ(fb[centre], 0x00c3c3aau);
+
+  glLogicOp(GL_COPY); /* identity: the source */
+  LOGIC_DRAW();
+  ASSERT_EQ(fb[centre], 0xfff00faau);
+
+  glLogicOp(GL_NOOP); /* the destination survives */
+  LOGIC_DRAW();
+  ASSERT_EQ(fb[centre], 0xff3c3c55u);
+
+  /* **The logic op replaces blending.** ONE + ONE would saturate every channel; XOR does not. */
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_ONE, GL_ONE);
+  glLogicOp(GL_XOR);
+  LOGIC_DRAW();
+  ASSERT_EQ(fb[centre], 0x00cc33ffu);
+  glDisable(GL_BLEND);
+
+  /* The colour mask still applies after the logic op: red kept from the destination. The mask
+   * goes on after the clear - it gates a clear as well, so set before it the clear would have
+   * kept the previous draw's red too. */
+  glClearColor(60.0f / 255.0f, 60.0f / 255.0f, 85.0f / 255.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColorMask(GL_FALSE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glColor4ub(0xf0, 0x0f, 0xaa, 0xff);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(fb[centre], 0x003c33ffu);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+  /* A refusal leaves the state alone. */
+  glLogicOp(GL_SET + 1u);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetIntegerv(GL_LOGIC_OP_MODE, &mode);
+  ASSERT_EQ((GLenum)mode, GL_XOR);
+
+  /* GL_INDEX_LOGIC_OP is colour-index mode's: kept as state in this RGBA context and applied to
+   * nothing - with only it enabled, a draw is a plain copy. */
+  glDisable(GL_COLOR_LOGIC_OP);
+  glEnable(GL_INDEX_LOGIC_OP);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_EQ(glIsEnabled(GL_INDEX_LOGIC_OP), GL_TRUE);
+  LOGIC_DRAW();
+  ASSERT_EQ(fb[centre], 0xfff00faau);
+  glDisable(GL_INDEX_LOGIC_OP);
+  glEnable(GL_COLOR_LOGIC_OP);
+
+  /* GL_COLOR_BUFFER_BIT carries the enable and the opcode. */
+  glPushAttrib(GL_COLOR_BUFFER_BIT);
+  glLogicOp(GL_NAND);
+  glDisable(GL_COLOR_LOGIC_OP);
+  glPopAttrib();
+  ASSERT_EQ(glIsEnabled(GL_COLOR_LOGIC_OP), GL_TRUE);
+  glGetIntegerv(GL_LOGIC_OP_MODE, &mode);
+  ASSERT_EQ((GLenum)mode, GL_XOR);
+
+  /* And GL_ENABLE_BIT carries the enable on its own. */
+  glPushAttrib(GL_ENABLE_BIT);
+  glDisable(GL_COLOR_LOGIC_OP);
+  glPopAttrib();
+  ASSERT_EQ(glIsEnabled(GL_COLOR_LOGIC_OP), GL_TRUE);
+
+  #undef LOGIC_DRAW
+  glDisable(GL_COLOR_LOGIC_OP);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* glBlendColor and the four constant factors, the blend factors refused when they are not
+ * factors, and GL's own defaults for them.
+ */
+static void test_gl_blend_constant_and_factor_rules(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  const int centre = (H / 2) * W + (W / 2);
+
+  /* **GL's defaults are GL_ONE and GL_ZERO** (Mesa main/blend.c:1148-1151): enabling blending
+   * without choosing factors overwrites. oops-gl defaulted to alpha blending. */
+  GLint f = 0;
+  glGetIntegerv(GL_BLEND_SRC, &f);
+  ASSERT_EQ((GLenum)f, (GLenum)GL_ONE);
+  glGetIntegerv(GL_BLEND_DST, &f);
+  ASSERT_EQ((GLenum)f, (GLenum)GL_ZERO);
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEnable(GL_BLEND);
+  glColor4f(1.0f, 0.0f, 0.0f, 0.5f);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x00ff0000u); /* not a half-blend with the blue */
+
+  /* The constant defaults to zero and is clamped on the way in. */
+  GLfloat bc[4] = {9.0f, 9.0f, 9.0f, 9.0f};
+  glGetFloatv(GL_BLEND_COLOR, bc);
+  ASSERT_TRUE(bc[0] == 0.0f && bc[1] == 0.0f && bc[2] == 0.0f && bc[3] == 0.0f);
+  glBlendColor(0.5f, 2.0f, -1.0f, 0.25f);
+  glGetFloatv(GL_BLEND_COLOR, bc);
+  ASSERT_TRUE(bc[0] == 0.5f && bc[1] == 1.0f && bc[2] == 0.0f && bc[3] == 0.25f);
+  /* As integers it spans the whole range (Mesa FLOAT_TO_INT). */
+  GLint bci[4] = {0, 0, 0, 0};
+  glGetIntegerv(GL_BLEND_COLOR, bci);
+  ASSERT_EQ(bci[1], 2147483647);
+  ASSERT_EQ(bci[2], 0);
+  /* And glGetDoublev copies all four, not one. */
+  GLdouble bcd[4] = {9.0, 9.0, 9.0, 9.0};
+  glGetDoublev(GL_BLEND_COLOR, bcd);
+  ASSERT_TRUE(bcd[3] == 0.25);
+
+  /* GL_CONSTANT_COLOR scales the source per channel by the constant. White through
+   * (0.5, 1.0, 0.0) onto black is (128, 255, 0). */
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBlendFunc(GL_CONSTANT_COLOR, GL_ZERO);
+  glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x0080ff00u);
+
+  /* GL_CONSTANT_ALPHA is the constant's alpha on every channel: 0.25 of white. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBlendFunc(GL_CONSTANT_ALPHA, GL_ZERO);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x00404040u);
+
+  /* GL_ONE_MINUS_CONSTANT_ALPHA on the destination: 0.75 of what was there, plus nothing. */
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBlendFunc(GL_ZERO, GL_ONE_MINUS_CONSTANT_ALPHA);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x00bfbfbfu);
+
+  /* **GL_SRC_ALPHA_SATURATE is 1 for alpha**, min(As, 1 - Ad) only for colour. Onto a
+   * transparent black destination with source alpha 0.5, a ONE-less saturate that also scaled
+   * alpha would write 0.25 alpha; the right answer keeps the source's 0.5. */
+  glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBlendFunc(GL_SRC_ALPHA_SATURATE, GL_ZERO);
+  glColor4f(1.0f, 1.0f, 1.0f, 0.5f);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ((fb[centre] >> 24) & 0xffu, 0x80u);        /* alpha: 0.5 * 1 */
+  ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x00808080u);    /* colour: 1 * min(0.5, 1) */
+
+  /* Refusals, each leaving the factors as they were. SRC_ALPHA_SATURATE is a source factor only
+   * (Mesa main/blend.c:105-108 needs ARB_blend_func_extended for it as a destination). */
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  (void)glGetError();
+  glBlendFunc(GL_ONE, GL_SRC_ALPHA_SATURATE);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glBlendFunc(GL_TEXTURE_2D, GL_ONE);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_SRC_ALPHA_SATURATE);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetIntegerv(GL_BLEND_SRC, &f);
+  ASSERT_EQ((GLenum)f, (GLenum)GL_SRC_ALPHA);
+  glGetIntegerv(GL_BLEND_DST_ALPHA, &f);
+  ASSERT_EQ((GLenum)f, (GLenum)GL_ONE_MINUS_SRC_ALPHA);
+  glBlendEquation(GL_ONE);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetIntegerv(GL_BLEND_EQUATION, &f);
+  ASSERT_EQ((GLenum)f, (GLenum)GL_FUNC_ADD);
+
+  /* GL_COLOR_BUFFER_BIT carries the constant. */
+  glBlendColor(0.5f, 0.5f, 0.5f, 0.5f);
+  glPushAttrib(GL_COLOR_BUFFER_BIT);
+  glBlendColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glPopAttrib();
+  glGetFloatv(GL_BLEND_COLOR, bc);
+  ASSERT_TRUE(bc[0] == 0.5f && bc[3] == 0.5f);
+
+  glDisable(GL_BLEND);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Queries that answered less than the state held: the projective texture coordinate, the
+ * colour queries as integers, and the four-component vectors glGetDoublev copied one of. */
+static void test_gl_vector_queries_answer_every_component(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 16, 16);
+  void *ctx_handle = glContextCreate(disp);
+  (void)glGetError();
+
+  /* r and q as set, not the constants 0 and 1. */
+  glTexCoord4f(0.1f, 0.2f, 0.3f, 2.0f);
+  GLfloat tc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  glGetFloatv(GL_CURRENT_TEXTURE_COORDS, tc);
+  ASSERT_TRUE(tc[2] == 0.3f && tc[3] == 2.0f);
+
+  /* Colours as integers map 1.0 to INT_MAX; these were refused outright. */
+  glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+  GLint iv[4] = {0, 0, 0, 0};
+  glGetIntegerv(GL_COLOR_CLEAR_VALUE, iv);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_EQ(iv[0], 2147483647);
+  ASSERT_EQ(iv[1], 0);
+  glColor4f(0.0f, 1.0f, 0.0f, 1.0f);
+  glGetIntegerv(GL_CURRENT_COLOR, iv);
+  ASSERT_EQ(iv[1], 2147483647);
+  const GLfloat grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  glFogfv(GL_FOG_COLOR, grey);
+  glGetIntegerv(GL_FOG_COLOR, iv);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_EQ(iv[3], 2147483647);
+
+  /* glGetDoublev writes all four components of each. */
+  GLdouble dv[4] = {9.0, 9.0, 9.0, 9.0};
+  glGetDoublev(GL_FOG_COLOR, dv);
+  ASSERT_TRUE(dv[0] == 0.5 && dv[3] == 1.0);
+  dv[3] = 9.0;
+  glGetDoublev(GL_CURRENT_RASTER_POSITION, dv);
+  ASSERT_TRUE(dv[3] != 9.0);
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Generation replaces only the coordinates it is enabled for - the rest are the vertex's own,
+ * including when the vertex came from an array - and a generated q divides like a given one. */
+static void test_gl_texgen_keeps_the_vertex_own_coordinates(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 16, 16);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+
+  /* s generated from x; t from the texture-coordinate array, not from glTexCoord's 0.9. */
+  static const GLfloat verts[9] = {0.25f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f};
+  static const GLfloat tcs[6] = {0.0f, 0.1f, 0.0f, 0.2f, 0.0f, 0.3f};
+  const GLfloat sx[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+  glTexGenfv(GL_S, GL_OBJECT_PLANE, sx);
+  glEnable(GL_TEXTURE_GEN_S);
+  glTexCoord2f(0.9f, 0.9f);
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(3, GL_FLOAT, 0, verts);
+  glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+  glTexCoordPointer(2, GL_FLOAT, 0, tcs);
+  glBegin(GL_TRIANGLES);
+  glArrayElement(0);
+  glArrayElement(1);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][0] == 0.25f && ctx->imm_verts[0].tc[0][1] == 0.1f);
+  ASSERT_TRUE(ctx->imm_verts[1].tc[0][0] == 0.5f && ctx->imm_verts[1].tc[0][1] == 0.2f);
+  glArrayElement(2);
+  glEnd();
+  glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glDisable(GL_TEXTURE_GEN_S);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* A generated q of 2 (w times 2) goes to the vertex beside the given s and t, which the
+   * rasteriser then divides per fragment (it halved them at the vertex until 2026-09-19). */
+  const GLfloat q2[4] = {0.0f, 0.0f, 0.0f, 2.0f};
+  glTexGeni(GL_Q, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+  glTexGenfv(GL_Q, GL_OBJECT_PLANE, q2);
+  glEnable(GL_TEXTURE_GEN_Q);
+  glTexCoord2f(0.5f, 0.5f);
+  glBegin(GL_TRIANGLES);
+  glVertex3f(1.0f, 0.0f, 0.0f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][0] == 0.5f && ctx->imm_verts[0].tc[0][1] == 0.5f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][3] == 2.0f);
+  glVertex3f(0.0f, 1.0f, 0.0f);
+  glVertex3f(0.0f, 0.0f, 0.0f);
+  glEnd();
+  glDisable(GL_TEXTURE_GEN_Q);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* glPolygonMode and edge flags - and the three things that had to be right underneath them:
+ * culling and the fill offset belong to polygons, not to the quads a line becomes, and a
+ * flat-shaded primitive takes its colour from the vertex the specification names.
+ *
+ * A 32x32 target with identity matrices, so NDC x maps to column (x + 1) * 16 and NDC y to row
+ * 16 - 16y. The quad spans columns and rows 8..24; its diagonal from the first corner to the
+ * third passes through the centre, which is why an unlit centre proves the diagonal is not drawn.
+ */
+static void test_gl_polygon_mode_draws_boundaries(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  #define PX(x, y) (fb[(y) * W + (x)] & 0x00ffffffu)
+  #define QUAD() do { glBegin(GL_QUADS); glVertex2f(-0.5f, -0.5f); glVertex2f(0.5f, -0.5f); \
+                      glVertex2f(0.5f, 0.5f); glVertex2f(-0.5f, 0.5f); glEnd(); } while (0)
+
+  /* Defaults: both faces filled, edges flagged. */
+  GLint pm[2] = {0, 0};
+  glGetIntegerv(GL_POLYGON_MODE, pm);
+  ASSERT_EQ((GLenum)pm[0], (GLenum)GL_FILL);
+  ASSERT_EQ((GLenum)pm[1], (GLenum)GL_FILL);
+  GLint ef = 0;
+  glGetIntegerv(GL_EDGE_FLAG, &ef);
+  ASSERT_EQ(ef, 1);
+
+  /* GL_LINE: the four sides, and not the diagonal the quad is triangulated along. */
+  glLineWidth(3.0f);
+  glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+  glGetIntegerv(GL_POLYGON_MODE, pm);
+  ASSERT_EQ((GLenum)pm[0], (GLenum)GL_LINE);
+  ASSERT_EQ((GLenum)pm[1], (GLenum)GL_LINE);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  QUAD();
+  ASSERT_EQ(PX(16, 16), 0u);          /* centre: no fill, no diagonal */
+  ASSERT_EQ(PX(16, 24), 0x00ffffffu); /* bottom side */
+  ASSERT_EQ(PX(24, 16), 0x00ffffffu); /* right */
+  ASSERT_EQ(PX(16, 8), 0x00ffffffu);  /* top */
+  ASSERT_EQ(PX(8, 16), 0x00ffffffu);  /* left */
+
+  /* An edge flag of false before a vertex drops the edge that starts there. Triangle
+   * (-0.5,-0.5) (0.5,-0.5) (0,0.5): the edge from the second vertex, whose midpoint is (20,16). */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_TRIANGLES);
+  glVertex2f(-0.5f, -0.5f);
+  glEdgeFlag(GL_FALSE);
+  glVertex2f(0.5f, -0.5f);
+  glEdgeFlag(GL_TRUE);
+  glVertex2f(0.0f, 0.5f);
+  glEnd();
+  ASSERT_EQ(PX(16, 24), 0x00ffffffu); /* first edge */
+  ASSERT_EQ(PX(20, 16), 0u);          /* the flagged-off one */
+  ASSERT_EQ(PX(12, 16), 0x00ffffffu); /* third edge */
+
+  /* The same through an edge-flag array and glDrawArrays. */
+  static const GLfloat tri[6] = {-0.5f, -0.5f, 0.5f, -0.5f, 0.0f, 0.5f};
+  static const GLboolean flags[3] = {GL_TRUE, GL_FALSE, GL_TRUE};
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(2, GL_FLOAT, 0, tri);
+  glEnableClientState(GL_EDGE_FLAG_ARRAY);
+  glEdgeFlagPointer(0, flags);
+  ASSERT_EQ(glIsEnabled(GL_EDGE_FLAG_ARRAY), GL_TRUE);
+  ASSERT_EQ(glIsEnabled(GL_VERTEX_ARRAY), GL_TRUE);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  ASSERT_EQ(PX(16, 24), 0x00ffffffu);
+  ASSERT_EQ(PX(20, 16), 0u);
+  ASSERT_EQ(PX(12, 16), 0x00ffffffu);
+  GLvoid *ptr = NULL;
+  glGetPointerv(GL_EDGE_FLAG_ARRAY_POINTER, &ptr);
+  ASSERT_TRUE(ptr == (const GLvoid *)flags);
+  glDisableClientState(GL_EDGE_FLAG_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
+
+  /* GL_POINT: the corners, each once, and nothing between them. */
+  glPointSize(3.0f);
+  glPolygonMode(GL_FRONT_AND_BACK, GL_POINT);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD();
+  ASSERT_EQ(PX(16, 16), 0u);
+  ASSERT_EQ(PX(16, 24), 0u);
+  ASSERT_EQ(PX(8, 24), 0x00ffffffu);
+  ASSERT_EQ(PX(24, 8), 0x00ffffffu);
+
+  /* Culling is decided for the polygon, before its mode: a culled back face draws no outline. The
+   * quad drawn clockwise is back-facing. */
+  glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_BACK);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_QUADS);
+  glVertex2f(-0.5f, -0.5f); glVertex2f(-0.5f, 0.5f); glVertex2f(0.5f, 0.5f); glVertex2f(0.5f, -0.5f);
+  glEnd();
+  ASSERT_EQ(PX(16, 24), 0u);
+  glDisable(GL_CULL_FACE);
+
+  /* A mode per face: front filled, back outlined. */
+  glPolygonMode(GL_FRONT, GL_FILL);
+  glPolygonMode(GL_BACK, GL_LINE);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(); /* counter-clockwise: front */
+  ASSERT_EQ(PX(16, 16), 0x00ffffffu);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_QUADS);
+  glVertex2f(-0.5f, -0.5f); glVertex2f(-0.5f, 0.5f); glVertex2f(0.5f, 0.5f); glVertex2f(0.5f, -0.5f);
+  glEnd();
+  ASSERT_EQ(PX(16, 16), 0u);
+  ASSERT_EQ(PX(16, 24), 0x00ffffffu);
+
+  /* The attribute stack and a display list both carry the mode. */
+  glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+  glPushAttrib(GL_POLYGON_BIT);
+  glPolygonMode(GL_FRONT_AND_BACK, GL_POINT);
+  glPopAttrib();
+  glGetIntegerv(GL_POLYGON_MODE, pm);
+  ASSERT_EQ((GLenum)pm[0], (GLenum)GL_FILL);
+  const GLuint lines = glGenLists(1);
+  glNewList(lines, GL_COMPILE);
+  glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+  glEndList();
+  glGetIntegerv(GL_POLYGON_MODE, pm);
+  ASSERT_EQ((GLenum)pm[0], (GLenum)GL_FILL);
+  glCallList(lines);
+  glGetIntegerv(GL_POLYGON_MODE, pm);
+  ASSERT_EQ((GLenum)pm[0], (GLenum)GL_LINE);
+  glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
+  /* Refusals leave the mode alone. */
+  glPolygonMode(GL_TEXTURE_2D, GL_LINE); /* not a face */
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glPolygonMode(GL_FRONT, GL_QUADS);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetIntegerv(GL_POLYGON_MODE, pm);
+  ASSERT_EQ((GLenum)pm[0], (GLenum)GL_FILL);
+
+  /* **A GL_LINES line is not culled**, whatever way its quad winds. */
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_FRONT_AND_BACK);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_LINES);
+  glVertex2f(-0.5f, 0.0f); glVertex2f(0.5f, 0.0f);
+  glEnd();
+  ASSERT_EQ(PX(16, 16), 0x00ffffffu);
+  glDisable(GL_CULL_FACE);
+
+  /* **Nor does it take the fill offset.** A filled quad at z = 0 without offset, then a line at
+   * the same depth with GL_POLYGON_OFFSET_FILL on and a large offset: GL_LEQUAL passes the line
+   * only if the offset left it alone. */
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LEQUAL);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  QUAD();
+  glEnable(GL_POLYGON_OFFSET_FILL);
+  glPolygonOffset(0.0f, 1000000.0f);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glBegin(GL_LINES);
+  glVertex2f(-0.4f, 0.0f); glVertex2f(0.4f, 0.0f);
+  glEnd();
+  ASSERT_EQ(PX(16, 16), 0x00ffffffu);
+  glDisable(GL_POLYGON_OFFSET_FILL);
+  glPolygonOffset(0.0f, 0.0f);
+  glDisable(GL_DEPTH_TEST);
+  ASSERT_EQ(glIsEnabled(GL_POLYGON_OFFSET_LINE), GL_FALSE);
+  glEnable(GL_POLYGON_OFFSET_LINE);
+  ASSERT_EQ(glIsEnabled(GL_POLYGON_OFFSET_LINE), GL_TRUE);
+  glDisable(GL_POLYGON_OFFSET_LINE);
+
+  /* **A flat quad is its fourth vertex's colour** - both triangles, not just the second. And a
+   * flat polygon is its first vertex's. (18,20) is in the quad's first triangle, (12,12) in its
+   * second. */
+  glShadeModel(GL_FLAT);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_QUADS);
+  glColor3f(1.0f, 0.0f, 0.0f); glVertex2f(-0.5f, -0.5f);
+  glVertex2f(0.5f, -0.5f);
+  glVertex2f(0.5f, 0.5f);
+  glColor3f(0.0f, 0.0f, 1.0f); glVertex2f(-0.5f, 0.5f);
+  glEnd();
+  ASSERT_EQ(PX(18, 20), 0x000000ffu);
+  ASSERT_EQ(PX(12, 12), 0x000000ffu);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_POLYGON);
+  glColor3f(0.0f, 1.0f, 0.0f); glVertex2f(-0.5f, -0.5f);
+  glColor3f(1.0f, 0.0f, 0.0f); glVertex2f(0.5f, -0.5f);
+  glVertex2f(0.5f, 0.5f);
+  glVertex2f(-0.5f, 0.5f);
+  glEnd();
+  ASSERT_EQ(PX(18, 20), 0x0000ff00u);
+  ASSERT_EQ(PX(12, 12), 0x0000ff00u);
+  glShadeModel(GL_SMOOTH);
+
+  #undef QUAD
+  #undef PX
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* State an RGBA context keeps and never draws with - the colour index, the index mask and clear
+ * value, the index array, the multisample enables and coverage - plus the point and line
+ * queries, which were declared and answered nowhere. Defaults are Mesa's (main/context.c:269,
+ * main/blend.c:1139-1141, main/multisample.c:69-75).
+ */
+static void test_gl_rgba_context_keeps_index_and_sample_state(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+
+  GLint iv[2] = {0, 0};
+  GLfloat fv[2] = {0.0f, 0.0f};
+  glGetIntegerv(GL_CURRENT_INDEX, iv);      ASSERT_EQ(iv[0], 1);
+  glGetIntegerv(GL_INDEX_WRITEMASK, iv);    ASSERT_EQ(iv[0], -1); /* all ones */
+  glGetIntegerv(GL_INDEX_CLEAR_VALUE, iv);  ASSERT_EQ(iv[0], 0);
+  glGetIntegerv(GL_INDEX_MODE, iv);         ASSERT_EQ(iv[0], 0);
+  glGetIntegerv(GL_RGBA_MODE, iv);          ASSERT_EQ(iv[0], 1);
+  glGetIntegerv(GL_SAMPLE_BUFFERS, iv);     ASSERT_EQ(iv[0], 0);
+  ASSERT_EQ(glIsEnabled(GL_MULTISAMPLE), GL_TRUE);
+  ASSERT_EQ(glIsEnabled(GL_SAMPLE_COVERAGE), GL_FALSE);
+  glGetFloatv(GL_SAMPLE_COVERAGE_VALUE, fv); ASSERT_TRUE(fv[0] == 1.0f);
+
+  /* Every spelling of glIndex is a cast, not a normalisation. */
+  glIndexub(200);
+  glGetFloatv(GL_CURRENT_INDEX, fv);        ASSERT_TRUE(fv[0] == 200.0f);
+  glIndexs(-3);
+  glGetFloatv(GL_CURRENT_INDEX, fv);        ASSERT_TRUE(fv[0] == -3.0f);
+  glIndexd(2.6);
+  glGetIntegerv(GL_CURRENT_INDEX, iv);      ASSERT_EQ(iv[0], 3); /* rounded, not truncated */
+  const GLint seven = 7;
+  glIndexiv(&seven);
+  glGetIntegerv(GL_CURRENT_INDEX, iv);      ASSERT_EQ(iv[0], 7);
+
+  /* The coverage value clamps (main/multisample.c:49). */
+  glSampleCoverage(2.0f, GL_TRUE);
+  glGetFloatv(GL_SAMPLE_COVERAGE_VALUE, fv); ASSERT_TRUE(fv[0] == 1.0f);
+  glGetIntegerv(GL_SAMPLE_COVERAGE_INVERT, iv); ASSERT_EQ(iv[0], 1);
+  glSampleCoverage(-1.0f, GL_FALSE);
+  glGetFloatv(GL_SAMPLE_COVERAGE_VALUE, fv); ASSERT_TRUE(fv[0] == 0.0f);
+  glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+  ASSERT_EQ(glIsEnabled(GL_SAMPLE_ALPHA_TO_COVERAGE), GL_TRUE);
+  glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* The index array: its types are the specification's, and an element compiled into a list
+   * becomes the glIndex call it stands for. */
+  static const GLubyte idx[1] = {42};
+  static const GLfloat pos[3] = {0.0f, 0.0f, 0.0f};
+  glIndexPointer(GL_UNSIGNED_INT, 0, idx);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glIndexPointer(GL_UNSIGNED_BYTE, 0, idx);
+  glEnableClientState(GL_INDEX_ARRAY);
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(3, GL_FLOAT, 0, pos);
+  ASSERT_EQ(glIsEnabled(GL_INDEX_ARRAY), GL_TRUE);
+  glGetIntegerv(GL_INDEX_ARRAY_TYPE, iv);   ASSERT_EQ((GLenum)iv[0], (GLenum)GL_UNSIGNED_BYTE);
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glBegin(GL_POINTS);
+  glArrayElement(0);
+  glEnd();
+  glIndexMask(0x0fu);
+  glClearIndex(5.0f);
+  glEndList();
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glDisableClientState(GL_INDEX_ARRAY);
+  glGetIntegerv(GL_CURRENT_INDEX, iv);      ASSERT_EQ(iv[0], 7);  /* compiling set nothing */
+  glCallList(list);
+  glGetIntegerv(GL_CURRENT_INDEX, iv);      ASSERT_EQ(iv[0], 42);
+  glGetIntegerv(GL_INDEX_WRITEMASK, iv);    ASSERT_EQ(iv[0], 0x0f);
+  glGetIntegerv(GL_INDEX_CLEAR_VALUE, iv);  ASSERT_EQ(iv[0], 5);
+
+  /* The attribute stack carries them: the index with GL_CURRENT_BIT, the mask and clear value
+   * with GL_COLOR_BUFFER_BIT. */
+  glPushAttrib(GL_CURRENT_BIT | GL_COLOR_BUFFER_BIT);
+  glIndexf(1.0f);
+  glIndexMask(0u);
+  glClearIndex(0.0f);
+  glPopAttrib();
+  glGetIntegerv(GL_CURRENT_INDEX, iv);      ASSERT_EQ(iv[0], 42);
+  glGetIntegerv(GL_INDEX_WRITEMASK, iv);    ASSERT_EQ(iv[0], 0x0f);
+
+  /* Point size and line width, and their ranges: queried as set, drawn rounded and clamped. */
+  glLineWidth(2.4f);
+  glGetFloatv(GL_LINE_WIDTH, fv);           ASSERT_TRUE(fv[0] == 2.4f);
+  glGetIntegerv(GL_LINE_WIDTH, iv);         ASSERT_EQ(iv[0], 2);
+  glGetFloatv(GL_ALIASED_LINE_WIDTH_RANGE, fv);
+  ASSERT_TRUE(fv[0] == 1.0f && fv[1] == (GLfloat)OOPS_GL_MAX_POINT_LINE_SIZE);
+  glGetIntegerv(GL_POINT_SIZE_RANGE, iv);
+  ASSERT_EQ(iv[0], 1);
+  ASSERT_EQ(iv[1], OOPS_GL_MAX_POINT_LINE_SIZE);
+  /* The smooth sizes' step - an eighth since smoothing landed; 1 before, when nothing smoothed. */
+  glGetFloatv(GL_POINT_SIZE_GRANULARITY, fv); ASSERT_TRUE(fv[0] == OOPS_GL_SMOOTH_GRANULARITY);
+
+  /* **A sub-pixel width draws a one-pixel line**, as an aliased line of any width below 1.5
+   * does. The raw 0.3 used to be the quad's width, which can miss every pixel centre. */
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glLineWidth(0.3f);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glBegin(GL_LINES);
+  glVertex2f(-0.9f, 0.03f); glVertex2f(0.9f, 0.03f);
+  glEnd();
+  int lit = 0;
+  for (int i = 0; i < W * H; i++) if ((fb[i] & 0x00ffffffu) != 0u) lit++;
+  ASSERT_TRUE(lit >= 10 && lit <= 20);
+  glLineWidth(1.0f);
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Mipmap levels, completeness, the default texture, the filters, and perspective-correct
+ * interpolation - the texturing a real 1.x program depends on, each against GL's own numbers.
+ *
+ * The first assertion is the one that matters most: uploading levels 1 and 2 must leave level 0
+ * alone. `level` was ignored until 2026-09-19, so a mip chain uploaded level by level ended as its
+ * own 1x1 level on the base image.
+ */
+static void test_gl_mipmaps_completeness_and_filtering(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  #define PX(x, y) (fb[(y) * W + (x)] & 0x00ffffffu)
+
+  /* A three-level chain: 4x4 red, 2x2 green, 1x1 blue. */
+  GLubyte red[4 * 4 * 4], green[2 * 2 * 4], blue[4] = {0, 0, 255, 255};
+  for (int i = 0; i < 16; i++) { red[i * 4] = 255; red[i * 4 + 1] = 0; red[i * 4 + 2] = 0; red[i * 4 + 3] = 255; }
+  for (int i = 0; i < 4; i++) { green[i * 4] = 0; green[i * 4 + 1] = 255; green[i * 4 + 2] = 0; green[i * 4 + 3] = 255; }
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+  glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+  glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* Each level is its own image, and the base one is untouched. */
+  GLint lw = 0;
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &lw); ASSERT_EQ(lw, 4);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH, &lw); ASSERT_EQ(lw, 2);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 2, GL_TEXTURE_WIDTH, &lw); ASSERT_EQ(lw, 1);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 3, GL_TEXTURE_WIDTH, &lw); ASSERT_EQ(lw, 0);
+  GLubyte back[4 * 4 * 4];
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+  ASSERT_EQ(back[0], 255); ASSERT_EQ(back[1], 0);   /* still red */
+  glGetTexImage(GL_TEXTURE_2D, 1, GL_RGBA, GL_UNSIGNED_BYTE, back);
+  ASSERT_EQ(back[0], 0); ASSERT_EQ(back[1], 255);   /* green */
+  glPixelStorei(GL_PACK_ALIGNMENT, 4);
+
+  glEnable(GL_TEXTURE_2D);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  #define QUAD(h) do { glBegin(GL_QUADS); \
+      glTexCoord2f(0.0f, 0.0f); glVertex2f(-(h), -(h)); glTexCoord2f(1.0f, 0.0f); glVertex2f((h), -(h)); \
+      glTexCoord2f(1.0f, 1.0f); glVertex2f((h), (h));   glTexCoord2f(0.0f, 1.0f); glVertex2f(-(h), (h)); \
+      glEnd(); } while (0)
+
+  /* Magnified - 4 texels over 16 pixels - the base level. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(0.5f);
+  ASSERT_EQ(PX(16, 16), 0x00ff0000u);
+  /* 4 texels over 2 pixels: lod 1, the second level. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(0.0625f);
+  ASSERT_EQ(PX(16, 16), 0x0000ff00u);
+  /* 4 texels over 1 pixel: lod 2, the third. The one-pixel quad is centred on a pixel corner,
+   * all four of whose neighbouring centres lie on its edges; under the rasteriser's tie rule
+   * the upper-left one is its pixel (it drew all four until 2026-09-19). */
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(0.03125f);
+  ASSERT_EQ(PX(15, 15), 0x000000ffu);
+  ASSERT_EQ(PX(16, 16), 0x00000000u);
+
+  /* **Incomplete draws untextured.** A second level of the wrong size breaks the chain, and the
+   * quad takes the plain vertex colour - white - as it would on any GL. */
+  glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(0.5f);
+  ASSERT_EQ(PX(16, 16), 0x00ffffffu);
+  /* A filter that reads no mipmaps needs only the base level. */
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(0.5f);
+  ASSERT_EQ(PX(16, 16), 0x00ff0000u);
+
+  /* **Nothing bound means the default texture.** Uploaded with no bind, drawn with no bind. */
+  glBindTexture(GL_TEXTURE_2D, 0);
+  const GLubyte yellow[4] = {255, 255, 0, 255};
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, yellow);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(0.5f);
+  ASSERT_EQ(PX(16, 16), 0x00ffff00u);
+
+  /* Linear against nearest magnification: a black-then-white 2x1 texture across the screen. At
+   * the centre column the linear sample is a blend; the nearest one is the white texel. */
+  const GLubyte bw[8] = {0, 0, 0, 255, 255, 255, 255, 255};
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, bw);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(1.0f);
+  const uint32_t mid_linear = (fb[16 * W + 16] >> 16) & 0xffu;
+  ASSERT_TRUE(mid_linear > 100u && mid_linear < 170u);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(1.0f);
+  ASSERT_EQ(PX(16, 16), 0x00ffffffu);
+  glDisable(GL_TEXTURE_2D);
+
+  /* **Perspective-correct interpolation.** Black at the bottom with w = 1, white at the top
+   * with w = 3, filling the screen. The middle row is NDC y = 0, which in clip space is a quarter
+   * of the way up the edge ((-1 + 4t) / (1 + 2t) = 0 at t = 1/4): colour 0.25, about 64. Affine
+   * interpolation, which this was, gives the screen halfway point's 128. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_QUADS);
+  glColor3f(0.0f, 0.0f, 0.0f); glVertex4f(-1.0f, -1.0f, 0.0f, 1.0f);
+  glColor3f(0.0f, 0.0f, 0.0f); glVertex4f(1.0f, -1.0f, 0.0f, 1.0f);
+  glColor3f(1.0f, 1.0f, 1.0f); glVertex4f(3.0f, 3.0f, 0.0f, 3.0f);
+  glColor3f(1.0f, 1.0f, 1.0f); glVertex4f(-3.0f, 3.0f, 0.0f, 3.0f);
+  glEnd();
+  const uint32_t mid = (fb[16 * W + 16] >> 16) & 0xffu;
+  ASSERT_TRUE(mid > 52u && mid < 76u);
+
+  /* Level bounds. */
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexImage2D(GL_TEXTURE_2D, OOPS_GL_MAX_TEXTURE_LEVELS, GL_RGBA, 1, 1, 0, GL_RGBA,
+               GL_UNSIGNED_BYTE, blue);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, OOPS_GL_MAX_TEXTURE_SIZE, 1, 0, GL_RGBA,
+               GL_UNSIGNED_BYTE, NULL);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE); /* larger than level 1 can be */
+  glTexSubImage2D(GL_TEXTURE_2D, 5, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, blue);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION); /* no level 5 to update */
+
+  #undef QUAD
+  #undef PX
+  glDeleteTextures(1, &tex);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Evaluators: every number here is the Bezier arithmetic worked by hand.
+ *
+ * The first drawing check is the one that tells a Bezier curve from a curve *through* its control
+ * points: the quadratic below has its middle control point at y = 0.5, and the curve's middle is
+ * at y = 0 - so the point lands on the centre row, not a quarter of the way up.
+ */
+static void test_gl_evaluators(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  #define PX(x, y) (fb[(y) * W + (x)] & 0x00ffffffu)
+
+  /* Defaults: every map order 1 over 0..1 holding its initial point, nothing enabled, a 1x1 grid. */
+  GLint iv[4] = {0, 0, 0, 0};
+  GLfloat fv[16] = {0}; /* GL_COEFF writes every point: 12 values for the 2x2 patch below */
+  glGetIntegerv(GL_MAX_EVAL_ORDER, iv);
+  ASSERT_TRUE(iv[0] >= 8);
+  ASSERT_EQ(glIsEnabled(GL_MAP2_VERTEX_3), GL_FALSE);
+  ASSERT_EQ(glIsEnabled(GL_AUTO_NORMAL), GL_FALSE);
+  glGetMapfv(GL_MAP1_COLOR_4, GL_COEFF, fv);
+  ASSERT_FLOAT_NEAR(fv[0], 1.0f, 0.0f); ASSERT_FLOAT_NEAR(fv[3], 1.0f, 0.0f);
+  glGetMapfv(GL_MAP2_NORMAL, GL_COEFF, fv);
+  ASSERT_FLOAT_NEAR(fv[0], 0.0f, 0.0f); ASSERT_FLOAT_NEAR(fv[2], 1.0f, 0.0f);
+  glGetMapiv(GL_MAP2_VERTEX_4, GL_ORDER, iv);
+  ASSERT_EQ(iv[0], 1); ASSERT_EQ(iv[1], 1);
+  glGetMapfv(GL_MAP1_VERTEX_3, GL_DOMAIN, fv);
+  ASSERT_FLOAT_NEAR(fv[0], 0.0f, 0.0f); ASSERT_FLOAT_NEAR(fv[1], 1.0f, 0.0f);
+  glGetIntegerv(GL_MAP2_GRID_SEGMENTS, iv);
+  ASSERT_EQ(iv[0], 1); ASSERT_EQ(iv[1], 1);
+  GLdouble dv[4] = {9, 9, 9, 9};
+  glGetDoublev(GL_MAP2_GRID_DOMAIN, dv); /* four values, all of them */
+  ASSERT_TRUE(dv[0] == 0.0 && dv[1] == 1.0 && dv[2] == 0.0 && dv[3] == 1.0);
+  /* An enable answers every glGet, not only glGetBooleanv. */
+  glGetIntegerv(GL_AUTO_NORMAL, iv);
+  ASSERT_EQ(iv[0], 0);
+  glEnable(GL_DEPTH_TEST);
+  glGetIntegerv(GL_DEPTH_TEST, iv);
+  ASSERT_EQ(iv[0], 1);
+  glDisable(GL_DEPTH_TEST);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* A quadratic through a stride wider than its points - the fourth value of each is padding. */
+  const GLfloat curve[12] = {-0.5f, -0.5f, 0.0f, 99.0f,
+                              0.0f,  0.5f, 0.0f, 99.0f,
+                              0.5f, -0.5f, 0.0f, 99.0f};
+  glMap1f(GL_MAP1_VERTEX_3, 2.0f, 4.0f, 4, 3, curve); /* domain 2..4: u = 3 is the middle */
+  glGetMapiv(GL_MAP1_VERTEX_3, GL_ORDER, iv);
+  ASSERT_EQ(iv[0], 3);
+  glGetMapfv(GL_MAP1_VERTEX_3, GL_COEFF, fv); /* packed: the padding is gone */
+  ASSERT_FLOAT_NEAR(fv[3], 0.0f, 0.0f); ASSERT_FLOAT_NEAR(fv[4], 0.5f, 0.0f);
+  glGetMapfv(GL_MAP1_VERTEX_3, GL_DOMAIN, fv);
+  ASSERT_FLOAT_NEAR(fv[0], 2.0f, 0.0f); ASSERT_FLOAT_NEAR(fv[1], 4.0f, 0.0f);
+
+  glPointSize(3.0f);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_POINTS);
+  glEvalCoord1f(3.0f); /* map not enabled: no vertex */
+  glEnd();
+  ASSERT_EQ(PX(16, 16), 0u);
+  glEnable(GL_MAP1_VERTEX_3);
+  glBegin(GL_POINTS);
+  glEvalCoord1f(3.0f);
+  glEnd();
+  ASSERT_EQ(PX(16, 16), 0x00ffffffu); /* (0, 0): the curve's middle */
+  ASSERT_EQ(PX(16, 8), 0u);           /* not the middle control point */
+
+  /* **An evaluated colour is that vertex's only.** Order 2 from red to green: u = 2 is red, and
+   * the current colour is still white afterwards. */
+  const GLfloat red_green[8] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+  glMap1f(GL_MAP1_COLOR_4, 2.0f, 4.0f, 4, 2, red_green);
+  glEnable(GL_MAP1_COLOR_4);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_POINTS);
+  glEvalCoord1d(2.0);
+  glEnd();
+  ASSERT_EQ(PX(8, 24), 0x00ff0000u); /* (-0.5, -0.5), red */
+  glGetFloatv(GL_CURRENT_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 1.0f && fv[1] == 1.0f && fv[2] == 1.0f);
+  glDisable(GL_MAP1_COLOR_4);
+
+  /* **GL_MAP1_VERTEX_4 wins over _3, and is projected.** (-1, 0, 0, 2) is (-0.5, 0). */
+  const GLfloat rational[8] = {-1.0f, 0.0f, 0.0f, 2.0f, 0.5f, 0.0f, 0.0f, 1.0f};
+  glMap1f(GL_MAP1_VERTEX_4, 0.0f, 1.0f, 4, 2, rational);
+  glEnable(GL_MAP1_VERTEX_4);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_POINTS);
+  glEvalCoord1f(0.0f);
+  glEnd();
+  ASSERT_EQ(PX(8, 16), 0x00ffffffu);
+  ASSERT_EQ(PX(8, 24), 0u); /* where the VERTEX_3 map's u = 0 would have been */
+  glDisable(GL_MAP1_VERTEX_4);
+
+  /* The grid: glEvalMesh1 as a line strip and glEvalPoint1 at the end of it. */
+  glMapGrid1f(2, 2.0f, 4.0f);
+  glGetFloatv(GL_MAP1_GRID_DOMAIN, fv);
+  ASSERT_FLOAT_NEAR(fv[0], 2.0f, 0.0f); ASSERT_FLOAT_NEAR(fv[1], 4.0f, 0.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glLineWidth(3.0f);
+  glEvalMesh1(GL_LINE, 0, 2);
+  ASSERT_EQ(PX(12, 20), 0x00ffffffu); /* (-0.25, -0.25), on the curve's first chord */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_POINTS);
+  glEvalPoint1(2); /* u = 4 exactly */
+  glEnd();
+  ASSERT_EQ(PX(24, 24), 0x00ffffffu);
+  glDisable(GL_MAP1_VERTEX_3);
+  glLineWidth(1.0f);
+
+  /* A flat 2x2 patch over x, y in -0.5..0.5, u along x and v along y: points u-major. */
+  const GLfloat patch[12] = {-0.5f, -0.5f, 0.0f,  -0.5f, 0.5f, 0.0f,
+                              0.5f, -0.5f, 0.0f,   0.5f, 0.5f, 0.0f};
+  glMap2f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 6, 2, 0.0f, 1.0f, 3, 2, patch);
+  glEnable(GL_MAP2_VERTEX_3);
+  glMapGrid2f(2, 0.0f, 1.0f, 2, 0.0f, 1.0f);
+  glGetIntegerv(GL_MAP2_GRID_SEGMENTS, iv);
+  ASSERT_EQ(iv[0], 2); ASSERT_EQ(iv[1], 2);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEvalMesh2(GL_FILL, 0, 2, 0, 2);
+  ASSERT_EQ(PX(12, 12), 0x00ffffffu);
+  ASSERT_EQ(PX(20, 20), 0x00ffffffu);
+  ASSERT_EQ(PX(4, 4), 0u);
+  /* GL_LINE: the grid lines only - a cell's inside stays dark, a row across it crosses three. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEvalMesh2(GL_LINE, 0, 2, 0, 2);
+  ASSERT_EQ(PX(12, 12), 0u);
+  int lit = 0;
+  for (int x = 0; x < W; x++) if (PX(x, 12) != 0u) lit++;
+  ASSERT_TRUE(lit >= 3 && lit <= 6);
+  /* GL_POINT: the nine grid points and nothing between. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEvalMesh2(GL_POINT, 0, 2, 0, 2);
+  ASSERT_EQ(PX(8, 8), 0x00ffffffu);
+  ASSERT_EQ(PX(24, 24), 0x00ffffffu);
+  ASSERT_EQ(PX(12, 12), 0u);
+  /* A sub-range of the grid: only the cell at i 1..2, j 0..1 - the lower right one. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEvalMesh2(GL_FILL, 1, 2, 0, 1);
+  ASSERT_EQ(PX(20, 20), 0x00ffffffu);
+  ASSERT_EQ(PX(12, 20), 0u);
+  ASSERT_EQ(PX(20, 12), 0u);
+
+  /* **GL_AUTO_NORMAL** lights the patch with its own normal, du x dv = +z, facing the default
+   * light; the current normal, pointing away, is left as it was. Turning the u domain round turns
+   * the normal round with it. */
+  glEnable(GL_LIGHTING);
+  glEnable(GL_LIGHT0);
+  glNormal3f(0.0f, 0.0f, -1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEvalMesh2(GL_FILL, 0, 2, 0, 2);
+  ASSERT_TRUE((PX(16, 16) & 0xffu) < 40u); /* the current normal faces away: ambient only */
+  glEnable(GL_AUTO_NORMAL);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEvalMesh2(GL_FILL, 0, 2, 0, 2);
+  ASSERT_TRUE((PX(16, 16) & 0xffu) > 150u);
+  glGetFloatv(GL_CURRENT_NORMAL, fv);
+  ASSERT_FLOAT_NEAR(fv[2], -1.0f, 0.0f);
+  glMap2f(GL_MAP2_VERTEX_3, 1.0f, 0.0f, 6, 2, 0.0f, 1.0f, 3, 2, patch);
+  glMapGrid2f(2, 1.0f, 0.0f, 2, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEvalMesh2(GL_FILL, 0, 2, 0, 2);
+  ASSERT_TRUE((PX(16, 16) & 0xffu) < 40u);
+  glMap2f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 6, 2, 0.0f, 1.0f, 3, 2, patch);
+  glMapGrid2f(2, 0.0f, 1.0f, 2, 0.0f, 1.0f);
+  glDisable(GL_AUTO_NORMAL);
+  glDisable(GL_LIGHTING);
+  glDisable(GL_LIGHT0);
+
+  /* **The highest texture-coordinate map wins.** Order-1 maps are constants: s = 0.25 from
+   * _COORD_1 would sample the red texel, s = 0.75 from _COORD_2 the green one. */
+  const GLubyte texels[8] = {255, 0, 0, 255, 0, 255, 0, 255};
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+  glEnable(GL_TEXTURE_2D);
+  const GLfloat s1 = 0.25f;
+  const GLfloat st2[2] = {0.75f, 0.5f};
+  glMap2f(GL_MAP2_TEXTURE_COORD_1, 0.0f, 1.0f, 1, 1, 0.0f, 1.0f, 1, 1, &s1);
+  glMap2f(GL_MAP2_TEXTURE_COORD_2, 0.0f, 1.0f, 2, 1, 0.0f, 1.0f, 2, 1, st2);
+  glEnable(GL_MAP2_TEXTURE_COORD_1);
+  glEnable(GL_MAP2_TEXTURE_COORD_2);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEvalMesh2(GL_FILL, 0, 2, 0, 2);
+  ASSERT_EQ(PX(16, 16), 0x0000ff00u);
+  glDisable(GL_MAP2_TEXTURE_COORD_2);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEvalMesh2(GL_FILL, 0, 2, 0, 2);
+  ASSERT_EQ(PX(16, 16), 0x00ff0000u);
+  glDisable(GL_MAP2_TEXTURE_COORD_1);
+  glDisable(GL_TEXTURE_2D);
+  glDeleteTextures(1, &tex);
+
+  /* **A list keeps the points it was compiled with**, and GL_COMPILE changes nothing until it
+   * is called. The mesh is compiled too, and draws when the list runs. */
+  GLfloat moving[12];
+  for (int i = 0; i < 12; i++) moving[i] = patch[i] * 0.5f; /* a patch half the size */
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glMap2f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 6, 2, 0.0f, 1.0f, 3, 2, moving);
+  glMapGrid2f(1, 0.0f, 1.0f, 1, 0.0f, 1.0f);
+  glEvalMesh2(GL_FILL, 0, 1, 0, 1);
+  glEndList();
+  for (int i = 0; i < 12; i++) moving[i] = 0.0f;
+  glGetMapfv(GL_MAP2_VERTEX_3, GL_COEFF, fv);
+  ASSERT_FLOAT_NEAR(fv[0], -0.5f, 0.0f); /* not yet the compiled patch */
+  glGetIntegerv(GL_MAP2_GRID_SEGMENTS, iv);
+  ASSERT_EQ(iv[0], 2);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glCallList(list);
+  ASSERT_EQ(PX(16, 16), 0x00ffffffu);
+  ASSERT_EQ(PX(10, 10), 0u); /* inside the full patch, outside the half one */
+  glGetMapfv(GL_MAP2_VERTEX_3, GL_COEFF, fv);
+  ASSERT_FLOAT_NEAR(fv[0], -0.25f, 0.0f);
+  glDeleteLists(list, 1);
+
+  /* The attribute stack: GL_EVAL_BIT carries the enables and the grid, GL_ENABLE_BIT the enables. */
+  glPushAttrib(GL_EVAL_BIT);
+  glDisable(GL_MAP2_VERTEX_3);
+  glEnable(GL_AUTO_NORMAL);
+  glMapGrid2f(7, 0.0f, 1.0f, 7, 0.0f, 1.0f);
+  glPopAttrib();
+  ASSERT_EQ(glIsEnabled(GL_MAP2_VERTEX_3), GL_TRUE);
+  ASSERT_EQ(glIsEnabled(GL_AUTO_NORMAL), GL_FALSE);
+  glGetIntegerv(GL_MAP2_GRID_SEGMENTS, iv);
+  ASSERT_EQ(iv[0], 1);
+  glPushAttrib(GL_ENABLE_BIT);
+  glDisable(GL_MAP2_VERTEX_3);
+  glPopAttrib();
+  ASSERT_EQ(glIsEnabled(GL_MAP2_VERTEX_3), GL_TRUE);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* Refusals, each leaving the map as it was. */
+  glMap1f(GL_MAP1_VERTEX_3, 1.0f, 1.0f, 3, 2, curve);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE); /* empty domain */
+  glMap1f(GL_MAP1_VERTEX_3, 0.0f, 1.0f, 3, 0, curve);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE); /* order 0 */
+  glMap1f(GL_MAP1_VERTEX_3, 0.0f, 1.0f, 3, 31, curve);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE); /* past GL_MAX_EVAL_ORDER */
+  glMap1f(GL_MAP1_VERTEX_3, 0.0f, 1.0f, 2, 2, curve);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE); /* stride shorter than a point */
+  glMap1f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 3, 2, curve);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);  /* a 2D target for glMap1 */
+  glMap2f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 6, 2, 0.0f, 1.0f, 2, 2, patch);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE); /* vstride */
+  glGetMapiv(GL_MAP1_VERTEX_3, GL_ORDER, iv);
+  ASSERT_EQ(iv[0], 3);
+  glGetMapfv(GL_TEXTURE_2D, GL_COEFF, fv);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetMapfv(GL_MAP1_VERTEX_3, GL_TEXTURE_2D, fv);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glMapGrid1f(0, 0.0f, 1.0f);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glEvalMesh1(GL_FILL, 0, 1);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glEvalMesh2(GL_TRIANGLES, 0, 1, 0, 1);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glBegin(GL_TRIANGLES);
+  glEvalMesh2(GL_FILL, 0, 1, 0, 1);
+  glEnd();
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  /* A compiled glMap with a bad stride fails when it runs, as the call would have. */
+  const GLuint bad = glGenLists(1);
+  glNewList(bad, GL_COMPILE);
+  glMap1f(GL_MAP1_VERTEX_3, 0.0f, 1.0f, 2, 2, curve);
+  glEndList();
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glCallList(bad);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glGetMapiv(GL_MAP1_VERTEX_3, GL_ORDER, iv);
+  ASSERT_EQ(iv[0], 3);
+  glDeleteLists(bad, 1);
+
+  glDisable(GL_MAP2_VERTEX_3);
+  glPointSize(1.0f);
+  #undef PX
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Selection and feedback, against numbers worked by hand. With identity matrices a vertex's z
+ * is its NDC z, so window z is z/2 + 1/2 and a hit record's depth is that times 2^32-1: z = 0 is
+ * 2147483648 after rounding. */
+static void test_gl_selection_and_feedback(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  #define PX(x, y) (fb[(y) * W + (x)] & 0x00ffffffu)
+  #define QUAD(x0, y0, x1, y1) do { glBegin(GL_QUADS); glVertex2f(x0, y0); glVertex2f(x1, y0); \
+                                    glVertex2f(x1, y1); glVertex2f(x0, y1); glEnd(); } while (0)
+  const GLuint Z_HALF = 2147483648u;
+
+  GLint iv[4] = {0};
+  glGetIntegerv(GL_RENDER_MODE, iv);
+  ASSERT_EQ((GLenum)iv[0], (GLenum)GL_RENDER);
+  glGetIntegerv(GL_MAX_NAME_STACK_DEPTH, iv);
+  ASSERT_TRUE(iv[0] >= 64);
+
+  /* GL_SELECT before glSelectBuffer is refused and changes nothing. */
+  ASSERT_EQ(glRenderMode(GL_SELECT), 0);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glGetIntegerv(GL_RENDER_MODE, iv);
+  ASSERT_EQ((GLenum)iv[0], (GLenum)GL_RENDER);
+
+  /* **Nothing is drawn in GL_SELECT, glClear included.** */
+  glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  GLuint sel[64];
+  for (int i = 0; i < 64; i++) sel[i] = 0xdeadbeefu;
+  glSelectBuffer(64, sel);
+  ASSERT_EQ(glRenderMode(GL_SELECT), 0);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glInitNames();
+  glPushName(0);
+  glLoadName(1);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  QUAD(-0.5f, -0.5f, 0.5f, 0.5f);                /* hit, flat at z = 0 */
+  glLoadName(2);
+  QUAD(2.0f, 2.0f, 3.0f, 3.0f);                  /* wholly outside: no hit */
+  glLoadName(3);
+  glBegin(GL_TRIANGLES);                          /* hit, z from -0.5 to 0.5 */
+  glVertex3f(-0.5f, -0.5f, -0.5f); glVertex3f(0.5f, -0.5f, 0.5f); glVertex3f(0.0f, 0.5f, 0.0f);
+  glEnd();
+  glLoadName(4);
+  glBegin(GL_TRIANGLES);                          /* clipped at the far plane: zmax is 1 */
+  glVertex3f(-0.5f, -0.5f, 0.0f); glVertex3f(0.5f, -0.5f, 0.0f); glVertex3f(0.0f, 0.5f, 2.0f);
+  glEnd();
+  glGetIntegerv(GL_NAME_STACK_DEPTH, iv);
+  ASSERT_EQ(iv[0], 1);
+  ASSERT_EQ(glRenderMode(GL_RENDER), 3);
+  ASSERT_EQ(PX(16, 16), 0x00ff0000u); /* the red clear survived the whole pass */
+  ASSERT_EQ(sel[0], 1u); ASSERT_EQ(sel[1], Z_HALF); ASSERT_EQ(sel[2], Z_HALF); ASSERT_EQ(sel[3], 1u);
+  ASSERT_EQ(sel[4], 1u); ASSERT_EQ(sel[5], 1073741824u); ASSERT_EQ(sel[6], 3221225471u);
+  ASSERT_EQ(sel[7], 3u);
+  ASSERT_EQ(sel[8], 1u); ASSERT_EQ(sel[9], Z_HALF); ASSERT_EQ(sel[10], 0xffffffffu);
+  ASSERT_EQ(sel[11], 4u);
+  ASSERT_EQ(sel[12], 0xdeadbeefu);
+  glGetIntegerv(GL_NAME_STACK_DEPTH, iv); /* leaving GL_SELECT empties the stack */
+  ASSERT_EQ(iv[0], 0);
+
+  /* **A culled polygon is no hit**; lines, points and a valid raster position are hits; names
+   * nest, bottom first. */
+  glRenderMode(GL_SELECT);
+  glInitNames();
+  glPushName(5);
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_BACK);
+  glBegin(GL_QUADS);                              /* clockwise: back-facing, culled */
+  glVertex2f(-0.5f, -0.5f); glVertex2f(-0.5f, 0.5f); glVertex2f(0.5f, 0.5f); glVertex2f(0.5f, -0.5f);
+  glEnd();
+  glDisable(GL_CULL_FACE);
+  glPushName(6);
+  glBegin(GL_LINES);
+  glVertex2f(-2.0f, 0.0f); glVertex2f(0.0f, 0.0f); /* half outside: still a hit */
+  glEnd();
+  glPopName();
+  glPushName(7);
+  glBegin(GL_POINTS);
+  glVertex3f(0.0f, 0.0f, 0.5f);
+  glEnd();
+  glPopName();
+  glPushName(8);
+  glRasterPos3f(0.0f, 0.0f, -0.5f);
+  glPopName();
+  ASSERT_EQ(glRenderMode(GL_RENDER), 3);
+  ASSERT_EQ(sel[0], 2u); ASSERT_EQ(sel[3], 5u); ASSERT_EQ(sel[4], 6u);
+  ASSERT_EQ(sel[5], 2u); ASSERT_EQ(sel[6], 3221225471u); ASSERT_EQ(sel[9], 7u);
+  ASSERT_EQ(sel[10], 2u); ASSERT_EQ(sel[11], 1073741824u); ASSERT_EQ(sel[14], 8u);
+
+  /* **The pick matrix**: a 4x4 pixel box around window (8, 8) - the lower left quarter - picks
+   * the quad there and not the one in the upper right. */
+  GLint vp[4];
+  glGetIntegerv(GL_VIEWPORT, vp);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  gluPickMatrix(8.0, 8.0, 4.0, 4.0, vp);
+  glMatrixMode(GL_MODELVIEW);
+  glRenderMode(GL_SELECT);
+  glInitNames();
+  glPushName(0);
+  glLoadName(10);
+  QUAD(-1.0f, -1.0f, 0.0f, 0.0f);
+  glLoadName(11);
+  QUAD(0.0f, 0.0f, 1.0f, 1.0f);
+  ASSERT_EQ(glRenderMode(GL_RENDER), 1);
+  ASSERT_EQ(sel[3], 10u);
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW);
+
+  /* A list carries the name-stack calls; they run when it does. */
+  const GLuint named = glGenLists(1);
+  glNewList(named, GL_COMPILE);
+  glPushName(21);
+  QUAD(-0.5f, -0.5f, 0.5f, 0.5f);
+  glPopName();
+  glEndList();
+  glRenderMode(GL_SELECT);
+  glInitNames();
+  glCallList(named);
+  ASSERT_EQ(glRenderMode(GL_RENDER), 1);
+  ASSERT_EQ(sel[0], 1u); ASSERT_EQ(sel[3], 21u);
+  glDeleteLists(named, 1);
+
+  /* **Overflow**: as much as fits is written, and glRenderMode answers -1. */
+  GLuint small[3] = {0, 0, 0};
+  glSelectBuffer(3, small);
+  glRenderMode(GL_SELECT);
+  glInitNames();
+  glPushName(9);
+  QUAD(-0.5f, -0.5f, 0.5f, 0.5f);
+  ASSERT_EQ(glRenderMode(GL_RENDER), -1);
+  ASSERT_EQ(small[0], 1u); ASSERT_EQ(small[1], Z_HALF);
+  glSelectBuffer(64, sel);
+
+  /* The name stack's refusals - and outside GL_SELECT, no refusal at all. */
+  glPopName();
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glRenderMode(GL_SELECT);
+  glInitNames();
+  glPopName();
+  ASSERT_EQ(glGetError(), GL_STACK_UNDERFLOW);
+  glLoadName(1);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  for (int i = 0; i < 64; i++) glPushName((GLuint)i);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glPushName(64);
+  ASSERT_EQ(glGetError(), GL_STACK_OVERFLOW);
+  glSelectBuffer(64, sel);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION); /* not while selecting */
+  glBegin(GL_TRIANGLES);
+  ASSERT_EQ(glRenderMode(GL_RENDER), 0);
+  glEnd();
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION); /* not inside glBegin */
+  ASSERT_EQ(glRenderMode(GL_RENDER), 0);          /* no hits */
+
+  /* Feedback, GL_2D: every token in order. A point at the centre is (16, 16); a line from x = -2
+   * is clipped at the edge, x = 0; the second segment of a strip is a plain GL_LINE_TOKEN. */
+  GLfloat fbk[128];
+  for (int i = 0; i < 128; i++) fbk[i] = -99.0f;
+  ASSERT_EQ(glRenderMode(GL_FEEDBACK), 0);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION); /* no feedback buffer yet */
+  glFeedbackBuffer(128, GL_2D, fbk);
+  glRenderMode(GL_FEEDBACK);
+  glBegin(GL_POINTS); glVertex2f(0.0f, 0.0f); glEnd();
+  glPassThrough(7.0f);
+  glBegin(GL_LINES); glVertex2f(-2.0f, 0.0f); glVertex2f(0.0f, 0.0f); glEnd();
+  glBegin(GL_LINE_STRIP);
+  glVertex2f(-0.5f, 0.0f); glVertex2f(0.0f, 0.0f); glVertex2f(0.5f, 0.0f);
+  glEnd();
+  glBegin(GL_TRIANGLES);
+  glVertex2f(-0.5f, -0.5f); glVertex2f(0.5f, -0.5f); glVertex2f(0.0f, 0.5f);
+  glEnd();
+  glRasterPos2f(0.0f, 0.0f);
+  glBitmap(0, 0, 0.0f, 0.0f, 4.0f, 0.0f, NULL);
+  const GLfloat want2d[] = {
+      (GLfloat)GL_POINT_TOKEN, 16, 16,
+      (GLfloat)GL_PASS_THROUGH_TOKEN, 7,
+      (GLfloat)GL_LINE_RESET_TOKEN, 0, 16, 16, 16,
+      (GLfloat)GL_LINE_RESET_TOKEN, 8, 16, 16, 16,
+      (GLfloat)GL_LINE_TOKEN, 16, 16, 24, 16,
+      (GLfloat)GL_POLYGON_TOKEN, 3, 8, 8, 24, 8, 16, 24,
+      (GLfloat)GL_BITMAP_TOKEN, 16, 16,
+  };
+  const int n2d = (int)(sizeof(want2d) / sizeof(want2d[0]));
+  ASSERT_EQ(glRenderMode(GL_RENDER), n2d);
+  for (int i = 0; i < n2d; i++) ASSERT_FLOAT_NEAR(fbk[i], want2d[i], 1e-4f);
+  ASSERT_FLOAT_NEAR(fbk[n2d], -99.0f, 0.0f);
+  GLfloat rp[4];
+  glGetFloatv(GL_CURRENT_RASTER_POSITION, rp); /* the bitmap still moved it */
+  ASSERT_FLOAT_NEAR(rp[0], 20.0f, 1e-4f);
+
+  /* GL_3D_COLOR and GL_4D_COLOR_TEXTURE: z, the colour, w (the clip w), the texture coordinate. */
+  glFeedbackBuffer(128, GL_4D_COLOR_TEXTURE, fbk);
+  glGetIntegerv(GL_FEEDBACK_BUFFER_TYPE, iv);
+  ASSERT_EQ((GLenum)iv[0], (GLenum)GL_4D_COLOR_TEXTURE);
+  glRenderMode(GL_FEEDBACK);
+  glColor4f(1.0f, 0.5f, 0.25f, 1.0f);
+  glTexCoord2f(0.25f, 0.75f);
+  glBegin(GL_POINTS); glVertex4f(0.0f, 0.0f, 1.0f, 2.0f); glEnd(); /* NDC z 0.5: window 0.75 */
+  ASSERT_EQ(glRenderMode(GL_RENDER), 13);
+  const GLfloat want4d[] = {(GLfloat)GL_POINT_TOKEN, 16, 16, 0.75f, 2.0f,
+                            1.0f, 0.5f, 0.25f, 1.0f, 0.25f, 0.75f, 0.0f, 1.0f};
+  for (int i = 0; i < 13; i++) ASSERT_FLOAT_NEAR(fbk[i], want4d[i], 1e-5f);
+  glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+  glTexCoord2f(0.0f, 0.0f);
+
+  /* GL_POLYGON_MODE GL_LINE reports the polygon's own sides, the first as a reset. */
+  glFeedbackBuffer(128, GL_2D, fbk);
+  glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+  glRenderMode(GL_FEEDBACK);
+  QUAD(-0.5f, -0.5f, 0.5f, 0.5f);
+  ASSERT_EQ(glRenderMode(GL_RENDER), 20); /* four sides of five values: no diagonal */
+  ASSERT_FLOAT_NEAR(fbk[0], (GLfloat)GL_LINE_RESET_TOKEN, 0.0f);
+  ASSERT_FLOAT_NEAR(fbk[5], (GLfloat)GL_LINE_TOKEN, 0.0f);
+  glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
+  /* Overflow in feedback, then refusals. */
+  GLfloat tiny[2];
+  glFeedbackBuffer(2, GL_2D, tiny);
+  glRenderMode(GL_FEEDBACK);
+  glBegin(GL_POINTS); glVertex2f(0.0f, 0.0f); glEnd();
+  ASSERT_EQ(glRenderMode(GL_RENDER), -1);
+  ASSERT_FLOAT_NEAR(tiny[0], (GLfloat)GL_POINT_TOKEN, 0.0f);
+  glFeedbackBuffer(8, GL_RGBA, fbk);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glFeedbackBuffer(-1, GL_2D, fbk);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glRenderMode(GL_POINTS);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  GLvoid *ptr = NULL;
+  glGetPointerv(GL_SELECTION_BUFFER_POINTER, &ptr);
+  ASSERT_TRUE(ptr == (GLvoid *)sel);
+
+  /* Back in GL_RENDER, drawing draws again. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD(-0.5f, -0.5f, 0.5f, 0.5f);
+  ASSERT_EQ(PX(16, 16), 0x00ffffffu);
+
+  #undef QUAD
+  #undef PX
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Pixel transfer and the pixel maps, on every path a colour rectangle takes: drawn, copied,
+ * uploaded, copied into a texture, and read back. A byte through a scale of 0.5 is 127.5, which
+ * rounds to 128 (0x80). */
+static void test_gl_pixel_transfer_and_maps(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  /* The raster position (0, 0) is window (16, 16): framebuffer row 15. */
+  #define RP() (fb[15 * W + 16] & 0x00ffffffu)
+  const GLubyte white[4] = {255, 255, 255, 255};
+
+  /* Defaults: nothing changes a pixel. */
+  GLfloat f = -1.0f;
+  GLint iv = -1;
+  glGetFloatv(GL_RED_SCALE, &f);    ASSERT_FLOAT_NEAR(f, 1.0f, 0.0f);
+  glGetFloatv(GL_ALPHA_BIAS, &f);   ASSERT_FLOAT_NEAR(f, 0.0f, 0.0f);
+  glGetIntegerv(GL_MAP_COLOR, &iv); ASSERT_EQ(iv, 0);
+  glGetIntegerv(GL_PIXEL_MAP_R_TO_R_SIZE, &iv); ASSERT_EQ(iv, 1);
+  glGetIntegerv(GL_MAX_PIXEL_MAP_TABLE, &iv);   ASSERT_TRUE(iv >= 32);
+  GLfloat map[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+  glGetPixelMapfv(GL_PIXEL_MAP_R_TO_R, map);
+  ASSERT_FLOAT_NEAR(map[0], 0.0f, 0.0f);
+  ASSERT_FLOAT_NEAR(map[1], 9.0f, 0.0f); /* one entry, and only one written */
+
+  /* **glDrawPixels**: red halved, green biased away. */
+  glRasterPos2f(0.0f, 0.0f);
+  glPixelTransferf(GL_RED_SCALE, 0.5f);
+  glPixelTransferf(GL_GREEN_BIAS, -1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glDrawPixels(1, 1, GL_RGBA, GL_UNSIGNED_BYTE, white);
+  ASSERT_EQ(RP(), 0x008000ffu);
+  glPixelTransferf(GL_GREEN_BIAS, 0.0f);
+
+  /* **glReadPixels** applies it too: white read back with red halved. */
+  glPixelTransferf(GL_RED_SCALE, 1.0f);
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glPixelTransferf(GL_RED_SCALE, 0.5f);
+  GLubyte px[4] = {0, 0, 0, 0};
+  glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+  ASSERT_EQ(px[0], 128); ASSERT_EQ(px[1], 255);
+
+  /* **A texture copy is transferred once**, not once reading and again uploading: 128, not 64. */
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 16, 16, 1, 1, 0);
+  glPixelTransferf(GL_RED_SCALE, 1.0f);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px); /* not transferred itself */
+  ASSERT_EQ(px[0], 128); ASSERT_EQ(px[1], 255);
+
+  /* **An upload**: red scaled to nothing on the way in, so the texture is cyan. */
+  glPixelTransferf(GL_RED_SCALE, 0.0f);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+  glPixelTransferf(GL_RED_SCALE, 1.0f);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+  ASSERT_EQ(px[0], 0); ASSERT_EQ(px[1], 255); ASSERT_EQ(px[2], 255);
+  glDeleteTextures(1, &tex);
+
+  /* **glCopyPixels**: the white at (16, 16) copied one to the right with blue biased off. */
+  glPixelTransferf(GL_BLUE_BIAS, -1.0f);
+  glRasterPos2f(1.0f / 16.0f, 0.0f); /* window (17, 16) */
+  glCopyPixels(16, 16, 1, 1, GL_COLOR);
+  ASSERT_EQ(fb[15 * W + 17] & 0x00ffffffu, 0x00ffff00u);
+  glPixelTransferf(GL_BLUE_BIAS, 0.0f);
+
+  /* **GL_MAP_COLOR**: red through a two-entry inverting table, the others through identity -
+   * magenta becomes blue. Every map starts as a single 0, so leaving one unset would zero it. */
+  const GLfloat invert[2] = {1.0f, 0.0f}, identity[2] = {0.0f, 1.0f};
+  glPixelMapfv(GL_PIXEL_MAP_R_TO_R, 2, invert);
+  glPixelMapfv(GL_PIXEL_MAP_G_TO_G, 2, identity);
+  glPixelMapfv(GL_PIXEL_MAP_B_TO_B, 2, identity);
+  glPixelMapfv(GL_PIXEL_MAP_A_TO_A, 2, identity);
+  glPixelTransferi(GL_MAP_COLOR, GL_TRUE);
+  const GLubyte magenta[4] = {255, 0, 255, 255};
+  glRasterPos2f(0.0f, 0.0f);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glDrawPixels(1, 1, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
+  ASSERT_EQ(RP(), 0x000000ffu);
+  glPixelTransferi(GL_MAP_COLOR, GL_FALSE);
+
+  /* **Luminance read from colour is R + G + B**: pure blue is 255, not 0. */
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  GLubyte lum = 7;
+  glReadPixels(16, 16, 1, 1, GL_LUMINANCE, GL_UNSIGNED_BYTE, &lum);
+  ASSERT_EQ(lum, 255);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+
+  /* The maps: stored clamped, converted by the integer forms, read back as they were set. */
+  const GLfloat wide[2] = {2.0f, -1.0f};
+  glPixelMapfv(GL_PIXEL_MAP_G_TO_G, 2, wide);
+  glGetPixelMapfv(GL_PIXEL_MAP_G_TO_G, map);
+  ASSERT_FLOAT_NEAR(map[0], 1.0f, 0.0f); ASSERT_FLOAT_NEAR(map[1], 0.0f, 0.0f);
+  const GLuint ui[2] = {0u, 0xffffffffu};
+  glPixelMapuiv(GL_PIXEL_MAP_B_TO_B, 2, ui);
+  glGetPixelMapfv(GL_PIXEL_MAP_B_TO_B, map);
+  ASSERT_FLOAT_NEAR(map[1], 1.0f, 1e-6f);
+  GLushort us[2] = {9, 9};
+  glGetPixelMapusv(GL_PIXEL_MAP_B_TO_B, us);
+  ASSERT_EQ(us[0], 0); ASSERT_EQ(us[1], 65535);
+  const GLuint indices[2] = {5u, 7u};
+  glPixelMapuiv(GL_PIXEL_MAP_I_TO_I, 2, indices); /* an index map: taken as integers */
+  GLuint back[2] = {0, 0};
+  glGetPixelMapuiv(GL_PIXEL_MAP_I_TO_I, back);
+  ASSERT_EQ(back[0], 5u); ASSERT_EQ(back[1], 7u);
+  glGetIntegerv(GL_PIXEL_MAP_I_TO_I_SIZE, &iv);
+  ASSERT_EQ(iv, 2);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* Refusals, each leaving the map as it was. */
+  const GLfloat three[3] = {0.0f, 0.5f, 1.0f};
+  glPixelMapfv(GL_PIXEL_MAP_I_TO_I, 3, three);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE); /* index maps are powers of two - I_TO_I too */
+  glPixelMapfv(GL_PIXEL_MAP_R_TO_R, 3, three);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);      /* colour maps are any size */
+  glPixelMapfv(GL_PIXEL_MAP_R_TO_R, 0, three);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glPixelMapfv(GL_PIXEL_MAP_R_TO_R, 257, three);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glPixelMapfv(GL_TEXTURE_2D, 2, three);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetPixelMapfv(GL_TEXTURE_2D, map);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glPixelTransferf(GL_TEXTURE_2D, 1.0f);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetIntegerv(GL_PIXEL_MAP_I_TO_I_SIZE, &iv);
+  ASSERT_EQ(iv, 2);
+
+  /* The state only colour-index and stencil pixels would use: kept and answered. */
+  glPixelTransferi(GL_INDEX_SHIFT, 3);
+  glPixelTransferi(GL_MAP_STENCIL, GL_TRUE);
+  glGetIntegerv(GL_INDEX_SHIFT, &iv);  ASSERT_EQ(iv, 3);
+  glGetIntegerv(GL_MAP_STENCIL, &iv);  ASSERT_EQ(iv, 1);
+
+  /* GL_PIXEL_MODE_BIT carries the transfer state and the zoom, not the maps. */
+  glPushAttrib(GL_PIXEL_MODE_BIT);
+  glPixelTransferf(GL_RED_SCALE, 0.25f);
+  glPixelTransferi(GL_INDEX_SHIFT, 0);
+  glPixelZoom(2.0f, 2.0f);
+  glPixelMapfv(GL_PIXEL_MAP_A_TO_A, 2, invert);
+  glPopAttrib();
+  glGetFloatv(GL_RED_SCALE, &f);    ASSERT_FLOAT_NEAR(f, 1.0f, 0.0f);
+  glGetIntegerv(GL_INDEX_SHIFT, &iv); ASSERT_EQ(iv, 3);
+  glGetFloatv(GL_ZOOM_X, &f);       ASSERT_FLOAT_NEAR(f, 1.0f, 0.0f);
+  glGetPixelMapfv(GL_PIXEL_MAP_A_TO_A, map);
+  ASSERT_FLOAT_NEAR(map[0], 1.0f, 0.0f);
+
+  /* **A list keeps the map it was compiled with**, and applies nothing until it runs. */
+  GLfloat moving[2] = {0.25f, 0.75f};
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glPixelMapfv(GL_PIXEL_MAP_R_TO_R, 2, moving);
+  glPixelTransferf(GL_RED_SCALE, 3.0f);
+  glEndList();
+  moving[0] = 0.0f;
+  glGetFloatv(GL_RED_SCALE, &f);    ASSERT_FLOAT_NEAR(f, 1.0f, 0.0f);
+  glCallList(list);
+  glGetFloatv(GL_RED_SCALE, &f);    ASSERT_FLOAT_NEAR(f, 3.0f, 0.0f);
+  glGetPixelMapfv(GL_PIXEL_MAP_R_TO_R, map);
+  ASSERT_FLOAT_NEAR(map[0], 0.25f, 0.0f);
+  glDeleteLists(list, 1);
+
+  #undef RP
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Line and polygon stipple. A horizontal line across the 32-pixel window is 32 fragments, one
+ * per column, so fragment s is column s - which makes the dash pattern readable pixel by pixel.
+ * Width 3 keeps a row of it on window row 15 (framebuffer row 16) whatever the rounding. */
+static void test_gl_line_and_polygon_stipple(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  #define PX(x, y) (fb[(y) * W + (x)] & 0x00ffffffu)
+  #define LIT(x) (PX(x, 16) != 0u)
+
+  GLint iv = 0;
+  ASSERT_EQ(glIsEnabled(GL_LINE_STIPPLE), GL_FALSE);
+  ASSERT_EQ(glIsEnabled(GL_POLYGON_STIPPLE), GL_FALSE);
+  glGetIntegerv(GL_LINE_STIPPLE_PATTERN, &iv); ASSERT_EQ(iv, 0xffff);
+  glGetIntegerv(GL_LINE_STIPPLE_REPEAT, &iv);  ASSERT_EQ(iv, 1);
+  GLubyte back[32 * 8];
+  glGetPolygonStipple(back);
+  ASSERT_EQ(back[0], 0xff); ASSERT_EQ(back[127], 0xff);
+
+  /* Four on, four off. */
+  glLineWidth(3.0f);
+  glEnable(GL_LINE_STIPPLE);
+  glLineStipple(1, 0x0f0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_LINES); glVertex2f(-1.0f, 0.0f); glVertex2f(1.0f, 0.0f); glEnd();
+  ASSERT_TRUE(LIT(1)); ASSERT_TRUE(!LIT(5)); ASSERT_TRUE(LIT(9)); ASSERT_TRUE(!LIT(13));
+  ASSERT_TRUE(LIT(18)); ASSERT_TRUE(!LIT(30));
+  /* The factor stretches each bit: two on-bits of 0x0003 at factor 4 are eight columns. */
+  glLineStipple(4, 0x0003);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_LINES); glVertex2f(-1.0f, 0.0f); glVertex2f(1.0f, 0.0f); glEnd();
+  ASSERT_TRUE(LIT(7)); ASSERT_TRUE(!LIT(8)); ASSERT_TRUE(!LIT(31));
+
+  /* **The count carries across a strip and starts again for each separate line.** 0x00ff at
+   * factor 1 is eight on, eight off; the joint is at column 12. Carried on, column 13 is s = 13,
+   * an off bit; started again it is s = 1, an on one. */
+  glLineStipple(1, 0x00ff);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_LINE_STRIP);
+  glVertex2f(-1.0f, 0.0f); glVertex2f(-0.25f, 0.0f); glVertex2f(1.0f, 0.0f);
+  glEnd();
+  ASSERT_TRUE(LIT(3)); ASSERT_TRUE(!LIT(13)); ASSERT_TRUE(LIT(17)); ASSERT_TRUE(!LIT(26));
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_LINES);
+  glVertex2f(-1.0f, 0.0f); glVertex2f(-0.25f, 0.0f);
+  glVertex2f(-0.25f, 0.0f); glVertex2f(1.0f, 0.0f);
+  glEnd();
+  ASSERT_TRUE(LIT(13)); ASSERT_TRUE(!LIT(21));
+
+  /* Off again: solid. */
+  glDisable(GL_LINE_STIPPLE);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_LINES); glVertex2f(-1.0f, 0.0f); glVertex2f(1.0f, 0.0f); glEnd();
+  ASSERT_TRUE(LIT(13)); ASSERT_TRUE(LIT(21));
+  glLineWidth(1.0f);
+
+  /* The factor is clamped, not refused. */
+  glLineStipple(0, 0x1234);
+  glGetIntegerv(GL_LINE_STIPPLE_REPEAT, &iv); ASSERT_EQ(iv, 1);
+  glLineStipple(1000, 0x1234);
+  glGetIntegerv(GL_LINE_STIPPLE_REPEAT, &iv); ASSERT_EQ(iv, 256);
+  glGetIntegerv(GL_LINE_STIPPLE_PATTERN, &iv); ASSERT_EQ(iv, 0x1234);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* **The polygon stipple**: a checkerboard, the mask's first row the window's bottom row, its
+   * first byte's top bit column 0. Unpacked at an alignment of 8, so each row's last four bytes
+   * are padding that must not be read. */
+  GLubyte mask[32 * 8];
+  for (int r = 0; r < 32; r++) {
+    for (int c = 0; c < 8; c++) mask[r * 8 + c] = (GLubyte)(c < 4 ? ((r & 1) ? 0x55 : 0xaa) : 0x00);
+  }
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
+  glPolygonStipple(mask);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glEnable(GL_POLYGON_STIPPLE);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(PX(0, 31), 0x00ffffffu); ASSERT_EQ(PX(1, 31), 0u);  /* window row 0 */
+  ASSERT_EQ(PX(0, 30), 0u);          ASSERT_EQ(PX(1, 30), 0x00ffffffu); /* window row 1 */
+  ASSERT_EQ(PX(20, 0), 0u);          ASSERT_EQ(PX(21, 0), 0x00ffffffu); /* row 31: odd */
+  /* Lines are not polygons, and nor is a polygon's outline. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glLineWidth(3.0f);
+  glBegin(GL_LINES); glVertex2f(-1.0f, 0.0f); glVertex2f(1.0f, 0.0f); glEnd();
+  ASSERT_TRUE(LIT(4)); ASSERT_TRUE(LIT(5));
+  glLineWidth(1.0f);
+  /* Read back at the pack alignment - here 1, so tight. */
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glGetPolygonStipple(back);
+  ASSERT_EQ(back[0], 0xaa); ASSERT_EQ(back[4], 0x55); ASSERT_EQ(back[127], 0x55);
+
+  /* The attribute stack: GL_POLYGON_STIPPLE_BIT carries the mask, GL_POLYGON_BIT the enable,
+   * GL_LINE_BIT the pattern and its enable. */
+  GLubyte ones[128];
+  for (int i = 0; i < 128; i++) ones[i] = 0xff;
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glPushAttrib(GL_POLYGON_STIPPLE_BIT | GL_POLYGON_BIT | GL_LINE_BIT);
+  glPolygonStipple(ones);
+  glDisable(GL_POLYGON_STIPPLE);
+  glEnable(GL_LINE_STIPPLE);
+  glLineStipple(2, 0x0001);
+  glPopAttrib();
+  glGetPolygonStipple(back);
+  ASSERT_EQ(back[0], 0xaa);
+  ASSERT_EQ(glIsEnabled(GL_POLYGON_STIPPLE), GL_TRUE);
+  ASSERT_EQ(glIsEnabled(GL_LINE_STIPPLE), GL_FALSE);
+  glGetIntegerv(GL_LINE_STIPPLE_PATTERN, &iv); ASSERT_EQ(iv, 0x1234);
+
+  /* **A list keeps the mask it was compiled with.** */
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glPolygonStipple(ones);
+  glLineStipple(3, 0x00f0);
+  glEndList();
+  for (int i = 0; i < 128; i++) ones[i] = 0x00;
+  glGetPolygonStipple(back);
+  ASSERT_EQ(back[0], 0xaa); /* not yet */
+  glCallList(list);
+  glGetPolygonStipple(back);
+  ASSERT_EQ(back[0], 0xff); ASSERT_EQ(back[127], 0xff);
+  glGetIntegerv(GL_LINE_STIPPLE_REPEAT, &iv); ASSERT_EQ(iv, 3);
+  glDeleteLists(list, 1);
+  glDisable(GL_POLYGON_STIPPLE);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glPixelStorei(GL_PACK_ALIGNMENT, 4);
+
+  #undef LIT
+  #undef PX
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* The accumulation buffer, the way programs use it - frames added in at a weight each, then
+ * returned - and each operation on its own. 0.5 of full intensity lands on 128, 0.25 on 64 and
+ * 0.75 on 191, allowing one step for the 16-bit rounding in between. */
+static void test_gl_accumulation_buffer(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  #define PX(x, y) (fb[(y) * W + (x)] & 0x00ffffffu)
+  #define CH(v, s) ((int)(((v) >> (s)) & 0xffu))
+  #define NEAR(v, want) ((v) >= (want) - 1 && (v) <= (want) + 1)
+
+  GLint iv = 0;
+  glGetIntegerv(GL_ACCUM_RED_BITS, &iv); ASSERT_EQ(iv, 16);
+  glGetIntegerv(GL_RED_BITS, &iv);       ASSERT_EQ(iv, 8);
+  glGetIntegerv(GL_DEPTH_BITS, &iv);     ASSERT_EQ(iv, 32);
+  GLfloat cv[4] = {9, 9, 9, 9};
+  glGetFloatv(GL_ACCUM_CLEAR_VALUE, cv);
+  ASSERT_TRUE(cv[0] == 0.0f && cv[3] == 0.0f);
+
+  /* **Two frames, half each**: red and blue make half-red, half-blue. */
+  glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT | GL_ACCUM_BUFFER_BIT);
+  glAccum(GL_ACCUM, 0.5f);
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glAccum(GL_ACCUM, 0.5f);
+  glAccum(GL_RETURN, 1.0f);
+  uint32_t p = PX(5, 5);
+  ASSERT_TRUE(NEAR(CH(p, 16), 128) && CH(p, 8) == 0 && NEAR(CH(p, 0), 128));
+
+  /* GL_LOAD replaces, GL_MULT scales, GL_ADD offsets. */
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glAccum(GL_LOAD, 1.0f);
+  glAccum(GL_MULT, 0.5f);
+  glAccum(GL_ADD, 0.25f);
+  glAccum(GL_RETURN, 1.0f);
+  p = PX(5, 5);
+  ASSERT_TRUE(NEAR(CH(p, 16), 64) && NEAR(CH(p, 8), 191) && NEAR(CH(p, 0), 64));
+  /* GL_RETURN scales too, and clamps. */
+  glAccum(GL_RETURN, 4.0f);
+  ASSERT_EQ(PX(5, 5), 0x00ffffffu);
+
+  /* **The colour mask applies to GL_RETURN**: green stays as the colour buffer had it. */
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColorMask(GL_TRUE, GL_FALSE, GL_TRUE, GL_TRUE);
+  glAccum(GL_RETURN, 4.0f);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  ASSERT_EQ(PX(5, 5), 0x00ff00ffu);
+
+  /* **Past full scale it clamps, it does not wrap.** White loaded, then white added again: the
+   * sum is 2, held at 1 - where 16-bit arithmetic that wrapped would come back near -1, black. */
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glAccum(GL_LOAD, 1.0f);
+  glAccum(GL_ACCUM, 1.0f);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glAccum(GL_RETURN, 1.0f);
+  ASSERT_EQ(PX(5, 5), 0x00ffffffu);
+
+  /* **The scissor box bounds a clear and an operation**: only the left half is cleared to white.
+   * The window's left half is framebuffer columns 0..15. */
+  glClearAccum(0.0f, 0.0f, 0.0f, 0.0f);
+  glClear(GL_ACCUM_BUFFER_BIT);
+  glClearAccum(1.0f, 1.0f, 1.0f, 1.0f);
+  glEnable(GL_SCISSOR_TEST);
+  glScissor(0, 0, 16, 32);
+  glClear(GL_ACCUM_BUFFER_BIT);
+  glDisable(GL_SCISSOR_TEST);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glAccum(GL_RETURN, 1.0f);
+  ASSERT_EQ(PX(5, 5), 0x00ffffffu);
+  ASSERT_EQ(PX(20, 5), 0u);
+
+  /* The clear value is clamped to -1..1 as it is set; a list carries both calls. */
+  glClearAccum(2.0f, -2.0f, 0.5f, 0.0f);
+  glGetFloatv(GL_ACCUM_CLEAR_VALUE, cv);
+  ASSERT_TRUE(cv[0] == 1.0f && cv[1] == -1.0f && cv[2] == 0.5f);
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glClearAccum(0.0f, 0.0f, 0.0f, 0.0f);
+  glAccum(GL_RETURN, 1.0f);
+  glEndList();
+  glGetFloatv(GL_ACCUM_CLEAR_VALUE, cv);
+  ASSERT_TRUE(cv[0] == 1.0f); /* not yet */
+  glCallList(list);
+  glGetFloatv(GL_ACCUM_CLEAR_VALUE, cv);
+  ASSERT_TRUE(cv[0] == 0.0f);
+  glDeleteLists(list, 1);
+
+  /* Refusals. */
+  glAccum(GL_TEXTURE_2D, 1.0f);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glBegin(GL_TRIANGLES);
+  glAccum(GL_RETURN, 1.0f);
+  glEnd();
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glClear(0x00100000u);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+
+  #undef NEAR
+  #undef CH
+  #undef PX
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* glClear through the scissor box and the write masks - all of which it ignored until
+ * 2026-09-19 - and unmoved by any per-fragment state it is not subject to. */
+static void test_gl_clear_keeps_to_scissor_and_masks(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  #define PX(x, y) (fb[(y) * W + (x)] & 0x00ffffffu)
+  #define DEPTH(x, y) (ctx->depth_buffer[(y) * W + (x)])
+  /* Window (4, 4) is framebuffer (4, 27); window (20, 20) is framebuffer (20, 11). */
+
+  glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+  glClearDepth(1.0f);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  ASSERT_EQ(PX(4, 27), 0x00ff0000u);
+  ASSERT_EQ(PX(20, 11), 0x00ff0000u);
+
+  /* **The scissor box**: green and depth 0.25 in the lower-left 16x16 only. */
+  glEnable(GL_SCISSOR_TEST);
+  glScissor(0, 0, 16, 16);
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClearDepth(0.25);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glDisable(GL_SCISSOR_TEST);
+  ASSERT_EQ(PX(4, 27), 0x0000ff00u);
+  ASSERT_EQ(PX(20, 11), 0x00ff0000u);
+  ASSERT_FLOAT_NEAR(DEPTH(4, 27), 0.25f, 1e-6f);
+  ASSERT_FLOAT_NEAR(DEPTH(20, 11), 1.0f, 1e-6f);
+
+  /* **The colour mask**: blue written, red kept. */
+  glColorMask(GL_FALSE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  ASSERT_EQ(PX(20, 11), 0x00ff00ffu);
+  ASSERT_EQ(PX(4, 27), 0x000000ffu); /* green cleared to 0 - it was not masked */
+
+  /* **The depth mask** drops the depth clear. */
+  glDepthMask(GL_FALSE);
+  glClearDepth(0.5);
+  glClear(GL_DEPTH_BUFFER_BIT);
+  glDepthMask(GL_TRUE);
+  ASSERT_FLOAT_NEAR(DEPTH(20, 11), 1.0f, 1e-6f);
+
+  /* **None of the per-fragment state a clear is not subject to touches it** - blending, an
+   * alpha test that rejects everything, a clip plane that cuts the whole window, a depth test
+   * that would fail, culling of the quad's winding, a texture - and all of it is back afterwards,
+   * with the matrices, viewport and depth range the clear set aside. */
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_ZERO, GL_ONE);
+  glEnable(GL_ALPHA_TEST);
+  glAlphaFunc(GL_NEVER, 0.0f);
+  const GLdouble cut[4] = {0.0, 0.0, 0.0, -1.0};
+  glClipPlane(GL_CLIP_PLANE0, cut);
+  glEnable(GL_CLIP_PLANE0);
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_NEVER);
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_FRONT_AND_BACK);
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  glTranslatef(5.0f, 0.0f, 0.0f);
+  glViewport(0, 0, 8, 8);
+  glDepthRange(0.5, 0.75);
+  glColor3f(0.25f, 0.5f, 0.75f);
+  glEnable(GL_SCISSOR_TEST);
+  glScissor(16, 16, 16, 16);
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glClearDepth(0.125);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glDisable(GL_SCISSOR_TEST);
+  ASSERT_EQ(PX(20, 11), 0x00ffffffu);
+  ASSERT_FLOAT_NEAR(DEPTH(20, 11), 0.125f, 1e-6f);
+  ASSERT_EQ(PX(4, 27), 0x000000ffu); /* outside the box */
+  ASSERT_EQ(glIsEnabled(GL_BLEND), GL_TRUE);
+  ASSERT_EQ(glIsEnabled(GL_ALPHA_TEST), GL_TRUE);
+  ASSERT_EQ(glIsEnabled(GL_CLIP_PLANE0), GL_TRUE);
+  ASSERT_EQ(glIsEnabled(GL_CULL_FACE), GL_TRUE);
+  GLint iv[4];
+  glGetIntegerv(GL_DEPTH_FUNC, iv);   ASSERT_EQ((GLenum)iv[0], (GLenum)GL_NEVER);
+  glGetIntegerv(GL_VIEWPORT, iv);     ASSERT_EQ(iv[2], 8);
+  GLfloat fv[16];
+  glGetFloatv(GL_DEPTH_RANGE, fv);    ASSERT_FLOAT_NEAR(fv[0], 0.5f, 0.0f);
+  glGetFloatv(GL_MODELVIEW_MATRIX, fv); ASSERT_FLOAT_NEAR(fv[12], 5.0f, 0.0f);
+  glGetFloatv(GL_CURRENT_COLOR, fv);  ASSERT_FLOAT_NEAR(fv[2], 0.75f, 0.0f);
+  glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST); glDisable(GL_CLIP_PLANE0);
+  glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+  glLoadIdentity(); glViewport(0, 0, W, H); glDepthRange(0.0, 1.0);
+
+  /* A box wholly off the surface clears nothing; a clear inside glBegin is refused. */
+  glEnable(GL_SCISSOR_TEST);
+  glScissor(100, 100, 8, 8);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glDisable(GL_SCISSOR_TEST);
+  ASSERT_EQ(PX(20, 11), 0x00ffffffu);
+  glBegin(GL_TRIANGLES);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEnd();
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  ASSERT_EQ(PX(20, 11), 0x00ffffffu);
+
+  #undef DEPTH
+  #undef PX
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* 3D textures on the software rasteriser. A 2x2x2 volume whose slice 0 is red and slice 1 green:
+ * slice centres sit at r = 0.25 and 0.75, so nearest filtering picks the slice and linear
+ * filtering at r = 0.5 is half of each. The quad carries one (s, t, r) at every corner, so the
+ * whole window samples the same point. */
+static void test_gl_texture_3d(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  #define PX(x, y) (fb[(y) * W + (x)] & 0x00ffffffu)
+  #define DRAW_AT(s_, t_, r_) do { glClear(GL_COLOR_BUFFER_BIT); glTexCoord3f(s_, t_, r_); \
+      glRectf(-1.0f, -1.0f, 1.0f, 1.0f); } while (0)
+
+  GLint iv = 0;
+  glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &iv); ASSERT_TRUE(iv >= 16);
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_3D), GL_FALSE);
+
+  GLubyte vol[2 * 2 * 2 * 4];
+  for (int i = 0; i < 8; i++) {
+    const int slice = i / 4;
+    vol[i * 4 + 0] = slice ? 0 : 255; vol[i * 4 + 1] = slice ? 255 : 0;
+    vol[i * 4 + 2] = 0; vol[i * 4 + 3] = 255;
+  }
+  GLuint t3 = 0;
+  glGenTextures(1, &t3);
+  glBindTexture(GL_TEXTURE_3D, t3);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetTexLevelParameteriv(GL_TEXTURE_3D, 0, GL_TEXTURE_DEPTH, &iv); ASSERT_EQ(iv, 2);
+  glGetIntegerv(GL_TEXTURE_BINDING_3D, &iv); ASSERT_EQ((GLuint)iv, t3);
+
+  /* **r picks the slice.** And a 2D texture enabled alongside - blue - loses to the volume. */
+  const GLubyte blue[4] = {0, 0, 255, 255};
+  GLuint t2 = 0;
+  glGenTextures(1, &t2);
+  glBindTexture(GL_TEXTURE_2D, t2);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue);
+  glEnable(GL_TEXTURE_2D);
+  glEnable(GL_TEXTURE_3D);
+  DRAW_AT(0.5f, 0.5f, 0.25f);
+  ASSERT_EQ(PX(16, 16), 0x00ff0000u);
+  DRAW_AT(0.5f, 0.5f, 0.75f);
+  ASSERT_EQ(PX(16, 16), 0x0000ff00u);
+  glDisable(GL_TEXTURE_3D);
+  DRAW_AT(0.5f, 0.5f, 0.75f);
+  ASSERT_EQ(PX(16, 16), 0x000000ffu); /* 2D again */
+  glDisable(GL_TEXTURE_2D);
+  glEnable(GL_TEXTURE_3D);
+
+  /* **Linear between slices**: r = 0.5 is half red, half green. */
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  DRAW_AT(0.5f, 0.5f, 0.5f);
+  uint32_t p = PX(16, 16);
+  ASSERT_TRUE(((p >> 16) & 0xffu) >= 126u && ((p >> 16) & 0xffu) <= 129u);
+  ASSERT_TRUE(((p >> 8) & 0xffu) >= 126u && ((p >> 8) & 0xffu) <= 129u);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+  /* **r wraps by GL_TEXTURE_WRAP_R**: 1.25 repeats to 0.25 (red), or clamps to the last slice. */
+  DRAW_AT(0.5f, 0.5f, 1.25f);
+  ASSERT_EQ(PX(16, 16), 0x00ff0000u);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+  glGetTexParameteriv(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, &iv);
+  ASSERT_EQ((GLenum)iv, (GLenum)GL_CLAMP_TO_EDGE);
+  DRAW_AT(0.5f, 0.5f, 1.25f);
+  ASSERT_EQ(PX(16, 16), 0x0000ff00u);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+
+  /* **The texture matrix moves r too**: 0.25 translated by a half samples the green slice. */
+  glMatrixMode(GL_TEXTURE);
+  glTranslatef(0.0f, 0.0f, 0.5f);
+  glMatrixMode(GL_MODELVIEW);
+  DRAW_AT(0.5f, 0.5f, 0.25f);
+  ASSERT_EQ(PX(16, 16), 0x0000ff00u);
+  glMatrixMode(GL_TEXTURE); glLoadIdentity(); glMatrixMode(GL_MODELVIEW);
+
+  /* glTexSubImage3D replaces slice 1 with blue; glGetTexImage reads the volume back in order. */
+  const GLubyte blues[2 * 2 * 4] = {0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255};
+  glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 1, 2, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, blues);
+  DRAW_AT(0.5f, 0.5f, 0.75f);
+  ASSERT_EQ(PX(16, 16), 0x000000ffu);
+  GLubyte back[2 * 2 * 3 * 4];
+  glGetTexImage(GL_TEXTURE_3D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+  ASSERT_EQ(back[0], 255); ASSERT_EQ(back[16 + 2], 255); ASSERT_EQ(back[16 + 0], 0);
+
+  /* **GL_UNPACK_IMAGE_HEIGHT**: the caller's slices three rows apart, the third row padding. */
+  GLubyte padded[2 * 3 * 2 * 4];
+  memset(padded, 7, sizeof(padded));
+  for (int z = 0; z < 2; z++) {
+    for (int y = 0; y < 2; y++) {
+      for (int x = 0; x < 2; x++) {
+        GLubyte *q = &padded[((z * 3 + y) * 2 + x) * 4];
+        q[0] = (GLubyte)(z ? 10 : 20); q[1] = 0; q[2] = 0; q[3] = 255;
+      }
+    }
+  }
+  glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 3);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, padded);
+  glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+  glGetTexImage(GL_TEXTURE_3D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+  ASSERT_EQ(back[0], 20); ASSERT_EQ(back[12], 20); ASSERT_EQ(back[16], 10); ASSERT_EQ(back[28], 10);
+
+  /* glCopyTexSubImage3D: a white framebuffer pixel into texel (1, 1) of slice 1. */
+  glDisable(GL_TEXTURE_3D);
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glCopyTexSubImage3D(GL_TEXTURE_3D, 0, 1, 1, 1, 5, 5, 1, 1);
+  glGetTexImage(GL_TEXTURE_3D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+  ASSERT_EQ(back[28], 255); ASSERT_EQ(back[28 + 1], 255); ASSERT_EQ(back[16], 10);
+  glEnable(GL_TEXTURE_3D);
+
+  /* **Completeness counts depth**: a mipmapping filter wants level 1 at 1x1x1. Without it the
+   * volume samples as none - the vertex colour, white; with it, level 1's yellow. */
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+  glPushMatrix();
+  glScalef(0.07f, 0.07f, 1.0f); /* a quad about two pixels across over the centre */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_QUADS);
+  glTexCoord3f(0.0f, 0.0f, 0.25f); glVertex2f(-1.0f, -1.0f);
+  glTexCoord3f(1.0f, 0.0f, 0.25f); glVertex2f(1.0f, -1.0f);
+  glTexCoord3f(1.0f, 1.0f, 0.25f); glVertex2f(1.0f, 1.0f);
+  glTexCoord3f(0.0f, 1.0f, 0.25f); glVertex2f(-1.0f, 1.0f);
+  glEnd();
+  ASSERT_EQ(PX(16, 16), 0x00ffffffu);
+  const GLubyte yellow[4] = {255, 255, 0, 255};
+  glTexImage3D(GL_TEXTURE_3D, 1, GL_RGBA, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, yellow);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_QUADS);
+  glTexCoord3f(0.0f, 0.0f, 0.25f); glVertex2f(-1.0f, -1.0f);
+  glTexCoord3f(4.0f, 0.0f, 0.25f); glVertex2f(1.0f, -1.0f);
+  glTexCoord3f(4.0f, 4.0f, 0.25f); glVertex2f(1.0f, 1.0f);
+  glTexCoord3f(0.0f, 4.0f, 0.25f); glVertex2f(-1.0f, 1.0f);
+  glEnd();
+  glPopMatrix();
+  ASSERT_EQ(PX(16, 16), 0x00ffff00u);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+  /* The attribute stack carries the binding and the enable; a list keeps the volume it compiled. */
+  glPushAttrib(GL_TEXTURE_BIT | GL_ENABLE_BIT);
+  glBindTexture(GL_TEXTURE_3D, 0);
+  glDisable(GL_TEXTURE_3D);
+  glPopAttrib();
+  glGetIntegerv(GL_TEXTURE_BINDING_3D, &iv); ASSERT_EQ((GLuint)iv, t3);
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_3D), GL_TRUE);
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+  glEndList();
+  vol[0] = 1;
+  glCallList(list);
+  glGetTexImage(GL_TEXTURE_3D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+  ASSERT_EQ(back[0], 255); /* compiled red, not the 1 written after */
+  glDeleteLists(list, 1);
+
+  /* Refusals. */
+  glTexImage3D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  /* A depth of zero is **not** a refusal since 2026-09-20: it releases the level, which is what
+   * GL says a zero size means. A negative one is still an error. */
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 0, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, -2, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 1024, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 2, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, vol);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE); /* slice 2 of 2 */
+
+  /* Deleting it unbinds it. */
+  glDeleteTextures(1, &t3);
+  glGetIntegerv(GL_TEXTURE_BINDING_3D, &iv); ASSERT_EQ(iv, 0);
+  glDisable(GL_TEXTURE_3D);
+  glDeleteTextures(1, &t2);
+
+  #undef DRAW_AT
+  #undef PX
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Texture parameters: values checked, the float ones kept as floats, priority and residency, the
+ * border colour - and the wrap modes as sampled: GL_CLAMP_TO_BORDER reaching the border,
+ * GL_CLAMP clamping the coordinate first, GL_MIRRORED_REPEAT reflecting. */
+static void test_gl_texture_parameters_and_wrap_modes(void) {
+  const int W = 64, H = 4;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  GLint iv[4] = {0, 0, 0, 0};
+  GLfloat fv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+  /* **Values are checked**: a wrap mode or filter GL does not have is refused and changes
+   * nothing. */
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x1234);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_REPEAT);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_REPEAT);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_LINEAR);
+
+  /* **Priority**: 1 by default, a float, clamped; glPrioritizeTextures sets the same field. */
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, fv);
+  ASSERT_TRUE(fv[0] == 1.0f);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, 0.5f);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, fv);
+  ASSERT_TRUE(fv[0] == 0.5f);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, iv);
+  ASSERT_EQ(iv[0], 1073741823); /* FLOAT_TO_INT(0.5) */
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, 7.0f);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, fv);
+  ASSERT_TRUE(fv[0] == 1.0f);
+  const GLclampf quarter = 0.25f;
+  glPrioritizeTextures(1, &tex, &quarter);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, fv);
+  ASSERT_TRUE(fv[0] == 0.25f);
+  /* Residency is a query; everything is resident. */
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_RESIDENT, iv);
+  ASSERT_EQ(iv[0], GL_TRUE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_RESIDENT, GL_TRUE);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+  /* **Border colour**: four floats, clamped; integers converted by range; refused as a scalar. */
+  const GLfloat wild[4] = {0.25f, 2.0f, -1.0f, 0.5f};
+  glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, wild);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 0.25f && fv[1] == 1.0f && fv[2] == 0.0f && fv[3] == 0.5f);
+  const GLint ib[4] = {2147483647, 0, 0, 2147483647};
+  glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, ib);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, iv);
+  ASSERT_TRUE(iv[0] == 2147483647 && iv[1] == 0 && iv[2] == 0 && iv[3] == 2147483647);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, 0);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* An environment colour of 1 read back as an integer is INT_MAX - it overflowed to INT_MIN. */
+  const GLfloat one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, one);
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, iv);
+  ASSERT_EQ(iv[0], 2147483647);
+
+  /* **The wrap modes, sampled.** A red | green texture across a quad whose s runs from -1 at the
+   * left edge to 2 at the right: pixel x samples s = -1 + 3 (x + 0.5) / 64. Columns 10, 26, 37,
+   * 48 and 58 are s = -0.51, 0.24, 0.76, 1.27 and 1.74. */
+  const GLubyte rg[8] = {255, 0, 0, 255, 0, 255, 0, 255};
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, rg);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  const GLfloat blue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+  glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, blue);
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glEnable(GL_TEXTURE_2D);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  #define DRAW_S(mode) do { \
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, mode); \
+      glBegin(GL_QUADS); \
+      glTexCoord2f(-1.0f, 0.5f); glVertex2f(-1.0f, -1.0f); \
+      glTexCoord2f(2.0f, 0.5f);  glVertex2f(1.0f, -1.0f); \
+      glTexCoord2f(2.0f, 0.5f);  glVertex2f(1.0f, 1.0f); \
+      glTexCoord2f(-1.0f, 0.5f); glVertex2f(-1.0f, 1.0f); \
+      glEnd(); } while (0)
+  #define AT(x) (fb[2 * W + (x)] & 0x00ffffffu)
+  DRAW_S(GL_CLAMP_TO_BORDER);
+  ASSERT_EQ(AT(10), 0x0000ffu); /* the border */
+  ASSERT_EQ(AT(26), 0xff0000u);
+  ASSERT_EQ(AT(37), 0x00ff00u);
+  ASSERT_EQ(AT(48), 0x0000ffu);
+  DRAW_S(GL_CLAMP); /* nearest never leaves the image */
+  ASSERT_EQ(AT(10), 0xff0000u);
+  ASSERT_EQ(AT(48), 0x00ff00u);
+  DRAW_S(GL_CLAMP_TO_EDGE);
+  ASSERT_EQ(AT(10), 0xff0000u);
+  ASSERT_EQ(AT(48), 0x00ff00u);
+  DRAW_S(GL_REPEAT);
+  ASSERT_EQ(AT(48), 0xff0000u);
+  ASSERT_EQ(AT(58), 0x00ff00u);
+  DRAW_S(GL_MIRRORED_REPEAT); /* the second repetition reflected */
+  ASSERT_EQ(AT(48), 0x00ff00u);
+  ASSERT_EQ(AT(58), 0xff0000u);
+  /* GL_CLAMP under a linear filter: s clamped to 0 puts the sample on the texel's edge, half
+   * red and half border. */
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  DRAW_S(GL_CLAMP);
+  const uint32_t half = AT(10);
+  ASSERT_TRUE(((half >> 16) & 0xffu) >= 126u && ((half >> 16) & 0xffu) <= 129u);
+  ASSERT_TRUE((half & 0xffu) >= 126u && (half & 0xffu) <= 129u);
+  ASSERT_EQ((half >> 8) & 0xffu, 0u);
+  /* A luminance texture's border is expanded as its texels are: red 0.5 is grey. */
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, rg);
+  const GLfloat half_red[4] = {0.5f, 0.0f, 0.0f, 1.0f};
+  glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, half_red);
+  DRAW_S(GL_CLAMP_TO_BORDER);
+  ASSERT_EQ(AT(10), 0x808080u);
+  #undef AT
+  #undef DRAW_S
+
+  /* Compiled into a list, the float and vector forms keep their values. */
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, 0.75f);
+  glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, wild);
+  glEndList();
+  glCallList(list);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, fv);
+  ASSERT_TRUE(fv[0] == 0.75f);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 0.25f && fv[1] == 1.0f && fv[3] == 0.5f);
+  glDeleteLists(list, 1);
+
+  glDisable(GL_TEXTURE_2D);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glDeleteTextures(1, &tex);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Vertex arrays of every type GL 1.1 allows, read as their type (and checked), and GL 1.4's
+ * glWindowPos. */
+static void test_gl_array_types_and_window_pos(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0, 16.0, 0.0, 16.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  #define CENTRE (fb[(H / 2) * W + W / 2] & 0x00ffffffu)
+  GLint iv[4] = {0, 0, 0, 0};
+
+  /* **A GL_SHORT position array** - pixel coordinates - with a GL_UNSIGNED_SHORT colour array,
+   * normalised: red. The positions were read as floats before, and drew nothing. */
+  static const GLshort sq[8] = {4, 4, 12, 4, 12, 12, 4, 12};
+  static const GLushort red16[16] = {65535, 0, 0, 65535, 65535, 0, 0, 65535,
+                                     65535, 0, 0, 65535, 65535, 0, 0, 65535};
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+  glVertexPointer(2, GL_SHORT, 0, sq);
+  glColorPointer(4, GL_UNSIGNED_SHORT, 0, red16);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glDrawArrays(GL_QUADS, 0, 4);
+  ASSERT_EQ(CENTRE, 0xff0000u);
+  /* GL_DOUBLE positions and GL_BYTE colours, converted as glColor3b converts: (2c + 1) / 255, so
+   * 127 is 1 and -128 is -1, clamped to 0 (0 would be 1/255). */
+  static const GLdouble sqd[12] = {4, 4, 0, 12, 4, 0, 12, 12, 0, 4, 12, 0};
+  static const GLbyte green8[12] = {-128, 127, -128, -128, 127, -128,
+                                    -128, 127, -128, -128, 127, -128};
+  glVertexPointer(3, GL_DOUBLE, 0, sqd);
+  glColorPointer(3, GL_BYTE, 0, green8);
+  glDrawArrays(GL_QUADS, 0, 4);
+  ASSERT_EQ(CENTRE, 0x00ff00u);
+  /* A strided GL_INT array: the stride in bytes, two ints of padding per element. */
+  static const GLint sqi[16] = {4, 4, -1, -1, 12, 4, -1, -1, 12, 12, -1, -1, 4, 12, -1, -1};
+  glVertexPointer(2, GL_INT, 4 * (GLsizei)sizeof(GLint), sqi);
+  glDisableClientState(GL_COLOR_ARRAY);
+  glColor3f(0.0f, 0.0f, 1.0f);
+  glDrawArrays(GL_QUADS, 0, 4);
+  ASSERT_EQ(CENTRE, 0x0000ffu);
+
+  /* **The checks**, each leaving the array as it was. */
+  glVertexPointer(1, GL_FLOAT, 0, sq);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glVertexPointer(2, GL_UNSIGNED_BYTE, 0, sq);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glVertexPointer(2, GL_FLOAT, -4, sq);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glGetIntegerv(GL_VERTEX_ARRAY_SIZE, iv);
+  ASSERT_EQ(iv[0], 2);
+  glGetIntegerv(GL_VERTEX_ARRAY_TYPE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_INT);
+  glColorPointer(2, GL_FLOAT, 0, sq);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glNormalPointer(GL_UNSIGNED_BYTE, 0, sq);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexCoordPointer(2, GL_BYTE, 0, sq);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexCoordPointer(5, GL_FLOAT, 0, sq);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glDisableClientState(GL_VERTEX_ARRAY);
+
+  /* **glWindowPos**: the raster position as given, valid, w 1, z through the depth range. */
+  glWindowPos2i(3, 5);
+  GLfloat rp[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  glGetFloatv(GL_CURRENT_RASTER_POSITION, rp);
+  ASSERT_TRUE(rp[0] == 3.0f && rp[1] == 5.0f && rp[2] == 0.0f && rp[3] == 1.0f);
+  glGetIntegerv(GL_CURRENT_RASTER_POSITION_VALID, iv);
+  ASSERT_EQ(iv[0], 1);
+  glDepthRange(0.25, 0.75);
+  glWindowPos3f(1.0f, 2.0f, 0.5f);
+  glGetFloatv(GL_CURRENT_RASTER_POSITION, rp);
+  ASSERT_TRUE(rp[2] == 0.5f);
+  glWindowPos3f(1.0f, 2.0f, 7.0f); /* clamped to 1 first */
+  glGetFloatv(GL_CURRENT_RASTER_POSITION, rp);
+  ASSERT_TRUE(rp[2] == 0.75f);
+  glDepthRange(0.0, 1.0);
+  /* Off-screen is still valid - there is no clip test - and the colour is the current one,
+   * unlit though lighting is on. */
+  glEnable(GL_LIGHTING);
+  glColor3f(1.0f, 0.5f, 0.0f);
+  glWindowPos2i(-100, 1000);
+  glGetIntegerv(GL_CURRENT_RASTER_POSITION_VALID, iv);
+  ASSERT_EQ(iv[0], 1);
+  GLfloat rc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  glGetFloatv(GL_CURRENT_RASTER_COLOR, rc);
+  ASSERT_TRUE(rc[0] == 1.0f && rc[1] == 0.5f && rc[2] == 0.0f);
+  glDisable(GL_LIGHTING);
+  /* A bitmap drawn there lands there; and compiled into a list, the call replays. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glWindowPos2i(3, 5);
+  glEndList();
+  glWindowPos2i(0, 0);
+  glCallList(list);
+  const GLubyte bit = 0x80u;
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glBitmap(1, 1, 0.0f, 0.0f, 0.0f, 0.0f, &bit);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  ASSERT_EQ(fb[(H - 1 - 5) * W + 3] & 0x00ffffffu, 0xffffffu);
+  glDeleteLists(list, 1);
+  #undef CENTRE
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL 1.4's secondary colour: the current one and its array, the colour sum that adds it after
+ * texturing, lighting's precedence over it, and the lists and attribute groups that carry it. */
+static void test_gl_secondary_color_and_color_sum(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0, 16.0, 0.0, 16.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  #define CENTRE (fb[(H / 2) * W + W / 2] & 0x00ffffffu)
+  #define QUAD() do { glBegin(GL_QUADS); glTexCoord2f(0.5f, 0.5f); glVertex2f(4, 4); \
+    glVertex2f(12, 4); glVertex2f(12, 12); glVertex2f(4, 12); glEnd(); } while (0)
+  GLint iv[4] = {0, 0, 0, 0};
+  GLfloat fv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+  /* **The initial state**: (0, 0, 0, 1), the sum off, the array off and three GL_FLOATs - and
+   * the other arrays' sizes and types, which answered 0 until 2026-09-19. */
+  glGetFloatv(GL_CURRENT_SECONDARY_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 0.0f && fv[1] == 0.0f && fv[2] == 0.0f && fv[3] == 1.0f);
+  ASSERT_EQ(glIsEnabled(GL_COLOR_SUM), GL_FALSE);
+  ASSERT_EQ(glIsEnabled(GL_SECONDARY_COLOR_ARRAY), GL_FALSE);
+  glGetIntegerv(GL_SECONDARY_COLOR_ARRAY_SIZE, iv);  ASSERT_EQ(iv[0], 3);
+  glGetIntegerv(GL_SECONDARY_COLOR_ARRAY_TYPE, iv);  ASSERT_EQ(iv[0], (GLint)GL_FLOAT);
+  glGetIntegerv(GL_VERTEX_ARRAY_SIZE, iv);           ASSERT_EQ(iv[0], 4);
+  glGetIntegerv(GL_VERTEX_ARRAY_TYPE, iv);           ASSERT_EQ(iv[0], (GLint)GL_FLOAT);
+  glGetIntegerv(GL_COLOR_ARRAY_SIZE, iv);            ASSERT_EQ(iv[0], 4);
+  glGetIntegerv(GL_TEXTURE_COORD_ARRAY_SIZE, iv);    ASSERT_EQ(iv[0], 4);
+  glGetIntegerv(GL_NORMAL_ARRAY_TYPE, iv);           ASSERT_EQ(iv[0], (GLint)GL_FLOAT);
+
+  /* Normalised as glColor is; alpha stays 1; the integer query is FLOAT_TO_INT's. */
+  glSecondaryColor3ub(255, 0, 51);
+  glGetFloatv(GL_CURRENT_SECONDARY_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 1.0f && fv[1] == 0.0f && fv[2] == 0.2f && fv[3] == 1.0f);
+  glGetIntegerv(GL_CURRENT_SECONDARY_COLOR, iv);
+  ASSERT_EQ(iv[0], 2147483647);
+  glSecondaryColor3b(127, -128, 127);
+  glGetFloatv(GL_CURRENT_SECONDARY_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 1.0f && fv[1] == -1.0f && fv[2] == 1.0f);
+
+  /* **The sum, unlit**: red plus a blue secondary is red while GL_COLOR_SUM is off, magenta
+   * when on. */
+  glSecondaryColor3f(0.0f, 0.0f, 1.0f);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD();
+  ASSERT_EQ(CENTRE, 0xff0000u);
+  glEnable(GL_COLOR_SUM);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetIntegerv(GL_COLOR_SUM, iv);
+  ASSERT_EQ(iv[0], 1);
+  QUAD();
+  ASSERT_EQ(CENTRE, 0xff00ffu);
+
+  /* **After texturing**: white modulated by a red texel is red, and the green secondary then
+   * makes it yellow. Summed before the texture it would be red again. */
+  GLuint tex = 0;
+  const GLubyte red_texel[4] = {255, 0, 0, 255};
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, red_texel);
+  glEnable(GL_TEXTURE_2D);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glSecondaryColor3f(0.0f, 1.0f, 0.0f);
+  QUAD();
+  ASSERT_EQ(CENTRE, 0xffff00u);
+  glDisable(GL_TEXTURE_2D);
+  glDeleteTextures(1, &tex);
+
+  /* **Clamped like the primary colour**: a negative secondary adds nothing rather than
+   * darkening. */
+  glSecondaryColor3f(-1.0f, -1.0f, -1.0f);
+  QUAD();
+  ASSERT_EQ(CENTRE, 0xffffffu);
+
+  /* **Lighting takes the secondary colour over**: under GL_SINGLE_COLOR it is zero whatever
+   * glSecondaryColor said, so the blue below is not added to the dim ambient-lit grey. */
+  glSecondaryColor3f(0.0f, 0.0f, 1.0f);
+  glEnable(GL_LIGHTING);
+  glNormal3f(0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD();
+  ASSERT_TRUE((CENTRE & 0xffu) < 0x20u);
+  ASSERT_TRUE(CENTRE != 0u);
+  glDisable(GL_LIGHTING);
+
+  /* **Flat shading** takes the provoking vertex's secondary colour: a quad's fourth. */
+  glShadeModel(GL_FLAT);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_QUADS);
+  glSecondaryColor3f(0.0f, 0.0f, 0.0f);
+  glVertex2f(4, 4); glVertex2f(12, 4); glVertex2f(12, 12);
+  glSecondaryColor3f(0.0f, 0.0f, 1.0f);
+  glVertex2f(4, 12);
+  glEnd();
+  ASSERT_EQ(CENTRE, 0xff00ffu);
+  glShadeModel(GL_SMOOTH);
+
+  /* **The array**: unsigned bytes, normalised, over a red current colour. */
+  static const GLshort sq[8] = {4, 4, 12, 4, 12, 12, 4, 12};
+  static const GLubyte blue8[12] = {0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255};
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(2, GL_SHORT, 0, sq);
+  glSecondaryColorPointer(3, GL_UNSIGNED_BYTE, 0, blue8);
+  glEnableClientState(GL_SECONDARY_COLOR_ARRAY);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_EQ(glIsEnabled(GL_SECONDARY_COLOR_ARRAY), GL_TRUE);
+  glSecondaryColor3f(0.0f, 0.0f, 0.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glDrawArrays(GL_QUADS, 0, 4);
+  ASSERT_EQ(CENTRE, 0xff00ffu);
+  glGetIntegerv(GL_SECONDARY_COLOR_ARRAY_TYPE, iv);  ASSERT_EQ(iv[0], (GLint)GL_UNSIGNED_BYTE);
+  GLvoid *ptr = NULL;
+  glGetPointerv(GL_SECONDARY_COLOR_ARRAY_POINTER, &ptr);
+  ASSERT_TRUE(ptr == (const GLvoid *)blue8);
+  /* Checked as Mesa checks it: 3 or 4 components, any of the eight types. */
+  glSecondaryColorPointer(2, GL_FLOAT, 0, blue8);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glSecondaryColorPointer(3, (GLenum)0x1407u /* GL_2_BYTES */, 0, blue8);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetIntegerv(GL_SECONDARY_COLOR_ARRAY_SIZE, iv);  ASSERT_EQ(iv[0], 3);
+
+  /* **Compiled**: the draw records the array's values as glSecondaryColor calls, so the list
+   * replays blue after the array has changed and been switched off. */
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glDrawArrays(GL_QUADS, 0, 4);
+  glEndList();
+  glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glCallList(list);
+  ASSERT_EQ(CENTRE, 0xff00ffu);
+  glGetFloatv(GL_CURRENT_SECONDARY_COLOR, fv); /* the replayed call set it */
+  ASSERT_TRUE(fv[2] == 1.0f);
+  glDeleteLists(list, 1);
+  glDisableClientState(GL_VERTEX_ARRAY);
+
+  /* **The attribute groups**: the colour with GL_CURRENT_BIT, the sum with GL_FOG_BIT and with
+   * GL_ENABLE_BIT, the array with the client's vertex-array bit. */
+  glSecondaryColor3f(0.0f, 1.0f, 0.0f);
+  glPushAttrib(GL_CURRENT_BIT);
+  glSecondaryColor3f(1.0f, 1.0f, 1.0f);
+  glPopAttrib();
+  glGetFloatv(GL_CURRENT_SECONDARY_COLOR, fv);
+  ASSERT_TRUE(fv[0] == 0.0f && fv[1] == 1.0f && fv[2] == 0.0f);
+  glPushAttrib(GL_FOG_BIT);
+  glDisable(GL_COLOR_SUM);
+  glPopAttrib();
+  ASSERT_EQ(glIsEnabled(GL_COLOR_SUM), GL_TRUE);
+  glPushAttrib(GL_ENABLE_BIT);
+  glDisable(GL_COLOR_SUM);
+  glPopAttrib();
+  ASSERT_EQ(glIsEnabled(GL_COLOR_SUM), GL_TRUE);
+  glPushClientAttrib(GL_CLIENT_VERTEX_ARRAY_BIT);
+  glEnableClientState(GL_SECONDARY_COLOR_ARRAY);
+  glSecondaryColorPointer(4, GL_FLOAT, 0, sq);
+  glPopClientAttrib();
+  ASSERT_EQ(glIsEnabled(GL_SECONDARY_COLOR_ARRAY), GL_FALSE);
+  glGetIntegerv(GL_SECONDARY_COLOR_ARRAY_TYPE, iv);  ASSERT_EQ(iv[0], (GLint)GL_UNSIGNED_BYTE);
+
+  /* And the sum stays out of the way once disabled. */
+  glDisable(GL_COLOR_SUM);
+  glClear(GL_COLOR_BUFFER_BIT);
+  QUAD();
+  ASSERT_EQ(CENTRE, 0xff0000u);
+  #undef QUAD
+  #undef CENTRE
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL 1.4's fog coordinate: fog from a per-vertex value in place of the eye distance, from
+ * glFogCoord and from its array, interpolated, compiled, saved - and the raster distance. */
+static void test_gl_fog_coordinates(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  /* Centred on the eye, so the eye distance of a small quad in the middle is about 1. */
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-8.0, 8.0, -8.0, 8.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  #define PIX(x, y) (fb[(H - 1 - (y)) * W + (x)] & 0x00ffffffu)
+  #define QUAD() do { glBegin(GL_QUADS); glVertex2f(-8, -8); glVertex2f(8, -8); \
+    glVertex2f(8, 8); glVertex2f(-8, 8); glEnd(); } while (0)
+  GLint iv[1] = {0};
+  GLfloat fv[1] = {0.0f};
+
+  /* The initial state: the eye distance, a coordinate of 0, the array off and one GL_FLOAT. */
+  glGetIntegerv(GL_FOG_COORD_SRC, iv);  ASSERT_EQ(iv[0], (GLint)GL_FRAGMENT_DEPTH);
+  glGetFloatv(GL_CURRENT_FOG_COORD, fv); ASSERT_TRUE(fv[0] == 0.0f);
+  ASSERT_EQ(glIsEnabled(GL_FOG_COORD_ARRAY), GL_FALSE);
+  glGetIntegerv(GL_FOG_COORD_ARRAY_TYPE, iv); ASSERT_EQ(iv[0], (GLint)GL_FLOAT);
+
+  /* Linear fog from 0 to 10 towards blue, over red. By the eye distance - at most 1.5 for this
+   * small quad around the eye - it is mostly red, whatever the coordinate says. */
+  const GLfloat blue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+  glFogfv(GL_FOG_COLOR, blue);
+  glFogi(GL_FOG_MODE, GL_LINEAR);
+  glFogf(GL_FOG_START, 0.0f);
+  glFogf(GL_FOG_END, 10.0f);
+  glEnable(GL_FOG);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glFogCoordf(10.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_TRUE(((PIX(8, 8) >> 16) & 0xffu) > 0xc0u);
+
+  /* **From the coordinate**: 10 is fully fogged, 0 not at all. */
+  glFogi(GL_FOG_COORD_SRC, GL_FOG_COORD);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(PIX(8, 8), 0x0000ffu);
+  QUAD();
+  ASSERT_EQ(PIX(8, 8), 0x0000ffu);
+  glFogCoordf(0.0f);
+  QUAD();
+  ASSERT_EQ(PIX(8, 8), 0xff0000u);
+  /* Used as given, not its absolute value: -10 is beyond the start, unfogged too. */
+  glFogCoordd(-10.0);
+  QUAD();
+  ASSERT_EQ(PIX(8, 8), 0xff0000u);
+
+  /* **Interpolated**: 0 on the left edge, 10 on the right - red to blue across. */
+  glBegin(GL_QUADS);
+  glFogCoordf(0.0f);  glVertex2f(-8, -8);
+  glFogCoordf(10.0f); glVertex2f(8, -8);
+  glFogCoordf(10.0f); glVertex2f(8, 8);
+  glFogCoordf(0.0f);  glVertex2f(-8, 8);
+  glEnd();
+  ASSERT_TRUE((PIX(1, 8) & 0xffu) < 0x30u);
+  ASSERT_TRUE(((PIX(14, 8) >> 16) & 0xffu) < 0x30u);
+  {
+    const uint32_t c = PIX(8, 8);
+    const int r = (int)((c >> 16) & 0xffu), b = (int)(c & 0xffu);
+    ASSERT_TRUE(r > 100 && r < 155 && b > 100 && b < 155);
+  }
+
+  /* **The array**: GL_DOUBLE, fully fogged; and the checks - one value of GL_FLOAT or
+   * GL_DOUBLE. */
+  static const GLshort sq[8] = {-8, -8, 8, -8, 8, 8, -8, 8};
+  static const GLdouble far4[4] = {10.0, 10.0, 10.0, 10.0};
+  glFogCoordf(0.0f);
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(2, GL_SHORT, 0, sq);
+  glFogCoordPointer(GL_DOUBLE, 0, far4);
+  glEnableClientState(GL_FOG_COORD_ARRAY);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glDrawArrays(GL_QUADS, 0, 4);
+  ASSERT_EQ(PIX(8, 8), 0x0000ffu);
+  GLvoid *ptr = NULL;
+  glGetPointerv(GL_FOG_COORD_ARRAY_POINTER, &ptr);
+  ASSERT_TRUE(ptr == (const GLvoid *)far4);
+  glFogCoordPointer(GL_INT, 0, far4);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glFogCoordPointer(GL_FLOAT, -1, far4);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glGetIntegerv(GL_FOG_COORD_ARRAY_TYPE, iv); ASSERT_EQ(iv[0], (GLint)GL_DOUBLE);
+
+  /* **Compiled**, from the array and by hand: the values of now replay later. */
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glDrawArrays(GL_QUADS, 0, 4);
+  glFogCoordf(3.0f);
+  glEndList();
+  glDisableClientState(GL_FOG_COORD_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glCallList(list);
+  ASSERT_EQ(PIX(8, 8), 0x0000ffu);
+  glGetFloatv(GL_CURRENT_FOG_COORD, fv); ASSERT_TRUE(fv[0] == 3.0f);
+  glDeleteLists(list, 1);
+
+  /* **The raster distance** is the coordinate under GL_FOG_COORD - glRasterPos and glWindowPos
+   * both - and the eye distance (or glWindowPos's 0) otherwise. */
+  glRasterPos2f(4.0f, 3.0f);
+  glGetFloatv(GL_CURRENT_RASTER_DISTANCE, fv); ASSERT_TRUE(fv[0] == 3.0f);
+  glWindowPos2i(1, 1);
+  glGetFloatv(GL_CURRENT_RASTER_DISTANCE, fv); ASSERT_TRUE(fv[0] == 3.0f);
+  glFogi(GL_FOG_COORD_SRC, GL_FRAGMENT_DEPTH);
+  glRasterPos2f(4.0f, 3.0f);
+  glGetFloatv(GL_CURRENT_RASTER_DISTANCE, fv); ASSERT_TRUE(fv[0] == 5.0f);
+  glWindowPos2i(1, 1);
+  glGetFloatv(GL_CURRENT_RASTER_DISTANCE, fv); ASSERT_TRUE(fv[0] == 0.0f);
+
+  /* The source takes the two values only. */
+  glFogi(GL_FOG_COORD_SRC, (GLint)GL_LINEAR);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+  /* **The attribute groups**: the coordinate with GL_CURRENT_BIT, the source with GL_FOG_BIT
+   * (which Mesa's pop leaves out), the array with the client vertex-array bit. */
+  glPushAttrib(GL_CURRENT_BIT | GL_FOG_BIT);
+  glFogCoordf(7.0f);
+  glFogi(GL_FOG_COORD_SRC, GL_FOG_COORD);
+  glPopAttrib();
+  glGetFloatv(GL_CURRENT_FOG_COORD, fv); ASSERT_TRUE(fv[0] == 3.0f);
+  glGetIntegerv(GL_FOG_COORD_SRC, iv);  ASSERT_EQ(iv[0], (GLint)GL_FRAGMENT_DEPTH);
+  glPushClientAttrib(GL_CLIENT_VERTEX_ARRAY_BIT);
+  glFogCoordPointer(GL_FLOAT, 0, sq);
+  glEnableClientState(GL_FOG_COORD_ARRAY);
+  glPopClientAttrib();
+  ASSERT_EQ(glIsEnabled(GL_FOG_COORD_ARRAY), GL_FALSE);
+  glGetIntegerv(GL_FOG_COORD_ARRAY_TYPE, iv); ASSERT_EQ(iv[0], (GLint)GL_DOUBLE);
+  #undef QUAD
+  #undef PIX
+
+  glDisable(GL_FOG);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Pixel rectangles are fragments: glDrawPixels, glBitmap and glCopyPixels meet the scissor, the
+ * alpha, stencil and depth tests, blending, the logic op, the masks, the texture environment and
+ * fog. They were written straight into the colour buffer until 2026-09-19. And glCopyPixels reads
+ * its whole source first, and the zoom maps pixels to window columns by GL's rule. */
+static void test_gl_pixel_rectangles_are_fragments(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0, 16.0, 0.0, 16.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  #define PIX(x, y) (fb[(H - 1 - (y)) * W + (x)] & 0x00ffffffu)
+  static GLubyte img[4 * 4 * 4];
+  #define FILL(r, g, b, a) do { for (int i_ = 0; i_ < 16; i_++) { img[i_ * 4] = (r); \
+    img[i_ * 4 + 1] = (g); img[i_ * 4 + 2] = (b); img[i_ * 4 + 3] = (a); } } while (0)
+  static const GLubyte ones[4] = {0xf0, 0xf0, 0xf0, 0xf0}; /* a 4x4 bitmap, all set */
+
+  /* **The scissor**: a 4x4 red image at (2, 2), a box from (4, 0) - only its right half lands. */
+  glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  FILL(255, 0, 0, 255);
+  glEnable(GL_SCISSOR_TEST);
+  glScissor(4, 0, 12, 16);
+  glWindowPos2i(2, 2);
+  glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glDisable(GL_SCISSOR_TEST);
+  ASSERT_EQ(PIX(2, 2), 0x000000u);
+  ASSERT_EQ(PIX(4, 2), 0xff0000u);
+
+  /* **Blending**: half-alpha red over blue. */
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  FILL(255, 0, 0, 128);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glDisable(GL_BLEND);
+  {
+    const uint32_t c = PIX(3, 3);
+    ASSERT_TRUE(((c >> 16) & 0xffu) > 0x70u && ((c >> 16) & 0xffu) < 0x90u);
+    ASSERT_TRUE((c & 0xffu) > 0x70u && (c & 0xffu) < 0x90u);
+  }
+
+  /* **The alpha test** drops the transparent image; **the colour mask** keeps red out of a white
+   * one. */
+  glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  FILL(255, 255, 255, 0);
+  glEnable(GL_ALPHA_TEST);
+  glAlphaFunc(GL_GREATER, 0.5f);
+  glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glDisable(GL_ALPHA_TEST);
+  ASSERT_EQ(PIX(3, 3), 0x000000u);
+  glColorMask(GL_FALSE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  ASSERT_EQ(PIX(3, 3), 0x00ffffu);
+
+  /* **The logic op**: white XOR cyan is red. */
+  glEnable(GL_COLOR_LOGIC_OP);
+  glLogicOp(GL_XOR);
+  glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glDisable(GL_COLOR_LOGIC_OP);
+  ASSERT_EQ(PIX(3, 3), 0xff0000u);
+
+  /* **The depth test, at the raster z, and the depth write**: a bitmap behind a cleared 0.5 is
+   * dropped, one in front drawn - and its 0.25 then hides a later one at 0.375. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glClearDepth(0.5);
+  glClear(GL_DEPTH_BUFFER_BIT);
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LESS);
+  glColor3f(0.0f, 1.0f, 0.0f);
+  glWindowPos3f(2.0f, 2.0f, 0.75f);
+  glBitmap(4, 4, 0.0f, 0.0f, 0.0f, 0.0f, ones);
+  ASSERT_EQ(PIX(3, 3), 0x000000u);
+  glWindowPos3f(2.0f, 2.0f, 0.25f);
+  glBitmap(4, 4, 0.0f, 0.0f, 0.0f, 0.0f, ones);
+  ASSERT_EQ(PIX(3, 3), 0x00ff00u);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glWindowPos3f(2.0f, 2.0f, 0.375f);
+  glBitmap(4, 4, 0.0f, 0.0f, 0.0f, 0.0f, ones);
+  ASSERT_EQ(PIX(3, 3), 0x00ff00u);
+  glDisable(GL_DEPTH_TEST);
+  glClearDepth(1.0);
+
+  /* **The stencil test**: a bitmap writes 1 where it lands, and a full-screen red rectangle kept
+   * to stencil 1 then fills exactly that square. */
+  glClearStencil(0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+  glEnable(GL_STENCIL_TEST);
+  glStencilFunc(GL_ALWAYS, 1, 0xff);
+  glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+  glColor3f(0.0f, 0.0f, 0.0f);
+  glWindowPos2i(8, 8);
+  glBitmap(4, 4, 0.0f, 0.0f, 0.0f, 0.0f, ones);
+  glStencilFunc(GL_EQUAL, 1, 0xff);
+  glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glRectf(0.0f, 0.0f, 16.0f, 16.0f);
+  glDisable(GL_STENCIL_TEST);
+  ASSERT_EQ(PIX(9, 9), 0xff0000u);
+  ASSERT_EQ(PIX(3, 3), 0x000000u);
+
+  /* **Texturing**, at the raster position's texture coordinate: white modulated by green. */
+  GLuint tex = 0;
+  const GLubyte green_texel[4] = {0, 255, 0, 255};
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, green_texel);
+  glEnable(GL_TEXTURE_2D);
+  glClear(GL_COLOR_BUFFER_BIT);
+  FILL(255, 255, 255, 255);
+  glTexCoord2f(0.5f, 0.5f);
+  glWindowPos2i(2, 2);
+  glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glDisable(GL_TEXTURE_2D);
+  glDeleteTextures(1, &tex);
+  ASSERT_EQ(PIX(3, 3), 0x00ff00u);
+
+  /* **Fog**, by the raster distance - here the fog coordinate glWindowPos takes under
+   * GL_FOG_COORD: 10 is fully the fog colour. */
+  const GLfloat blue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+  glFogfv(GL_FOG_COLOR, blue);
+  glFogi(GL_FOG_MODE, GL_LINEAR);
+  glFogf(GL_FOG_START, 0.0f);
+  glFogf(GL_FOG_END, 10.0f);
+  glFogi(GL_FOG_COORD_SRC, GL_FOG_COORD);
+  glFogCoordf(10.0f);
+  glEnable(GL_FOG);
+  glWindowPos2i(2, 2);
+  glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glDisable(GL_FOG);
+  glFogi(GL_FOG_COORD_SRC, GL_FRAGMENT_DEPTH);
+  ASSERT_EQ(PIX(3, 3), 0x0000ffu);
+
+  /* **glCopyPixels reads before it writes**: three rows - red, green, blue from the bottom -
+   * and the lower two copied up by one. Row 2 is green, not the red a copy that read its own
+   * writes smeared up. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColor3f(1.0f, 0.0f, 0.0f); glRectf(0.0f, 0.0f, 16.0f, 1.0f);
+  glColor3f(0.0f, 1.0f, 0.0f); glRectf(0.0f, 1.0f, 16.0f, 2.0f);
+  glColor3f(0.0f, 0.0f, 1.0f); glRectf(0.0f, 2.0f, 16.0f, 3.0f);
+  glWindowPos2i(0, 1);
+  glCopyPixels(0, 0, 16, 2, GL_COLOR);
+  ASSERT_EQ(PIX(5, 1), 0xff0000u);
+  ASSERT_EQ(PIX(5, 2), 0x00ff00u);
+  /* And it is fragments too: through a mask keeping red as it is, green copied onto red is
+   * yellow. */
+  glColorMask(GL_FALSE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glWindowPos2i(0, 0);
+  glCopyPixels(0, 2, 16, 1, GL_COLOR);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  ASSERT_EQ(PIX(5, 0), 0xffff00u);
+
+  /* **A mirrored image lands where GL puts it**: pixel 0 of a zoom of -1 from x 8 covers the
+   * column whose centre is in [7, 8) - column 7, not 8. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  img[0] = 255; img[1] = 255; img[2] = 0; img[3] = 255; /* pixel 0 yellow, the rest white */
+  glPixelZoom(-1.0f, 1.0f);
+  glWindowPos2i(8, 2);
+  glDrawPixels(4, 1, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glPixelZoom(1.0f, 1.0f);
+  ASSERT_EQ(PIX(7, 2), 0xffff00u);
+  ASSERT_EQ(PIX(4, 2), 0xffffffu);
+  ASSERT_EQ(PIX(8, 2), 0x000000u);
+
+  /* **A bitmap in a negative raster colour is black**, clamped as a fragment's colour is - by
+   * glRasterPos, which keeps the colour unclamped (glWindowPos clamps it). */
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColor3f(-1.0f, -1.0f, -1.0f);
+  glRasterPos2i(2, 2);
+  glBitmap(4, 4, 0.0f, 0.0f, 0.0f, 0.0f, ones);
+  ASSERT_EQ(PIX(3, 3), 0x000000u);
+  #undef FILL
+  #undef PIX
+
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* The pixels of a buffer that are not black. */
+static int count_lit_pixels(const uint32_t *fb, int n) {
+  int lit = 0;
+  for (int i = 0; i < n; i++) lit += (fb[i] & 0x00ffffffu) != 0u;
+  return lit;
+}
+
+/* GL 1.4's point parameters - the size clamp and the distance attenuation - and its
+ * multi-draws. */
+static void test_gl_point_parameters_and_multi_draw(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  /* One unit a pixel, the eye at the centre. */
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-16.0, 16.0, -16.0, 16.0, -10.0, 10.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  GLfloat fv[3] = {0.0f, 0.0f, 0.0f};
+  #define LIT() count_lit_pixels(fb, W * H)
+  #define POINT_AT(z) do { glClear(GL_COLOR_BUFFER_BIT); glBegin(GL_POINTS); \
+    glVertex3f(0.0f, 0.0f, (z)); glEnd(); } while (0)
+
+  /* The initial values: no attenuation, a clamp from 0 to the largest size, a threshold of 1. */
+  glGetFloatv(GL_POINT_SIZE_MIN, fv);  ASSERT_TRUE(fv[0] == 0.0f);
+  glGetFloatv(GL_POINT_SIZE_MAX, fv);  ASSERT_TRUE(fv[0] == (float)OOPS_GL_MAX_POINT_LINE_SIZE);
+  glGetFloatv(GL_POINT_FADE_THRESHOLD_SIZE, fv); ASSERT_TRUE(fv[0] == 1.0f);
+  glGetFloatv(GL_POINT_DISTANCE_ATTENUATION, fv);
+  ASSERT_TRUE(fv[0] == 1.0f && fv[1] == 0.0f && fv[2] == 0.0f);
+
+  glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glPointSize(8.0f);
+  POINT_AT(-4.0f);
+  ASSERT_EQ(LIT(), 64);
+
+  /* **The clamp, unattenuated**: GL_POINT_SIZE_MAX 2 draws the size-8 point as 2 pixels a side. */
+  glPointParameterf(GL_POINT_SIZE_MAX, 2.0f);
+  POINT_AT(-4.0f);
+  ASSERT_EQ(LIT(), 4);
+  glPointParameterf(GL_POINT_SIZE_MAX, (float)OOPS_GL_MAX_POINT_LINE_SIZE);
+
+  /* **Attenuation**: (0, 0, 1) divides by the distance - 16 at distance 4 is 4 a side, at
+   * distance 2 is 8 - and GL_POINT_SIZE_MIN holds it from below. */
+  const GLfloat quad_atten[3] = {0.0f, 0.0f, 1.0f};
+  glPointSize(16.0f);
+  glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, quad_atten);
+  POINT_AT(-4.0f);
+  ASSERT_EQ(LIT(), 16);
+  POINT_AT(-2.0f);
+  ASSERT_EQ(LIT(), 64);
+  glPointParameteri(GL_POINT_SIZE_MIN, 6);
+  POINT_AT(-4.0f);
+  ASSERT_EQ(LIT(), 36);
+  {
+    GLint iv[3] = {0, 0, 0};
+    glGetIntegerv(GL_POINT_DISTANCE_ATTENUATION, iv);
+    ASSERT_TRUE(iv[0] == 0 && iv[1] == 0 && iv[2] == 1);
+  }
+
+  /* **GL_POINT_BIT** saves and restores them; **a list** records them. */
+  glPushAttrib(GL_POINT_BIT);
+  const GLint one_atten[3] = {1, 0, 0};
+  glPointParameteriv(GL_POINT_DISTANCE_ATTENUATION, one_atten);
+  glPointParameterf(GL_POINT_SIZE_MIN, 0.0f);
+  glPopAttrib();
+  glGetFloatv(GL_POINT_SIZE_MIN, fv); ASSERT_TRUE(fv[0] == 6.0f);
+  glGetFloatv(GL_POINT_DISTANCE_ATTENUATION, fv); ASSERT_TRUE(fv[0] == 0.0f && fv[2] == 1.0f);
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glPointParameterf(GL_POINT_FADE_THRESHOLD_SIZE, 3.0f);
+  glEndList();
+  glGetFloatv(GL_POINT_FADE_THRESHOLD_SIZE, fv); ASSERT_TRUE(fv[0] == 1.0f);
+  glCallList(list);
+  glGetFloatv(GL_POINT_FADE_THRESHOLD_SIZE, fv); ASSERT_TRUE(fv[0] == 3.0f);
+  glDeleteLists(list, 1);
+
+  /* The checks: a negative clamp or threshold, and GL 2.0's sprite origin. */
+  glPointParameterf(GL_POINT_SIZE_MAX, -1.0f);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glPointParameterf(GL_POINT_FADE_THRESHOLD_SIZE, -1.0f);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glPointParameteri((GLenum)0x8CA0u /* GL_POINT_SPRITE_COORD_ORIGIN */, 0x8CA1);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, (const GLfloat[3]){1.0f, 0.0f, 0.0f});
+  glPointParameterf(GL_POINT_SIZE_MIN, 0.0f);
+  glPointSize(1.0f);
+
+  /* **glMultiDrawArrays**: two 2x2 quads from one array in one call, an empty third skipped. */
+  static const GLfloat quads[16] = {-8, -8, -6, -8, -6, -6, -8, -6,   6, 6, 8, 6, 8, 8, 6, 8};
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(2, GL_FLOAT, 0, quads);
+  const GLint firsts[3] = {0, 4, 0};
+  const GLsizei counts[3] = {4, 4, 0};
+  glClear(GL_COLOR_BUFFER_BIT);
+  glMultiDrawArrays(GL_QUADS, firsts, counts, 3);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_EQ(LIT(), 8);
+  /* **Checked before anything is drawn**: a negative count at the end draws neither quad. */
+  const GLsizei bad_counts[2] = {4, -1};
+  glClear(GL_COLOR_BUFFER_BIT);
+  glMultiDrawArrays(GL_QUADS, firsts, bad_counts, 2);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  ASSERT_EQ(LIT(), 0);
+  glMultiDrawArrays(GL_QUADS, firsts, counts, -1);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glMultiDrawArrays((GLenum)0x7fu, firsts, counts, 2);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+  /* **glMultiDrawElements**: the same two quads by index, bytes, and a bad type refused. */
+  static const GLubyte idx_a[4] = {0, 1, 2, 3}, idx_b[4] = {4, 5, 6, 7};
+  const GLvoid *const idx[2] = {idx_a, idx_b};
+  glClear(GL_COLOR_BUFFER_BIT);
+  glMultiDrawElements(GL_QUADS, counts, GL_UNSIGNED_BYTE, idx, 2);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_EQ(LIT(), 8);
+  glMultiDrawElements(GL_QUADS, counts, GL_FLOAT, idx, 2);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+  /* **Compiled**: the draws a list records are the arrays' values of now. */
+  const GLuint list2 = glGenLists(1);
+  glNewList(list2, GL_COMPILE);
+  glMultiDrawArrays(GL_QUADS, firsts, counts, 2);
+  glEndList();
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glCallList(list2);
+  ASSERT_EQ(LIT(), 8);
+  glDeleteLists(list2, 1);
+  #undef POINT_AT
+  #undef LIT
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL 1.4's level-of-detail bias - the texture's and the unit's - and GL_GENERATE_MIPMAP. */
+static void test_gl_lod_bias_and_generate_mipmap(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0, 16.0, 0.0, 16.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  #define PIX(x, y) (fb[(H - 1 - (y)) * W + (x)] & 0x00ffffffu)
+  /* A 4x4 texture drawn 4x4 pixels: a level of detail of about 0. */
+  #define QUAD() do { glBegin(GL_QUADS); glTexCoord2f(0, 0); glVertex2f(4, 4); \
+    glTexCoord2f(1, 0); glVertex2f(8, 4); glTexCoord2f(1, 1); glVertex2f(8, 8); \
+    glTexCoord2f(0, 1); glVertex2f(4, 8); glEnd(); } while (0)
+  GLint iv[1] = {0};
+  GLfloat fv[1] = {0.0f};
+  GLubyte img[4 * 4 * 4];
+
+  /* **GL_GENERATE_MIPMAP**: set before the upload, a 4x4 base of red columns and blue columns
+   * gives a 2x2 level of the same and a 1x1 level of their mean - 127.5 rounded to even, 128. */
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_GENERATE_MIPMAP, iv);
+  ASSERT_EQ(iv[0], GL_FALSE);
+  glTexParameteri(GL_TEXTURE_2D, GL_GENERATE_MIPMAP, GL_TRUE);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_GENERATE_MIPMAP, iv);
+  ASSERT_EQ(iv[0], GL_TRUE);
+  for (int i = 0; i < 16; i++) {
+    const int col = i % 4;
+    img[i * 4] = (col < 2) ? 255 : 0; img[i * 4 + 1] = 0;
+    img[i * 4 + 2] = (col < 2) ? 0 : 255; img[i * 4 + 3] = 255;
+  }
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 2, GL_TEXTURE_WIDTH, iv);
+  ASSERT_EQ(iv[0], 1);
+  GLubyte got[4 * 4 * 4];
+  glGetTexImage(GL_TEXTURE_2D, 1, GL_RGBA, GL_UNSIGNED_BYTE, got);
+  ASSERT_TRUE(got[0] == 255 && got[2] == 0 && got[4] == 0 && got[6] == 255);
+  glGetTexImage(GL_TEXTURE_2D, 2, GL_RGBA, GL_UNSIGNED_BYTE, got);
+  ASSERT_TRUE(got[0] == 128 && got[1] == 0 && got[2] == 128 && got[3] == 255);
+  /* The texture is complete through them: minified to one pixel, it samples the 1x1 level. */
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glEnable(GL_TEXTURE_2D);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_QUADS);
+  glTexCoord2f(0, 0); glVertex2f(1, 1); glTexCoord2f(1, 0); glVertex2f(2, 1);
+  glTexCoord2f(1, 1); glVertex2f(2, 2); glTexCoord2f(0, 1); glVertex2f(1, 2);
+  glEnd();
+  ASSERT_EQ(PIX(1, 1), 0x800080u);
+  /* **A change to the base regenerates**: all green through glTexSubImage2D. */
+  for (int i = 0; i < 16; i++) { img[i * 4] = 0; img[i * 4 + 1] = 255; img[i * 4 + 2] = 0; }
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glGetTexImage(GL_TEXTURE_2D, 2, GL_RGBA, GL_UNSIGNED_BYTE, got);
+  ASSERT_TRUE(got[0] == 0 && got[1] == 255 && got[2] == 0);
+  /* **Not past GL_TEXTURE_MAX_LEVEL**, and not from a level that is not the base: with the
+   * maximum at 1, a new base rebuilds level 1 alone and level 2 stays green. */
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+  for (int i = 0; i < 16; i++) { img[i * 4] = 255; img[i * 4 + 1] = 255; img[i * 4 + 2] = 255; }
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glGetTexImage(GL_TEXTURE_2D, 1, GL_RGBA, GL_UNSIGNED_BYTE, got);
+  ASSERT_TRUE(got[0] == 255 && got[1] == 255 && got[2] == 255);
+  glGetTexImage(GL_TEXTURE_2D, 2, GL_RGBA, GL_UNSIGNED_BYTE, got);
+  ASSERT_TRUE(got[0] == 0 && got[1] == 255 && got[2] == 0);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
+  glDeleteTextures(1, &tex);
+
+  /* **The level-of-detail bias**: level 0 red, level 1 green, drawn at a level of detail of about
+   * 0 - red; biased by 1 through the texture, green; the unit's -1 cancelling it, red again. */
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  for (int i = 0; i < 16; i++) { img[i * 4] = 255; img[i * 4 + 1] = 0; img[i * 4 + 2] = 0; img[i * 4 + 3] = 255; }
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  for (int i = 0; i < 16; i++) { img[i * 4] = 0; img[i * 4 + 1] = 255; }
+  glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  QUAD();
+  ASSERT_EQ(PIX(5, 5), 0xff0000u);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, 1.0f);
+  QUAD();
+  ASSERT_EQ(PIX(5, 5), 0x00ff00u);
+  glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, -1.0f);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  QUAD();
+  ASSERT_EQ(PIX(5, 5), 0xff0000u);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, fv); ASSERT_TRUE(fv[0] == 1.0f);
+  glGetTexEnvfv(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, fv); ASSERT_TRUE(fv[0] == -1.0f);
+  glGetTexEnviv(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, iv); ASSERT_EQ(iv[0], -1);
+  glGetFloatv(GL_MAX_TEXTURE_LOD_BIAS, fv); ASSERT_TRUE(fv[0] == 14.0f);
+  /* GL_TEXTURE_FILTER_CONTROL has the one parameter. */
+  glTexEnvi(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  /* **GL_TEXTURE_BIT** keeps both. */
+  glPushAttrib(GL_TEXTURE_BIT);
+  glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, 3.0f);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, 3.0f);
+  glPopAttrib();
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, fv); ASSERT_TRUE(fv[0] == 1.0f);
+  glGetTexEnvfv(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, fv); ASSERT_TRUE(fv[0] == -1.0f);
+  glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, 0.0f);
+  glDisable(GL_TEXTURE_2D);
+  glDeleteTextures(1, &tex);
+
+  /* GL_GENERATE_MIPMAP_HINT is a hint like the others. */
+  glHint(GL_GENERATE_MIPMAP_HINT, GL_NICEST);
+  glGetIntegerv(GL_GENERATE_MIPMAP_HINT, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_NICEST);
+  #undef QUAD
+  #undef PIX
+
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL 1.0's depth and stencil pixel rectangles - glReadPixels, glDrawPixels and glCopyPixels of
+ * GL_DEPTH_COMPONENT and GL_STENCIL_INDEX - and GL 1.4's depth textures and shadow comparison. */
+static void test_gl_depth_stencil_pixels_and_depth_textures(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0, 16.0, 0.0, 16.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  #define PIX(x, y) (fb[(H - 1 - (y)) * W + (x)] & 0x00ffffffu)
+  GLfloat zf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  GLubyte sv[4] = {0, 0, 0, 0};
+
+  /* **glReadPixels of depth**, as floats and as unsigned shorts, and through GL_DEPTH_SCALE. */
+  glClearDepth(0.25);
+  glClear(GL_DEPTH_BUFFER_BIT);
+  glReadPixels(3, 3, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, zf);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_TRUE(zf[0] == 0.25f);
+  GLushort zs = 0;
+  glReadPixels(3, 3, 1, 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, &zs);
+  ASSERT_EQ(zs, 16384);
+  glPixelTransferf(GL_DEPTH_SCALE, 2.0f);
+  glReadPixels(3, 3, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, zf);
+  glPixelTransferf(GL_DEPTH_SCALE, 1.0f);
+  ASSERT_TRUE(zf[0] == 0.5f);
+  /* A packed type is no depth type. */
+  glReadPixels(3, 3, 1, 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT_5_6_5, &zs);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+
+  /* **glDrawPixels of depth**: fragments at their own z in the raster colour, through the depth
+   * test - GL_ALWAYS writes each; with the test off no depth is written at all. */
+  static const GLfloat zimg[4] = {0.125f, 0.375f, 0.625f, 0.875f};
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_ALWAYS);
+  glColor3f(0.0f, 1.0f, 0.0f);
+  glWindowPos2i(0, 0);
+  glDrawPixels(2, 2, GL_DEPTH_COMPONENT, GL_FLOAT, zimg);
+  glReadPixels(0, 0, 2, 2, GL_DEPTH_COMPONENT, GL_FLOAT, zf);
+  ASSERT_TRUE(zf[0] == 0.125f && zf[1] == 0.375f && zf[2] == 0.625f && zf[3] == 0.875f);
+  ASSERT_EQ(PIX(1, 1), 0x00ff00u);
+  glDisable(GL_DEPTH_TEST);
+  static const GLfloat zmid[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+  glDrawPixels(2, 2, GL_DEPTH_COMPONENT, GL_FLOAT, zmid);
+  glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, zf);
+  ASSERT_TRUE(zf[0] == 0.125f);
+  /* **glCopyPixels of depth**, to (4, 4): the depth test on again, GL_ALWAYS. */
+  glEnable(GL_DEPTH_TEST);
+  glWindowPos2i(4, 4);
+  glCopyPixels(0, 0, 2, 2, GL_DEPTH);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glReadPixels(4, 4, 2, 2, GL_DEPTH_COMPONENT, GL_FLOAT, zf);
+  ASSERT_TRUE(zf[0] == 0.125f && zf[3] == 0.875f);
+  glDisable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LESS);
+
+  /* **Stencil indices**: drawn straight into the stencil buffer, through the write mask and the
+   * index offset, read back, and copied. */
+  static const GLubyte simg[4] = {1, 2, 3, 4};
+  glClearStencil(0);
+  glClear(GL_STENCIL_BUFFER_BIT);
+  glWindowPos2i(8, 8);
+  glDrawPixels(2, 2, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, simg);
+  glReadPixels(8, 8, 2, 2, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sv);
+  ASSERT_TRUE(sv[0] == 1 && sv[1] == 2 && sv[2] == 3 && sv[3] == 4);
+  glPixelTransferi(GL_INDEX_OFFSET, 10);
+  glReadPixels(8, 8, 1, 1, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sv);
+  glPixelTransferi(GL_INDEX_OFFSET, 0);
+  ASSERT_EQ(sv[0], 11);
+  glStencilMask(0x01u);
+  static const GLubyte sff[4] = {0xff, 0xff, 0xff, 0xff};
+  glDrawPixels(1, 1, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sff); /* 1 | (0xfe of 1) = 1 */
+  glWindowPos2i(9, 8);
+  glDrawPixels(1, 1, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sff); /* 2 -> 3 */
+  glStencilMask(0xffu);
+  glReadPixels(8, 8, 2, 1, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sv);
+  ASSERT_TRUE(sv[0] == 1 && sv[1] == 3);
+  glWindowPos2i(12, 12);
+  glCopyPixels(8, 8, 2, 2, GL_STENCIL);
+  glReadPixels(12, 12, 2, 2, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sv);
+  ASSERT_TRUE(sv[0] == 1 && sv[1] == 3 && sv[2] == 3 && sv[3] == 4);
+  glCopyPixels(0, 0, 1, 1, GL_STENCIL_INDEX); /* a format; the buffer is GL_STENCIL */
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+  /* **A depth texture**: 2x1, 0.25 and 0.75, read as luminance - (64, 64, 64) and (191, ...). */
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  static const GLfloat dtex[2] = {0.25f, 0.75f};
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, 2, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, dtex);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  GLint iv[1] = {0};
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_DEPTH_SIZE, iv);
+  ASSERT_EQ(iv[0], 32);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_DEPTH_TEXTURE_MODE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_LUMINANCE);
+  glEnable(GL_TEXTURE_2D);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  #define DQUAD() do { glClear(GL_COLOR_BUFFER_BIT); glBegin(GL_QUADS); \
+    glTexCoord3f(0, 0, 0.5f); glVertex2f(0, 0); glTexCoord3f(1, 0, 0.5f); glVertex2f(16, 0); \
+    glTexCoord3f(1, 1, 0.5f); glVertex2f(16, 16); glTexCoord3f(0, 1, 0.5f); glVertex2f(0, 16); \
+    glEnd(); } while (0)
+  DQUAD();
+  ASSERT_EQ(PIX(4, 8), 0x404040u);
+  ASSERT_EQ(PIX(12, 8), 0xbfbfbfu);
+  /* **The comparison**: r = 0.5 against 0.25 and 0.75 under GL_LEQUAL - 0 where 0.5 > 0.25, 1
+   * where 0.5 <= 0.75 - and the other way round under GL_GEQUAL. */
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_R_TO_TEXTURE);
+  DQUAD();
+  ASSERT_EQ(PIX(4, 8), 0x000000u);
+  ASSERT_EQ(PIX(12, 8), 0xffffffu);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_GEQUAL);
+  DQUAD();
+  ASSERT_EQ(PIX(4, 8), 0xffffffu);
+  ASSERT_EQ(PIX(12, 8), 0x000000u);
+  /* GL_ALPHA reads the result as alpha alone: under GL_REPLACE the fragment's own green stays on
+   * both sides, as an alpha texture's does. */
+  glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_TEXTURE_MODE, GL_ALPHA);
+  DQUAD();
+  ASSERT_EQ(PIX(4, 8), 0x00ff00u);
+  ASSERT_EQ(PIX(12, 8), 0x00ff00u);
+  glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_TEXTURE_MODE, GL_LUMINANCE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+  /* Read back as depth only. */
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, zf);
+  ASSERT_TRUE(zf[0] == 0.25f && zf[1] == 0.75f);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, sv);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  /* **Copied from the depth buffer**: glCopyTexImage2D with a depth format reads depth. */
+  glClearDepth(0.5);
+  glClear(GL_DEPTH_BUFFER_BIT);
+  glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 0, 0, 2, 1, 0);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, zf);
+  ASSERT_TRUE(zf[0] == 0.5f && zf[1] == 0.5f);
+  glClearDepth(1.0);
+  glClear(GL_DEPTH_BUFFER_BIT);
+
+  /* The checks: depth data for a depth format and only for one, a 1D or 2D target, the
+   * parameters' values. */
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, sv);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, dtex);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sv);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_DEPTH_COMPONENT, 2, 1, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, dtex);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_LEQUAL);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_TEXTURE_MODE, GL_RGBA);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  #undef DQUAD
+  #undef PIX
+
+  glDisable(GL_TEXTURE_2D);
+  glDeleteTextures(1, &tex);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glPixelStorei(GL_PACK_ALIGNMENT, 4);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL 1.0's colour-index images in an RGBA context: glDrawPixels and a texture upload through the
+ * index shift and offset and the I_TO_R/G/B/A maps; never read back. */
+static void test_gl_colour_index_images(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0, 16.0, 0.0, 16.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  #define PIX(x, y) (fb[(H - 1 - (y)) * W + (x)] & 0x00ffffffu)
+
+  /* The default maps are one entry of 0: every index is transparent black. */
+  static const GLubyte idx[2] = {0, 1};
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glWindowPos2i(2, 2);
+  glDrawPixels(2, 1, GL_COLOR_INDEX, GL_UNSIGNED_BYTE, idx);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_EQ(PIX(2, 2), 0x000000u);
+
+  /* Two-entry maps: index 0 blue, index 1 red. */
+  static const GLfloat r[2] = {0.0f, 1.0f}, g[2] = {0.0f, 0.0f}, b[2] = {1.0f, 0.0f},
+                       a[2] = {1.0f, 1.0f};
+  glPixelMapfv(GL_PIXEL_MAP_I_TO_R, 2, r);
+  glPixelMapfv(GL_PIXEL_MAP_I_TO_G, 2, g);
+  glPixelMapfv(GL_PIXEL_MAP_I_TO_B, 2, b);
+  glPixelMapfv(GL_PIXEL_MAP_I_TO_A, 2, a);
+  glDrawPixels(2, 1, GL_COLOR_INDEX, GL_UNSIGNED_BYTE, idx);
+  ASSERT_EQ(PIX(2, 2), 0x0000ffu);
+  ASSERT_EQ(PIX(3, 2), 0xff0000u);
+  /* **Through the offset**, and not the RGBA scale: index 0 + 1 is red, and a red scale of 0
+   * leaves it red - the maps stand in for the colour transfer. */
+  glPixelTransferi(GL_INDEX_OFFSET, 1);
+  glPixelTransferf(GL_RED_SCALE, 0.0f);
+  glDrawPixels(1, 1, GL_COLOR_INDEX, GL_UNSIGNED_BYTE, idx);
+  glPixelTransferi(GL_INDEX_OFFSET, 0);
+  glPixelTransferf(GL_RED_SCALE, 1.0f);
+  ASSERT_EQ(PIX(2, 2), 0xff0000u);
+  /* Masked to the map's size: index 3 is index 1. */
+  static const GLshort idx3[1] = {3};
+  glDrawPixels(1, 1, GL_COLOR_INDEX, GL_SHORT, idx3);
+  ASSERT_EQ(PIX(2, 2), 0xff0000u);
+
+  /* **A texture uploaded from indices** is the colours they map to. */
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_COLOR_INDEX, GL_UNSIGNED_BYTE, idx);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  GLubyte texels[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+  ASSERT_TRUE(texels[2] == 255 && texels[0] == 0 && texels[4] == 255 && texels[6] == 0);
+
+  /* **Never read back**: an RGBA buffer holds no indices, and a texture is no index format. */
+  GLubyte out[4] = {0, 0, 0, 0};
+  glReadPixels(0, 0, 1, 1, GL_COLOR_INDEX, GL_UNSIGNED_BYTE, out);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_COLOR_INDEX, GL_UNSIGNED_BYTE, out);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  /* No packed type holds an index. */
+  glDrawPixels(1, 1, GL_COLOR_INDEX, GL_UNSIGNED_SHORT_5_6_5, idx);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+
+  /* **GL_BITMAP**: an index a bit, most significant first - 1010 0000 is red, blue, red, blue
+   * - for glDrawPixels, a texture upload and a compiled list; and only for index formats. */
+  static const GLubyte bits[1] = {0xa0};
+  glClear(GL_COLOR_BUFFER_BIT);
+  glWindowPos2i(4, 4);
+  glDrawPixels(4, 1, GL_COLOR_INDEX, GL_BITMAP, bits);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_TRUE(PIX(4, 4) == 0xff0000u && PIX(5, 4) == 0x0000ffu && PIX(6, 4) == 0xff0000u);
+  glPixelStorei(GL_UNPACK_LSB_FIRST, GL_TRUE); /* 0xa0 read from bit 0: 0, 0, 0, 0, 0, 1 */
+  glWindowPos2i(4, 6);
+  glDrawPixels(6, 1, GL_COLOR_INDEX, GL_BITMAP, bits);
+  glPixelStorei(GL_UNPACK_LSB_FIRST, GL_FALSE);
+  ASSERT_TRUE(PIX(4, 6) == 0x0000ffu && PIX(9, 6) == 0xff0000u);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_COLOR_INDEX, GL_BITMAP, bits);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+  ASSERT_TRUE(texels[0] == 255 && texels[6] == 255 && texels[4] == 0);
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glWindowPos2i(4, 8);
+  glDrawPixels(4, 1, GL_COLOR_INDEX, GL_BITMAP, bits);
+  glEndList();
+  glCallList(list);
+  ASSERT_TRUE(PIX(4, 8) == 0xff0000u && PIX(5, 8) == 0x0000ffu);
+  glDeleteLists(list, 1);
+  glDrawPixels(4, 1, GL_RGBA, GL_BITMAP, bits);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  /* Stencil indices as bits, drawn and read back. */
+  glClearStencil(0);
+  glClear(GL_STENCIL_BUFFER_BIT);
+  glWindowPos2i(0, 0);
+  glDrawPixels(4, 1, GL_STENCIL_INDEX, GL_BITMAP, bits);
+  GLubyte sread[4] = {9, 9, 9, 9};
+  glReadPixels(0, 0, 4, 1, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sread);
+  ASSERT_TRUE(sread[0] == 1 && sread[1] == 0 && sread[2] == 1 && sread[3] == 0);
+  GLubyte sbits[1] = {0x0f};
+  glReadPixels(0, 0, 4, 1, GL_STENCIL_INDEX, GL_BITMAP, sbits);
+  ASSERT_EQ(sbits[0], 0xafu); /* the four bits written, the rest of the byte left alone */
+  glDeleteTextures(1, &tex);
+  #undef PIX
+
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Projective texturing: q divides s, t and r per fragment, after interpolation, so a q that
+ * varies across a primitive bends the mapping rather than being averaged away at the vertices.
+ *
+ * A 32-pixel-wide strip with (s, q) = (0, 1) on its left edge and (3, 3) on its right: s/q runs
+ * 0 to 1 either way, but interpolated first it is 3f / (1 + 2f) at fraction f of the width, which
+ * reaches the second texel of a two-texel texture at f = 1/4 - column 8 - where a per-vertex
+ * divide would have reached it only at column 16. */
+static void test_gl_projective_texcoords_divide_per_fragment(void) {
+  const int W = 32, H = 8;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0, 32.0, 0.0, 8.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  #define PIX(x, y) (fb[(H - 1 - (y)) * W + (x)] & 0x00ffffffu)
+
+  static const GLubyte texels[2 * 4] = {255, 0, 0, 255, 0, 255, 0, 255}; /* red, green */
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  glEnable(GL_TEXTURE_2D);
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_QUADS);
+  glTexCoord4f(0.0f, 0.0f, 0.0f, 1.0f); glVertex2f(0.0f, 2.0f);
+  glTexCoord4f(3.0f, 0.0f, 0.0f, 3.0f); glVertex2f(32.0f, 2.0f);
+  glTexCoord4f(3.0f, 0.0f, 0.0f, 3.0f); glVertex2f(32.0f, 6.0f);
+  glTexCoord4f(0.0f, 0.0f, 0.0f, 1.0f); glVertex2f(0.0f, 6.0f);
+  glEnd();
+  for (int y = 2; y < 6; y++) {
+    int first_green = -1;
+    for (int x = 0; x < W; x++) {
+      const uint32_t c = PIX(x, y);
+      ASSERT_TRUE(c == 0xff0000u || c == 0x00ff00u);
+      if (c == 0x00ff00u && first_green < 0) first_green = x;
+      if (first_green >= 0) ASSERT_EQ(c, 0x00ff00u); /* one boundary, no stray texels past it */
+    }
+    ASSERT_EQ(first_green, 8);
+  }
+  glDisable(GL_TEXTURE_2D);
+  glDeleteTextures(1, &tex);
+  #undef PIX
+
+  /* Feedback returns the coordinate as the vertex kept it: all four components, undivided
+   * (mesa/src/mesa/main/feedback.c:136-139). */
+  GLfloat fbuf[16];
+  for (int i = 0; i < 16; i++) fbuf[i] = -1.0f;
+  glFeedbackBuffer(16, GL_4D_COLOR_TEXTURE, fbuf);
+  glRenderMode(GL_FEEDBACK);
+  glBegin(GL_POINTS);
+  glTexCoord4f(2.0f, 4.0f, 6.0f, 2.0f);
+  glVertex2f(1.0f, 1.0f);
+  glEnd();
+  ASSERT_EQ(glRenderMode(GL_RENDER), 13);
+  ASSERT_TRUE(fbuf[0] == (GLfloat)GL_POINT_TOKEN);
+  ASSERT_TRUE(fbuf[9] == 2.0f && fbuf[10] == 4.0f && fbuf[11] == 6.0f && fbuf[12] == 2.0f);
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* **What an audit of the specification's state tables found** (2026-09-19): every name GL 1.5's
+ * tables give glGet or glIsEnabled was queried through every getter, and every GL 1.0-1.5 enum
+ * in Mesa's headers checked against gl.h. Each gap it turned up is pinned here. */
+/* **The front buffer** (GL 1.0, 4.2.1; since 2026-09-19): a surface of its own beside the back,
+ * drawn into, cleared and read by name. GL_FRONT_AND_BACK and GL_LEFT draw into both and read
+ * the front (Mesa main/buffers.c:145-170, :209-226). A swap makes it the back's picture, and it
+ * waits to be presented while drawn into. The host has no screen, so the front starts as the
+ * back. */
+static void test_gl_front_buffer(void) {
+  const int W = 8, H = 8;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  uint32_t *back = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  GLint iv[1];
+  GLubyte px[4];
+  const size_t mid = (size_t)(H / 2) * W + W / 2;
+  #define RGB(p) ((p) & 0x00ffffffu)
+
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_TRUE(ctx->front_fb == NULL); /* none until a program names it */
+  glDrawBuffer(GL_FRONT);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetIntegerv(GL_DRAW_BUFFER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_FRONT);
+  ASSERT_TRUE(ctx->front_fb != NULL && ctx->front_fb != back);
+  ASSERT_EQ(RGB(ctx->front_fb[mid]), 0x0000ffu);
+
+  /* Drawn into, the front changes and the back does not. */
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(RGB(ctx->front_fb[mid]), 0xff0000u);
+  ASSERT_EQ(RGB(back[mid]), 0x0000ffu);
+
+  /* Read by name. */
+  glReadBuffer(GL_BACK);
+  glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+  ASSERT_TRUE(px[0] == 0u && px[2] == 255u);
+  glReadBuffer(GL_FRONT);
+  glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+  ASSERT_TRUE(px[0] == 255u && px[2] == 0u);
+  glReadBuffer(GL_BACK);
+  glReadBuffer(GL_FRONT_AND_BACK);
+  glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+  ASSERT_TRUE(px[0] == 255u && px[2] == 0u);
+  glReadBuffer(GL_LEFT);
+  glGetIntegerv(GL_READ_BUFFER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_LEFT);
+  glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+  ASSERT_TRUE(px[0] == 255u && px[2] == 0u);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* glCopyPixels from the read buffer into the draw buffer: the front's red into the back's
+   * bottom-left pixel. */
+  glReadBuffer(GL_FRONT);
+  glDrawBuffer(GL_BACK);
+  glWindowPos2i(0, 0);
+  glCopyPixels(W / 2, H / 2, 1, 1, GL_COLOR);
+  ASSERT_EQ(RGB(back[(size_t)(H - 1) * W]), 0xff0000u);
+  ASSERT_EQ(RGB(ctx->front_fb[(size_t)(H - 1) * W]), 0xff0000u);
+
+  /* Both: drawn into together, each blended against its own pixel - red plus green in the
+   * front, blue plus green in the back. */
+  glDrawBuffer(GL_FRONT_AND_BACK);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_ONE, GL_ONE);
+  glColor3f(0.0f, 1.0f, 0.0f);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  glDisable(GL_BLEND);
+  ASSERT_EQ(RGB(ctx->front_fb[mid]), 0xffff00u);
+  ASSERT_EQ(RGB(back[mid]), 0x00ffffu);
+  /* GL_LEFT is the same pair, and a clear reaches both. */
+  glDrawBuffer(GL_LEFT);
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(RGB(ctx->front_fb[mid]), 0xffffffu);
+  ASSERT_EQ(RGB(back[mid]), 0xffffffu);
+  /* And the accumulation buffer's return. */
+  glClearAccum(0.0f, 0.0f, 0.0f, 0.0f);
+  glClear(GL_ACCUM_BUFFER_BIT);
+  glAccum(GL_RETURN, 1.0f);
+  ASSERT_EQ(RGB(ctx->front_fb[mid]), 0x000000u);
+  ASSERT_EQ(RGB(back[mid]), 0x000000u);
+
+  /* A swap: the front becomes the picture just presented, the back's. */
+  glDrawBuffer(GL_BACK);
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glSwapBuffers();
+  ASSERT_EQ(RGB(ctx->front_fb[mid]), 0x00ff00u);
+  ASSERT_TRUE(ctx->framebuffer == back && ctx->fb_also == NULL);
+
+  /* Waiting to be presented once drawn into, until glFlush puts it on screen. */
+  ASSERT_EQ(ctx->front_pending, GL_FALSE);
+  glDrawBuffer(GL_FRONT);
+  ASSERT_EQ(ctx->front_pending, GL_TRUE);
+  glDrawBuffer(GL_BACK);
+  ASSERT_EQ(ctx->front_pending, GL_TRUE);
+  glFlush();
+  ASSERT_EQ(ctx->front_pending, GL_FALSE);
+
+  /* Saved with GL_COLOR_BUFFER_BIT, and the buffer drawn into follows it back. */
+  glDrawBuffer(GL_FRONT);
+  glPushAttrib(GL_COLOR_BUFFER_BIT);
+  glDrawBuffer(GL_BACK);
+  ASSERT_TRUE(ctx->framebuffer == back);
+  glPopAttrib();
+  ASSERT_TRUE(ctx->framebuffer == ctx->front_fb);
+  glDrawBuffer(GL_BACK);
+  glReadBuffer(GL_BACK);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  #undef RGB
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+static void test_gl_state_table_audit_findings(void) {
+  const int W = 8, H = 8;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  GLint iv[16];
+  GLfloat fv[16];
+
+  /* Float-valued state through glGetIntegerv: normalised ones mapped linearly (GL 1.5, 6.1.2),
+   * the rest rounded. Every one of these was GL_INVALID_ENUM. */
+  glAlphaFunc(GL_GREATER, 0.5f);
+  glGetIntegerv(GL_ALPHA_TEST_REF, iv);
+  ASSERT_EQ(iv[0], 1073741823);
+  glClearDepth(1.0);
+  glGetIntegerv(GL_DEPTH_CLEAR_VALUE, iv);
+  ASSERT_EQ(iv[0], 2147483647);
+  glGetIntegerv(GL_CURRENT_NORMAL, iv);
+  ASSERT_TRUE(iv[0] == 0 && iv[1] == 0 && iv[2] == 2147483647);
+  glPixelZoom(2.5f, -1.0f);
+  glGetIntegerv(GL_ZOOM_X, iv);
+  ASSERT_EQ(iv[0], 3);
+  glGetIntegerv(GL_ZOOM_Y, iv);
+  ASSERT_EQ(iv[0], -1);
+  glPixelZoom(1.0f, 1.0f);
+  glPolygonOffset(1.4f, 2.6f);
+  glGetIntegerv(GL_POLYGON_OFFSET_FACTOR, iv);
+  ASSERT_EQ(iv[0], 1);
+  glGetIntegerv(GL_POLYGON_OFFSET_UNITS, iv);
+  ASSERT_EQ(iv[0], 3);
+  glGetIntegerv(GL_CURRENT_RASTER_POSITION, iv);
+  ASSERT_TRUE(iv[0] == 0 && iv[3] == 1);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetIntegerv(0x1234, iv); /* and a name nothing knows still stops, rather than recursing */
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+  /* The texture matrix stack's depth, per unit; the transposed matrices. */
+  glMatrixMode(GL_TEXTURE);
+  glGetIntegerv(GL_TEXTURE_STACK_DEPTH, iv);
+  ASSERT_EQ(iv[0], 1);
+  glPushMatrix();
+  glGetIntegerv(GL_TEXTURE_STACK_DEPTH, iv);
+  ASSERT_EQ(iv[0], 2);
+  glActiveTexture(GL_TEXTURE1);
+  glGetIntegerv(GL_TEXTURE_STACK_DEPTH, iv);
+  ASSERT_EQ(iv[0], 1);
+  glActiveTexture(GL_TEXTURE0);
+  glPopMatrix();
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  glTranslatef(1.0f, 2.0f, 3.0f);
+  glGetFloatv(GL_TRANSPOSE_MODELVIEW_MATRIX, fv);
+  ASSERT_TRUE(fv[3] == 1.0f && fv[7] == 2.0f && fv[11] == 3.0f && fv[12] == 0.0f);
+  glGetFloatv(GL_MODELVIEW_MATRIX, fv);
+  ASSERT_TRUE(fv[12] == 1.0f && fv[3] == 0.0f);
+  glLoadIdentity();
+
+  /* The ten table names that were not even declared. */
+  glGetIntegerv(GL_MAX_LIST_NESTING, iv);  ASSERT_EQ(iv[0], 64);
+  glGetIntegerv(GL_AUX_BUFFERS, iv);       ASSERT_EQ(iv[0], 0);
+  glGetIntegerv(GL_DOUBLEBUFFER, iv);      ASSERT_EQ(iv[0], 1);
+  glGetIntegerv(GL_STEREO, iv);            ASSERT_EQ(iv[0], 0);
+  glGetIntegerv(GL_SUBPIXEL_BITS, iv);     ASSERT_EQ(iv[0], 4);
+  glGetIntegerv(GL_CURRENT_RASTER_INDEX, iv); ASSERT_EQ(iv[0], 1);
+  glGetIntegerv(GL_MAX_ELEMENTS_VERTICES, iv); ASSERT_TRUE(iv[0] > 0);
+  glGetIntegerv(GL_MAX_ELEMENTS_INDICES, iv);  ASSERT_TRUE(iv[0] > 0);
+  glGetIntegerv(GL_LIST_INDEX, iv);        ASSERT_EQ(iv[0], 0);
+  glNewList(5, GL_COMPILE);
+  glGetIntegerv(GL_LIST_INDEX, iv);        ASSERT_EQ(iv[0], 5); /* a get is not compiled */
+  glGetIntegerv(GL_LIST_MODE, iv);         ASSERT_EQ(iv[0], (GLint)GL_COMPILE);
+  glEndList();
+  glGetIntegerv(GL_LIST_MODE, iv);         ASSERT_EQ(iv[0], 0);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* glCallLists' ten types (GL 1.0) - three were accepted. Lists 10 and 11 each set a colour. */
+  glNewList(10, GL_COMPILE); glColor3f(1.0f, 0.0f, 0.0f); glEndList();
+  glNewList(11, GL_COMPILE); glColor3f(0.0f, 1.0f, 0.0f); glEndList();
+  glListBase(12);
+  static const GLbyte back2[1] = {-2};                /* 12 - 2 = 10 */
+  static const GLubyte two[2] = {0xff, 0xff};         /* 12 + 65535, which does not exist */
+  static const GLubyte two11[2] = {0x00, 0x00};       /* 12 + 0: none - so nothing changes */
+  static const GLfloat fl[1] = {-0.7f};               /* truncated to 0: list 12, none */
+  static const GLubyte four[4] = {0xff, 0xff, 0xff, 0xff}; /* -1 as a 32-bit name: 11 */
+  glColor3f(0.0f, 0.0f, 1.0f);
+  glCallLists(1, GL_BYTE, back2);
+  ASSERT_TRUE(ctx->cur_color[0] == 1.0f && ctx->cur_color[1] == 0.0f);
+  glCallLists(1, GL_4_BYTES, four);
+  ASSERT_TRUE(ctx->cur_color[0] == 0.0f && ctx->cur_color[1] == 1.0f);
+  glCallLists(1, GL_2_BYTES, two);
+  glCallLists(1, GL_2_BYTES, two11);
+  glCallLists(1, GL_FLOAT, fl);
+  ASSERT_TRUE(ctx->cur_color[1] == 1.0f);
+  static const GLubyte three[3] = {0x00, 0x00, 0x00};
+  glListBase(10);
+  glCallLists(1, GL_3_BYTES, three);                 /* 10 + 0 */
+  ASSERT_TRUE(ctx->cur_color[0] == 1.0f);
+  glListBase(0);
+  glDeleteLists(10, 2);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* glDrawBuffer and glReadBuffer: GL_NONE draws no colour, GL_BACK_LEFT is the back buffer,
+   * the absent buffers are GL_INVALID_OPERATION, and a name that is no buffer is
+   * GL_INVALID_ENUM. The front has its own test, test_gl_front_buffer. */
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glDrawBuffer(GL_NONE);
+  glGetIntegerv(GL_DRAW_BUFFER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_NONE);
+  glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColor3f(0.0f, 1.0f, 0.0f);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(fb[(H / 2) * W + W / 2] & 0x00ffffffu, 0x0000ffu); /* still the first clear */
+  glDrawBuffer(GL_BACK_LEFT);
+  glGetIntegerv(GL_DRAW_BUFFER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_BACK_LEFT);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(fb[(H / 2) * W + W / 2] & 0x00ffffffu, 0x00ff00u);
+  glDrawBuffer(GL_AUX0);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glDrawBuffer(GL_RIGHT);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glDrawBuffer(GL_TEXTURE_2D);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetIntegerv(GL_DRAW_BUFFER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_BACK_LEFT); /* the refusals changed nothing */
+  glReadBuffer(GL_NONE);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glReadBuffer(GL_BACK_LEFT);
+  glGetIntegerv(GL_READ_BUFFER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_BACK_LEFT);
+  /* Saved with their groups: the draw buffer with the colour buffer bit, the read buffer with
+   * the pixel mode bit. */
+  glPushAttrib(GL_COLOR_BUFFER_BIT | GL_PIXEL_MODE_BIT);
+  glDrawBuffer(GL_NONE);
+  glReadBuffer(GL_BACK);
+  glPopAttrib();
+  glGetIntegerv(GL_DRAW_BUFFER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_BACK_LEFT);
+  glGetIntegerv(GL_READ_BUFFER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_BACK_LEFT);
+  glDrawBuffer(GL_BACK);
+  glReadBuffer(GL_BACK);
+
+  /* GL_CURRENT_BIT carries the raster position (table 6.5), which the push left out. */
+  glRasterPos2f(0.5f, 0.5f);
+  glGetFloatv(GL_CURRENT_RASTER_POSITION, fv);
+  const float saved_x = fv[0];
+  glPushAttrib(GL_CURRENT_BIT);
+  glRasterPos2f(-0.5f, -0.5f);
+  glPopAttrib();
+  glGetFloatv(GL_CURRENT_RASTER_POSITION, fv);
+  ASSERT_TRUE(fv[0] == saved_x);
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Two texture-enable fixes that came with the per-unit state (2026-09-19): the drawn clear sets
+ * aside every texture target, not just 1D and 2D, and GL_ENABLE_BIT carries the texture
+ * generation enables (GL 1.3, table 6.20, "texture/enable"; Mesa main/attrib.c:189-192). */
+static void test_gl_drawn_clear_and_enable_bit_cover_every_texture_enable(void) {
+  const int W = 8, H = 8;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+
+  /* A red 3D texture, enabled. A scissored clear is drawn as a quad at the clear colour; were it
+   * textured, red modulating green would clear to black. */
+  static const GLubyte red[2 * 2 * 2 * 4] = {
+    255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+    255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+  };
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_3D, tex);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+  glEnable(GL_TEXTURE_3D);
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glEnable(GL_SCISSOR_TEST);
+  glScissor(2, 2, 4, 4);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(fb[4 * W + 4] & 0x00ffffffu, 0x00ff00u);
+  glDisable(GL_SCISSOR_TEST);
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_3D), GL_TRUE); /* and the enable came back after the clear */
+  glDisable(GL_TEXTURE_3D);
+  glDeleteTextures(1, &tex);
+
+  /* GL_ENABLE_BIT alone restores a generation enable. */
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_GEN_S), GL_FALSE);
+  glPushAttrib(GL_ENABLE_BIT);
+  glEnable(GL_TEXTURE_GEN_S);
+  glEnable(GL_TEXTURE_2D);
+  glPopAttrib();
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_GEN_S), GL_FALSE);
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_2D), GL_FALSE);
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL 1.5's buffer mapping and read back, its full set of usages, and its occlusion queries. */
+static void test_gl_buffer_mapping_and_occlusion_queries(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0, 16.0, 0.0, 16.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  GLint iv[1] = {0};
+
+  /* **Buffers**: a _READ usage, refused until 2026-09-19; mapped, written through the pointer,
+   * and read back once unmapped. */
+  static const GLfloat quad0[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  GLuint buf = 0;
+  glGenBuffers(1, &buf);
+  glBindBuffer(GL_ARRAY_BUFFER, buf);
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(quad0), quad0, GL_STATIC_READ);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_ACCESS, iv); ASSERT_EQ(iv[0], (GLint)GL_READ_WRITE);
+  glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_MAPPED, iv); ASSERT_EQ(iv[0], GL_FALSE);
+  GLfloat *p = (GLfloat *)glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+  ASSERT_TRUE(p != NULL);
+  static const GLfloat quad[8] = {4, 4, 8, 4, 8, 8, 4, 8};
+  memcpy(p, quad, sizeof(quad));
+  glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_MAPPED, iv); ASSERT_EQ(iv[0], GL_TRUE);
+  glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_ACCESS, iv); ASSERT_EQ(iv[0], (GLint)GL_WRITE_ONLY);
+  GLvoid *mp = NULL;
+  glGetBufferPointerv(GL_ARRAY_BUFFER, GL_BUFFER_MAP_POINTER, &mp);
+  ASSERT_TRUE(mp == (GLvoid *)p);
+  /* **While mapped**: no second map, no update, no read back, no draw from it. */
+  ASSERT_TRUE(glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY) == NULL);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glBufferSubData(GL_ARRAY_BUFFER, 0, 4, quad);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  GLfloat back[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  glGetBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)sizeof(back), back);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(2, GL_FLOAT, 0, (const GLvoid *)0);
+  glDrawArrays(GL_QUADS, 0, 4);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  ASSERT_EQ(glUnmapBuffer(GL_ARRAY_BUFFER), GL_TRUE);
+  ASSERT_EQ(glUnmapBuffer(GL_ARRAY_BUFFER), GL_FALSE);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glGetBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)sizeof(back), back);
+  ASSERT_TRUE(back[0] == 4.0f && back[5] == 8.0f && back[7] == 8.0f);
+  glGetBufferPointerv(GL_ARRAY_BUFFER, GL_BUFFER_MAP_POINTER, &mp);
+  ASSERT_TRUE(mp == NULL);
+  /* The checks: an access, a pointer name, a range. */
+  ASSERT_TRUE(glMapBuffer(GL_ARRAY_BUFFER, GL_STATIC_DRAW) == NULL);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetBufferPointerv(GL_ARRAY_BUFFER, GL_BUFFER_SIZE, &mp);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetBufferSubData(GL_ARRAY_BUFFER, 4, (GLsizeiptr)sizeof(back), back);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  /* A new store unmaps. */
+  (void)glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY);
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(quad), quad, GL_DYNAMIC_COPY);
+  glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_MAPPED, iv); ASSERT_EQ(iv[0], GL_FALSE);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* **Occlusion queries.** Names from glGenQueries are query objects only once begun. */
+  GLuint q[2] = {0, 0};
+  glGenQueries(2, q);
+  ASSERT_TRUE(q[0] != 0u && q[1] != 0u && q[0] != q[1]);
+  ASSERT_EQ(glIsQuery(q[0]), GL_FALSE);
+  glGetQueryiv(GL_SAMPLES_PASSED, GL_QUERY_COUNTER_BITS, iv); ASSERT_EQ(iv[0], 32);
+  glGetQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, iv);      ASSERT_EQ(iv[0], 0);
+  /* The 4x4 quad from the buffer: sixteen samples. */
+  glBeginQuery(GL_SAMPLES_PASSED, q[0]);
+  glGetQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, iv); ASSERT_EQ(iv[0], (GLint)q[0]);
+  glGetQueryObjectiv(q[0], GL_QUERY_RESULT, iv);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION); /* active */
+  glDrawArrays(GL_QUADS, 0, 4);
+  glEndQuery(GL_SAMPLES_PASSED);
+  ASSERT_EQ(glIsQuery(q[0]), GL_TRUE);
+  GLuint uv = 0;
+  glGetQueryObjectuiv(q[0], GL_QUERY_RESULT_AVAILABLE, &uv); ASSERT_EQ(uv, (GLuint)GL_TRUE);
+  glGetQueryObjectuiv(q[0], GL_QUERY_RESULT, &uv);           ASSERT_EQ(uv, 16u);
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  /* **Only what passes the depth test**: a quad behind a nearer one counts nothing; and only
+   * what passes the alpha test. */
+  glClear(GL_DEPTH_BUFFER_BIT);
+  glEnable(GL_DEPTH_TEST);
+  glBegin(GL_QUADS);
+  glVertex3f(0, 0, 0.5f); glVertex3f(16, 0, 0.5f); glVertex3f(16, 16, 0.5f); glVertex3f(0, 16, 0.5f);
+  glEnd();
+  glBeginQuery(GL_SAMPLES_PASSED, q[1]);
+  glBegin(GL_QUADS); /* z -0.5 is further under this orthographic projection */
+  glVertex3f(2, 2, -0.5f); glVertex3f(6, 2, -0.5f); glVertex3f(6, 6, -0.5f); glVertex3f(2, 6, -0.5f);
+  glEnd();
+  glEndQuery(GL_SAMPLES_PASSED);
+  glGetQueryObjectuiv(q[1], GL_QUERY_RESULT, &uv); ASSERT_EQ(uv, 0u);
+  glDisable(GL_DEPTH_TEST);
+  glEnable(GL_ALPHA_TEST);
+  glAlphaFunc(GL_GREATER, 0.5f);
+  glColor4f(1.0f, 1.0f, 1.0f, 0.25f);
+  glBeginQuery(GL_SAMPLES_PASSED, q[1]);
+  glRectf(0, 0, 4, 4);
+  glEndQuery(GL_SAMPLES_PASSED);
+  glGetQueryObjectuiv(q[1], GL_QUERY_RESULT, &uv); ASSERT_EQ(uv, 0u);
+  glDisable(GL_ALPHA_TEST);
+  glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+  /* **Pixel rectangles are fragments too**: a 2x2 glDrawPixels, four samples - and a new name
+   * at glBeginQuery is made a query object, as a compatibility context allows. */
+  static const GLubyte px4[16] = {255, 255, 255, 255, 255, 255, 255, 255,
+                                  255, 255, 255, 255, 255, 255, 255, 255};
+  glBeginQuery(GL_SAMPLES_PASSED, 50u);
+  glWindowPos2i(10, 10);
+  glDrawPixels(2, 2, GL_RGBA, GL_UNSIGNED_BYTE, px4);
+  glEndQuery(GL_SAMPLES_PASSED);
+  glGetQueryObjectuiv(50u, GL_QUERY_RESULT, &uv); ASSERT_EQ(uv, 4u);
+  /* **Compiled**: the begin and end replay around the draw between them. */
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glBeginQuery(GL_SAMPLES_PASSED, q[0]);
+  glRectf(0, 0, 2, 2);
+  glEndQuery(GL_SAMPLES_PASSED);
+  glEndList();
+  glCallList(list);
+  glGetQueryObjectuiv(q[0], GL_QUERY_RESULT, &uv); ASSERT_EQ(uv, 4u);
+  glDeleteLists(list, 1);
+  /* The checks. */
+  glBeginQuery(GL_SAMPLES_PASSED, 0u);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glEndQuery(GL_SAMPLES_PASSED);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glBeginQuery((GLenum)0x8C2Fu /* GL 3.3's GL_ANY_SAMPLES_PASSED */, q[0]);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glBeginQuery(GL_SAMPLES_PASSED, q[0]);
+  glBeginQuery(GL_SAMPLES_PASSED, q[1]);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glGetQueryObjectuiv(q[0], GL_QUERY_COUNTER_BITS, &uv);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION); /* still active: that is checked first */
+  /* Deleting the active query ends it. */
+  glDeleteQueries(1, &q[0]);
+  glGetQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, iv); ASSERT_EQ(iv[0], 0);
+  ASSERT_EQ(glIsQuery(q[0]), GL_FALSE);
+  glGetQueryObjectuiv(q[1], GL_QUERY_COUNTER_BITS, &uv);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glDeleteQueries(1, &q[1]);
+  GLuint q50 = 50u;
+  glDeleteQueries(1, &q50);
+  glDeleteBuffers(1, &buf);
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL_COLOR_MATERIAL writes the current colour into the material it tracks - so the material reads
+ * back as the colour, glMaterial cannot set a tracked property, and the last tracked colour stays
+ * when the enable goes off. */
+static void test_gl_color_material_writes_the_material(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 16, 16);
+  void *ctx_handle = glContextCreate(disp);
+  (void)glGetError();
+  GLfloat m[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  const GLfloat green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  #define IS(v, r, g, b) ASSERT_TRUE((v)[0] == (r) && (v)[1] == (g) && (v)[2] == (b))
+
+  /* Enabled with the defaults - both sides, ambient and diffuse: the current colour now, and
+   * each colour after it. */
+  glColor3f(1.0f, 0.0f, 0.0f);
+  glEnable(GL_COLOR_MATERIAL);
+  glGetMaterialfv(GL_FRONT, GL_DIFFUSE, m);  IS(m, 1.0f, 0.0f, 0.0f);
+  glGetMaterialfv(GL_BACK, GL_AMBIENT, m);   IS(m, 1.0f, 0.0f, 0.0f);
+  glColor3f(0.0f, 0.0f, 1.0f);
+  glGetMaterialfv(GL_FRONT, GL_AMBIENT, m);  IS(m, 0.0f, 0.0f, 1.0f);
+
+  /* A tracked property is the colour's: glMaterial leaves it and sets the rest. */
+  glMaterialfv(GL_FRONT, GL_DIFFUSE, green);
+  glMaterialfv(GL_FRONT, GL_SPECULAR, green);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetMaterialfv(GL_FRONT, GL_DIFFUSE, m);  IS(m, 0.0f, 0.0f, 1.0f);
+  glGetMaterialfv(GL_FRONT, GL_SPECULAR, m); IS(m, 0.0f, 1.0f, 0.0f);
+
+  /* **Off, the material keeps the last colour it tracked**, and later colours leave it. */
+  glDisable(GL_COLOR_MATERIAL);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glGetMaterialfv(GL_FRONT, GL_DIFFUSE, m);  IS(m, 0.0f, 0.0f, 1.0f);
+  glMaterialfv(GL_FRONT, GL_DIFFUSE, green); /* and glMaterial sets it again */
+  glGetMaterialfv(GL_FRONT, GL_DIFFUSE, m);  IS(m, 0.0f, 1.0f, 0.0f);
+
+  /* **glColorMaterial while on** tracks the new property at once, on its side only. */
+  glColor3f(1.0f, 0.0f, 1.0f);
+  glColorMaterial(GL_FRONT, GL_EMISSION);
+  glEnable(GL_COLOR_MATERIAL);
+  glGetMaterialfv(GL_FRONT, GL_EMISSION, m); IS(m, 1.0f, 0.0f, 1.0f);
+  glGetMaterialfv(GL_BACK, GL_EMISSION, m);  IS(m, 0.0f, 0.0f, 0.0f);
+  glColorMaterial(GL_FRONT, GL_SPECULAR);
+  glGetMaterialfv(GL_FRONT, GL_SPECULAR, m); IS(m, 1.0f, 0.0f, 1.0f);
+  glDisable(GL_COLOR_MATERIAL);
+  glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+  #undef IS
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Antialiasing: a smooth point, line and polygon each weigh their fragments' alpha by the fraction
+ * of the pixel they cover. Read as alpha, over a transparent black clear with blending off. */
+static void test_gl_smooth_points_lines_polygons(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+  glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+  GLubyte img[16 * 16 * 4];
+  /* Alpha of window pixel (x, y), y counting up from the bottom as glReadPixels does. */
+  #define ALPHA(x, y) (img[((y) * W + (x)) * 4 + 3])
+  #define GRAB() glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, img)
+
+  /* The enables, their groups, and the step a smooth size takes. */
+  ASSERT_EQ(glIsEnabled(GL_POINT_SMOOTH), GL_FALSE);
+  glPushAttrib(GL_POINT_BIT | GL_LINE_BIT | GL_POLYGON_BIT);
+  glEnable(GL_POINT_SMOOTH); glEnable(GL_LINE_SMOOTH); glEnable(GL_POLYGON_SMOOTH);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_EQ(glIsEnabled(GL_LINE_SMOOTH), GL_TRUE);
+  glPopAttrib();
+  ASSERT_EQ(glIsEnabled(GL_LINE_SMOOTH), GL_FALSE);
+  ASSERT_EQ(glIsEnabled(GL_POLYGON_SMOOTH), GL_FALSE);
+  GLfloat fv[2] = {0.0f, 0.0f};
+  glGetFloatv(GL_SMOOTH_POINT_SIZE_GRANULARITY, fv);
+  ASSERT_TRUE(fv[0] == OOPS_GL_SMOOTH_GRANULARITY);
+
+  /* **A smooth point** of size 6 at the centre, (8, 8) in window pixels: a disc of radius 3.
+   * Its centre pixel is covered, one 2.5 across and 0.5 up almost all of it, and the corner
+   * of the 6x6 square an aliased point fills - 3.5 away both ways - not at all. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEnable(GL_POINT_SMOOTH);
+  glPointSize(6.0f);
+  glBegin(GL_POINTS); glVertex2f(0.0f, 0.0f); glEnd();
+  glDisable(GL_POINT_SMOOTH);
+  GRAB();
+  ASSERT_EQ(ALPHA(7, 7), 255);
+  ASSERT_TRUE(ALPHA(10, 8) > 230 && ALPHA(10, 8) < 255);
+  ASSERT_EQ(ALPHA(10, 10), 0);
+  ASSERT_EQ(ALPHA(4, 7), 0); /* 3.5 from the centre along x: outside */
+
+  /* **A smooth line** 3 wide along y = 8 from x = 2 to 14: rows 7 and 8 lie inside it, rows 6
+   * and 9 half inside (their centres 1.5 from the axis, the edge at 1.5); and it stops at its
+   * ends - column 1 is outside. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEnable(GL_LINE_SMOOTH);
+  glLineWidth(3.0f);
+  glBegin(GL_LINES); glVertex2f(-0.75f, 0.0f); glVertex2f(0.75f, 0.0f); glEnd();
+  glDisable(GL_LINE_SMOOTH);
+  glLineWidth(1.0f);
+  GRAB();
+  ASSERT_EQ(ALPHA(6, 7), 255);
+  ASSERT_EQ(ALPHA(6, 8), 255);
+  ASSERT_TRUE(ALPHA(6, 6) > 118 && ALPHA(6, 6) < 138);
+  ASSERT_TRUE(ALPHA(6, 9) > 118 && ALPHA(6, 9) < 138);
+  ASSERT_EQ(ALPHA(6, 10), 0);
+  ASSERT_EQ(ALPHA(1, 7), 0);
+
+  /* **A smooth polygon**, a square from 4.5 to 11.5: its edge columns are half covered, its
+   * inside is whole - along the diagonal where its two triangles meet too, which must not
+   * fade. */
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEnable(GL_POLYGON_SMOOTH);
+  glRectf(-0.4375f, -0.4375f, 0.4375f, 0.4375f);
+  glDisable(GL_POLYGON_SMOOTH);
+  GRAB();
+  ASSERT_TRUE(ALPHA(4, 8) > 118 && ALPHA(4, 8) < 138);
+  ASSERT_TRUE(ALPHA(11, 8) > 118 && ALPHA(11, 8) < 138);
+  ASSERT_TRUE(ALPHA(8, 4) > 118 && ALPHA(8, 4) < 138);
+  ASSERT_EQ(ALPHA(3, 8), 0);
+  for (int i = 5; i <= 10; i++) {
+    ASSERT_EQ(ALPHA(i, i), 255);
+    ASSERT_EQ(ALPHA(i, 15 - i), 255);
+  }
+  /* A corner pixel is covered a quarter - the two edges' halves multiplied - where both edges
+   * are one triangle's: the bottom right and top left of glRectf's quad. **At the two corners
+   * the diagonal leaves, each triangle knows one of the corner's edges**, and the pixel comes
+   * out half covered: the approximation of fading each triangle across its own boundary edges. */
+  ASSERT_TRUE(ALPHA(11, 4) > 54 && ALPHA(11, 4) < 74);
+  ASSERT_TRUE(ALPHA(4, 11) > 54 && ALPHA(4, 11) < 74);
+  ASSERT_TRUE(ALPHA(4, 4) > 118 && ALPHA(4, 4) < 138);
+  #undef GRAB
+  #undef ALPHA
+
+  glPixelStorei(GL_PACK_ALIGNMENT, 4);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL_COMBINE (GL 1.3): each colour and alpha function, operands, sources, scales, the DOT3
+ * functions, and the parameters' checks. One 1x1 texture over a full-screen quad, read at the
+ * centre. */
+static void test_gl_texture_combine(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  (void)glGetError();
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glEnable(GL_TEXTURE_2D);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  GLubyte out[4];
+  GLint iv = 0;
+  #define TEXEL(r, g, b, a) do { const GLubyte tx[4] = {r, g, b, a}; \
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, tx); } while (0)
+  #define DRAW(r, g, b, a) do { glColor4f(r, g, b, a); glRectf(-1.0f, -1.0f, 1.0f, 1.0f); \
+      glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out); } while (0)
+  #define NEAR2(v, want) ((int)(v) >= (want) - 2 && (int)(v) <= (want) + 2)
+  #define RGBA_NEAR(r, g, b, a) ASSERT_TRUE(NEAR2(out[0], r) && NEAR2(out[1], g) && \
+                                            NEAR2(out[2], b) && NEAR2(out[3], a))
+
+  /* The defaults: GL_MODULATE of the texture by the previous colour, for both. */
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_COMBINE_RGB, &iv);    ASSERT_EQ(iv, (GLint)GL_MODULATE);
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_SOURCE1_RGB, &iv);    ASSERT_EQ(iv, (GLint)GL_PREVIOUS);
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_OPERAND2_RGB, &iv);   ASSERT_EQ(iv, (GLint)GL_SRC_ALPHA);
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_RGB_SCALE, &iv);      ASSERT_EQ(iv, 1);
+  TEXEL(128, 128, 128, 255);
+  DRAW(0.5f, 1.0f, 0.0f, 1.0f);
+  RGBA_NEAR(64, 128, 0, 255);
+  /* **GL_RGB_SCALE** doubles it; the alpha has its own scale. */
+  glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 2.0f);
+  DRAW(0.5f, 1.0f, 0.0f, 1.0f);
+  RGBA_NEAR(128, 255, 0, 255);
+  glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 1.0f);
+
+  /* **GL_ADD_SIGNED**: 0.5 + 0.75 - 0.5. **GL_SUBTRACT**: 1 - 0.25. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_ADD_SIGNED);
+  DRAW(0.75f, 0.75f, 0.75f, 1.0f);
+  RGBA_NEAR(191, 191, 191, 255);
+  TEXEL(255, 255, 255, 255);
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_SUBTRACT);
+  DRAW(0.25f, 0.25f, 0.25f, 1.0f);
+  RGBA_NEAR(191, 191, 191, 255);
+
+  /* **GL_INTERPOLATE**: red texture towards blue fragment by the constant's alpha, 0.25. */
+  TEXEL(255, 0, 0, 255);
+  const GLfloat k[4] = {0.0f, 0.0f, 0.0f, 0.25f};
+  glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, k);
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_INTERPOLATE);
+  DRAW(0.0f, 0.0f, 1.0f, 1.0f);
+  RGBA_NEAR(64, 0, 191, 255);
+
+  /* **Operands and sources**: GL_REPLACE of one minus the primary colour; of the constant's
+   * alpha; the alpha function on its own - GL_REPLACE of the constant alpha. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_PRIMARY_COLOR);
+  glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_ONE_MINUS_SRC_COLOR);
+  DRAW(1.0f, 0.25f, 0.0f, 1.0f);
+  RGBA_NEAR(0, 191, 255, 255);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_CONSTANT);
+  glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_SRC_ALPHA);
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA, GL_CONSTANT);
+  DRAW(1.0f, 1.0f, 1.0f, 1.0f);
+  RGBA_NEAR(64, 64, 64, 64);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE);
+  glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_SRC_COLOR);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA, GL_TEXTURE);
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_MODULATE);
+
+  /* **GL_DOT3_RGB**: a +x normal map texel (1, 0.5, 0.5) against a +x light vector in the
+   * primary colour is 4 * 0.25 = 1, white; against +y, 0. GL_DOT3_RGBA puts it in alpha too. */
+  TEXEL(255, 128, 128, 255);
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_DOT3_RGB);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, GL_PRIMARY_COLOR);
+  DRAW(1.0f, 0.5f, 0.5f, 0.5f);
+  RGBA_NEAR(255, 255, 255, 128); /* alpha from its own function: 1 * 0.5 */
+  DRAW(0.5f, 1.0f, 0.5f, 1.0f);
+  RGBA_NEAR(0, 0, 0, 255);
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_DOT3_RGBA);
+  DRAW(0.5f, 1.0f, 0.5f, 1.0f);
+  RGBA_NEAR(0, 0, 0, 0);
+
+  /* **The checks**: DOT3 is a colour function only; an alpha operand takes no colour; a source
+   * must be one GL names - a unit there is, GL_TEXTURE0 or GL_TEXTURE1 (GL_TEXTURE1 was refused
+   * while there was one unit), not GL_TEXTURE2; a scale is 1, 2 or 4. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_DOT3_RGB);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_ALPHA, GL_SRC_COLOR);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE0);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE1);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE2);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE0);
+  glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 1.5f);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexEnvf(GL_TEXTURE_ENV, GL_ALPHA_SCALE, 3.0f);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_RGB_SCALE, &iv); ASSERT_EQ(iv, 1);
+
+  /* **On the attribute stack** with the rest of the environment, and **in a list**. */
+  glPushAttrib(GL_TEXTURE_BIT);
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_ADD);
+  glPopAttrib();
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_COMBINE_RGB, &iv); ASSERT_EQ(iv, (GLint)GL_DOT3_RGBA);
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glTexEnvf(GL_TEXTURE_ENV, GL_ALPHA_SCALE, 4.0f);
+  glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND1_RGB, GL_ONE_MINUS_SRC_ALPHA);
+  glEndList();
+  glCallList(list);
+  GLfloat fv = 0.0f;
+  glGetTexEnvfv(GL_TEXTURE_ENV, GL_ALPHA_SCALE, &fv);  ASSERT_TRUE(fv == 4.0f);
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_OPERAND1_RGB, &iv); ASSERT_EQ(iv, (GLint)GL_ONE_MINUS_SRC_ALPHA);
+  glDeleteLists(list, 1);
+  #undef RGBA_NEAR
+  #undef NEAR2
+  #undef DRAW
+  #undef TEXEL
+
+  glDisable(GL_TEXTURE_2D);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glPixelStorei(GL_PACK_ALIGNMENT, 4);
+  glDeleteTextures(1, &tex);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Cube maps (GL 1.3): six faces through their own targets, cube completeness, the lookup by
+ * direction, the two generation modes that make directions, the proxy, and the targets each
+ * call does and does not take. */
+static void test_gl_cube_maps(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  GLint iv = 0;
+  glGetIntegerv(GL_MAX_CUBE_MAP_TEXTURE_SIZE, &iv);
+  ASSERT_TRUE(iv >= 16);
+
+  GLuint cube = 0;
+  glGenTextures(1, &cube);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
+  glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP, &iv); ASSERT_EQ(iv, (GLint)cube);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* +X red, -X green, +Y blue, -Y yellow, +Z magenta, -Z cyan - 1x1 each. */
+  static const GLubyte colours[6][4] = {
+    {255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255},
+    {255, 255, 0, 255}, {255, 0, 255, 255}, {0, 255, 255, 255},
+  };
+  static const uint32_t argb[6] = {0xff0000u, 0x00ff00u, 0x0000ffu, 0xffff00u, 0xff00ffu, 0x00ffffu};
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  for (int f = 0; f < 5; f++) {
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f, 0, GL_RGBA, 1, 1, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, colours[f]);
+  }
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* **Refusals**: the cube itself is not an image target, a face not an object target, and a
+   * face must be square. */
+  glTexImage2D(GL_TEXTURE_CUBE_MAP, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, colours[0]);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glBindTexture(GL_TEXTURE_CUBE_MAP_POSITIVE_X, cube);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP_POSITIVE_X, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, colours[0]);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+
+  /* **Cube complete only with all six**: five faces draw untextured, in the vertex colour. */
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glEnable(GL_TEXTURE_CUBE_MAP);
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_CUBE_MAP), GL_TRUE);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  #define CENTRE (fb[(H / 2) * W + W / 2] & 0x00ffffffu)
+  #define DRAW(s, t, r) do { glTexCoord3f(s, t, r); glRectf(-0.5f, -0.5f, 0.5f, 0.5f); } while (0)
+  DRAW(1.0f, 0.0f, 0.0f);
+  ASSERT_EQ(CENTRE, 0xffffffu);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+               colours[5]);
+
+  /* **The lookup by direction**: the major axis names the face. */
+  DRAW(1.0f, 0.1f, 0.2f);   ASSERT_EQ(CENTRE, argb[0]);
+  DRAW(-1.0f, 0.2f, 0.1f);  ASSERT_EQ(CENTRE, argb[1]);
+  DRAW(0.1f, 1.0f, -0.2f);  ASSERT_EQ(CENTRE, argb[2]);
+  DRAW(0.2f, -1.0f, 0.1f);  ASSERT_EQ(CENTRE, argb[3]);
+  DRAW(0.1f, 0.2f, 1.0f);   ASSERT_EQ(CENTRE, argb[4]);
+  DRAW(-0.1f, 0.1f, -1.0f); ASSERT_EQ(CENTRE, argb[5]);
+
+  /* **The place on a face**, GL 1.3's table 3.19: on +X, s runs with -z and t with -y. A 2x2 +X
+   * face - red, green over blue, yellow in memory order - at (1, 0.5, -0.5) is s 0.75, t 0.25:
+   * the second texel of the first row. The other faces go 2x2 too, to stay complete. */
+  static const GLubyte quad4[16] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255};
+  for (int f = 0; f < 6; f++) {
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f, 0, GL_RGBA, 2, 2, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, quad4);
+  }
+  DRAW(1.0f, 0.5f, -0.5f);  ASSERT_EQ(CENTRE, 0x00ff00u);
+  DRAW(1.0f, -0.5f, 0.5f);  ASSERT_EQ(CENTRE, 0x0000ffu); /* s 0.25, t 0.75 */
+  /* And on -Z, s runs with -x: (0.5, -0.5, -1) is s 0.25, t 0.75, blue again. */
+  DRAW(0.5f, -0.5f, -1.0f); ASSERT_EQ(CENTRE, 0x0000ffu);
+  for (int f = 0; f < 6; f++) {
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f, 0, GL_RGBA, 1, 1, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, colours[f]);
+  }
+
+  /* **The generation modes that make directions**: GL_NORMAL_MAP looks up by the eye-space
+   * normal - (0, 0, -1) is -Z, cyan - and GL_REFLECTION_MAP by the eye vector reflected in it:
+   * looking down -z at a face whose normal is +z reflects back up +z, magenta. */
+  glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP);
+  glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP);
+  glTexGeni(GL_R, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP);
+  glEnable(GL_TEXTURE_GEN_S); glEnable(GL_TEXTURE_GEN_T); glEnable(GL_TEXTURE_GEN_R);
+  glNormal3f(0.0f, 0.0f, -1.0f);
+  glRectf(-0.5f, -0.5f, 0.5f, 0.5f);
+  ASSERT_EQ(CENTRE, argb[5]);
+  glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_REFLECTION_MAP);
+  glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_REFLECTION_MAP);
+  glTexGeni(GL_R, GL_TEXTURE_GEN_MODE, GL_REFLECTION_MAP);
+  glMatrixMode(GL_PROJECTION); glOrtho(-1.0, 1.0, -1.0, 1.0, 1.0, 10.0);
+  glMatrixMode(GL_MODELVIEW); glTranslatef(0.0f, 0.0f, -5.0f);
+  glNormal3f(0.0f, 0.0f, 1.0f);
+  glRectf(-0.5f, -0.5f, 0.5f, 0.5f);
+  ASSERT_EQ(CENTRE, argb[4]);
+  glLoadIdentity();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW);
+  glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T); glDisable(GL_TEXTURE_GEN_R);
+
+  /* **A cube map outranks 2D**: both enabled, the cube samples. */
+  GLuint flat = 0;
+  const GLubyte white[4] = {255, 255, 255, 255};
+  glGenTextures(1, &flat);
+  glBindTexture(GL_TEXTURE_2D, flat);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+  glEnable(GL_TEXTURE_2D);
+  DRAW(0.0f, 1.0f, 0.0f);
+  ASSERT_EQ(CENTRE, argb[2]);
+  glDisable(GL_TEXTURE_2D);
+
+  /* **Each face read back and asked about through its own target**, and written by a
+   * sub-image. */
+  GLubyte back[4] = {0, 0, 0, 0};
+  glGetTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+  ASSERT_TRUE(back[0] == 255 && back[1] == 0 && back[2] == 255);
+  glTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, white);
+  glGetTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+  ASSERT_TRUE(back[0] == 255 && back[1] == 255 && back[2] == 255);
+  glGetTexLevelParameteriv(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, GL_TEXTURE_WIDTH, &iv);
+  ASSERT_EQ(iv, 1);
+  glGetTexLevelParameteriv(GL_TEXTURE_CUBE_MAP, 0, GL_TEXTURE_WIDTH, &iv);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* **The proxy**: square and within the limit fits; otherwise zeros, no error. */
+  glTexImage2D(GL_PROXY_TEXTURE_CUBE_MAP, 0, GL_RGBA, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_CUBE_MAP, 0, GL_TEXTURE_WIDTH, &iv); ASSERT_EQ(iv, 64);
+  glTexImage2D(GL_PROXY_TEXTURE_CUBE_MAP, 0, GL_RGBA, 64, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_CUBE_MAP, 0, GL_TEXTURE_WIDTH, &iv); ASSERT_EQ(iv, 0);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* **On the attribute stack**: the binding and the enable come back. */
+  glPushAttrib(GL_TEXTURE_BIT);
+  glDisable(GL_TEXTURE_CUBE_MAP);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+  glPopAttrib();
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_CUBE_MAP), GL_TRUE);
+  glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP, &iv); ASSERT_EQ(iv, (GLint)cube);
+  #undef DRAW
+  #undef CENTRE
+
+  glDisable(GL_TEXTURE_CUBE_MAP);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glDeleteTextures(1, &cube);
+  glDeleteTextures(1, &flat);
+  glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP, &iv); ASSERT_EQ(iv, 0);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Two-sided lighting: a polygon facing away lit with the back material and its normal reversed;
+ * glColorMaterial's face; a polygon's outline lit from its own side; lines from the front. */
+static void test_gl_two_sided_lighting(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  const GLfloat dir[4] = {0.0f, 0.0f, 1.0f, 0.0f}, none[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  const GLfloat white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  const GLfloat green[4] = {0.0f, 1.0f, 0.0f, 1.0f}, red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  glLightfv(GL_LIGHT0, GL_POSITION, dir);
+  glLightfv(GL_LIGHT0, GL_AMBIENT, none);
+  glLightfv(GL_LIGHT0, GL_DIFFUSE, white);
+  glLightModelfv(GL_LIGHT_MODEL_AMBIENT, none);
+  glEnable(GL_LIGHT0);
+  glEnable(GL_LIGHTING);
+  #define CENTRE (fb[(H / 2) * W + W / 2] & 0x00ffffffu)
+  /* A quad wound counter-clockwise (front) or clockwise (back), normal along z = `nz`. */
+  #define QUAD(cw, nz) do { glNormal3f(0.0f, 0.0f, nz); glBegin(GL_QUADS); \
+      if (cw) { glVertex2f(-0.5f, -0.5f); glVertex2f(-0.5f, 0.5f); \
+                glVertex2f(0.5f, 0.5f); glVertex2f(0.5f, -0.5f); } \
+      else    { glVertex2f(-0.5f, -0.5f); glVertex2f(0.5f, -0.5f); \
+                glVertex2f(0.5f, 0.5f); glVertex2f(-0.5f, 0.5f); } \
+      glEnd(); } while (0)
+
+  /* **The back material**: green emission in front, red behind, no diffuse. One-sided lighting
+   * lights a back face with the front material. */
+  glMaterialfv(GL_FRONT, GL_EMISSION, green);
+  glMaterialfv(GL_BACK, GL_EMISSION, red);
+  glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, none);
+  glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, none);
+  QUAD(1, 1.0f);
+  ASSERT_EQ(CENTRE, 0x00ff00u);
+  glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE);
+  QUAD(1, 1.0f);
+  ASSERT_EQ(CENTRE, 0xff0000u);
+  QUAD(0, 1.0f); /* a front face is still the front */
+  ASSERT_EQ(CENTRE, 0x00ff00u);
+  glFrontFace(GL_CW); /* and the facing follows glFrontFace */
+  QUAD(1, 1.0f);
+  ASSERT_EQ(CENTRE, 0x00ff00u);
+  glFrontFace(GL_CCW);
+
+  /* **The normal reversed**: a back face whose normal points away from the light is lit on its
+   * visible side - where one-sided lighting leaves it dark. */
+  glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, none);
+  glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, white);
+  QUAD(1, -1.0f);
+  ASSERT_EQ(CENTRE, 0xffffffu);
+  glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_FALSE);
+  QUAD(1, -1.0f);
+  ASSERT_EQ(CENTRE, 0x000000u);
+
+  /* **glColorMaterial's face**: tracking the back only leaves one-sided lighting - which lights
+   * with the front material - alone. It used to change the front material whatever it said. */
+  glEnable(GL_COLOR_MATERIAL);
+  glColorMaterial(GL_BACK, GL_DIFFUSE);
+  glColor3f(1.0f, 0.0f, 0.0f);
+  QUAD(0, 1.0f);
+  ASSERT_EQ(CENTRE, 0xffffffu);
+  glColorMaterial(GL_FRONT_AND_BACK, GL_DIFFUSE);
+  QUAD(0, 1.0f);
+  ASSERT_EQ(CENTRE, 0xff0000u);
+  glColorMaterial(GL_FRONT, (GLenum)0x1234u);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  GLint iv = 0;
+  glGetIntegerv(GL_COLOR_MATERIAL_FACE, &iv);      ASSERT_EQ(iv, (GLint)GL_FRONT_AND_BACK);
+  glGetIntegerv(GL_COLOR_MATERIAL_PARAMETER, &iv); ASSERT_EQ(iv, (GLint)GL_DIFFUSE);
+  glDisable(GL_COLOR_MATERIAL);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, white);
+
+  /* **An outline takes its polygon's side**: the back face's outline under GL_LINE is red, the
+   * back emission. A GL_LINES line across the middle is lit from the front whatever way it runs:
+   * green. */
+  glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, none);
+  glMaterialfv(GL_FRONT, GL_EMISSION, green);
+  glMaterialfv(GL_BACK, GL_EMISSION, red);
+  glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+  QUAD(1, 1.0f);
+  glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+  GLboolean saw_red = GL_FALSE, saw_green = GL_FALSE;
+  for (int i = 0; i < W * H; i++) {
+    if ((fb[i] & 0x00ffffffu) == 0xff0000u) saw_red = GL_TRUE;
+    if ((fb[i] & 0x00ffffffu) == 0x00ff00u) saw_green = GL_TRUE;
+  }
+  ASSERT_TRUE(saw_red && !saw_green);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBegin(GL_LINES);
+  glVertex2f(0.9f, 0.0f); glVertex2f(-0.9f, 0.0f);
+  glEnd();
+  saw_red = GL_FALSE; saw_green = GL_FALSE;
+  for (int i = 0; i < W * H; i++) {
+    if ((fb[i] & 0x00ffffffu) == 0xff0000u) saw_red = GL_TRUE;
+    if ((fb[i] & 0x00ffffffu) == 0x00ff00u) saw_green = GL_TRUE;
+  }
+  ASSERT_TRUE(saw_green && !saw_red);
+
+  /* On the attribute stack. */
+  glPushAttrib(GL_LIGHTING_BIT);
+  glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_FALSE);
+  glColorMaterial(GL_BACK, GL_EMISSION);
+  glPopAttrib();
+  glGetIntegerv(GL_LIGHT_MODEL_TWO_SIDE, &iv);     ASSERT_EQ(iv, 1);
+  glGetIntegerv(GL_COLOR_MATERIAL_FACE, &iv);      ASSERT_EQ(iv, (GLint)GL_FRONT_AND_BACK);
+  #undef QUAD
+  #undef CENTRE
+
+  glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_FALSE);
+  glDisable(GL_LIGHTING);
+  glDisable(GL_LIGHT0);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL 1.2's separate specular colour and GL_RESCALE_NORMAL, and the lighting details under them:
+ * a normal lights at the length it has unless the program asks otherwise, and a shininess of 0
+ * is full specular. */
+static void test_gl_separate_specular_and_rescale_normal(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  GLint iv = 0;
+
+  /* State: the default, the two values, a refusal, the enable - and the light model's scalars
+   * on the attribute stack, the local viewer included. */
+  glGetIntegerv(GL_LIGHT_MODEL_COLOR_CONTROL, &iv); ASSERT_EQ(iv, (GLint)GL_SINGLE_COLOR);
+  glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SEPARATE_SPECULAR_COLOR);
+  glGetIntegerv(GL_LIGHT_MODEL_COLOR_CONTROL, &iv); ASSERT_EQ(iv, (GLint)GL_SEPARATE_SPECULAR_COLOR);
+  glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_MODULATE);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  ASSERT_EQ(glIsEnabled(GL_RESCALE_NORMAL), GL_FALSE);
+  glEnable(GL_RESCALE_NORMAL);
+  ASSERT_EQ(glIsEnabled(GL_RESCALE_NORMAL), GL_TRUE);
+  glDisable(GL_RESCALE_NORMAL);
+  glPushAttrib(GL_LIGHTING_BIT);
+  glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SINGLE_COLOR);
+  glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
+  glGetIntegerv(GL_LIGHT_MODEL_LOCAL_VIEWER, &iv); ASSERT_EQ(iv, 1);
+  glPopAttrib();
+  glGetIntegerv(GL_LIGHT_MODEL_COLOR_CONTROL, &iv); ASSERT_EQ(iv, (GLint)GL_SEPARATE_SPECULAR_COLOR);
+  glGetIntegerv(GL_LIGHT_MODEL_LOCAL_VIEWER, &iv); ASSERT_EQ(iv, 0);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* One directional light along +z, the viewer along +z: n.l = n.h = 1 for a +z normal. */
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  const GLfloat dir[4] = {0.0f, 0.0f, 1.0f, 0.0f}, zero[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  const GLfloat white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  glLightfv(GL_LIGHT0, GL_POSITION, dir);
+  glLightfv(GL_LIGHT0, GL_AMBIENT, zero);
+  glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zero);
+  glEnable(GL_LIGHT0);
+  glEnable(GL_LIGHTING);
+  #define CENTRE (fb[(H / 2) * W + W / 2] & 0x00ffffffu)
+  #define RECT(n) do { glNormal3f(0.0f, 0.0f, n); \
+      glBegin(GL_QUADS); glVertex2f(-0.5f, -0.5f); glVertex2f(0.5f, -0.5f); \
+      glVertex2f(0.5f, 0.5f); glVertex2f(-0.5f, 0.5f); glEnd(); } while (0)
+
+  /* **Specular only, shininess 0**: (n.h)^0 is 1, a full highlight - which was skipped. Under a
+   * black GL_MODULATE texture it survives only when kept apart: GL_SEPARATE_SPECULAR_COLOR adds
+   * it after texturing; GL_SINGLE_COLOR lets the texture black it out. */
+  glLightfv(GL_LIGHT0, GL_DIFFUSE, zero);
+  glLightfv(GL_LIGHT0, GL_SPECULAR, white);
+  glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, zero);
+  glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, zero);
+  glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, white);
+  glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0.0f);
+  glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SINGLE_COLOR);
+  RECT(1.0f);
+  ASSERT_EQ(CENTRE, 0xffffffu);
+  GLuint tex = 0;
+  const GLubyte black[4] = {0, 0, 0, 255};
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, black);
+  glEnable(GL_TEXTURE_2D);
+  glTexCoord2f(0.5f, 0.5f);
+  RECT(1.0f);
+  ASSERT_EQ(CENTRE, 0x000000u);
+  glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SEPARATE_SPECULAR_COLOR);
+  RECT(1.0f);
+  ASSERT_EQ(CENTRE, 0xffffffu);
+  glDisable(GL_TEXTURE_2D);
+  glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SINGLE_COLOR);
+  glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, zero);
+
+  /* **A normal lights at its own length** unless GL_NORMALIZE or GL_RESCALE_NORMAL says
+   * otherwise: (0, 0, 2) under a light of diffuse 0.25 is 0.5 - it was normalised to 0.25. */
+  const GLfloat quarter[4] = {0.25f, 0.25f, 0.25f, 1.0f};
+  glLightfv(GL_LIGHT0, GL_DIFFUSE, quarter);
+  glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, white);
+  RECT(2.0f);
+  ASSERT_EQ(CENTRE, 0x808080u);
+  glEnable(GL_NORMALIZE);
+  RECT(2.0f);
+  ASSERT_EQ(CENTRE, 0x404040u);
+  glDisable(GL_NORMALIZE);
+
+  /* **GL_RESCALE_NORMAL** undoes a uniform modelview scale: under glScalef(2) the unit normal
+   * comes out half as long, a quarter-bright 0.5 * 0.25; rescaled, it is unit again. */
+  glLightfv(GL_LIGHT0, GL_DIFFUSE, white);
+  glScalef(2.0f, 2.0f, 2.0f);
+  RECT(1.0f);
+  ASSERT_EQ(CENTRE, 0x808080u);
+  glEnable(GL_RESCALE_NORMAL);
+  RECT(1.0f);
+  ASSERT_EQ(CENTRE, 0xffffffu);
+  glDisable(GL_RESCALE_NORMAL);
+  glLoadIdentity();
+  #undef RECT
+  #undef CENTRE
+
+  glDisable(GL_LIGHTING);
+  glDisable(GL_LIGHT0);
+  glDeleteTextures(1, &tex);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* GL 1.2's level-of-detail parameters, sampled: the base level sampling starts from, the maximum
+ * level that makes a short chain complete, and the clamp on the level of detail. */
+static void test_gl_texture_lod_parameters(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  GLint iv = 0;
+  GLfloat fv = 0.0f;
+
+  /* Defaults, and the value rules. */
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, &iv); ASSERT_EQ(iv, 0);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &iv);  ASSERT_EQ(iv, 1000);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, &iv);    ASSERT_EQ(iv, -1000);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, &fv);    ASSERT_TRUE(fv == 1000.0f);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, -1);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, -2);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, 0.625f);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, &fv);    ASSERT_TRUE(fv == 0.625f);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, &iv);    ASSERT_EQ(iv, 1); /* rounded */
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, -1000.0f);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* Level 0 red 4x4, level 1 green 2x2, level 2 blue 1x1 - but only level 0 for now. */
+  uint32_t red[16], green[4], blue[1];
+  for (int i = 0; i < 16; i++) red[i] = 0xff0000ffu; /* bytes R,G,B,A = ff,00,00,ff */
+  for (int i = 0; i < 4; i++) green[i] = 0xff00ff00u;
+  blue[0] = 0xffff0000u;
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glEnable(GL_TEXTURE_2D);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  /* A full-screen quad with s and t running 0..`reps`: at 16 pixels across, `reps` 16 puts four
+   * texels of the 4x4 base under each pixel (level of detail 2), and `reps` 1 a quarter of one
+   * (magnified). */
+  #define QUAD(reps) do { \
+      glBegin(GL_QUADS); \
+      glTexCoord2f(0.0f, 0.0f);   glVertex2f(-1.0f, -1.0f); \
+      glTexCoord2f(reps, 0.0f);   glVertex2f(1.0f, -1.0f); \
+      glTexCoord2f(reps, reps);   glVertex2f(1.0f, 1.0f); \
+      glTexCoord2f(0.0f, reps);   glVertex2f(-1.0f, 1.0f); \
+      glEnd(); } while (0)
+  #define CENTRE (fb[(H / 2) * W + W / 2] & 0x00ffffffu)
+
+  /* **GL_TEXTURE_MAX_LEVEL makes a short chain complete**: one level and a mipmap filter is
+   * incomplete - the quad in its own white - until the maximum level says one level is all. */
+  QUAD(1.0f);
+  ASSERT_EQ(CENTRE, 0xffffffu);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+  QUAD(1.0f);
+  ASSERT_EQ(CENTRE, 0xff0000u);
+  QUAD(16.0f); /* minified, but level 0 is the last */
+  ASSERT_EQ(CENTRE, 0xff0000u);
+
+  /* The full chain, and minified sampling reaches level 2. */
+  glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+  glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
+  QUAD(16.0f);
+  ASSERT_EQ(CENTRE, 0x0000ffu);
+  /* **GL_TEXTURE_MAX_LOD** holds it at level 1, then at level 0. */
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 1.0f);
+  QUAD(16.0f);
+  ASSERT_EQ(CENTRE, 0x00ff00u);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 0.25f);
+  QUAD(16.0f);
+  ASSERT_EQ(CENTRE, 0xff0000u);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 1000.0f);
+  /* **GL_TEXTURE_MIN_LOD** makes a magnified quad minify, from level 1. */
+  QUAD(1.0f);
+  ASSERT_EQ(CENTRE, 0xff0000u);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, 1.0f);
+  QUAD(1.0f);
+  ASSERT_EQ(CENTRE, 0x00ff00u);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, -1000.0f);
+
+  /* **GL_TEXTURE_BASE_LEVEL** is where sampling starts: a magnified quad is level 1's green,
+   * level 2's blue - and a base level with no image is incomplete. */
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+  QUAD(1.0f);
+  ASSERT_EQ(CENTRE, 0x00ff00u);
+  QUAD(16.0f); /* minified from level 1: 2x2 under 1/16 of the quad a pixel is lod 1: level 2 */
+  ASSERT_EQ(CENTRE, 0x0000ffu);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 2);
+  QUAD(1.0f);
+  ASSERT_EQ(CENTRE, 0x0000ffu);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 3);
+  QUAD(1.0f);
+  ASSERT_EQ(CENTRE, 0xffffffu);
+  /* And a maximum level below the base leaves a mipmapped texture incomplete, a non-mipmapped
+   * one not. */
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+  QUAD(1.0f);
+  ASSERT_EQ(CENTRE, 0xffffffu);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  QUAD(1.0f);
+  ASSERT_EQ(CENTRE, 0x00ff00u);
+  #undef CENTRE
+  #undef QUAD
+
+  /* **GL_TEXTURE_BIT carries the bound texture's parameters**, not only the binding. */
+  glPushAttrib(GL_TEXTURE_BIT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 2);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, 0.5f);
+  glPopAttrib();
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, &iv); ASSERT_EQ(iv, 1);
+  glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &iv);     ASSERT_EQ(iv, (GLint)GL_REPEAT);
+  glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, &fv);   ASSERT_TRUE(fv == 1.0f);
+
+  glDisable(GL_TEXTURE_2D);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  glDeleteTextures(1, &tex);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Internal formats: what each keeps, how glGetTexImage and the size queries report it, how the
+ * texture environment combines it (Mesa's calculate_derived_texenv), that a mip chain of mixed
+ * formats is incomplete - and the proxy targets. */
+static void test_gl_internal_formats_and_proxies(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  (void)glGetError();
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  GLubyte out[4];
+  GLint iv = 0;
+  #define NEAR2(v, want) ((int)(v) >= (want) - 2 && (int)(v) <= (want) + 2)
+  #define RGBA_NEAR(p, r, g, b, a) ASSERT_TRUE(NEAR2((p)[0], r) && NEAR2((p)[1], g) && \
+                                               NEAR2((p)[2], b) && NEAR2((p)[3], a))
+
+  /* **What each keeps**, read back as GL_RGBA: luminance and intensity in red alone, alpha 1
+   * but for GL_LUMINANCE_ALPHA (Mesa, main/texgetimage.c:289-301). */
+  const GLubyte src[4] = {10, 20, 30, 40};
+  struct { GLint ifmt; GLubyte r, g, b, a; } keep[] = {
+    {GL_ALPHA8, 0, 0, 0, 40},           {GL_LUMINANCE, 10, 0, 0, 255},
+    {GL_LUMINANCE_ALPHA, 10, 0, 0, 40}, {GL_INTENSITY, 10, 0, 0, 255},
+    {GL_RGB5, 10, 20, 30, 255},         {GL_RGBA4, 10, 20, 30, 40},
+    {1, 10, 0, 0, 255},                 {3, 10, 20, 30, 255},
+  };
+  for (size_t i = 0; i < sizeof(keep) / sizeof(keep[0]); i++) {
+    glTexImage2D(GL_TEXTURE_2D, 0, keep[i].ifmt, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, out);
+    ASSERT_TRUE(out[0] == keep[i].r && out[1] == keep[i].g && out[2] == keep[i].b &&
+                out[3] == keep[i].a);
+  }
+  /* A luminance texture read back as luminance is its own luminance. */
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+  GLubyte lum = 0;
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, &lum);
+  ASSERT_EQ(lum, 10);
+  /* A sub-image into it is reduced the same way. */
+  const GLubyte src2[4] = {99, 1, 2, 3};
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, src2);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, out);
+  ASSERT_TRUE(out[0] == 99 && out[1] == 0 && out[2] == 0 && out[3] == 255);
+
+  /* **The queries**: the format as named, a generic compressed one as its base format, and eight
+   * bits for each component the base format keeps. */
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE8_ALPHA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &iv);
+  ASSERT_EQ(iv, (GLint)GL_LUMINANCE8_ALPHA8);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_LUMINANCE_SIZE, &iv); ASSERT_EQ(iv, 8);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_ALPHA_SIZE, &iv);     ASSERT_EQ(iv, 8);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_RED_SIZE, &iv);       ASSERT_EQ(iv, 0);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTENSITY_SIZE, &iv); ASSERT_EQ(iv, 0);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &iv);
+  ASSERT_EQ(iv, (GLint)GL_RGBA);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_COMPRESSED, &iv);
+  ASSERT_EQ(iv, GL_FALSE);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_INTERNAL_FORMAT, &iv); /* never specified */
+  ASSERT_EQ(iv, (GLint)GL_RGBA);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* **The environment**, per base format: a full-screen quad, read at the centre. */
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glEnable(GL_TEXTURE_2D);
+  glTexCoord2f(0.5f, 0.5f);
+  const GLubyte half[4] = {128, 128, 128, 128};
+  #define DRAW_READ(ifmt, mode, cr, cg, cb, ca) do { \
+      glTexImage2D(GL_TEXTURE_2D, 0, ifmt, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, half); \
+      glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, mode); \
+      glColor4f(cr, cg, cb, ca); \
+      glRectf(-1.0f, -1.0f, 1.0f, 1.0f); \
+      glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out); } while (0)
+  /* An alpha texture leaves the colour alone and modulates alpha. */
+  DRAW_READ(GL_ALPHA, GL_MODULATE, 1.0f, 0.0f, 0.0f, 1.0f); RGBA_NEAR(out, 255, 0, 0, 128);
+  /* ... and replaces alpha - colour still the fragment's. */
+  DRAW_READ(GL_ALPHA, GL_REPLACE, 0.0f, 1.0f, 0.0f, 1.0f);  RGBA_NEAR(out, 0, 255, 0, 128);
+  /* Luminance and RGB replace the colour and keep the fragment's alpha. */
+  DRAW_READ(GL_LUMINANCE, GL_REPLACE, 1.0f, 0.0f, 0.0f, 0.25f); RGBA_NEAR(out, 128, 128, 128, 64);
+  DRAW_READ(GL_RGB, GL_REPLACE, 1.0f, 0.0f, 0.0f, 0.25f);       RGBA_NEAR(out, 128, 128, 128, 64);
+  /* RGBA replaces both. */
+  DRAW_READ(GL_RGBA, GL_REPLACE, 1.0f, 0.0f, 0.0f, 0.25f);      RGBA_NEAR(out, 128, 128, 128, 128);
+  /* Intensity is all four. */
+  DRAW_READ(GL_INTENSITY, GL_MODULATE, 1.0f, 1.0f, 1.0f, 1.0f); RGBA_NEAR(out, 128, 128, 128, 128);
+  /* GL_ADD: colour added and alpha multiplied - but for intensity, alpha added too. */
+  DRAW_READ(GL_RGBA, GL_ADD, 0.25f, 0.0f, 1.0f, 1.0f);          RGBA_NEAR(out, 192, 128, 255, 128);
+  DRAW_READ(GL_INTENSITY, GL_ADD, 0.0f, 0.0f, 0.0f, 0.25f);     RGBA_NEAR(out, 128, 128, 128, 192);
+  /* GL_BLEND: the fragment towards the environment colour by the texel - which was drawn as
+   * GL_MODULATE until 2026-09-19. Intensity blends alpha the same way. */
+  const GLfloat env[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+  glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, env);
+  DRAW_READ(GL_RGBA, GL_BLEND, 1.0f, 0.0f, 0.0f, 1.0f);         RGBA_NEAR(out, 128, 0, 128, 128);
+  DRAW_READ(GL_INTENSITY, GL_BLEND, 1.0f, 0.0f, 0.0f, 1.0f);    RGBA_NEAR(out, 128, 0, 128, 128);
+  DRAW_READ(GL_LUMINANCE, GL_BLEND, 1.0f, 0.0f, 0.0f, 1.0f);    RGBA_NEAR(out, 128, 0, 128, 255);
+  /* GL_DECAL: an RGB texture replaces the colour; a luminance one leaves it (Mesa's reading of an
+   * undefined case); alpha is always the fragment's. */
+  DRAW_READ(GL_RGB, GL_DECAL, 1.0f, 0.0f, 0.0f, 0.25f);         RGBA_NEAR(out, 128, 128, 128, 64);
+  DRAW_READ(GL_LUMINANCE, GL_DECAL, 1.0f, 0.0f, 0.0f, 0.25f);   RGBA_NEAR(out, 255, 0, 0, 64);
+  DRAW_READ(GL_RGBA, GL_DECAL, 1.0f, 0.0f, 0.0f, 0.25f);        RGBA_NEAR(out, 191, 64, 64, 64);
+  #undef DRAW_READ
+
+  /* A mode GL does not have is refused and changes nothing. (GL_COMBINE was the example until the
+   * combiner landed - test_gl_texture_combine.) */
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, 0x1234);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &iv);
+  ASSERT_EQ(iv, (GLint)GL_MODULATE);
+
+  /* **A mipmapped texture is one format**: level 1 as RGB under an RGBA base is incomplete, and
+   * the quad draws in its own colour. */
+  const GLubyte red4[16] = {255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255};
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, red4);
+  glTexImage2D(GL_TEXTURE_2D, 1, GL_RGB, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, red4);
+  glColor4f(0.0f, 1.0f, 0.0f, 1.0f);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
+  RGBA_NEAR(out, 0, 255, 0, 255);
+  glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, red4);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
+  RGBA_NEAR(out, 0, 0, 0, 255); /* complete now: red modulating green */
+  glDisable(GL_TEXTURE_2D);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* **Refusals**: an internal format GL 1.x does not have is a value error; a border too. A copy
+   * refuses the legacy 1 to 4, as an enum error. */
+  glTexImage2D(GL_TEXTURE_2D, 0, 0x1234, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexImage2D(GL_TEXTURE_2D, 0, 5, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, src);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glCopyTexImage2D(GL_TEXTURE_2D, 0, 3, 0, 0, 1, 1, 0);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, 0, 0, 1, 1, 0);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &iv);
+  ASSERT_EQ(iv, (GLint)GL_LUMINANCE);
+
+  /* **Proxies**: a size that fits is reported, one that does not is zeros and no error. Nothing is
+   * allocated - the bound texture keeps its image. */
+  glTexImage2D(GL_PROXY_TEXTURE_2D, 0, GL_RGBA8, 64, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &iv);  ASSERT_EQ(iv, 64);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &iv); ASSERT_EQ(iv, 32);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &iv);
+  ASSERT_EQ(iv, (GLint)GL_RGBA8);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &iv);        ASSERT_EQ(iv, 1);
+  glTexImage2D(GL_PROXY_TEXTURE_2D, 0, GL_RGBA8, 4096, 4096, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &iv);  ASSERT_EQ(iv, 0);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_2D, 0, GL_TEXTURE_RED_SIZE, &iv); ASSERT_EQ(iv, 0);
+  glTexImage3D(GL_PROXY_TEXTURE_3D, 0, GL_RGBA, 16, 16, 512, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_3D, 0, GL_TEXTURE_DEPTH, &iv);  ASSERT_EQ(iv, 0);
+  glTexImage1D(GL_PROXY_TEXTURE_1D, 2, GL_INTENSITY8, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_1D, 2, GL_TEXTURE_INTENSITY_SIZE, &iv);
+  ASSERT_EQ(iv, 8);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  /* Enum and level errors are still errors. */
+  glTexImage2D(GL_PROXY_TEXTURE_2D, 0, 0x1234, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  glTexImage2D(GL_PROXY_TEXTURE_2D, -1, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+  /* A proxy is not a binding and not a sub-image target. */
+  glBindTexture(GL_PROXY_TEXTURE_2D, tex);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glTexSubImage2D(GL_PROXY_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, src);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  /* And never compiled: inside glNewList it runs at once. */
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glTexImage2D(GL_PROXY_TEXTURE_2D, 0, GL_RGB, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glGetTexLevelParameteriv(GL_PROXY_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &iv);
+  glEndList();
+  ASSERT_EQ(iv, 8);
+  glDeleteLists(list, 1);
+  #undef RGBA_NEAR
+  #undef NEAR2
+
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glPixelStorei(GL_PACK_ALIGNMENT, 4);
+  glDeleteTextures(1, &tex);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* Pixel formats, types and every glPixelStorei parameter, through a 1x1 texture upload read
+ * back as RGBA bytes - the unpack side - and glReadPixels - the pack side. Each packed layout's
+ * expected value is its bit pattern worked by hand from GL 1.2's tables. */
+static void test_gl_pixel_types_and_store(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  GLubyte out[16];
+  #define UP(fmt, typ, data) do { glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, fmt, typ, data); \
+      ASSERT_EQ(glGetError(), GL_NO_ERROR); \
+      glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, out); } while (0)
+  #define RGBA_IS(r, g, b, a) ASSERT_TRUE(out[0] == (r) && out[1] == (g) && out[2] == (b) && out[3] == (a))
+
+  GLint iv = 0;
+  glGetIntegerv(GL_UNPACK_ALIGNMENT, &iv); ASSERT_EQ(iv, 1);
+  glGetIntegerv(GL_UNPACK_SKIP_ROWS, &iv); ASSERT_EQ(iv, 0);
+
+  /* **Packed types**: the format's first component in the top bits, or the bottom for _REV. */
+  const GLushort r565 = 0xF800u, r565rev = 0x001Fu, rgba4 = 0xF00Fu, bgra1555rev = 0x801Fu;
+  UP(GL_RGB, GL_UNSIGNED_SHORT_5_6_5, &r565);          RGBA_IS(255, 0, 0, 255);
+  UP(GL_RGB, GL_UNSIGNED_SHORT_5_6_5_REV, &r565rev);   RGBA_IS(255, 0, 0, 255);
+  UP(GL_BGR, GL_UNSIGNED_SHORT_5_6_5, &r565);          RGBA_IS(0, 0, 255, 255); /* B first */
+  UP(GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, &rgba4);      RGBA_IS(255, 0, 0, 255);
+  UP(GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, &bgra1555rev); RGBA_IS(0, 0, 255, 255);
+  const GLuint i8888 = 0x11223344u, i8888rev = 0x44332211u, i1010102rev = 0xC00003FFu;
+  UP(GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, &i8888);        RGBA_IS(0x11, 0x22, 0x33, 0x44);
+  UP(GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, &i8888rev); RGBA_IS(0x11, 0x22, 0x33, 0x44);
+  UP(GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, &i1010102rev); RGBA_IS(255, 0, 0, 255);
+  const GLubyte b332 = 0xE0u;
+  UP(GL_RGB, GL_UNSIGNED_BYTE_3_3_2, &b332);           RGBA_IS(255, 0, 0, 255);
+
+  /* **Plain types**: unsigned over 2^b - 1, signed as (2c + 1) / (2^b - 1) and clamped. */
+  const GLushort us[4] = {65535u, 32768u, 0u, 65535u};
+  UP(GL_RGBA, GL_UNSIGNED_SHORT, us);                  RGBA_IS(255, 128, 0, 255);
+  const GLshort ss[4] = {32767, -32768, 16383, 32767}; /* 32767 / 65535 */
+  UP(GL_RGBA, GL_SHORT, ss);                           RGBA_IS(255, 0, 127, 255);
+  const GLbyte sb[4] = {127, -128, 63, 127};           /* 127 / 255 */
+  UP(GL_RGBA, GL_BYTE, sb);                            RGBA_IS(255, 0, 127, 255);
+  const GLuint ui[4] = {0xFFFFFFFFu, 0u, 0u, 0xFFFFFFFFu};
+  UP(GL_RGBA, GL_UNSIGNED_INT, ui);                    RGBA_IS(255, 0, 0, 255);
+  const GLfloat fs[4] = {0.25f, 2.0f, -1.0f, 1.0f};
+  UP(GL_RGBA, GL_FLOAT, fs);                           RGBA_IS(64, 255, 0, 255);
+
+  /* **Single-channel formats**: the rest is 0, alpha 1. */
+  const GLubyte one = 200u;
+  UP(GL_RED, GL_UNSIGNED_BYTE, &one);                  RGBA_IS(200, 0, 0, 255);
+  UP(GL_GREEN, GL_UNSIGNED_BYTE, &one);                RGBA_IS(0, 200, 0, 255);
+  UP(GL_BLUE, GL_UNSIGNED_BYTE, &one);                 RGBA_IS(0, 0, 200, 255);
+
+  /* **Swap bytes**: R stored as bytes 00 FF is 0xFF00 read natively and 0x00FF swapped. */
+  const GLubyte swap_src[8] = {0x00, 0xFF, 0, 0, 0, 0, 0xFF, 0xFF};
+  UP(GL_RGBA, GL_UNSIGNED_SHORT, swap_src);            ASSERT_EQ(out[0], 254);
+  glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
+  UP(GL_RGBA, GL_UNSIGNED_SHORT, swap_src);            ASSERT_EQ(out[0], 1);
+  glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
+
+  /* **Skips**: the texel at (1, 1) of a 3x3 image, rows three pixels long. */
+  GLubyte img[3 * 3 * 4];
+  for (int i = 0; i < 9; i++) { img[i * 4] = (GLubyte)(i * 10); img[i * 4 + 1] = 0; img[i * 4 + 2] = 0; img[i * 4 + 3] = 255; }
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, 3);
+  glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+  glPixelStorei(GL_UNPACK_SKIP_PIXELS, 1);
+  UP(GL_RGBA, GL_UNSIGNED_BYTE, img);                  ASSERT_EQ(out[0], 40); /* pixel 4 */
+  /* A list keeps what the skips selected; the replay does not skip again. */
+  const GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  glEndList();
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+  glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+  glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+  UP(GL_RGBA, GL_UNSIGNED_BYTE, img);                  ASSERT_EQ(out[0], 0);
+  glCallList(list);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, out);
+  ASSERT_EQ(out[0], 40);
+  glDeleteLists(list, 1);
+
+  /* The client attribute stack carries every parameter. */
+  glPushClientAttrib(GL_CLIENT_PIXEL_STORE_BIT);
+  glPixelStorei(GL_UNPACK_SKIP_ROWS, 5);
+  glPixelStorei(GL_PACK_SWAP_BYTES, GL_TRUE);
+  glPopClientAttrib();
+  glGetIntegerv(GL_UNPACK_SKIP_ROWS, &iv); ASSERT_EQ(iv, 0);
+  glGetIntegerv(GL_PACK_SWAP_BYTES, &iv);  ASSERT_EQ(iv, 0);
+
+  /* **The pack side**: A=44 R=11 G=22 B=33 everywhere, read as packed types, floats, through a
+   * skip and with bytes swapped. */
+  for (int i = 0; i < W * H; i++) fb[i] = 0x44112233u;
+  GLuint word = 0;
+  glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, &word);
+  ASSERT_EQ(word, 0x11223344u);
+  GLubyte bytes[8] = {0};
+  glPixelStorei(GL_PACK_SWAP_BYTES, GL_TRUE);
+  glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, bytes);
+  glPixelStorei(GL_PACK_SWAP_BYTES, GL_FALSE);
+  ASSERT_TRUE(bytes[0] == 0x11 && bytes[1] == 0x22 && bytes[2] == 0x33 && bytes[3] == 0x44);
+  for (int i = 0; i < W * H; i++) fb[i] = 0xffff0000u; /* opaque red */
+  GLushort p565 = 0;
+  glReadPixels(0, 0, 1, 1, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, &p565);
+  ASSERT_EQ(p565, 0xF800u);
+  GLubyte skipped[12];
+  memset(skipped, 0xcd, sizeof(skipped));
+  glPixelStorei(GL_PACK_SKIP_PIXELS, 2);
+  glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, skipped);
+  glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+  ASSERT_EQ(skipped[0], 0xcd); /* the two skipped pixels untouched */
+  ASSERT_EQ(skipped[8], 255);  /* red, third pixel */
+  GLshort sred[3] = {0, 0, 0};
+  glReadPixels(0, 0, 1, 1, GL_RGB, GL_SHORT, sred);
+  ASSERT_EQ(sred[0], 32767);   /* ((2^16 - 1) * 1 - 1) / 2 */
+  ASSERT_EQ(sred[1], 0);       /* 0 packs to -1/2: toward zero, as Mesa's FLOAT_TO_SHORT */
+
+  /* **GL_UNPACK_LSB_FIRST** turns a bitmap byte round: 0x01 is the leftmost pixel. */
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glRasterPos2f(-1.0f, -1.0f); /* window (0, 0): framebuffer row 15 */
+  const GLubyte bit0 = 0x01u;
+  glBitmap(8, 1, 0.0f, 0.0f, 0.0f, 0.0f, &bit0);
+  ASSERT_EQ(fb[15 * W + 7] & 0x00ffffffu, 0x00ffffffu);
+  ASSERT_EQ(fb[15 * W + 0] & 0x00ffffffu, 0u);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glPixelStorei(GL_UNPACK_LSB_FIRST, GL_TRUE);
+  glBitmap(8, 1, 0.0f, 0.0f, 0.0f, 0.0f, &bit0);
+  glPixelStorei(GL_UNPACK_LSB_FIRST, GL_FALSE);
+  ASSERT_EQ(fb[15 * W + 0] & 0x00ffffffu, 0x00ffffffu);
+  ASSERT_EQ(fb[15 * W + 7] & 0x00ffffffu, 0u);
+
+  /* Refusals: a packed type with the wrong format is an operation error; a negative skip a
+   * value error. */
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGB, GL_UNSIGNED_SHORT_4_4_4_4, &rgba4);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glPixelStorei(GL_UNPACK_SKIP_ROWS, -1);
+  ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+
+  #undef RGBA_IS
+  #undef UP
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glPixelStorei(GL_PACK_ALIGNMENT, 4);
+  glDeleteTextures(1, &tex);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* The texture matrix, and the raster position processed as the vertex it is. */
+static void test_gl_texture_matrix_and_raster_vertex(void) {
+  const int W = 32, H = 32;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  #define PX(x, y) (fb[(y) * W + (x)] & 0x00ffffffu)
+
+  /* Red | green, and a quad whose s runs 0..0.5 - all red, until the texture matrix moves s on
+   * by a half. */
+  const GLubyte texels[8] = {255, 0, 0, 255, 0, 255, 0, 255};
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+  glEnable(GL_TEXTURE_2D);
+  glColor3f(1.0f, 1.0f, 1.0f);
+  #define TQUAD() do { glBegin(GL_QUADS); \
+      glTexCoord2f(0.0f, 0.0f); glVertex2f(-0.5f, -0.5f); glTexCoord2f(0.49f, 0.0f); glVertex2f(0.5f, -0.5f); \
+      glTexCoord2f(0.49f, 1.0f); glVertex2f(0.5f, 0.5f); glTexCoord2f(0.0f, 1.0f); glVertex2f(-0.5f, 0.5f); \
+      glEnd(); } while (0)
+  glClear(GL_COLOR_BUFFER_BIT);
+  TQUAD();
+  ASSERT_EQ(PX(16, 16), 0x00ff0000u);
+  glMatrixMode(GL_TEXTURE);
+  glTranslatef(0.5f, 0.0f, 0.0f);
+  glMatrixMode(GL_MODELVIEW);
+  glClear(GL_COLOR_BUFFER_BIT);
+  TQUAD();
+  ASSERT_EQ(PX(16, 16), 0x0000ff00u);
+  glDisable(GL_TEXTURE_2D);
+
+  /* The raster position's coordinate goes through the same matrix. */
+  glTexCoord2f(0.25f, 0.0f);
+  glRasterPos2f(0.0f, 0.0f);
+  GLfloat v[4];
+  glGetFloatv(GL_CURRENT_RASTER_TEXTURE_COORDS, v);
+  ASSERT_FLOAT_NEAR(v[0], 0.75f, 1e-6f);
+  glMatrixMode(GL_TEXTURE); glLoadIdentity(); glMatrixMode(GL_MODELVIEW);
+
+  /* Its colour is lit: the default light and material facing the viewer give 0.2*0.2 + 0.8. */
+  glEnable(GL_LIGHTING);
+  glEnable(GL_LIGHT0);
+  glNormal3f(0.0f, 0.0f, 1.0f);
+  glRasterPos2f(0.0f, 0.0f);
+  glGetFloatv(GL_CURRENT_RASTER_COLOR, v);
+  ASSERT_FLOAT_NEAR(v[0], 0.84f, 1e-4f);
+  glDisable(GL_LIGHTING);
+  glDisable(GL_LIGHT0);
+
+  /* And its w is the clip w, not its reciprocal. */
+  glRasterPos4f(0.0f, 0.0f, 0.0f, 2.0f);
+  glGetFloatv(GL_CURRENT_RASTER_POSITION, v);
+  ASSERT_FLOAT_NEAR(v[3], 2.0f, 1e-6f);
+
+  #undef TQUAD
+  #undef PX
+  glDeleteTextures(1, &tex);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
   glContextDestroy(ctx_handle);
   oops_display_close(disp);
 }
@@ -2660,7 +9190,9 @@ static void test_gl_compressed_textures_are_refused_not_absent(void) {
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
   glGetCompressedTexImage(GL_TEXTURE_2D, 0, back);
   ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
-  glGetCompressedTexImage((GLenum)0x806Fu /* GL_TEXTURE_3D */, 0, back);
+  /* A target that names no image - GL_TEXTURE_CUBE_MAP, whose images are its faces. (GL_TEXTURE_3D
+   * was the example until 3D textures landed.) */
+  glGetCompressedTexImage(GL_TEXTURE_CUBE_MAP, 0, back);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
   /* And the per-level queries answer rather than erroring: no texture here is compressed, which
@@ -2883,12 +9415,13 @@ static void test_gl_raster_position_and_pixel_ops(void) {
     ASSERT_EQ(fb[row * W + (int)p[0]] & 0x00ffffffu, 0x00ff0000u); /* red, not blue */
   }
 
-  /* Refusals: a type this does not convert, and a negative extent. */
-  glDrawPixels(2, 2, GL_RGBA, GL_FLOAT, px2);
+  /* Refusals: a format GL 1.x does not have - GL 3.0's GL_DEPTH_STENCIL; GL_FLOAT and then
+   * GL_COLOR_INDEX were the example until each converted - and a negative extent. */
+  glDrawPixels(2, 2, (GLenum)0x84F9u /* GL_DEPTH_STENCIL */, GL_UNSIGNED_BYTE, px2);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glDrawPixels(-1, 2, GL_RGBA, GL_UNSIGNED_BYTE, px2);
   ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
-  glCopyPixels(0, 0, 4, 4, (GLenum)0x1902u); /* GL_DEPTH_COMPONENT: a different buffer */
+  glCopyPixels(0, 0, 4, 4, GL_DEPTH_COMPONENT); /* a format; the buffer is GL_DEPTH */
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
   glContextDestroy(ctx_handle);
@@ -2987,11 +9520,20 @@ static void test_gl_stencil_test_and_operations(void) {
   glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
   ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0xf0u);
 
-  /* ...but it does not gate a *clear*: GL says glClear ignores the stencil write mask. */
+  /* **And it gates a clear too.** This asserted the opposite until 2026-09-19 - that glClear
+   * ignores the stencil write mask - and GL applies every buffer's write mask to a clear; Mesa
+   * clears a masked stencil buffer through a quad whose stencil writemask is the program's
+   * (state_tracker/st_cb_clear.c, clear_with_quad). Masked off, the clear changes nothing;
+   * masked to the low half, it changes the low half. */
   glClearStencil(0x11);
   glClear(GL_STENCIL_BUFFER_BIT);
-  ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0x11u);
+  ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0xf0u);
+  glStencilMask(0x0f);
+  glClear(GL_STENCIL_BUFFER_BIT);
+  ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0xf1u);
   glStencilMask(0xff);
+  glClear(GL_STENCIL_BUFFER_BIT);
+  ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0x11u);
 
   /* **Alpha test comes first.** A fragment alpha discards must not reach stencil at all - not
    * even the fail operation. With alpha rejecting everything, the buffer must not move. */
@@ -3012,8 +9554,24 @@ static void test_gl_stencil_test_and_operations(void) {
   ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0x06u);
   glDisable(GL_ALPHA_TEST);
 
-  /* Refusals: GL 1.4's wrapping operations are not this, and are not quietly GL_INCR. */
-  glStencilOp(GL_KEEP, GL_KEEP, (GLenum)0x8507u); /* GL_INCR_WRAP */
+  /* **GL 1.4's wrapping operations** (refused until 2026-09-19): from 255 GL_INCR_WRAP goes round
+   * to 0 and GL_DECR_WRAP back to 255, where GL_INCR holds at the end. The function is still
+   * GL_NEVER, so each is the fail operation. */
+  glClearStencil(0xff);
+  glClear(GL_STENCIL_BUFFER_BIT);
+  glStencilOp(GL_INCR_WRAP, GL_KEEP, GL_KEEP);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0x00u);
+  glStencilOp(GL_DECR_WRAP, GL_KEEP, GL_KEEP);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0xffu);
+  glStencilOp(GL_INCR, GL_KEEP, GL_KEEP);
+  glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
+  ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0xffu);
+
+  /* Refusals. */
+  glStencilOp(GL_KEEP, GL_KEEP, (GLenum)0x8509u); /* past GL_DECR_WRAP */
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glStencilFunc((GLenum)0x1E00u, 0, 0xff);        /* GL_KEEP is not a function */
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
@@ -3179,51 +9737,260 @@ static void test_gl_mat4_invert_round_trips(void) {
   for (int i = 0; i < 16; i++) ASSERT_TRUE(out.m[i] == before.m[i]);
 }
 
-static void test_gl_multitexture_has_one_unit_and_says_so(void) {
+/* Two texture units' state (GL 1.3; one unit until 2026-09-19, which GL 1.3 does not allow -
+ * section 2.6). Each server call acts on the active unit, each client-array call on the client
+ * active unit, glTexCoord on unit 0 always, and the attribute groups and lists carry all of it. */
+static void test_gl_multitexture_state_is_per_unit(void) {
   oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
   void *ctx_handle = glContextCreate(disp);
   gl_context_t *ctx = (gl_context_t *)ctx_handle;
   (void)glGetError();
+  GLint iv[4] = {0, 0, 0, 0};
+  GLfloat fv[16];
 
-  GLint units = 0;
-  glGetIntegerv(GL_MAX_TEXTURE_UNITS, &units);
-  ASSERT_EQ(units, 1);
-  GLint active = 0;
-  glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
-  ASSERT_EQ(active, (GLint)GL_TEXTURE0);
-  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetIntegerv(GL_MAX_TEXTURE_UNITS, iv);
+  ASSERT_EQ(iv[0], 2);
+  glGetIntegerv(GL_ACTIVE_TEXTURE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_TEXTURE0);
+  glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_TEXTURE0);
 
-  /* Unit 0 reaches exactly the same state the single-unit call does. */
+  /* Current coordinates: each unit its own, defaults filled; glTexCoord is unit 0's whichever
+   * unit is active; GL_CURRENT_TEXTURE_COORDS answers for the active unit. */
   glMultiTexCoord2f(GL_TEXTURE0, 0.25f, 0.75f);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 0.25f && ctx->cur_texcoord[1] == 0.75f);
-  ASSERT_EQ(glGetError(), GL_NO_ERROR);
-  glMultiTexCoord4f(GL_TEXTURE0, 2.0f, 4.0f, 6.0f, 2.0f);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 1.0f && ctx->cur_texcoord[1] == 2.0f);
-  ASSERT_EQ(glGetError(), GL_NO_ERROR);
-
+  glMultiTexCoord2f(GL_TEXTURE1, 3.0f, 4.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.25f && ctx->cur_texcoord[0][1] == 0.75f);
+  ASSERT_TRUE(ctx->cur_texcoord[1][0] == 3.0f && ctx->cur_texcoord[1][1] == 4.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[1][2] == 0.0f && ctx->cur_texcoord[1][3] == 1.0f);
+  glActiveTexture(GL_TEXTURE1);
+  glGetIntegerv(GL_ACTIVE_TEXTURE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_TEXTURE1);
+  glTexCoord2f(0.5f, 0.125f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.5f && ctx->cur_texcoord[1][0] == 3.0f);
+  glGetFloatv(GL_CURRENT_TEXTURE_COORDS, fv);
+  ASSERT_TRUE(fv[0] == 3.0f && fv[1] == 4.0f && fv[3] == 1.0f);
   /* The ARB spelling is the same function, not a stub. */
-  glMultiTexCoord2fARB(GL_TEXTURE0, 0.5f, 0.125f);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 0.5f && ctx->cur_texcoord[1] == 0.125f);
+  glMultiTexCoord4fARB(GL_TEXTURE1, 1.0f, 2.0f, 3.0f, 2.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[1][2] == 3.0f && ctx->cur_texcoord[1][3] == 2.0f);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-  /* A second unit is refused, and - the part that matters - it does not change the coordinate
-   * on the way out. A refusal that still wrote unit 0 would be worse than no refusal at all. */
-  glMultiTexCoord2f(GL_TEXTURE0 + 1, 9.0f, 9.0f);
+  /* A unit past the maximum is refused and writes nothing - a refusal that still wrote some unit
+   * would be worse than none. Null vectors are ignored rather than dereferenced. */
+  glMultiTexCoord2f(GL_TEXTURE2, 9.0f, 9.0f);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 0.5f && ctx->cur_texcoord[1] == 0.125f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.5f && ctx->cur_texcoord[1][0] == 1.0f);
+  glActiveTexture(GL_TEXTURE2);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glGetIntegerv(GL_ACTIVE_TEXTURE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_TEXTURE1);
+  glClientActiveTexture(GL_TEXTURE3);
+  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glMultiTexCoord4fv(GL_TEXTURE1, NULL);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-  glActiveTexture(GL_TEXTURE0 + 1);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-  glClientActiveTexture(GL_TEXTURE0 + 3);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  /* Server state follows the active unit: the enables, the bindings, the environment and the
+   * texture matrix. */
+  GLuint tex[2] = {0, 0};
+  glGenTextures(2, tex);
+  glEnable(GL_TEXTURE_2D);
+  glBindTexture(GL_TEXTURE_2D, tex[1]);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD);
+  glMatrixMode(GL_TEXTURE);
+  glScalef(2.0f, 2.0f, 2.0f);
   glActiveTexture(GL_TEXTURE0);
-  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_2D), GL_FALSE);
+  glGetIntegerv(GL_TEXTURE_BINDING_2D, iv);
+  ASSERT_EQ(iv[0], 0);
+  glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_MODULATE);
+  glGetFloatv(GL_TEXTURE_MATRIX, fv);
+  ASSERT_TRUE(fv[0] == 1.0f);
+  glActiveTexture(GL_TEXTURE1);
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_2D), GL_TRUE);
+  glGetIntegerv(GL_TEXTURE_BINDING_2D, iv);
+  ASSERT_EQ(iv[0], (GLint)tex[1]);
+  glGetFloatv(GL_TEXTURE_MATRIX, fv);
+  ASSERT_TRUE(fv[0] == 2.0f);
+  glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW);
 
-  /* Null vectors are ignored rather than dereferenced, on the refused path too. */
-  glMultiTexCoord4fv(GL_TEXTURE0, NULL);
-  glMultiTexCoord4fv(GL_TEXTURE0 + 1, NULL);
+  /* Client arrays follow the client active unit. */
+  glClientActiveTexture(GL_TEXTURE1);
+  glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_COORD_ARRAY), GL_TRUE);
+  glClientActiveTexture(GL_TEXTURE0);
+  ASSERT_EQ(glIsEnabled(GL_TEXTURE_COORD_ARRAY), GL_FALSE);
+  /* The client attribute group carries every unit's array and the selector (table 6.6). */
+  glPushClientAttrib(GL_CLIENT_VERTEX_ARRAY_BIT);
+  glClientActiveTexture(GL_TEXTURE1);
+  glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+  glPopClientAttrib();
+  glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_TEXTURE0);
+  ASSERT_EQ(ctx->array_texcoord[1].enabled, GL_TRUE);
+  glClientActiveTexture(GL_TEXTURE1);
+  glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+  glClientActiveTexture(GL_TEXTURE0);
+
+  /* GL_TEXTURE_BIT saves every unit and the active selector (table 6.20). */
+  glActiveTexture(GL_TEXTURE1);
+  glPushAttrib(GL_TEXTURE_BIT);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  glActiveTexture(GL_TEXTURE0);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
+  glPopAttrib();
+  glGetIntegerv(GL_ACTIVE_TEXTURE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_TEXTURE1);
+  ASSERT_EQ(ctx->tex_unit[1].tex_env_mode, (GLenum)GL_ADD);
+  ASSERT_EQ(ctx->tex_unit[0].tex_env_mode, (GLenum)GL_MODULATE);
+  /* GL_CURRENT_BIT, every unit's current coordinate. */
+  glPushAttrib(GL_CURRENT_BIT);
+  glMultiTexCoord2f(GL_TEXTURE1, 7.0f, 7.0f);
+  glPopAttrib();
+  ASSERT_TRUE(ctx->cur_texcoord[1][0] == 1.0f);
+
+  /* A list records the unit a coordinate went to and the unit it made active. */
+  GLuint list = glGenLists(1);
+  glNewList(list, GL_COMPILE);
+  glMultiTexCoord2f(GL_TEXTURE1, 5.0f, 6.0f);
+  glActiveTexture(GL_TEXTURE0);
+  glEndList();
+  ASSERT_TRUE(ctx->cur_texcoord[1][0] == 1.0f);
+  glGetIntegerv(GL_ACTIVE_TEXTURE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_TEXTURE1);
+  glCallList(list);
+  ASSERT_TRUE(ctx->cur_texcoord[1][0] == 5.0f && ctx->cur_texcoord[1][1] == 6.0f);
+  glGetIntegerv(GL_ACTIVE_TEXTURE, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_TEXTURE0);
+  glDeleteLists(list, 1);
+
+  /* Deleting a texture unbinds it from every unit. */
+  glActiveTexture(GL_TEXTURE1);
+  glDisable(GL_TEXTURE_2D);
+  glDeleteTextures(2, tex);
+  ASSERT_EQ(ctx->tex_unit[1].bound_texture_2d, 0u);
+  glActiveTexture(GL_TEXTURE0);
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* **Two units drawing** - the software rasteriser applies unit 0's environment to the fragment's
+ * colour and unit 1's to what unit 0 left, each unit sampling its own coordinate (current, array,
+ * after its own texture matrix), and GL_COMBINE telling GL_PREVIOUS, GL_PRIMARY_COLOR and GL 1.4's
+ * GL_TEXTURE0 apart. 8x8 target, one quad over all of it; colours read at the centre. */
+static void test_gl_two_texture_units_draw(void) {
+  const int W = 8, H = 8;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  uint32_t *fb = oops_display_get_framebuffer(disp);
+  (void)glGetError();
+  #define CENTRE() (fb[(H / 2) * W + (W / 2)] & 0x00ffffffu)
+  #define QUAD() do { glBegin(GL_QUADS); glVertex2f(-1, -1); glVertex2f(1, -1); \
+    glVertex2f(1, 1); glVertex2f(-1, 1); glEnd(); } while (0)
+  #define NEAR1(x, want) ((int)(x) - (want) <= 2 && (want) - (int)(x) <= 2)
+  #define NEAR(c, r, g, b) (NEAR1(((c) >> 16) & 0xffu, r) && NEAR1(((c) >> 8) & 0xffu, g) && \
+                            NEAR1((c) & 0xffu, b))
+
+  /* Unit 0: red | green, replacing. Unit 1: blue | black, added. */
+  static const GLubyte red_green[2 * 4] = {255, 0, 0, 255, 0, 255, 0, 255};
+  static const GLubyte blue_black[2 * 4] = {0, 0, 255, 255, 0, 0, 0, 255};
+  GLuint tex[2] = {0, 0};
+  glGenTextures(2, tex);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, tex[0]);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, red_green);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+  glEnable(GL_TEXTURE_2D);
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D, tex[1]);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue_black);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD);
+  glEnable(GL_TEXTURE_2D);
+
+  /* Each unit its own coordinate: unit 0 at s 0.25 (red), unit 1 at s 0.75 (black) - red. Read
+   * unit 0's coordinate for unit 1 and it would be red + blue. */
+  glTexCoord2f(0.25f, 0.5f);
+  glMultiTexCoord2f(GL_TEXTURE1, 0.75f, 0.5f);
+  QUAD();
+  ASSERT_EQ(CENTRE(), 0xff0000u);
+  /* Unit 1 at s 0.25 (blue): red + blue. */
+  glMultiTexCoord2f(GL_TEXTURE1, 0.25f, 0.5f);
+  QUAD();
+  ASSERT_EQ(CENTRE(), 0xff00ffu);
+  /* Unit 1's own texture matrix moves its coordinate to 0.75 and leaves unit 0's alone. */
+  glMatrixMode(GL_TEXTURE);
+  glTranslatef(0.5f, 0.0f, 0.0f);
+  glMatrixMode(GL_MODELVIEW);
+  QUAD();
+  ASSERT_EQ(CENTRE(), 0xff0000u);
+  glMatrixMode(GL_TEXTURE);
+  glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW);
+  /* Unit 1 off: unit 0 alone. */
+  glDisable(GL_TEXTURE_2D);
+  glTexCoord2f(0.75f, 0.5f);
+  QUAD();
+  ASSERT_EQ(CENTRE(), 0x00ff00u);
+  glEnable(GL_TEXTURE_2D);
+
+  /* From arrays: unit 1's coordinate array through the client active unit. */
+  static const GLfloat pos[8] = {-1, -1, 1, -1, 1, 1, -1, 1};
+  static const GLfloat tc0[8] = {0.25f, 0.5f, 0.25f, 0.5f, 0.25f, 0.5f, 0.25f, 0.5f};
+  static const GLfloat tc1[8] = {0.25f, 0.5f, 0.25f, 0.5f, 0.25f, 0.5f, 0.25f, 0.5f};
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(2, GL_FLOAT, 0, pos);
+  glClientActiveTexture(GL_TEXTURE0);
+  glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+  glTexCoordPointer(2, GL_FLOAT, 0, tc0);
+  glClientActiveTexture(GL_TEXTURE1);
+  glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+  glTexCoordPointer(2, GL_FLOAT, 0, tc1);
+  glMultiTexCoord2f(GL_TEXTURE1, 0.75f, 0.5f); /* the array, not this, is what unit 1 reads */
+  glDrawArrays(GL_QUADS, 0, 4);
+  ASSERT_EQ(CENTRE(), 0xff00ffu);
+  glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+  glClientActiveTexture(GL_TEXTURE0);
+  glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
+
+  /* GL_COMBINE on unit 1, fragment colour 0.5 grey, unit 0 now modulating red: unit 0 leaves
+   * (0.5, 0, 0). GL_REPLACE of GL_PREVIOUS is that; of GL_PRIMARY_COLOR the grey; of GL 1.4's
+   * GL_TEXTURE0 unit 0's texel, red. With one unit these three were indistinguishable. */
+  glActiveTexture(GL_TEXTURE0);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+  glActiveTexture(GL_TEXTURE1);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+  glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+  glColor3f(0.5f, 0.5f, 0.5f);
+  glTexCoord2f(0.25f, 0.5f);
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_PREVIOUS);
+  QUAD();
+  ASSERT_TRUE(NEAR(CENTRE(), 128, 0, 0));
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_PRIMARY_COLOR);
+  QUAD();
+  ASSERT_TRUE(NEAR(CENTRE(), 128, 128, 128));
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE0);
+  QUAD();
+  ASSERT_EQ(CENTRE(), 0xff0000u);
+  /* A crossbar source naming a unit past the last is refused. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE2);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
+  glDisable(GL_TEXTURE_2D);
+  glActiveTexture(GL_TEXTURE0);
+  glDisable(GL_TEXTURE_2D);
+  glDeleteTextures(2, tex);
+  #undef CENTRE
+  #undef QUAD
+  #undef NEAR
+  #undef NEAR1
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
   glContextDestroy(ctx_handle);
   oops_display_close(disp);
 }
@@ -3279,17 +10046,28 @@ static void test_gl_integer_spellings_normalise_only_what_should_be(void) {
    * the specification's defaults rather than whatever the previous call left behind. */
   glTexCoord4f(0.5f, 0.5f, 0.5f, 0.5f);
   glTexCoord2s(3, 4);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 3.0f && ctx->cur_texcoord[1] == 4.0f);
-  ASSERT_TRUE(ctx->cur_texcoord[2] == 0.0f && ctx->cur_texcoord[3] == 1.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 3.0f && ctx->cur_texcoord[0][1] == 4.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][2] == 0.0f && ctx->cur_texcoord[0][3] == 1.0f);
 
-  /* q is a projective divide, not a fourth coordinate to ignore. */
+  /* q is a projective divide, not a fourth coordinate to ignore - kept with the vertex, undivided,
+   * for the rasteriser to divide per fragment (the vertex divided until 2026-09-19); the current
+   * coordinate keeps what was passed, which is what GL_CURRENT_TEXTURE_COORDS reports. */
   glTexCoord4f(2.0f, 4.0f, 6.0f, 2.0f);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 1.0f && ctx->cur_texcoord[1] == 2.0f);
-  ASSERT_TRUE(ctx->cur_texcoord[2] == 3.0f && ctx->cur_texcoord[3] == 2.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 2.0f && ctx->cur_texcoord[0][1] == 4.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][2] == 6.0f && ctx->cur_texcoord[0][3] == 2.0f);
+  glBegin(GL_TRIANGLES);
+  glVertex3f(0.0f, 0.0f, 0.0f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][0] == 2.0f && ctx->imm_verts[0].tc[0][1] == 4.0f);
+  ASSERT_TRUE(ctx->imm_verts[0].tc[0][2] == 6.0f && ctx->imm_verts[0].tc[0][3] == 2.0f);
 
-  /* A q of zero is left alone rather than producing infinities. */
+  /* A q of zero is kept as given too; the divide that meets it leaves the coordinate alone
+   * rather than producing infinities (gl_q_inv). */
   glTexCoord4f(1.0f, 2.0f, 3.0f, 0.0f);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 1.0f && ctx->cur_texcoord[1] == 2.0f);
+  glVertex3f(1.0f, 0.0f, 0.0f);
+  ASSERT_TRUE(ctx->imm_verts[1].tc[0][0] == 1.0f && ctx->imm_verts[1].tc[0][1] == 2.0f);
+  ASSERT_TRUE(ctx->imm_verts[1].tc[0][3] == 0.0f);
+  glVertex3f(0.0f, 1.0f, 0.0f);
+  glEnd();
 
   /* The vector forms reach the same place as the scalar ones. */
   const GLbyte nb[3] = {127, 0, 0};
@@ -3360,21 +10138,21 @@ static void test_gl_every_spelling_reaches_the_same_state(void) {
               ctx->cur_normal[2] == 0.5f);
 
   glTexCoord2d(0.25, 0.75);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 0.25f && ctx->cur_texcoord[1] == 0.75f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.25f && ctx->cur_texcoord[0][1] == 0.75f);
   glTexCoord2i(3, 7);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 3.0f && ctx->cur_texcoord[1] == 7.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 3.0f && ctx->cur_texcoord[0][1] == 7.0f);
   /* The one-coordinate form leaves t at zero, so it has to clear a t that was set. */
   glTexCoord1f(0.5f);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 0.5f && ctx->cur_texcoord[1] == 0.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.5f && ctx->cur_texcoord[0][1] == 0.0f);
   const GLfloat t2f[2] = {0.125f, 0.875f};
   glTexCoord2fv(t2f);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 0.125f && ctx->cur_texcoord[1] == 0.875f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.125f && ctx->cur_texcoord[0][1] == 0.875f);
   const GLdouble t2d[2] = {0.875, 0.125};
   glTexCoord2dv(t2d);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 0.875f && ctx->cur_texcoord[1] == 0.125f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.875f && ctx->cur_texcoord[0][1] == 0.125f);
   const GLint t2i[2] = {5, 9};
   glTexCoord2iv(t2i);
-  ASSERT_TRUE(ctx->cur_texcoord[0] == 5.0f && ctx->cur_texcoord[1] == 9.0f);
+  ASSERT_TRUE(ctx->cur_texcoord[0][0] == 5.0f && ctx->cur_texcoord[0][1] == 9.0f);
 
   /* Vertices, read out of the immediate-mode buffer. The two-coordinate forms must also set
    * z to 0 and w to 1 rather than leaving whatever the previous vertex had. */
@@ -3760,11 +10538,12 @@ static void test_gl_get_tex_image_reads_back_unflipped(void) {
 
   /* Refusals: a target this does not have, a format it cannot convert, and a query with no
    * image under it. */
-  /* GL_TEXTURE_1D used to be the example here and is a real target now, so the refusal moved to
-   * GL_TEXTURE_3D - which this genuinely does not have. */
-  glGetTexImage(0x806Fu /* GL_TEXTURE_3D */, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+  /* GL_TEXTURE_1D used to be the example here, then GL_TEXTURE_3D; both are real targets now.
+   * GL_TEXTURE_CUBE_MAP is a real texture too, but not an image target - a cube's images are
+   * its six faces, each read through its own - so it is refused here as GL says it is. */
+  glGetTexImage(GL_TEXTURE_CUBE_MAP, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, back);
+  glGetTexImage(GL_TEXTURE_2D, 0, (GLenum)0x1900u /* GL_COLOR_INDEX */, GL_UNSIGNED_BYTE, back);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
   GLuint empty = 0;
@@ -3820,11 +10599,11 @@ static void test_gl_per_object_queries_match_their_setters(void) {
   ASSERT_EQ(iv[0], 8);
   glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, iv);
   ASSERT_EQ(iv[0], 4);
-  /* **What is stored, not what was asked for.** GL_RGB went in; every upload is converted to
-   * RGBA8, so reporting GL_RGB back would have a program size its readback for three bytes a
-   * texel against an image that holds four. */
+  /* **What was asked for**, as Mesa reports it, now that the internal format means something:
+   * GL_RGB went in and is kept as RGB - alpha 1 however it was uploaded. This reported GL_RGBA
+   * while every texture was RGBA. */
   glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, iv);
-  ASSERT_EQ(iv[0], (GLint)GL_RGBA);
+  ASSERT_EQ(iv[0], (GLint)GL_RGB);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
   /* Lights. Four-element colours and a three-element direction, each with a guard after it. */
@@ -3925,14 +10704,14 @@ static void test_gl_interleaved_arrays_sets_the_pointers_the_spec_names(void) {
   /* GL_T2F_C4F_N3F_V3F: every array present, so every offset is exercised at once. */
   glInterleavedArrays(GL_T2F_C4F_N3F_V3F, 0, buf);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
-  ASSERT_EQ(ctx->array_texcoord.enabled, GL_TRUE);
+  ASSERT_EQ(ctx->array_texcoord[0].enabled, GL_TRUE);
   ASSERT_EQ(ctx->array_color.enabled, GL_TRUE);
   ASSERT_EQ(ctx->array_normal.enabled, GL_TRUE);
   ASSERT_EQ(ctx->array_vertex.enabled, GL_TRUE);
-  ASSERT_EQ(ctx->array_texcoord.size, 2);
+  ASSERT_EQ(ctx->array_texcoord[0].size, 2);
   ASSERT_EQ(ctx->array_color.size, 4);
   ASSERT_EQ(ctx->array_vertex.size, 3);
-  ASSERT_TRUE(ctx->array_texcoord.pointer == (const void *)base);
+  ASSERT_TRUE(ctx->array_texcoord[0].pointer == (const void *)base);
   ASSERT_TRUE(ctx->array_color.pointer == (const void *)(base + 2 * f));
   ASSERT_TRUE(ctx->array_normal.pointer == (const void *)(base + 6 * f));
   ASSERT_TRUE(ctx->array_vertex.pointer == (const void *)(base + 9 * f));
@@ -3955,7 +10734,7 @@ static void test_gl_interleaved_arrays_sets_the_pointers_the_spec_names(void) {
    * normals through a pointer nothing set for this buffer. */
   glInterleavedArrays(GL_C3F_V3F, 0, buf);
   ASSERT_EQ(ctx->array_normal.enabled, GL_FALSE);
-  ASSERT_EQ(ctx->array_texcoord.enabled, GL_FALSE);
+  ASSERT_EQ(ctx->array_texcoord[0].enabled, GL_FALSE);
   ASSERT_EQ(ctx->array_color.enabled, GL_TRUE);
   ASSERT_EQ(ctx->array_color.size, 3);
   ASSERT_EQ(ctx->array_color.type, (GLenum)GL_FLOAT);
@@ -3971,7 +10750,7 @@ static void test_gl_interleaved_arrays_sets_the_pointers_the_spec_names(void) {
 
   /* The widest one, where a miscounted offset has the furthest to travel. */
   glInterleavedArrays(GL_T4F_C4F_N3F_V4F, 0, buf);
-  ASSERT_EQ(ctx->array_texcoord.size, 4);
+  ASSERT_EQ(ctx->array_texcoord[0].size, 4);
   ASSERT_EQ(ctx->array_vertex.size, 4);
   ASSERT_TRUE(ctx->array_color.pointer == (const void *)(base + 4 * f));
   ASSERT_TRUE(ctx->array_normal.pointer == (const void *)(base + 8 * f));
@@ -4531,8 +11310,9 @@ static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void
   glGetTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_WRAP_S, fv);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-  /* The hint: the one that names something real is kept and reported, and the ones that name
-   * fog, points and lines are refused because this draws none of those. */
+  /* The hints: each target is kept and reported. The fog and line-smooth hints were refused
+   * here until 2026-09-19, while this drew no fog and no lines; it draws both, and a hint is a
+   * preference an implementation may ignore but not reject. */
   glGetIntegerv(GL_PERSPECTIVE_CORRECTION_HINT, iv);
   ASSERT_EQ(iv[0], (GLint)GL_DONT_CARE); /* the specification's default */
   glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);
@@ -4542,9 +11322,15 @@ static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void
   ASSERT_EQ(iv[1], GUARD);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-  glHint(0x0C54u /* GL_FOG_HINT */, GL_NICEST);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-  glHint(0x0C52u /* GL_LINE_SMOOTH_HINT */, GL_FASTEST);
+  glHint(GL_FOG_HINT, GL_NICEST);
+  glHint(GL_LINE_SMOOTH_HINT, GL_FASTEST);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetIntegerv(GL_FOG_HINT, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_NICEST);
+  glGetIntegerv(GL_LINE_SMOOTH_HINT, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_FASTEST);
+  /* A target that is no hint is still refused. */
+  glHint(GL_TEXTURE_2D, GL_NICEST);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   /* A mode that is not a hint mode is refused before the target is even considered. */
   glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_TRIANGLES);
@@ -4552,8 +11338,10 @@ static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void
   glGetIntegerv(GL_PERSPECTIVE_CORRECTION_HINT, iv);
   ASSERT_EQ(iv[0], (GLint)GL_NICEST); /* unchanged by the refusals */
 
-  /* One surface. GL_BACK names it; GL_NONE would have a program believe it had switched
-   * drawing off, which is the refusal that matters most here. */
+  /* GL_BACK names the back buffer. The right buffers name buffers this mono visual does not
+   * have, so they are GL_INVALID_OPERATION, the refusal of a buffer that cannot be used
+   * (GL_INVALID_ENUM until 2026-09-19). The front was refused the same way until that
+   * evening, when it became a surface of its own - test_gl_front_buffer. */
   glDrawBuffer(GL_BACK);
   glReadBuffer(GL_BACK);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
@@ -4562,12 +11350,17 @@ static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void
   glGetIntegerv(GL_READ_BUFFER, iv);
   ASSERT_EQ(iv[0], (GLint)GL_BACK);
 
+  glDrawBuffer(GL_FRONT_RIGHT);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glReadBuffer(GL_BACK_RIGHT);
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+  glGetIntegerv(GL_DRAW_BUFFER, iv);
+  ASSERT_EQ(iv[0], (GLint)GL_BACK);
   glDrawBuffer(GL_FRONT);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-  glDrawBuffer(0u /* GL_NONE, which this deliberately does not define */);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glReadBuffer(GL_FRONT);
-  ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glDrawBuffer(GL_BACK);
+  glReadBuffer(GL_BACK);
 
   glContextDestroy(ctx_handle);
   oops_display_close(disp);
@@ -6063,10 +12856,18 @@ static void test_gl_blend_control_carries_the_gl_state(void) {
   /* And nothing lands at bit 13, where the register has no field. */
   ASSERT_EQ((v >> 13) & 0x7u, 0u);
 
-  /* The default factors still decode to what the constant had right. */
+  /* The default factors are GL's own, GL_ONE and GL_ZERO (Mesa main/blend.c:1148-1151). This
+   * used to assert SRC_ALPHA / ONE_MINUS_SRC_ALPHA, which was oops-gl's default and nobody
+   * else's. */
+  ASSERT_EQ(BSRC(v), 1u);  /* BLEND_ONE */
+  ASSERT_EQ(BDST(v), 0u);  /* BLEND_ZERO */
+  ASSERT_EQ(BCOMB(v), 0u); /* COMB_DST_PLUS_SRC, GL_FUNC_ADD */
+
+  /* The pair the old constant carried still decodes to what it had right. */
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  v = gl_compute_cb_blend_control(c);
   ASSERT_EQ(BSRC(v), 4u);  /* BLEND_SRC_ALPHA */
   ASSERT_EQ(BDST(v), 5u);  /* BLEND_ONE_MINUS_SRC_ALPHA */
-  ASSERT_EQ(BCOMB(v), 0u); /* COMB_DST_PLUS_SRC, GL_FUNC_ADD */
 
   /* glBlendFunc reaches the register at all. */
   glBlendFunc(GL_ONE, GL_ZERO);
@@ -6348,15 +13149,23 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_draw_count_separates_empty_from_invalid);
     RUN_TEST(test_gl_draw_elements_refuses_an_unreadable_index_type);
     RUN_TEST(test_gl_strings_are_honest_and_parseable);
+    RUN_TEST(test_gl_extension_entry_points_are_the_core_ones);
     RUN_TEST(test_gl_unsupported_state_enums_are_refused);
     RUN_TEST(test_gl_hardware_badge_does_not_overclaim);
     RUN_TEST(test_gl_matrix_builders_match_their_definitions);
+    RUN_TEST(test_gl_glu_scales_projects_and_builds_mipmaps);
+    RUN_TEST(test_gl_glu_quadrics_wind_and_texture_as_the_spec_says);
+    RUN_TEST(test_gl_platonic_solids_are_the_solids_they_claim);
+    RUN_TEST(test_gl_bitmap_font_draws_what_it_is_a_picture_of);
+    RUN_TEST(test_gl_the_newest_calls_refuse_rather_than_fault);
+    RUN_TEST(test_gl_glut_main_loop_dispatches_and_can_be_left);
     RUN_TEST(test_gl_vector_forms_match_their_scalar_twins);
     RUN_TEST(test_gl_first_error_is_the_one_retained);
     RUN_TEST(test_gl_scalar_twins_agree_with_their_vector_forms);
     RUN_TEST(test_gl_display_list_compiles_then_replays);
     RUN_TEST(test_gl_display_list_compile_and_execute_does_both);
     RUN_TEST(test_gl_display_list_refusals);
+    RUN_TEST(test_gl_display_list_records_what_gl_compiles);
     RUN_TEST(test_gl_display_list_recursion_is_bounded);
     RUN_TEST(test_gl_tex_sub_image_updates_only_its_rectangle);
     RUN_TEST(test_gl_pixel_store_alignment_moves_the_rows);
@@ -6371,7 +13180,8 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_copy_tex_image_allocates_then_copies);
     RUN_TEST(test_gl_every_spelling_reaches_the_same_state);
     RUN_TEST(test_gl_integer_spellings_normalise_only_what_should_be);
-    RUN_TEST(test_gl_multitexture_has_one_unit_and_says_so);
+    RUN_TEST(test_gl_multitexture_state_is_per_unit);
+    RUN_TEST(test_gl_two_texture_units_draw);
     RUN_TEST(test_gl_mat4_invert_round_trips);
     RUN_TEST(test_gl_clip_planes_cut_geometry);
     RUN_TEST(test_gl_stencil_test_and_operations);
@@ -6380,6 +13190,44 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_compressed_textures_are_refused_not_absent);
     RUN_TEST(test_gl_points_and_lines_expand_to_triangles);
     RUN_TEST(test_gl_fog_blends_by_eye_distance);
+    RUN_TEST(test_gl_logic_op_combines_stored_bits);
+    RUN_TEST(test_gl_blend_constant_and_factor_rules);
+    RUN_TEST(test_gl_vector_queries_answer_every_component);
+    RUN_TEST(test_gl_texgen_keeps_the_vertex_own_coordinates);
+    RUN_TEST(test_gl_polygon_mode_draws_boundaries);
+    RUN_TEST(test_gl_rgba_context_keeps_index_and_sample_state);
+    RUN_TEST(test_gl_mipmaps_completeness_and_filtering);
+    RUN_TEST(test_gl_evaluators);
+    RUN_TEST(test_gl_selection_and_feedback);
+    RUN_TEST(test_gl_texture_matrix_and_raster_vertex);
+    RUN_TEST(test_gl_pixel_transfer_and_maps);
+    RUN_TEST(test_gl_line_and_polygon_stipple);
+    RUN_TEST(test_gl_accumulation_buffer);
+    RUN_TEST(test_gl_clear_keeps_to_scissor_and_masks);
+    RUN_TEST(test_gl_texture_3d);
+    RUN_TEST(test_gl_pixel_types_and_store);
+    RUN_TEST(test_gl_internal_formats_and_proxies);
+    RUN_TEST(test_gl_texture_parameters_and_wrap_modes);
+    RUN_TEST(test_gl_texture_lod_parameters);
+    RUN_TEST(test_gl_separate_specular_and_rescale_normal);
+    RUN_TEST(test_gl_two_sided_lighting);
+    RUN_TEST(test_gl_cube_maps);
+    RUN_TEST(test_gl_texture_combine);
+    RUN_TEST(test_gl_smooth_points_lines_polygons);
+    RUN_TEST(test_gl_color_material_writes_the_material);
+    RUN_TEST(test_gl_array_types_and_window_pos);
+    RUN_TEST(test_gl_secondary_color_and_color_sum);
+    RUN_TEST(test_gl_fog_coordinates);
+    RUN_TEST(test_gl_pixel_rectangles_are_fragments);
+    RUN_TEST(test_gl_point_parameters_and_multi_draw);
+    RUN_TEST(test_gl_lod_bias_and_generate_mipmap);
+    RUN_TEST(test_gl_depth_stencil_pixels_and_depth_textures);
+    RUN_TEST(test_gl_colour_index_images);
+    RUN_TEST(test_gl_projective_texcoords_divide_per_fragment);
+    RUN_TEST(test_gl_drawn_clear_and_enable_bit_cover_every_texture_enable);
+    RUN_TEST(test_gl_state_table_audit_findings);
+    RUN_TEST(test_gl_front_buffer);
+    RUN_TEST(test_gl_buffer_mapping_and_occlusion_queries);
     RUN_TEST(test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification);
     RUN_TEST(test_gl_double_matrix_forms_narrow_element_by_element);
     RUN_TEST(test_gl_queries_report_and_refuse);

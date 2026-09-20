@@ -263,8 +263,8 @@ static gl_mat4_t *get_active_matrix(gl_context_t *ctx) {
     switch (ctx->matrix_mode) {
         case GL_PROJECTION:
             return &ctx->projection_stack[ctx->projection_depth];
-        case GL_TEXTURE:
-            return &ctx->texture_stack[ctx->texture_depth];
+        case GL_TEXTURE: /* the active unit's, GL 1.3 */
+            return &gl_tu(ctx)->texture_stack[gl_tu(ctx)->texture_depth];
         case GL_MODELVIEW:
         default:
             return &ctx->modelview_stack[ctx->modelview_depth];
@@ -288,6 +288,10 @@ void gl_update_mvp(gl_context_t *ctx) {
  * an error and not silently swapped. The viewport registers carry the result - see the ZSCALE
  * and ZOFFSET arms of the patch loop in `gl_draw.c` for the arithmetic. */
 void glDepthRange(GLclampd near_val, GLclampd far_val) {
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_DEPTH_RANGE, gl_la_f((GLfloat)near_val), gl_la_f((GLfloat)far_val))) {
+        return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     float near_f = (float)near_val;
@@ -298,16 +302,18 @@ void glDepthRange(GLclampd near_val, GLclampd far_val) {
     if (far_f > 1.0f) far_f = 1.0f;
     ctx->depth_near = near_f;
     ctx->depth_far = far_f;
-    /* No dirty flag: the viewport registers are re-emitted from the table at the start of every
-     * frame, so the new range is in force from the next one. The matrix stacks are untouched -
-     * depth range is a viewport transform, not part of the model-view-projection. */
+    /* **Dirty, so the next draw carries it.** This used to rely on the frame's register table
+     * alone - "in force from the next frame" - which is wrong for the way depth range is used:
+     * a program narrows it, draws one thing, and widens it again inside the same frame (the view
+     * weapon drawn in front of the world is the classic case). Every draw in that frame got
+     * whichever range was current when the frame began. The software rasteriser reads the range
+     * per triangle and was always right, so only the hardware showed it. The matrix stacks are
+     * untouched - depth range is a viewport transform, not part of the model-view-projection. */
+    ctx->hw_depth_range_dirty = GL_TRUE;
 }
 
 void glMatrixMode(GLenum mode) {
-    {
-        GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        if (gl_list_capture(GL_LIST_OP_MATRIX_MODE, mode, 0, 0, f)) return;
-    }
+    if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_MATRIX_MODE, gl_la_e(mode))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     if (mode == GL_MODELVIEW || mode == GL_PROJECTION || mode == GL_TEXTURE) {
@@ -324,10 +330,7 @@ void glMatrixMode(GLenum mode) {
 }
 
 void glPushMatrix(void) {
-    {
-        GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        if (gl_list_capture(GL_LIST_OP_PUSH_MATRIX, 0, 0, 0, f)) return;
-    }
+    if (gl_list_recording() && GL_LIST_REC0(GL_LIST_OP_PUSH_MATRIX)) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
 
@@ -348,14 +351,16 @@ void glPushMatrix(void) {
                 gl_record_error(ctx, GL_STACK_OVERFLOW);
             }
             break;
-        case GL_TEXTURE:
-            if (ctx->texture_depth < OOPS_GL_TEXTURE_STACK_CAPACITY - 1) {
-                ctx->texture_stack[ctx->texture_depth + 1] = ctx->texture_stack[ctx->texture_depth];
-                ctx->texture_depth++;
+        case GL_TEXTURE: {
+            gl_tex_unit_t *tu = gl_tu(ctx);
+            if (tu->texture_depth < OOPS_GL_TEXTURE_STACK_CAPACITY - 1) {
+                tu->texture_stack[tu->texture_depth + 1] = tu->texture_stack[tu->texture_depth];
+                tu->texture_depth++;
             } else {
                 gl_record_error(ctx, GL_STACK_OVERFLOW);
             }
             break;
+        }
         default: break;
     }
 }
@@ -370,8 +375,13 @@ static inline void mark_matrix_dirty(gl_context_t *ctx) {
 void gl_update_normal_matrix(gl_context_t *ctx) {
     if (!ctx) return;
     if (!ctx->normal_matrix_dirty) return;
+    gl_normal_matrix_of(&ctx->modelview_stack[ctx->modelview_depth], ctx->normal_matrix);
+    ctx->normal_matrix_dirty = GL_FALSE;
+}
 
-    const gl_mat4_t *mv = &ctx->modelview_stack[ctx->modelview_depth];
+/* The inverse-transpose of a modelview's upper 3x3, row-major: the normal matrix, without the
+ * context's cache - for callers holding a const context (texture generation). */
+void gl_normal_matrix_of(const gl_mat4_t *mv, float *normal_matrix) {
     float a00 = mv->m[0], a10 = mv->m[1], a20 = mv->m[2];
     float a01 = mv->m[4], a11 = mv->m[5], a21 = mv->m[6];
     float a02 = mv->m[8], a12 = mv->m[9], a22 = mv->m[10];
@@ -390,29 +400,25 @@ void gl_update_normal_matrix(gl_context_t *ctx) {
 
     float det = a00 * c00 + a01 * c01 + a02 * c02;
     if (det > -1e-12f && det < 1e-12f) {
-        ctx->normal_matrix[0] = 1.0f; ctx->normal_matrix[1] = 0.0f; ctx->normal_matrix[2] = 0.0f;
-        ctx->normal_matrix[3] = 0.0f; ctx->normal_matrix[4] = 1.0f; ctx->normal_matrix[5] = 0.0f;
-        ctx->normal_matrix[6] = 0.0f; ctx->normal_matrix[7] = 0.0f; ctx->normal_matrix[8] = 1.0f;
+        normal_matrix[0] = 1.0f; normal_matrix[1] = 0.0f; normal_matrix[2] = 0.0f;
+        normal_matrix[3] = 0.0f; normal_matrix[4] = 1.0f; normal_matrix[5] = 0.0f;
+        normal_matrix[6] = 0.0f; normal_matrix[7] = 0.0f; normal_matrix[8] = 1.0f;
     } else {
         float inv_det = 1.0f / det;
-        ctx->normal_matrix[0] = c00 * inv_det;
-        ctx->normal_matrix[1] = c01 * inv_det;
-        ctx->normal_matrix[2] = c02 * inv_det;
-        ctx->normal_matrix[3] = c10 * inv_det;
-        ctx->normal_matrix[4] = c11 * inv_det;
-        ctx->normal_matrix[5] = c12 * inv_det;
-        ctx->normal_matrix[6] = c20 * inv_det;
-        ctx->normal_matrix[7] = c21 * inv_det;
-        ctx->normal_matrix[8] = c22 * inv_det;
+        normal_matrix[0] = c00 * inv_det;
+        normal_matrix[1] = c01 * inv_det;
+        normal_matrix[2] = c02 * inv_det;
+        normal_matrix[3] = c10 * inv_det;
+        normal_matrix[4] = c11 * inv_det;
+        normal_matrix[5] = c12 * inv_det;
+        normal_matrix[6] = c20 * inv_det;
+        normal_matrix[7] = c21 * inv_det;
+        normal_matrix[8] = c22 * inv_det;
     }
-    ctx->normal_matrix_dirty = GL_FALSE;
 }
 
 void glPopMatrix(void) {
-    {
-        GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        if (gl_list_capture(GL_LIST_OP_POP_MATRIX, 0, 0, 0, f)) return;
-    }
+    if (gl_list_recording() && GL_LIST_REC0(GL_LIST_OP_POP_MATRIX)) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
 
@@ -432,8 +438,8 @@ void glPopMatrix(void) {
             }
             break;
         case GL_TEXTURE:
-            if (ctx->texture_depth > 0) {
-                ctx->texture_depth--;
+            if (gl_tu(ctx)->texture_depth > 0) {
+                gl_tu(ctx)->texture_depth--;
             } else {
                 gl_record_error(ctx, GL_STACK_UNDERFLOW);
             }
@@ -444,17 +450,20 @@ void glPopMatrix(void) {
 }
 
 void glLoadIdentity(void) {
-    {
-        GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        if (gl_list_capture(GL_LIST_OP_LOAD_IDENTITY, 0, 0, 0, f)) return;
-    }
+    if (gl_list_recording() && GL_LIST_REC0(GL_LIST_OP_LOAD_IDENTITY)) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     mat4_identity(get_active_matrix(ctx));
     mark_matrix_dirty(ctx);
 }
 
+/* The sixteen floats are copied into the list - the spelling that reaches here from the double,
+ * transposed and GLU forms included, since all of them forward. */
 void glLoadMatrixf(const GLfloat *m) {
+    if (m && gl_list_recording() &&
+        gl_list_rec(GL_LIST_OP_LOAD_MATRIX, (const gl_list_arg_t *)0, 0, m, 16 * sizeof(GLfloat))) {
+        return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !m) return;
     memcpy(get_active_matrix(ctx)->m, m, 16 * sizeof(float));
@@ -462,6 +471,10 @@ void glLoadMatrixf(const GLfloat *m) {
 }
 
 void glMultMatrixf(const GLfloat *m) {
+    if (m && gl_list_recording() &&
+        gl_list_rec(GL_LIST_OP_MULT_MATRIX, (const gl_list_arg_t *)0, 0, m, 16 * sizeof(GLfloat))) {
+        return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !m) return;
     gl_mat4_t in;
@@ -472,10 +485,8 @@ void glMultMatrixf(const GLfloat *m) {
 }
 
 void glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
-    {
-        GLfloat f[4] = {x, y, z, 0.0f};
-        if (gl_list_capture(GL_LIST_OP_TRANSLATE, 0, 0, 0, f)) return;
-    }
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_TRANSLATE, gl_la_f(x), gl_la_f(y), gl_la_f(z))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     mat4_translate(get_active_matrix(ctx), (float)x, (float)y, (float)z);
@@ -483,10 +494,8 @@ void glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
 }
 
 void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
-    {
-        GLfloat f[4] = {angle, x, y, z};
-        if (gl_list_capture(GL_LIST_OP_ROTATE, 0, 0, 0, f)) return;
-    }
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_ROTATE, gl_la_f(angle), gl_la_f(x), gl_la_f(y), gl_la_f(z))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     mat4_rotate(get_active_matrix(ctx), (float)angle, (float)x, (float)y, (float)z);
@@ -494,10 +503,8 @@ void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
 }
 
 void glScalef(GLfloat x, GLfloat y, GLfloat z) {
-    {
-        GLfloat f[4] = {x, y, z, 0.0f};
-        if (gl_list_capture(GL_LIST_OP_SCALE, 0, 0, 0, f)) return;
-    }
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_SCALE, gl_la_f(x), gl_la_f(y), gl_la_f(z))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     mat4_scale(get_active_matrix(ctx), (float)x, (float)y, (float)z);
@@ -579,8 +586,23 @@ void glMultTransposeMatrixd(const GLdouble *m) {
     glMultTransposeMatrixf(f);
 }
 
+/* GL_ARB_transpose_matrix's own spellings, which a program written before GL 1.3 took it into
+ * the core calls - a port whose matrices are row-major, typically. */
+void glLoadTransposeMatrixfARB(const GLfloat *m) { glLoadTransposeMatrixf(m); }
+void glLoadTransposeMatrixdARB(const GLdouble *m) { glLoadTransposeMatrixd(m); }
+void glMultTransposeMatrixfARB(const GLfloat *m) { glMultTransposeMatrixf(m); }
+void glMultTransposeMatrixdARB(const GLdouble *m) { glMultTransposeMatrixd(m); }
+
+/* Recorded narrowed to float, as the stack holds it anyway - Mesa's save_Ortho and save_Frustum
+ * narrow the same six arguments (main/dlist.c). */
 void glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top,
              GLdouble near_val, GLdouble far_val) {
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_ORTHO, gl_la_f((GLfloat)left), gl_la_f((GLfloat)right),
+                    gl_la_f((GLfloat)bottom), gl_la_f((GLfloat)top),
+                    gl_la_f((GLfloat)near_val), gl_la_f((GLfloat)far_val))) {
+        return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     mat4_ortho(get_active_matrix(ctx), (float)left, (float)right, (float)bottom,
@@ -590,6 +612,12 @@ void glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top,
 
 void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top,
                GLdouble near_val, GLdouble far_val) {
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_FRUSTUM, gl_la_f((GLfloat)left), gl_la_f((GLfloat)right),
+                    gl_la_f((GLfloat)bottom), gl_la_f((GLfloat)top),
+                    gl_la_f((GLfloat)near_val), gl_la_f((GLfloat)far_val))) {
+        return;
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     mat4_frustum(get_active_matrix(ctx), (float)left, (float)right, (float)bottom,
@@ -664,6 +692,20 @@ void gluOrtho2D(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top) {
     glOrtho(left, right, bottom, top, -1.0, 1.0);
 }
 
+/* The pick matrix: multiplied onto the projection *before* the program's own projection, it
+ * stretches a `dx` by `dy` window rectangle centred on (x, y) to fill the view volume, so
+ * GL_SELECT reports only what is under the cursor. Worked from the viewport transform rather than
+ * copied: a window x is NDC (2(x - vx)/vw - 1), and scaling NDC by vw/dx about that point puts the
+ * rectangle's edges at -1 and 1 - a translate of (vw - 2(x - vx))/dx after the scale. A rectangle
+ * of no area picks nothing and changes nothing. */
+void gluPickMatrix(GLdouble x, GLdouble y, GLdouble dx, GLdouble dy, GLint *viewport) {
+    if (!viewport || dx <= 0.0 || dy <= 0.0) return;
+    glTranslatef((GLfloat)(((GLdouble)viewport[2] - 2.0 * (x - (GLdouble)viewport[0])) / dx),
+                 (GLfloat)(((GLdouble)viewport[3] - 2.0 * (y - (GLdouble)viewport[1])) / dy),
+                 0.0f);
+    glScalef((GLfloat)((GLdouble)viewport[2] / dx), (GLfloat)((GLdouble)viewport[3] / dy), 1.0f);
+}
+
 const GLubyte *gluErrorString(GLenum error) {
     switch (error) {
         case GL_NO_ERROR:          return (const GLubyte *)"no error";
@@ -673,6 +715,13 @@ const GLubyte *gluErrorString(GLenum error) {
         case GL_STACK_OVERFLOW:    return (const GLubyte *)"stack overflow";
         case GL_STACK_UNDERFLOW:   return (const GLubyte *)"stack underflow";
         case GL_OUT_OF_MEMORY:     return (const GLubyte *)"out of memory";
+        /* GLU's own codes, which its image functions return rather than record (gl_glu.c). */
+        case GLU_INVALID_ENUM:     return (const GLubyte *)"invalid enumerant";
+        case GLU_INVALID_VALUE:    return (const GLubyte *)"invalid value";
+        case GLU_OUT_OF_MEMORY:    return (const GLubyte *)"out of memory";
+        case GLU_INVALID_OPERATION: return (const GLubyte *)"invalid operation";
+        case GLU_INCOMPATIBLE_GL_VERSION:
+            return (const GLubyte *)"incompatible gl version";
         default:                   return (const GLubyte *)"unknown error";
     }
 }

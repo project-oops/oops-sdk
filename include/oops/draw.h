@@ -30,11 +30,32 @@ typedef uint32_t oops_color_t;
   ((((uint32_t)(a) & 0xFF) << 24) | (((uint32_t)(r) & 0xFF) << 16) |           \
    (((uint32_t)(g) & 0xFF) << 8) | ((uint32_t)(b) & 0xFF))
 
+/*
+ * How a surface's pixels are laid out. Every drawing call here takes either.
+ *
+ * OOPS_SURFACE_LINEAR (0) is rows, `pitch` pixels apart. That is every surface
+ * built with an initializer that leaves the field out.
+ *
+ * OOPS_SURFACE_RX is the GPU's 64KB_R_X render-target swizzle at 32 bits a
+ * pixel - the layout of the display's scanout buffers on AGC. It is 64 KiB
+ * blocks of 128 x 128 pixels, row by row, `pitch` pixels (a multiple of 128) to
+ * a row of blocks, each block addressed as <agc/tiler.h>'s agc_tile_pixel says.
+ * oops_display_get_surface hands one out while a renderer draws the scanout
+ * buffers in place (oops_display_use_scanout), so a CPU overlay drawn on it
+ * lands in the frame being flipped. Drawing is correct at any position, but
+ * the pixels of a small shape are scattered through memory, and a blended one
+ * reads its destination back. From a scanout buffer, which is write-combined
+ * and not cached for the CPU, that read is slow.
+ */
+#define OOPS_SURFACE_LINEAR 0u
+#define OOPS_SURFACE_RX 1u
+
 typedef struct oops_surface {
   uint32_t *pixels;
   uint32_t width;
   uint32_t height;
-  uint32_t pitch; /* Row width in pixels */
+  uint32_t pitch;  /* Row width in pixels; for RX, a row of blocks' width */
+  uint32_t layout; /* OOPS_SURFACE_LINEAR or OOPS_SURFACE_RX */
 } oops_surface_t;
 
 /*
@@ -51,7 +72,13 @@ typedef struct oops_sprite {
   const uint32_t *pixels;
 } oops_sprite_t;
 
-/* Display surface extraction */
+/*
+ * The surface the next flip shows. Normally it is the display's linear
+ * framebuffer, which oops_display_flip converts to the scanout layout. Once a
+ * renderer has called oops_display_use_scanout, it is the next scanout buffer
+ * itself, in that buffer's layout (OOPS_SURFACE_RX on AGC). Defined with the
+ * display (src/display.c), which knows which of the two it is.
+ */
 oops_surface_t oops_display_get_surface(oops_display_t *disp);
 
 /*

@@ -567,3 +567,212 @@ int oops_snprintf(char *buf, size_t size, const char *fmt, ...) {
   va_end(args);
   return ret;
 }
+
+/* ---------------------------------------------------------------------------
+ * The parser's half of <string.h>, and the sort a depth-sorted scene needs
+ *
+ * These are `src/system/libc.c`'s `strspn`, `strcspn`, `strpbrk`, `strtok_r`, `qsort` and
+ * `bsearch`. They live here because that file is target-only - the host build's real C library
+ * provides those names - so an algorithm written there could never be run by a test. What is
+ * there is a rename; what is here is the code.
+ * --------------------------------------------------------------------------- */
+
+/* A byte is in the set. The terminator is not: `obs_strspn("ab", "")` is 0 rather than the whole
+ * string, because the empty set contains nothing. */
+static int obs_in_set(char c, const char *set) {
+  if (set == NULL) {
+    return 0;
+  }
+  for (; *set != '\0'; set++) {
+    if (*set == c) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+size_t obs_strspn(const char *s, const char *accept) {
+  size_t n = 0;
+  if (s == NULL) {
+    return 0;
+  }
+  while (s[n] != '\0' && obs_in_set(s[n], accept)) {
+    n++;
+  }
+  return n;
+}
+
+size_t obs_strcspn(const char *s, const char *reject) {
+  size_t n = 0;
+  if (s == NULL) {
+    return 0;
+  }
+  while (s[n] != '\0' && !obs_in_set(s[n], reject)) {
+    n++;
+  }
+  return n;
+}
+
+char *obs_strpbrk(const char *s, const char *accept) {
+  if (s == NULL) {
+    return NULL;
+  }
+  for (; *s != '\0'; s++) {
+    if (obs_in_set(*s, accept)) {
+      return (char *)(size_t)s;
+    }
+  }
+  return NULL;
+}
+
+/*
+ * `strtok_r`'s contract, which is the awkward one C specifies: the first call takes the string
+ * and every call after takes NULL, leading delimiters are skipped, an all-delimiter remainder is
+ * the end, and the token is terminated **in the caller's own buffer** - so a string literal
+ * passed to it is a write to read-only memory. That is the behaviour every parser written
+ * against it expects, including the sharp edge.
+ */
+char *obs_strtok_r(char *s, const char *delim, char **save) {
+  if (save == NULL) {
+    return NULL;
+  }
+  char *p = (s != NULL) ? s : *save;
+  if (p == NULL) {
+    return NULL;
+  }
+  while (*p != '\0' && obs_in_set(*p, delim)) {
+    p++;
+  }
+  if (*p == '\0') {
+    *save = p;
+    return NULL;
+  }
+  char *start = p;
+  while (*p != '\0' && !obs_in_set(*p, delim)) {
+    p++;
+  }
+  if (*p != '\0') {
+    *p = '\0';
+    p++;
+  }
+  *save = p;
+  return start;
+}
+
+static void obs_swap_bytes(unsigned char *a, unsigned char *b, size_t size) {
+  for (size_t i = 0; i < size; i++) {
+    const unsigned char t = a[i];
+    a[i] = b[i];
+    b[i] = t;
+  }
+}
+
+/*
+ * **`qsort` is what a GL 1.x program draws transparency with.** A fixed-function pipeline blends
+ * in the order the triangles arrive, so anything see-through is sorted back to front by the
+ * program, every frame.
+ *
+ * Median-of-three quicksort, insertion-sorting runs under sixteen, and **recursing into the
+ * smaller partition only** while looping on the larger. That last part is not a refinement: it
+ * bounds the stack at log2(count) frames instead of count, and the input that would otherwise
+ * reach `count` is a *sorted* one - which is exactly what a scene hands this on the frame after
+ * it sorted, and a payload's stack has nothing to overflow into.
+ */
+void obs_qsort(void *base, size_t count, size_t size,
+               int (*compare)(const void *, const void *)) {
+  if (base == NULL || compare == NULL || size == 0u) {
+    return;
+  }
+  unsigned char *lo = (unsigned char *)base;
+  size_t n = count;
+  while (n > 1u) {
+    if (n < 16u) {
+      for (size_t i = 1; i < n; i++) {
+        for (size_t j = i; j > 0u && compare(lo + (j - 1u) * size, lo + j * size) > 0; j--) {
+          obs_swap_bytes(lo + (j - 1u) * size, lo + j * size, size);
+        }
+      }
+      return;
+    }
+    /* The median of the first, middle and last to the front - which is what stops a sorted
+     * input from partitioning into one element and the rest. */
+    unsigned char *const mid = lo + (n / 2u) * size;
+    unsigned char *const last = lo + (n - 1u) * size;
+    if (compare(mid, lo) < 0) {
+      obs_swap_bytes(mid, lo, size);
+    }
+    if (compare(last, mid) < 0) {
+      obs_swap_bytes(last, mid, size);
+      if (compare(mid, lo) < 0) {
+        obs_swap_bytes(mid, lo, size);
+      }
+    }
+    obs_swap_bytes(lo, mid, size);
+
+    /*
+     * **Both scans stop on an element equal to the pivot**, and that is not a detail. Letting
+     * the ascending scan walk over equals instead puts a run of identical elements entirely on
+     * one side: an array that is all one value partitions into n-1 and 0, every time, which is
+     * the quadratic case the median-of-three was chosen to avoid. Stopping both and swapping
+     * splits the run down the middle. `test_freestd_qsort_and_bsearch` counts the comparisons on
+     * an all-equal array, which is how that was found.
+     *
+     * The swap is followed by advancing both, or two equal elements would be exchanged forever.
+     */
+    size_t i = 1u;
+    size_t j = n - 1u;
+    for (;;) {
+      while (i <= j && compare(lo + i * size, lo) < 0) {
+        i++;
+      }
+      while (i <= j && compare(lo + j * size, lo) > 0) {
+        j--;
+      }
+      if (i > j) {
+        break;
+      }
+      obs_swap_bytes(lo + i * size, lo + j * size, size);
+      i++;
+      if (j == 0u) {
+        break;
+      }
+      j--;
+    }
+    obs_swap_bytes(lo, lo + j * size, size); /* the pivot into its place */
+
+    const size_t left = j;
+    const size_t right = n - j - 1u;
+    if (left < right) {
+      obs_qsort(lo, left, size, compare);
+      lo += (j + 1u) * size;
+      n = right;
+    } else {
+      obs_qsort(lo + (j + 1u) * size, right, size, compare);
+      n = left;
+    }
+  }
+}
+
+void *obs_bsearch(const void *key, const void *base, size_t count, size_t size,
+                  int (*compare)(const void *, const void *)) {
+  if (key == NULL || base == NULL || compare == NULL || size == 0u) {
+    return NULL;
+  }
+  const unsigned char *lo = (const unsigned char *)base;
+  size_t n = count;
+  while (n > 0u) {
+    const size_t half = n / 2u;
+    const unsigned char *const mid = lo + half * size;
+    const int c = compare(key, mid);
+    if (c == 0) {
+      return (void *)(size_t)mid;
+    }
+    if (c > 0) {
+      lo = mid + size;
+      n -= half + 1u;
+    } else {
+      n = half;
+    }
+  }
+  return NULL;
+}

@@ -68,7 +68,7 @@ The display subsystem opens exclusive HDMI video scanout on Bus 0 (`OBS_VIDEO_BU
 
 ### `uint32_t *oops_display_get_framebuffer(oops_display_t *disp)`
 * **When to use**: Direct 32bpp ARGB pixel access to the back buffer before flipping.
-* **Returns**: Pointer to the active back buffer pixels in write-combined direct memory.
+* **Returns**: Pointer to the active back buffer pixels, linear rows. On AGC this is CPU-cached Onion direct memory, GPU-mapped and 64 KiB aligned. It was heap memory from 2026-09-19 10:27 until that evening, which the GPU could not use. `oops_display_flip` tiles it onto a scanout buffer.
 
 ### `unsigned int oops_display_get_width(const oops_display_t *disp)`
 ### `unsigned int oops_display_get_height(const oops_display_t *disp)`
@@ -93,6 +93,20 @@ The display subsystem opens exclusive HDMI video scanout on Bus 0 (`OBS_VIDEO_BU
 ### `void oops_display_clear(oops_display_t *disp, uint32_t color)`
 * **When to use**: Fast fill of the entire active back buffer with an ARGB color word (e.g. `0xFF000000` for black).
 
+### `int oops_display_present(oops_display_t *disp, const uint32_t *pixels)`
+* **When to use**: Put another linear image of the display's size on screen without touching the framebuffer — oops-gl's front buffer. AGC tiles it and flips; GNM, whose framebuffer is a scanout buffer, copies it into the one on screen.
+* **Returns**: `0`, or negative without a display.
+
+### `int oops_display_read_shown(oops_display_t *disp, uint32_t *pixels)`
+* **Returns**: The image on screen, as a linear image of the display's size (AGC detiles its scanout buffer). `0`, or negative without a display.
+
+### Scanout buffers, for a renderer that draws them itself
+* `oops_display_scanout_layout_t oops_display_scanout_layout(const oops_display_t *disp)`: `OOPS_DISPLAY_SCANOUT_RX` - the GPU's 64KB_R_X render-target swizzle, addressed with `agc_tile_pixel` - on AGC, `OOPS_DISPLAY_SCANOUT_LINEAR` on GNM, `OOPS_DISPLAY_SCANOUT_NONE` without a display.
+* `uint32_t *oops_display_scanout(oops_display_t *disp, int which)`: the buffer the next flip shows (`0`) or the one on screen (`1`).
+* `int oops_display_wait_scanout(oops_display_t *disp)`: waits, up to about 100 ms, until no flip is pending, so the next buffer has left the screen. `1` on the timeout.
+* `int oops_display_flip_scanout(oops_display_t *disp)`: flips the next buffer as drawn, with nothing tiled or copied.
+* oops-gl's scanout path (`src/gl/gl_rx.h`) is written on these and off on the console until REQ-20260919T1927Z-7e21 measures the colour block's 64KB_R_X.
+
 ### `void oops_display_close(oops_display_t *disp)`
 * **When to use**: Clean shutdown to unregister video buffers and release the HDMI bus.
 
@@ -103,8 +117,17 @@ The display subsystem opens exclusive HDMI video scanout on Bus 0 (`OBS_VIDEO_BU
 High-performance 2D rasterizer operating on linear ARGB pixel surfaces. Supports clipping, alpha blending, antialiasing primitives, bitmap fonts, and sprite blitting.
 
 ### `oops_surface_t oops_display_get_surface(oops_display_t *disp)`
-* **When to use**: Wraps the display's current back buffer in an `oops_surface_t` for 2D draw calls.
-* **Returns**: Surface struct containing `pixels`, `width`, `height`, and row `pitch`.
+* **When to use**: Wraps the buffer the next flip shows in an `oops_surface_t` for 2D draw calls. That is normally the display's linear framebuffer. After a renderer calls `oops_display_use_scanout` - oops-gl's scanout path - it is the next scanout buffer, in the GPU's 64KB_R_X layout, so a CPU overlay such as gl1-cube's HUD lands in the frame being flipped. Defined in `src/display.c` since 2026-09-19; it was in `draw.c`.
+* **Returns**: Surface struct containing `pixels`, `width`, `height`, `pitch`, and `layout`.
+
+### Surface layouts (`oops_surface_t.layout`)
+* `OOPS_SURFACE_LINEAR` (0): rows `pitch` pixels apart. Every initializer that leaves `layout` out gets this.
+* `OOPS_SURFACE_RX`: the GPU's 64KB_R_X swizzle at 32 bits a pixel, the AGC scanout buffers' layout. It is 128 x 128 blocks row by row, `pitch` (a multiple of 128) pixels to a row of blocks, each block addressed by `agc_tile_pixel`.
+* Every `oops_draw_*` call takes either layout, as destination or blit source, and `test_draw_rx_layout_matches_linear` checks the two draw the same scene pixel for pixel. On a scanout buffer, blended calls read write-combined memory the CPU does not cache, so they are much slower than on the linear framebuffer.
+
+### `oops_display_scanout_layout_t oops_display_use_scanout(oops_display_t *disp)`
+* **When to use**: Once, by a renderer that draws the scanout buffers in place and flips them with `oops_display_flip_scanout`, so that `oops_display_get_surface` describes the next scanout buffer.
+* **Returns**: The scanout layout, or `OOPS_DISPLAY_SCANOUT_NONE` (and no change) without scanout buffers.
 
 ### `oops_surface_t oops_surface_from_sprite(const oops_sprite_t *sprite)`
 * **When to use**: Wrap a build-time sprite (32-bit pixels compiled into `.rodata`) as a read-only source surface, without copying. Use the result only as a blit source. Returns an empty surface (`NULL` pixels) for a `NULL` sprite.
@@ -235,6 +258,7 @@ Low-level bare-metal access to PS5 RDNA2 GFX10.3 hardware command queues, comput
 * `void agc_tile_init(void)`: Builds the swizzle lookup table. Idempotent; `agc_tile_surface()` calls it on first use.
 * `void agc_tile_surface(void *dest, const void *src, uint32_t width, uint32_t height)`: Converts a linear 32bpp RGBX raster buffer into the RDNA2 64 KB micro-tiled display scanout layout (`kRenderTarget = 27`, `64KB_R_X`).
 * `static inline void agc_detile_pixel(uint32_t offset_dwords, uint32_t *out_x, uint32_t *out_y)`: Closed-form inverse — recovers the (x, y) pixel a dword offset within a tile came from.
+* `static inline uint32_t agc_tile_pixel(uint32_t x, uint32_t y)`: The forward direction for one pixel — the dword offset within a tile of (x, y) — for addressing a tiled surface in place. `test_agc_tile_pixel_inverts_detile` checks it against `agc_detile_pixel` and `agc_tile_surface` for all 16,384 pixels.
 
 ---
 

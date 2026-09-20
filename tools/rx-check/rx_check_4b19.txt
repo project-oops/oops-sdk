@@ -1,0 +1,5 @@
+rx-check: 166-agc/primitive-draw, color-target rows, 256x256
+multiblock-256: 262144 of 262144 bytes dumped
+  block order 0 1 2 3: 223 of 223 rows are one run, no gaps, 24512 pixels  <- the tool's own order
+  the tool's order: 223 of 223 rows are one run, 0 gap(s), 24512 pixels drawn; the check reported 24512
+VERDICT: the blocks run in the tool's own order, and it is the only order that does

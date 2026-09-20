@@ -22,7 +22,10 @@ endif
 
 OOPS_TARGET_FLAGS := -DOOPS_TARGET=$(OOPS_TARGET_NUM)
 TARGET_FLAGS := -target x86_64-unknown-freebsd -ffreestanding -fno-builtin -nostdlib -fPIC -fno-stack-protector
-CFLAGS := $(TARGET_FLAGS) $(OOPS_TARGET_FLAGS) -std=c11 -Wall -Wextra -Werror -Iinclude
+# `include/libc` is on the **target** path only: <math.h>, <string.h> and <stdlib.h> under the
+# names a port calls. HOST_CFLAGS below must not have it, or a host test including <string.h>
+# gets the freestanding one instead of the real library.
+CFLAGS := $(TARGET_FLAGS) $(OOPS_TARGET_FLAGS) -std=c11 -Wall -Wextra -Werror -Iinclude -Iinclude/libc
 BUILD := build/$(TARGET)
 
 # Graphics backend source segregation:
@@ -47,10 +50,15 @@ OBJS := \
     $(BUILD)/gl/gl_context.o \
     $(BUILD)/gl/gl_state.o \
     $(BUILD)/gl/gl_matrix.o \
+    $(BUILD)/gl/gl_glu.o \
+    $(BUILD)/gl/glut.o \
     $(BUILD)/gl/gl_draw.o \
     $(BUILD)/gl/gl_list.o \
     $(BUILD)/gl/gl_attrib.o \
     $(BUILD)/gl/gl_raster.o \
+    $(BUILD)/gl/gl_eval.o \
+    $(BUILD)/gl/gl_select.o \
+    $(BUILD)/gl/gl_pixel.o \
     $(BUILD)/gl/glsl_lex.o \
     $(BUILD)/gl/glsl_parse.o \
     $(BUILD)/gl/glsl_pp.o \
@@ -83,6 +91,8 @@ OBJS := \
     $(BUILD)/draw/png.o \
     $(BUILD)/system/pkg.o \
     $(BUILD)/system/freestd.o \
+    $(BUILD)/system/scanf.o \
+    $(BUILD)/system/libc.o \
     $(BUILD)/system/syscall.o \
     $(BUILD)/system/krw.o \
     $(BUILD)/system/procctl.o \
@@ -150,6 +160,7 @@ TEST_SRCS := \
     src/system/fs.c \
     src/system/pkg.c \
     src/system/freestd.c \
+    src/system/scanf.c \
     src/system/syscall.c \
     src/system/krw.c \
     src/system/procctl.c \
@@ -164,10 +175,16 @@ TEST_SRCS := \
     src/gl/gl_context.c \
     src/gl/gl_state.c \
     src/gl/gl_matrix.c \
+    src/gl/gl_glu.c \
+    src/gl/glut.c \
+    src/gl/glut_font.c \
     src/gl/gl_draw.c \
     src/gl/gl_list.c \
     src/gl/gl_attrib.c \
     src/gl/gl_raster.c \
+    src/gl/gl_eval.c \
+    src/gl/gl_select.c \
+    src/gl/gl_pixel.c \
     src/gl/glsl_lex.c \
     src/gl/glsl_parse.c \
     src/gl/glsl_pp.c \
@@ -177,7 +194,7 @@ TEST_SRCS := \
 
 HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -D_GNU_SOURCE -DOOPS_HOST_BUILD $(OOPS_TARGET_FLAGS)
 
-.PHONY: all clean test test-unit test-int
+.PHONY: all clean test test-unit test-int checks libc-check header-check
 
 all: $(BUILD)/liboops.a
 
@@ -195,6 +212,22 @@ $(BUILD)/tests/test_runner: all $(TEST_SRCS)
 
 test: $(BUILD)/tests/test_runner
 	$(BUILD)/tests/test_runner
+
+# The two checks that a test cannot make, because what they look at is the link and the
+# preprocessor rather than a value a function returns. `libc-check` fails when a name the
+# `<libc/*.h>` headers declare is left undefined by a payload link - which links cleanly and
+# faults on the console. `header-check` fails when `include/GL/gl.h` stops compiling beside a
+# real `GL/glext.h`, which is the only place a hosted title's two sets of GL headers meet.
+#
+# Separate from `test` because both need the target compiler rather than the host one, and a
+# `make test` on a machine without it should still run the tests.
+libc-check:
+	@bash tools/libc-check/build.sh
+
+header-check:
+	@bash tools/header-check/build.sh
+
+checks: libc-check header-check
 
 test-unit: $(BUILD)/tests/test_runner
 	$(BUILD)/tests/test_runner unit

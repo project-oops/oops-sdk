@@ -11,7 +11,7 @@ static void test_pipeline_draw_and_tile(void) {
   uint32_t *tiled_fb = (uint32_t *)calloc(width * height, sizeof(uint32_t));
   ASSERT_TRUE(linear_fb != NULL && tiled_fb != NULL);
 
-  oops_surface_t surf = {linear_fb, width, height, width};
+  oops_surface_t surf = {linear_fb, width, height, width, OOPS_SURFACE_LINEAR};
 
   /* 1. Clear with dark blue */
   oops_draw_clear(&surf, OOPS_RGB(10, 20, 40));

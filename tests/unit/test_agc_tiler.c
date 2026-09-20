@@ -285,6 +285,32 @@ static void test_agc_detile_pixel_golden(void) {
   ASSERT_EQ(y, 0u);
 }
 
+/* agc_tile_pixel is agc_detile_pixel run backwards, for every pixel of a block, and agrees with
+ * the whole-surface tiler, whose placement the display has shown correctly. */
+static void test_agc_tile_pixel_inverts_detile(void) {
+  for (uint32_t i = 0; i < 16384u; i++) {
+    uint32_t x = 0, y = 0;
+    agc_detile_pixel(i, &x, &y);
+    ASSERT_EQ(agc_tile_pixel(x, y), i);
+  }
+  ASSERT_EQ(agc_tile_pixel(15u, 15u), 0x43fu);
+  ASSERT_EQ(agc_tile_pixel(32u, 21u), 0x294u);
+
+  enum { W = 128, H = 128 };
+  uint32_t *lin = (uint32_t *)malloc((size_t)W * H * sizeof(uint32_t));
+  uint32_t *tiled = (uint32_t *)calloc((size_t)W * H, sizeof(uint32_t));
+  ASSERT_TRUE(lin != NULL && tiled != NULL);
+  for (uint32_t i = 0; i < (uint32_t)(W * H); i++) lin[i] = 0xff000000u | (i * 2654435761u >> 8);
+  agc_tile_surface(tiled, lin, W, H);
+  for (uint32_t y = 0; y < H; y++) {
+    for (uint32_t x = 0; x < W; x++) {
+      ASSERT_EQ(tiled[agc_tile_pixel(x, y)], lin[y * W + x]);
+    }
+  }
+  free(tiled);
+  free(lin);
+}
+
 static void test_agc_detile_surface_roundtrip(void) {
   enum { W = 256, H = 256 };
   size_t n = (size_t)W * H;
@@ -320,6 +346,7 @@ void run_unit_tests_agc_tiler(void) {
   RUN_TEST(test_tiler_bijection_partial_tiles);
   RUN_TEST(test_tiler_null_safety);
   RUN_TEST(test_agc_detile_pixel_golden);
+  RUN_TEST(test_agc_tile_pixel_inverts_detile);
   RUN_TEST(test_agc_detile_surface_roundtrip);
   RUN_TEST(test_agc_dcb_desc_contract);
   RUN_TEST(test_agc_display_acceleration_query);

@@ -101,7 +101,12 @@ void glEnableClientState(GLenum array) {
         case GL_VERTEX_ARRAY:         ctx->array_vertex.enabled = GL_TRUE; break;
         case GL_COLOR_ARRAY:          ctx->array_color.enabled = GL_TRUE; break;
         case GL_NORMAL_ARRAY:         ctx->array_normal.enabled = GL_TRUE; break;
-        case GL_TEXTURE_COORD_ARRAY:  ctx->array_texcoord.enabled = GL_TRUE; break;
+        case GL_TEXTURE_COORD_ARRAY:  /* the client active unit's (GL 1.3, 2.8) */
+            ctx->array_texcoord[ctx->client_active_texture].enabled = GL_TRUE; break;
+        case GL_EDGE_FLAG_ARRAY:      ctx->array_edge_flag.enabled = GL_TRUE; break;
+        case GL_INDEX_ARRAY:          ctx->array_index.enabled = GL_TRUE; break;
+        case GL_SECONDARY_COLOR_ARRAY: ctx->array_secondary.enabled = GL_TRUE; break;
+        case GL_FOG_COORD_ARRAY:      ctx->array_fog_coord.enabled = GL_TRUE; break;
         /* Same reasoning as glEnable: an array this subset does not keep is refused rather
          * than dropped, so a caller asking for one finds out from glGetError() instead of
          * from geometry that renders without it. */
@@ -116,9 +121,63 @@ void glDisableClientState(GLenum array) {
         case GL_VERTEX_ARRAY:         ctx->array_vertex.enabled = GL_FALSE; break;
         case GL_COLOR_ARRAY:          ctx->array_color.enabled = GL_FALSE; break;
         case GL_NORMAL_ARRAY:         ctx->array_normal.enabled = GL_FALSE; break;
-        case GL_TEXTURE_COORD_ARRAY:  ctx->array_texcoord.enabled = GL_FALSE; break;
+        case GL_TEXTURE_COORD_ARRAY:
+            ctx->array_texcoord[ctx->client_active_texture].enabled = GL_FALSE; break;
+        case GL_EDGE_FLAG_ARRAY:      ctx->array_edge_flag.enabled = GL_FALSE; break;
+        case GL_INDEX_ARRAY:          ctx->array_index.enabled = GL_FALSE; break;
+        case GL_SECONDARY_COLOR_ARRAY: ctx->array_secondary.enabled = GL_FALSE; break;
+        case GL_FOG_COORD_ARRAY:      ctx->array_fog_coord.enabled = GL_FALSE; break;
         default: gl_record_error(ctx, GL_INVALID_ENUM); break;
     }
+}
+
+/* One GLboolean per element; a stride of zero means tightly packed, which for this type is one
+ * byte. Client state, so not compiled into a list. */
+void glEdgeFlagPointer(GLsizei stride, const GLvoid *pointer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (stride < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    ctx->array_edge_flag.size = 1;
+    ctx->array_edge_flag.type = GL_UNSIGNED_BYTE;
+    ctx->array_edge_flag.stride = stride;
+    ctx->array_edge_flag.pointer = pointer;
+    ctx->array_edge_flag.buffer = ctx->bound_array_buffer;
+}
+
+/* The index array's element size, or 0 for a type GL does not allow here. */
+static size_t gl_index_type_bytes(GLenum type) {
+    switch (type) {
+        case GL_UNSIGNED_BYTE: return sizeof(GLubyte);
+        case GL_SHORT:         return sizeof(GLshort);
+        case GL_INT:           return sizeof(GLint);
+        case GL_FLOAT:         return sizeof(GLfloat);
+        case GL_DOUBLE:        return sizeof(GLdouble);
+        default:               return 0u;
+    }
+}
+
+/* The colour-index array. Client state, validated as the specification lists its types. Read
+ * only when an array element is compiled into a display list, where it becomes the glIndex call
+ * it stands for. */
+void glIndexPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (gl_index_type_bytes(type) == 0u) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (stride < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    ctx->array_index.size = 1;
+    ctx->array_index.type = type;
+    ctx->array_index.stride = stride;
+    ctx->array_index.pointer = pointer;
+    ctx->array_index.buffer = ctx->bound_array_buffer;
 }
 
 /* **The buffer bound *now* is the one this array reads from later.** GL ties the array to the
@@ -126,9 +185,52 @@ void glDisableClientState(GLenum array) {
  * draw - so a program that binds a buffer, sets four pointers, then binds a different buffer
  * and sets a fifth ends up with arrays reading from two buffers at once, which is exactly what
  * it meant. Capturing the name here is what makes that work. */
+/* **An array's type and size are checked** as Mesa's varray.c checks them for GL 1.x - the
+ * vertex array SHORT, INT, FLOAT or DOUBLE in 2 to 4 components (varray.c:1180-1193), the normal
+ * array BYTE, SHORT, INT, FLOAT or DOUBLE (:1250-1262), the colour array any of the eight in 3
+ * or 4 (:1330-1350), the texture coordinate array SHORT, INT, FLOAT or DOUBLE in 1 to 4
+ * (:1615-1629) - a type outside the list an enum error (:918), a size or a negative stride a
+ * value error. Nothing was checked until 2026-09-19, and nothing but floats (and a colour's
+ * unsigned bytes) was read. `types` is a mask of the bit for each legal type below. */
+enum {
+    GL_AT_BYTE = 1, GL_AT_UBYTE = 2, GL_AT_SHORT = 4, GL_AT_USHORT = 8, GL_AT_INT = 16,
+    GL_AT_UINT = 32, GL_AT_FLOAT = 64, GL_AT_DOUBLE = 128
+};
+
+static unsigned gl_array_type_bit(GLenum type) {
+    switch (type) {
+        case GL_BYTE: return GL_AT_BYTE;
+        case GL_UNSIGNED_BYTE: return GL_AT_UBYTE;
+        case GL_SHORT: return GL_AT_SHORT;
+        case GL_UNSIGNED_SHORT: return GL_AT_USHORT;
+        case GL_INT: return GL_AT_INT;
+        case GL_UNSIGNED_INT: return GL_AT_UINT;
+        case GL_FLOAT: return GL_AT_FLOAT;
+        case GL_DOUBLE: return GL_AT_DOUBLE;
+        default: return 0u;
+    }
+}
+
+static GLboolean gl_array_pointer_ok(gl_context_t *ctx, unsigned types, GLint size, GLint size_min,
+                                     GLint size_max, GLenum type, GLsizei stride) {
+    if ((gl_array_type_bit(type) & types) == 0u) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return GL_FALSE;
+    }
+    if (size < size_min || size > size_max || stride < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
+    if (!gl_array_pointer_ok(ctx, GL_AT_SHORT | GL_AT_INT | GL_AT_FLOAT | GL_AT_DOUBLE, size, 2, 4,
+                             type, stride)) {
+        return;
+    }
     ctx->array_vertex.size = size;
     ctx->array_vertex.type = type;
     ctx->array_vertex.stride = stride;
@@ -139,6 +241,7 @@ void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *poin
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
+    if (!gl_array_pointer_ok(ctx, 0xffu, size, 3, 4, type, stride)) return;
     ctx->array_color.size = size;
     ctx->array_color.type = type;
     ctx->array_color.stride = stride;
@@ -149,21 +252,59 @@ void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *point
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
-    ctx->array_texcoord.size = size;
-    ctx->array_texcoord.type = type;
-    ctx->array_texcoord.stride = stride;
-    ctx->array_texcoord.pointer = pointer;
-    ctx->array_texcoord.buffer = ctx->bound_array_buffer;
+    if (!gl_array_pointer_ok(ctx, GL_AT_SHORT | GL_AT_INT | GL_AT_FLOAT | GL_AT_DOUBLE, size, 1, 4,
+                             type, stride)) {
+        return;
+    }
+    /* The client active unit's array (GL 1.3, 2.8). */
+    gl_client_array_t *a = &ctx->array_texcoord[ctx->client_active_texture];
+    a->size = size;
+    a->type = type;
+    a->stride = stride;
+    a->pointer = pointer;
+    a->buffer = ctx->bound_array_buffer;
 }
 
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
+    if (!gl_array_pointer_ok(ctx, GL_AT_BYTE | GL_AT_SHORT | GL_AT_INT | GL_AT_FLOAT | GL_AT_DOUBLE,
+                             3, 3, 3, type, stride)) {
+        return;
+    }
     ctx->array_normal.size = 3;
     ctx->array_normal.type = type;
     ctx->array_normal.stride = stride;
     ctx->array_normal.pointer = pointer;
     ctx->array_normal.buffer = ctx->bound_array_buffer;
+}
+
+/* GL 1.4's secondary colour array: any of the eight types, normalised as the colour array is. **3
+ * or 4 components, as Mesa accepts them** (main/varray.c:1536-1553, a minimum of 3 and BGRA_OR_4's
+ * maximum), where the GL 1.4 specification's table lists only 3 - so a program written against
+ * Mesa is not refused here. Only three are read either way: the secondary alpha is never used. */
+void glSecondaryColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (!gl_array_pointer_ok(ctx, 0xffu, size, 3, 4, type, stride)) return;
+    ctx->array_secondary.size = size;
+    ctx->array_secondary.type = type;
+    ctx->array_secondary.stride = stride;
+    ctx->array_secondary.pointer = pointer;
+    ctx->array_secondary.buffer = ctx->bound_array_buffer;
+}
+
+/* GL 1.4's fog coordinate array: one GL_FLOAT or GL_DOUBLE per element, read as a value (Mesa
+ * main/varray.c:1408-1425 - its third legal type, half float, is not GL 1.x's). */
+void glFogCoordPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (!gl_array_pointer_ok(ctx, GL_AT_FLOAT | GL_AT_DOUBLE, 1, 1, 1, type, stride)) return;
+    ctx->array_fog_coord.size = 1;
+    ctx->array_fog_coord.type = type;
+    ctx->array_fog_coord.stride = stride;
+    ctx->array_fog_coord.pointer = pointer;
+    ctx->array_fog_coord.buffer = ctx->bound_array_buffer;
 }
 
 /* `glInterleavedArrays(format, stride, pointer)` - all four arrays from one buffer.
@@ -237,6 +378,11 @@ void glInterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer) {
     const GLsizei real_stride = stride ? stride : (GLsizei)packed;
     const uint8_t *base = (const uint8_t *)pointer;
 
+    /* No interleaved format carries edge flags or colour indices, and the specification disables
+     * both arrays here too (Mesa main/varray.c:2960-2961). */
+    glDisableClientState(GL_EDGE_FLAG_ARRAY);
+    glDisableClientState(GL_INDEX_ARRAY);
+
     if (tc) {
         glTexCoordPointer(tc, GL_FLOAT, real_stride, base ? base + off_t : NULL);
         glEnableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -268,10 +414,7 @@ void glInterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer) {
  * ------------------------------------------------------------------------- */
 
 void glBegin(GLenum mode) {
-    {
-        GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        if (gl_list_capture(GL_LIST_OP_BEGIN, mode, 0, 0, f)) return;
-    }
+    if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_BEGIN, gl_la_e(mode))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     /* Refused here rather than at glEnd, so the vertices in between are never collected and
@@ -300,10 +443,8 @@ void glVertex3fv(const GLfloat *v) {
 }
 
 void glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
-    {
-        GLfloat f[4] = {x, y, z, w};
-        if (gl_list_capture(GL_LIST_OP_VERTEX, 0, 0, 0, f)) return;
-    }
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_VERTEX, gl_la_f(x), gl_la_f(y), gl_la_f(z), gl_la_f(w))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !ctx->imm_active) return;
     if (ctx->imm_count >= OOPS_GL_MAX_IMMEDIATE_VERTS) return;
@@ -317,24 +458,51 @@ void glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     v->g = ctx->cur_color[1];
     v->b = ctx->cur_color[2];
     v->a = ctx->cur_color[3];
-    v->u = ctx->cur_texcoord[0];
-    v->v = ctx->cur_texcoord[1];
     v->nx = ctx->cur_normal[0];
     v->ny = ctx->cur_normal[1];
     v->nz = ctx->cur_normal[2];
-    gl_apply_texgen(ctx, v);
+    v->edge = ctx->cur_edge_flag;
+    v->sr = ctx->cur_secondary[0];
+    v->sg = ctx->cur_secondary[1];
+    v->sb = ctx->cur_secondary[2];
+    v->fogc = ctx->cur_fog_coord;
+    gl_vertex_texcoord(ctx, v, ctx->cur_texcoord);
 }
 
-/* Texture coordinate generation, computed here because this is where the object coordinates and
- * the object-space normal are both in hand and the modelview is still the one that belongs to
- * them. Doing it later would need all three carried forward.
- *
- * Only the coordinates whose generation is enabled are replaced; the rest keep what glTexCoord
- * left, which is what lets a program generate s and supply t by hand.
- *
- * **Only s and t reach the sampler.** The texture unit here is 2D, so r and q are generated into
- * the current texture coordinate for glGetFloatv and the display list to see, and go no further.
- * That is a real limit and it is the same one glTexCoord4 has. */
+/* glEdgeFlag - a vertex attribute like the colour, so compiled into lists and saved with
+ * GL_CURRENT_BIT. It marks whether the polygon edge starting at the next vertex is a boundary
+ * edge; only glPolygonMode's GL_LINE and GL_POINT read it. */
+void glEdgeFlag(GLboolean flag) {
+    if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_EDGE_FLAG, gl_la_u(flag))) return;
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    ctx->cur_edge_flag = flag ? GL_TRUE : GL_FALSE;
+}
+
+void glEdgeFlagv(const GLboolean *flag) {
+    if (flag) glEdgeFlag(*flag);
+}
+
+/* glIndex - the current colour index. A vertex attribute like the colour, so compiled into lists
+ * and saved with GL_CURRENT_BIT, and in an RGBA context kept and never drawn with. Every spelling
+ * is a plain cast to float, not a normalisation: an index is a number, not an intensity (Mesa
+ * vbo/vbo_attrib_tmp.h:1978-1990 and :2705-2761). */
+void glIndexf(GLfloat c) {
+    if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_INDEX, gl_la_f(c))) return;
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    ctx->cur_index = c;
+}
+void glIndexd(GLdouble c)  { glIndexf((GLfloat)c); }
+void glIndexi(GLint c)     { glIndexf((GLfloat)c); }
+void glIndexs(GLshort c)   { glIndexf((GLfloat)c); }
+void glIndexub(GLubyte c)  { glIndexf((GLfloat)c); }
+void glIndexfv(const GLfloat *c)  { if (c) glIndexf(c[0]); }
+void glIndexdv(const GLdouble *c) { if (c) glIndexf((GLfloat)c[0]); }
+void glIndexiv(const GLint *c)    { if (c) glIndexf((GLfloat)c[0]); }
+void glIndexsv(const GLshort *c)  { if (c) glIndexf((GLfloat)c[0]); }
+void glIndexubv(const GLubyte *c) { if (c) glIndexf((GLfloat)c[0]); }
+
 /* PA_CL_UCP_0_X and the 23 registers after it - six planes of four floats, at context offset
  * 0x16F (byte 0x0285BC, mesa/src/amd/registers/gfx103.json). Consecutive, so one SET_CONTEXT_REG
  * carries the lot. A plane whose enable is off is still written, as zero: the enable bit in
@@ -367,38 +535,85 @@ GLboolean gl_compute_clip_plane_hw(const gl_context_t *ctx, int i, float out[4])
     return GL_TRUE;
 }
 
-void gl_apply_texgen(const gl_context_t *ctx, gl_vertex_t *v) {
-    if (!ctx || !v) return;
-    if (!ctx->texgen_enabled[0] && !ctx->texgen_enabled[1] &&
-        !ctx->texgen_enabled[2] && !ctx->texgen_enabled[3]) {
-        return;
-    }
+/* The vertex's texture coordinate: generated where generation is on, then projected.
+ *
+ * Generation is computed here because this is where the object coordinates and the object-space
+ * normal are both in hand and the modelview is still the one that belongs to them. Only the
+ * coordinates whose generation is enabled are replaced; the rest keep **the vertex's own** -
+ * which is what lets a program generate s and supply t by hand. That was the current glTexCoord
+ * value until 2026-09-19 even for a vertex drawn from arrays, so generating s alone replaced the
+ * array's t with a coordinate the program had set for some other vertex.
+ *
+ * **The divide by q happens here, once, after generation.** glTexCoord4 used to divide as it
+ * stored, which made glGetFloatv(GL_CURRENT_TEXTURE_COORDS) answer s/q where GL answers s - and
+ * left a *generated* q undivided, so eye-linear projective texturing (a texture projected from a
+ * light) came out as if q were 1. Dividing per vertex is the approximation this path makes: GL
+ * interpolates s, t and q and divides per fragment, and the two differ inside a triangle whose
+ * corners have different q. The texture unit is 2D, so s/q and t/q are what reach the sampler; r
+ * travels as far as the queries and the display list. */
+static void gl_generate_texcoord(const gl_context_t *ctx, const gl_tex_unit_t *tu,
+                                 const gl_vertex_t *v, float gen[4]);
 
+/* **Then the texture matrix**, which GL applies to every texture coordinate - supplied or
+ * generated - before it is used. The stack was kept, pushed, popped, loaded and queried, and
+ * never applied, until 2026-09-19: a program that scrolled or scaled a texture through
+ * glMatrixMode(GL_TEXTURE) drew it unmoved, and a projected texture (eye-linear generation
+ * followed by a projection in the texture matrix) came out as the raw planes. */
+void gl_vertex_texcoord4(const gl_context_t *ctx, GLuint unit, const gl_vertex_t *v,
+                         const float tc[4], float out[4]) {
+    const gl_tex_unit_t *tu = &ctx->tex_unit[unit];
+    float gen[4] = {tc[0], tc[1], tc[2], tc[3]};
+    if (tu->texgen_enabled[0] || tu->texgen_enabled[1] ||
+        tu->texgen_enabled[2] || tu->texgen_enabled[3]) {
+        gl_generate_texcoord(ctx, tu, v, gen);
+    }
+    mat4_transform_vec4(out, &tu->texture_stack[tu->texture_depth], gen);
+}
+
+void gl_vertex_texcoord(const gl_context_t *ctx, gl_vertex_t *v,
+                        float tcs[OOPS_GL_MAX_TEXTURE_UNITS][4]) {
+    if (!ctx || !v || !tcs) return;
+    /* **Kept undivided**, all four: the rasteriser interpolates s, t, r and q and divides per
+     * fragment, as GL does. The divide was made here until 2026-09-19. Each unit through its own
+     * generation and texture matrix. */
+    for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        float gen[4];
+        gl_vertex_texcoord4(ctx, u, v, tcs[u], gen);
+        for (int k = 0; k < 4; k++) v->tc[u][k] = gen[k];
+    }
+}
+
+static void gl_generate_texcoord(const gl_context_t *ctx, const gl_tex_unit_t *tu,
+                                 const gl_vertex_t *v, float gen[4]) {
     const float obj[4] = {v->x, v->y, v->z, v->w};
     const gl_mat4_t *mv = &ctx->modelview_stack[ctx->modelview_depth];
 
     float eye[4];
     mat4_transform_vec4(eye, mv, obj);
 
-    /* The eye-space normal, for sphere mapping. The upper 3x3 of the modelview is used directly
-     * rather than its inverse-transpose: the two agree for the rotations and translations a
-     * sphere map is used with, and the reflection below renormalises anyway. */
-    float ne[3] = {
-        mv->m[0] * v->nx + mv->m[4] * v->ny + mv->m[8]  * v->nz,
-        mv->m[1] * v->nx + mv->m[5] * v->ny + mv->m[9]  * v->nz,
-        mv->m[2] * v->nx + mv->m[6] * v->ny + mv->m[10] * v->nz,
-    };
-    float nlen = gl_sqrt(ne[0] * ne[0] + ne[1] * ne[1] + ne[2] * ne[2]);
-    if (nlen > 0.0f) { ne[0] /= nlen; ne[1] /= nlen; ne[2] /= nlen; }
+    /* The eye-space normal - the one lighting uses, through the inverse-transpose and unit length
+     * only under GL_NORMALIZE or GL_RESCALE_NORMAL, as Mesa's fixed-function program takes it
+     * for every generation mode. This used the modelview's own upper 3x3 and always normalised
+     * until 2026-09-19, which differed from lighting's normal under a non-uniform scale. */
+    float nm[9];
+    gl_normal_matrix_of(mv, nm);
+    const float obj_n[3] = {v->nx, v->ny, v->nz};
+    float ne[3];
+    gl_eye_normal(ctx, nm, obj_n, ne);
 
-    /* Sphere mapping, computed once and only if something asks for it. The eye vector points
-     * from the eye to the vertex; u is that normalised, r is u reflected about the normal, and
-     * the coordinate is r scaled into [0,1] by the sphere's own radius term. */
+    /* The reflection of the eye vector - from the eye to the vertex, normalised - about the
+     * normal: r = u - 2n(n.u). Sphere mapping scales it into [0, 1] by the sphere's own radius
+     * term; GL 1.3's reflection map is r itself. Computed once and only if something asks. */
     float sphere_s = 0.0f, sphere_t = 0.0f;
-    const GLboolean wants_sphere =
-        (GLboolean)((ctx->texgen_enabled[0] && ctx->texgen_mode[0] == GL_SPHERE_MAP) ||
-                    (ctx->texgen_enabled[1] && ctx->texgen_mode[1] == GL_SPHERE_MAP));
-    if (wants_sphere) {
+    float refl[3] = {0.0f, 0.0f, 0.0f};
+    GLboolean wants_reflect = GL_FALSE;
+    for (int i = 0; i < 3; i++) {
+        if (tu->texgen_enabled[i] && (tu->texgen_mode[i] == GL_SPHERE_MAP ||
+                                      tu->texgen_mode[i] == GL_REFLECTION_MAP)) {
+            wants_reflect = GL_TRUE;
+        }
+    }
+    if (wants_reflect) {
         float u[3] = {eye[0], eye[1], eye[2]};
         float ulen = gl_sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
         if (ulen > 0.0f) { u[0] /= ulen; u[1] /= ulen; u[2] /= ulen; }
@@ -406,6 +621,7 @@ void gl_apply_texgen(const gl_context_t *ctx, gl_vertex_t *v) {
         const float r0 = u[0] - ne[0] * d;
         const float r1 = u[1] - ne[1] * d;
         const float r2 = u[2] - ne[2] * d;
+        refl[0] = r0; refl[1] = r1; refl[2] = r2;
         const float mterm = 2.0f * gl_sqrt(r0 * r0 + r1 * r1 + (r2 + 1.0f) * (r2 + 1.0f));
         if (mterm != 0.0f) {
             sphere_s = r0 / mterm + 0.5f;
@@ -418,32 +634,35 @@ void gl_apply_texgen(const gl_context_t *ctx, gl_vertex_t *v) {
         }
     }
 
-    float gen[4] = {ctx->cur_texcoord[0], ctx->cur_texcoord[1],
-                    ctx->cur_texcoord[2], ctx->cur_texcoord[3]};
     for (int i = 0; i < 4; i++) {
-        if (!ctx->texgen_enabled[i]) continue;
-        switch (ctx->texgen_mode[i]) {
+        if (!tu->texgen_enabled[i]) continue;
+        switch (tu->texgen_mode[i]) {
             case GL_OBJECT_LINEAR: {
-                const float *p = ctx->texgen_object_plane[i];
+                const float *p = tu->texgen_object_plane[i];
                 gen[i] = p[0] * obj[0] + p[1] * obj[1] + p[2] * obj[2] + p[3] * obj[3];
                 break;
             }
             case GL_EYE_LINEAR: {
                 /* The plane was already put through the inverse modelview when it was set. */
-                const float *p = ctx->texgen_eye_plane[i];
+                const float *p = tu->texgen_eye_plane[i];
                 gen[i] = p[0] * eye[0] + p[1] * eye[1] + p[2] * eye[2] + p[3] * eye[3];
                 break;
             }
             case GL_SPHERE_MAP:
                 gen[i] = (i == 0) ? sphere_s : sphere_t;
                 break;
+            /* GL 1.3's cube-map modes, s, t and r only (glTexGen refuses q): the reflection and
+             * the eye-space normal, each a direction a cube map is looked up by. */
+            case GL_REFLECTION_MAP:
+                if (i < 3) gen[i] = refl[i];
+                break;
+            case GL_NORMAL_MAP:
+                if (i < 3) gen[i] = ne[i];
+                break;
             default:
                 break;
         }
     }
-
-    v->u = gen[0];
-    v->v = gen[1];
 }
 
 void glColor3f(GLfloat red, GLfloat green, GLfloat blue) {
@@ -455,9 +674,9 @@ void glColor3fv(const GLfloat *v) {
 }
 
 void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
-    {
-        GLfloat f[4] = {red, green, blue, alpha};
-        if (gl_list_capture(GL_LIST_OP_COLOR, 0, 0, 0, f)) return;
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_COLOR, gl_la_f(red), gl_la_f(green), gl_la_f(blue), gl_la_f(alpha))) {
+        return;
     }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
@@ -465,6 +684,8 @@ void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
     ctx->cur_color[1] = (float)green;
     ctx->cur_color[2] = (float)blue;
     ctx->cur_color[3] = (float)alpha;
+    /* GL_COLOR_MATERIAL: the new colour is the tracked material's too. */
+    if (ctx->cap_color_material) gl_color_material_update(ctx);
 }
 
 void glColor4fv(const GLfloat *v) {
@@ -504,32 +725,25 @@ void glColor4ub(GLubyte red, GLubyte green, GLubyte blue, GLubyte alpha) {
  * A q of zero is left alone rather than dividing: the specification does not define it, and
  * producing an infinity here would poison the vertex instead of just this coordinate. */
 void glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
-    {
-        GLfloat f[4] = {s, t, r, q};
-        if (gl_list_capture(GL_LIST_OP_TEXCOORD, 0, 0, 0, f)) return;
-    }
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_TEXCOORD, gl_la_f(s), gl_la_f(t), gl_la_f(r), gl_la_f(q))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
-    if (q != 0.0f && q != 1.0f) {
-        ctx->cur_texcoord[0] = (float)(s / q);
-        ctx->cur_texcoord[1] = (float)(t / q);
-        ctx->cur_texcoord[2] = (float)(r / q);
-    } else {
-        ctx->cur_texcoord[0] = (float)s;
-        ctx->cur_texcoord[1] = (float)t;
-        ctx->cur_texcoord[2] = (float)r;
-    }
-    ctx->cur_texcoord[3] = (float)q;
+    /* Stored as given. The divide by q belongs to the vertex (gl_vertex_texcoord), after any
+     * generation - not here, where it made the current coordinate answer s/q to a query. Unit
+     * 0's, whichever unit is active: glTexCoord is glMultiTexCoord(GL_TEXTURE0) (GL 1.3, 2.7). */
+    ctx->cur_texcoord[0][0] = (float)s;
+    ctx->cur_texcoord[0][1] = (float)t;
+    ctx->cur_texcoord[0][2] = (float)r;
+    ctx->cur_texcoord[0][3] = (float)q;
 }
 
 void glTexCoord2f(GLfloat s, GLfloat t) { glTexCoord4f(s, t, 0.0f, 1.0f); }
 void glTexCoord3f(GLfloat s, GLfloat t, GLfloat r) { glTexCoord4f(s, t, r, 1.0f); }
 
 void glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz) {
-    {
-        GLfloat f[4] = {nx, ny, nz, 0.0f};
-        if (gl_list_capture(GL_LIST_OP_NORMAL, 0, 0, 0, f)) return;
-    }
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_NORMAL, gl_la_f(nx), gl_la_f(ny), gl_la_f(nz))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     ctx->cur_normal[0] = (float)nx;
@@ -547,7 +761,7 @@ void glNormal3fv(const GLfloat *v) {
  * GL 1.x names each attribute once per C type and once per arity. Every one of these converts
  * and forwards to the `f` sibling above, so each attribute has exactly one implementation and
  * the spellings cannot drift apart - which also means they are all recorded into a display list
- * by the one `gl_list_capture` the sibling already has.
+ * by the one `gl_list_rec` the sibling already has.
  *
  * A null vector pointer draws nothing rather than being dereferenced, matching the `fv` forms.
  * ------------------------------------------------------------------------- */
@@ -664,6 +878,79 @@ void glColor4iv(const GLint *v)     { if (v) glColor4i(v[0], v[1], v[2], v[3]); 
 void glColor4usv(const GLushort *v) { if (v) glColor4us(v[0], v[1], v[2], v[3]); }
 void glColor4uiv(const GLuint *v)   { if (v) glColor4ui(v[0], v[1], v[2], v[3]); }
 
+/* GL 1.4's secondary colour: three components, normalised exactly as glColor's are (Mesa
+ * vbo/vbo_attrib_tmp.h:3258-3316, through the same macros). Compiled into lists
+ * and saved with GL_CURRENT_BIT like the primary colour; alpha stays at its initial 1. Unlike the
+ * primary colour it is not a tracked material's source - GL_COLOR_MATERIAL reads the primary. */
+void glSecondaryColor3f(GLfloat r, GLfloat g, GLfloat b) {
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_SECONDARY_COLOR, gl_la_f(r), gl_la_f(g), gl_la_f(b))) return;
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    ctx->cur_secondary[0] = (float)r;
+    ctx->cur_secondary[1] = (float)g;
+    ctx->cur_secondary[2] = (float)b;
+}
+void glSecondaryColor3d(GLdouble r, GLdouble g, GLdouble b) {
+    glSecondaryColor3f((GLfloat)r, (GLfloat)g, (GLfloat)b);
+}
+void glSecondaryColor3b(GLbyte r, GLbyte g, GLbyte b) { glSecondaryColor3f(gl_b_to_f(r), gl_b_to_f(g), gl_b_to_f(b)); }
+void glSecondaryColor3s(GLshort r, GLshort g, GLshort b) { glSecondaryColor3f(gl_s_to_f(r), gl_s_to_f(g), gl_s_to_f(b)); }
+void glSecondaryColor3i(GLint r, GLint g, GLint b) { glSecondaryColor3f(gl_i_to_f(r), gl_i_to_f(g), gl_i_to_f(b)); }
+void glSecondaryColor3ub(GLubyte r, GLubyte g, GLubyte b) { glSecondaryColor3f(gl_ub_to_f(r), gl_ub_to_f(g), gl_ub_to_f(b)); }
+void glSecondaryColor3us(GLushort r, GLushort g, GLushort b) { glSecondaryColor3f(gl_us_to_f(r), gl_us_to_f(g), gl_us_to_f(b)); }
+void glSecondaryColor3ui(GLuint r, GLuint g, GLuint b) { glSecondaryColor3f(gl_ui_to_f(r), gl_ui_to_f(g), gl_ui_to_f(b)); }
+void glSecondaryColor3fv(const GLfloat *v)   { if (v) glSecondaryColor3f(v[0], v[1], v[2]); }
+void glSecondaryColor3dv(const GLdouble *v)  { if (v) glSecondaryColor3d(v[0], v[1], v[2]); }
+void glSecondaryColor3bv(const GLbyte *v)    { if (v) glSecondaryColor3b(v[0], v[1], v[2]); }
+void glSecondaryColor3sv(const GLshort *v)   { if (v) glSecondaryColor3s(v[0], v[1], v[2]); }
+void glSecondaryColor3iv(const GLint *v)     { if (v) glSecondaryColor3i(v[0], v[1], v[2]); }
+void glSecondaryColor3ubv(const GLubyte *v)  { if (v) glSecondaryColor3ub(v[0], v[1], v[2]); }
+void glSecondaryColor3usv(const GLushort *v) { if (v) glSecondaryColor3us(v[0], v[1], v[2]); }
+void glSecondaryColor3uiv(const GLuint *v)   { if (v) glSecondaryColor3ui(v[0], v[1], v[2]); }
+
+/* GL 1.4's fog coordinate: a value, not a colour, so nothing converts it. Compiled into lists and
+ * saved with GL_CURRENT_BIT; read only while GL_FOG_COORD_SRC is GL_FOG_COORD. */
+void glFogCoordf(GLfloat coord) {
+    if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_FOG_COORD, gl_la_f(coord))) return;
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    ctx->cur_fog_coord = (float)coord;
+}
+void glFogCoordd(GLdouble coord) { glFogCoordf((GLfloat)coord); }
+void glFogCoordfv(const GLfloat *coord) { if (coord) glFogCoordf(coord[0]); }
+void glFogCoorddv(const GLdouble *coord) { if (coord) glFogCoordf((GLfloat)coord[0]); }
+
+/* **GL_EXT_secondary_color's and GL_EXT_fog_coord's own spellings** (2026-09-19): both were
+ * extensions before GL 1.4 took them into the core, and a program of that era calls these names
+ * after finding the extension in glGetString's list. Each is the core function. */
+void glSecondaryColor3bEXT(GLbyte r, GLbyte g, GLbyte b) { glSecondaryColor3b(r, g, b); }
+void glSecondaryColor3bvEXT(const GLbyte *v) { glSecondaryColor3bv(v); }
+void glSecondaryColor3dEXT(GLdouble r, GLdouble g, GLdouble b) { glSecondaryColor3d(r, g, b); }
+void glSecondaryColor3dvEXT(const GLdouble *v) { glSecondaryColor3dv(v); }
+void glSecondaryColor3fEXT(GLfloat r, GLfloat g, GLfloat b) { glSecondaryColor3f(r, g, b); }
+void glSecondaryColor3fvEXT(const GLfloat *v) { glSecondaryColor3fv(v); }
+void glSecondaryColor3iEXT(GLint r, GLint g, GLint b) { glSecondaryColor3i(r, g, b); }
+void glSecondaryColor3ivEXT(const GLint *v) { glSecondaryColor3iv(v); }
+void glSecondaryColor3sEXT(GLshort r, GLshort g, GLshort b) { glSecondaryColor3s(r, g, b); }
+void glSecondaryColor3svEXT(const GLshort *v) { glSecondaryColor3sv(v); }
+void glSecondaryColor3ubEXT(GLubyte r, GLubyte g, GLubyte b) { glSecondaryColor3ub(r, g, b); }
+void glSecondaryColor3ubvEXT(const GLubyte *v) { glSecondaryColor3ubv(v); }
+void glSecondaryColor3uiEXT(GLuint r, GLuint g, GLuint b) { glSecondaryColor3ui(r, g, b); }
+void glSecondaryColor3uivEXT(const GLuint *v) { glSecondaryColor3uiv(v); }
+void glSecondaryColor3usEXT(GLushort r, GLushort g, GLushort b) { glSecondaryColor3us(r, g, b); }
+void glSecondaryColor3usvEXT(const GLushort *v) { glSecondaryColor3usv(v); }
+void glSecondaryColorPointerEXT(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
+    glSecondaryColorPointer(size, type, stride, pointer);
+}
+void glFogCoordfEXT(GLfloat coord) { glFogCoordf(coord); }
+void glFogCoordfvEXT(const GLfloat *coord) { glFogCoordfv(coord); }
+void glFogCoorddEXT(GLdouble coord) { glFogCoordd(coord); }
+void glFogCoorddvEXT(const GLdouble *coord) { glFogCoorddv(coord); }
+void glFogCoordPointerEXT(GLenum type, GLsizei stride, const GLvoid *pointer) {
+    glFogCoordPointer(type, stride, pointer);
+}
+
 /* Normals: normalised, like colours and unlike positions. */
 void glNormal3b(GLbyte nx, GLbyte ny, GLbyte nz) { glNormal3f(gl_b_to_f(nx), gl_b_to_f(ny), gl_b_to_f(nz)); }
 void glNormal3s(GLshort nx, GLshort ny, GLshort nz) { glNormal3f(gl_s_to_f(nx), gl_s_to_f(ny), gl_s_to_f(nz)); }
@@ -708,61 +995,89 @@ void glTexCoord4sv(const GLshort *v)  { if (v) glTexCoord4s(v[0], v[1], v[2], v[
 
 
 /* -------------------------------------------------------------------------
- * Multitexture, on an implementation with one texture unit
+ * Multitexture (GL 1.3)
  *
- * GL_TEXTURE0 forwards to the single-unit call of the same shape. **Any higher unit is
- * GL_INVALID_ENUM**, which is not a refusal this port invented: a unit at or above
- * GL_MAX_TEXTURE_UNITS is an invalid enum by the specification, and this reports that maximum as
- * 1. The alternative - accepting GL_TEXTURE1 and quietly applying unit 0's coordinate - would
- * draw a picture that is wrong in a way no error code mentions.
+ * **Two units since 2026-09-19**, GL 1.3's minimum (section 2.6); one before, which was short of
+ * it. A unit at or above GL_MAX_TEXTURE_UNITS is GL_INVALID_ENUM - for glMultiTexCoord the
+ * specification leaves it undefined (2.7), and an error beats quietly writing some other unit.
+ * Every spelling reaches gl_mtc with all four components, GL's defaults - t and r 0, q 1 - filling
+ * the ones it leaves out, as glTexCoord's spellings do.
  *
- * A second unit needs a third parameter export from the vertex shader, which is an unmeasured
- * hardware fact (roadmap, and obSCEne REQ-20260917T1652Z-7c40). When that lands, the range check
- * here is the only thing that moves.
+ * The console applies unit 0 only: a second unit is a second interpolated coordinate and a second
+ * sample, a pixel-shader interface change (GL_ROADMAP.md, "Needs a shader change"). The draw logs
+ * that once.
  * ------------------------------------------------------------------------- */
 
-/* Refuses and returns false for a unit this implementation does not have. */
-static GLboolean gl_mt_unit_ok(GLenum target) {
-    if (target == GL_TEXTURE0) return GL_TRUE;
+/* The unit a GL_TEXTUREn names, or -1 - with GL_INVALID_ENUM recorded - for one there is not. */
+static int gl_mt_unit(GLenum target) {
+    if (target >= GL_TEXTURE0 && target < GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS) {
+        return (int)(target - GL_TEXTURE0);
+    }
     gl_context_t *ctx = gl_get_ctx();
     if (ctx) gl_record_error(ctx, GL_INVALID_ENUM);
-    return GL_FALSE;
+    return -1;
 }
 
-void glActiveTexture(GLenum texture) { (void)gl_mt_unit_ok(texture); }
-void glClientActiveTexture(GLenum texture) { (void)gl_mt_unit_ok(texture); }
-void glMultiTexCoord1f(GLenum target, GLfloat s) { if (gl_mt_unit_ok(target)) glTexCoord1f(s); }
-void glMultiTexCoord2f(GLenum target, GLfloat s, GLfloat t) { if (gl_mt_unit_ok(target)) glTexCoord2f(s, t); }
-void glMultiTexCoord3f(GLenum target, GLfloat s, GLfloat t, GLfloat r) { if (gl_mt_unit_ok(target)) glTexCoord3f(s, t, r); }
-void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) { if (gl_mt_unit_ok(target)) glTexCoord4f(s, t, r, q); }
-void glMultiTexCoord1d(GLenum target, GLdouble s) { if (gl_mt_unit_ok(target)) glTexCoord1d(s); }
-void glMultiTexCoord2d(GLenum target, GLdouble s, GLdouble t) { if (gl_mt_unit_ok(target)) glTexCoord2d(s, t); }
-void glMultiTexCoord3d(GLenum target, GLdouble s, GLdouble t, GLdouble r) { if (gl_mt_unit_ok(target)) glTexCoord3d(s, t, r); }
-void glMultiTexCoord4d(GLenum target, GLdouble s, GLdouble t, GLdouble r, GLdouble q) { if (gl_mt_unit_ok(target)) glTexCoord4d(s, t, r, q); }
-void glMultiTexCoord1i(GLenum target, GLint s) { if (gl_mt_unit_ok(target)) glTexCoord1i(s); }
-void glMultiTexCoord2i(GLenum target, GLint s, GLint t) { if (gl_mt_unit_ok(target)) glTexCoord2i(s, t); }
-void glMultiTexCoord3i(GLenum target, GLint s, GLint t, GLint r) { if (gl_mt_unit_ok(target)) glTexCoord3i(s, t, r); }
-void glMultiTexCoord4i(GLenum target, GLint s, GLint t, GLint r, GLint q) { if (gl_mt_unit_ok(target)) glTexCoord4i(s, t, r, q); }
-void glMultiTexCoord1s(GLenum target, GLshort s) { if (gl_mt_unit_ok(target)) glTexCoord1s(s); }
-void glMultiTexCoord2s(GLenum target, GLshort s, GLshort t) { if (gl_mt_unit_ok(target)) glTexCoord2s(s, t); }
-void glMultiTexCoord3s(GLenum target, GLshort s, GLshort t, GLshort r) { if (gl_mt_unit_ok(target)) glTexCoord3s(s, t, r); }
-void glMultiTexCoord4s(GLenum target, GLshort s, GLshort t, GLshort r, GLshort q) { if (gl_mt_unit_ok(target)) glTexCoord4s(s, t, r, q); }
-void glMultiTexCoord1fv(GLenum target, const GLfloat *v) { if (gl_mt_unit_ok(target)) glTexCoord1fv(v); }
-void glMultiTexCoord2fv(GLenum target, const GLfloat *v) { if (gl_mt_unit_ok(target)) glTexCoord2fv(v); }
-void glMultiTexCoord3fv(GLenum target, const GLfloat *v) { if (gl_mt_unit_ok(target)) glTexCoord3fv(v); }
-void glMultiTexCoord4fv(GLenum target, const GLfloat *v) { if (gl_mt_unit_ok(target)) glTexCoord4fv(v); }
-void glMultiTexCoord1dv(GLenum target, const GLdouble *v) { if (gl_mt_unit_ok(target)) glTexCoord1dv(v); }
-void glMultiTexCoord2dv(GLenum target, const GLdouble *v) { if (gl_mt_unit_ok(target)) glTexCoord2dv(v); }
-void glMultiTexCoord3dv(GLenum target, const GLdouble *v) { if (gl_mt_unit_ok(target)) glTexCoord3dv(v); }
-void glMultiTexCoord4dv(GLenum target, const GLdouble *v) { if (gl_mt_unit_ok(target)) glTexCoord4dv(v); }
-void glMultiTexCoord1iv(GLenum target, const GLint *v) { if (gl_mt_unit_ok(target)) glTexCoord1iv(v); }
-void glMultiTexCoord2iv(GLenum target, const GLint *v) { if (gl_mt_unit_ok(target)) glTexCoord2iv(v); }
-void glMultiTexCoord3iv(GLenum target, const GLint *v) { if (gl_mt_unit_ok(target)) glTexCoord3iv(v); }
-void glMultiTexCoord4iv(GLenum target, const GLint *v) { if (gl_mt_unit_ok(target)) glTexCoord4iv(v); }
-void glMultiTexCoord1sv(GLenum target, const GLshort *v) { if (gl_mt_unit_ok(target)) glTexCoord1sv(v); }
-void glMultiTexCoord2sv(GLenum target, const GLshort *v) { if (gl_mt_unit_ok(target)) glTexCoord2sv(v); }
-void glMultiTexCoord3sv(GLenum target, const GLshort *v) { if (gl_mt_unit_ok(target)) glTexCoord3sv(v); }
-void glMultiTexCoord4sv(GLenum target, const GLshort *v) { if (gl_mt_unit_ok(target)) glTexCoord4sv(v); }
+/* The one implementation: compiled into a list as named, and checked when it runs. */
+static void gl_mtc(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
+    if (gl_list_recording() &&
+        GL_LIST_REC(GL_LIST_OP_MULTI_TEXCOORD, gl_la_e(target), gl_la_f(s), gl_la_f(t), gl_la_f(r),
+                    gl_la_f(q))) {
+        return;
+    }
+    const int u = gl_mt_unit(target);
+    gl_context_t *ctx = gl_get_ctx();
+    if (u < 0 || !ctx) return;
+    ctx->cur_texcoord[u][0] = s;
+    ctx->cur_texcoord[u][1] = t;
+    ctx->cur_texcoord[u][2] = r;
+    ctx->cur_texcoord[u][3] = q;
+}
+
+/* Server state, so compiled into a list; glClientActiveTexture below is client state and is not. */
+void glActiveTexture(GLenum texture) {
+    if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_ACTIVE_TEXTURE, gl_la_e(texture))) return;
+    const int u = gl_mt_unit(texture);
+    gl_context_t *ctx = gl_get_ctx();
+    if (u >= 0 && ctx) ctx->active_texture = (GLuint)u;
+}
+void glClientActiveTexture(GLenum texture) {
+    const int u = gl_mt_unit(texture);
+    gl_context_t *ctx = gl_get_ctx();
+    if (u >= 0 && ctx) ctx->client_active_texture = (GLuint)u;
+}
+void glMultiTexCoord1f(GLenum target, GLfloat s) { gl_mtc(target, s, 0.0f, 0.0f, 1.0f); }
+void glMultiTexCoord2f(GLenum target, GLfloat s, GLfloat t) { gl_mtc(target, s, t, 0.0f, 1.0f); }
+void glMultiTexCoord3f(GLenum target, GLfloat s, GLfloat t, GLfloat r) { gl_mtc(target, s, t, r, 1.0f); }
+void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) { gl_mtc(target, s, t, r, q); }
+void glMultiTexCoord1d(GLenum target, GLdouble s) { gl_mtc(target, (GLfloat)s, 0.0f, 0.0f, 1.0f); }
+void glMultiTexCoord2d(GLenum target, GLdouble s, GLdouble t) { gl_mtc(target, (GLfloat)s, (GLfloat)t, 0.0f, 1.0f); }
+void glMultiTexCoord3d(GLenum target, GLdouble s, GLdouble t, GLdouble r) { gl_mtc(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, 1.0f); }
+void glMultiTexCoord4d(GLenum target, GLdouble s, GLdouble t, GLdouble r, GLdouble q) { gl_mtc(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, (GLfloat)q); }
+void glMultiTexCoord1i(GLenum target, GLint s) { gl_mtc(target, (GLfloat)s, 0.0f, 0.0f, 1.0f); }
+void glMultiTexCoord2i(GLenum target, GLint s, GLint t) { gl_mtc(target, (GLfloat)s, (GLfloat)t, 0.0f, 1.0f); }
+void glMultiTexCoord3i(GLenum target, GLint s, GLint t, GLint r) { gl_mtc(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, 1.0f); }
+void glMultiTexCoord4i(GLenum target, GLint s, GLint t, GLint r, GLint q) { gl_mtc(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, (GLfloat)q); }
+void glMultiTexCoord1s(GLenum target, GLshort s) { gl_mtc(target, (GLfloat)s, 0.0f, 0.0f, 1.0f); }
+void glMultiTexCoord2s(GLenum target, GLshort s, GLshort t) { gl_mtc(target, (GLfloat)s, (GLfloat)t, 0.0f, 1.0f); }
+void glMultiTexCoord3s(GLenum target, GLshort s, GLshort t, GLshort r) { gl_mtc(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, 1.0f); }
+void glMultiTexCoord4s(GLenum target, GLshort s, GLshort t, GLshort r, GLshort q) { gl_mtc(target, (GLfloat)s, (GLfloat)t, (GLfloat)r, (GLfloat)q); }
+void glMultiTexCoord1fv(GLenum target, const GLfloat *v) { if (v) glMultiTexCoord1f(target, v[0]); }
+void glMultiTexCoord2fv(GLenum target, const GLfloat *v) { if (v) glMultiTexCoord2f(target, v[0], v[1]); }
+void glMultiTexCoord3fv(GLenum target, const GLfloat *v) { if (v) glMultiTexCoord3f(target, v[0], v[1], v[2]); }
+void glMultiTexCoord4fv(GLenum target, const GLfloat *v) { if (v) glMultiTexCoord4f(target, v[0], v[1], v[2], v[3]); }
+void glMultiTexCoord1dv(GLenum target, const GLdouble *v) { if (v) glMultiTexCoord1d(target, v[0]); }
+void glMultiTexCoord2dv(GLenum target, const GLdouble *v) { if (v) glMultiTexCoord2d(target, v[0], v[1]); }
+void glMultiTexCoord3dv(GLenum target, const GLdouble *v) { if (v) glMultiTexCoord3d(target, v[0], v[1], v[2]); }
+void glMultiTexCoord4dv(GLenum target, const GLdouble *v) { if (v) glMultiTexCoord4d(target, v[0], v[1], v[2], v[3]); }
+void glMultiTexCoord1iv(GLenum target, const GLint *v) { if (v) glMultiTexCoord1i(target, v[0]); }
+void glMultiTexCoord2iv(GLenum target, const GLint *v) { if (v) glMultiTexCoord2i(target, v[0], v[1]); }
+void glMultiTexCoord3iv(GLenum target, const GLint *v) { if (v) glMultiTexCoord3i(target, v[0], v[1], v[2]); }
+void glMultiTexCoord4iv(GLenum target, const GLint *v) { if (v) glMultiTexCoord4i(target, v[0], v[1], v[2], v[3]); }
+void glMultiTexCoord1sv(GLenum target, const GLshort *v) { if (v) glMultiTexCoord1s(target, v[0]); }
+void glMultiTexCoord2sv(GLenum target, const GLshort *v) { if (v) glMultiTexCoord2s(target, v[0], v[1]); }
+void glMultiTexCoord3sv(GLenum target, const GLshort *v) { if (v) glMultiTexCoord3s(target, v[0], v[1], v[2]); }
+void glMultiTexCoord4sv(GLenum target, const GLshort *v) { if (v) glMultiTexCoord4s(target, v[0], v[1], v[2], v[3]); }
 
 /* The ARB spellings: the same functions under their extension names. */
 void glActiveTextureARB(GLenum texture) { glActiveTexture(texture); }
@@ -859,9 +1174,161 @@ static gl_vertex_t gl_vertex_at_ndc(const gl_mat4_t *inv_mvp, const gl_vertex_t 
     return out;
 }
 
-/* One line segment as two triangles. */
+static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const gl_vertex_t *v1,
+                                const gl_vertex_t *v2, const gl_vertex_t *pv);
+
+/* A point size or line width as it is drawn: the specification's rule for aliased points and
+ * lines - rounded to the nearest integer, and 1 where that would be 0 - clamped to the range the
+ * queries report. The raw float was used until 2026-09-19, so glLineWidth(0.5) drew a half-pixel
+ * sliver that could miss every pixel centre and draw nothing at all. */
+static float gl_aliased_size(float s) {
+    float r = (float)(int)(s + 0.5f);
+    if (r < 1.0f) r = 1.0f;
+    if (r > (float)OOPS_GL_MAX_POINT_LINE_SIZE) r = (float)OOPS_GL_MAX_POINT_LINE_SIZE;
+    return r;
+}
+
+/* A smooth point size or line width: not rounded to a pixel but to the granularity the queries
+ * report, within the same range. */
+static float gl_smooth_size(float s) {
+    float r = (float)(int)(s / OOPS_GL_SMOOTH_GRANULARITY + 0.5f) * OOPS_GL_SMOOTH_GRANULARITY;
+    if (r < 1.0f) r = 1.0f;
+    if (r > (float)OOPS_GL_MAX_POINT_LINE_SIZE) r = (float)OOPS_GL_MAX_POINT_LINE_SIZE;
+    return r;
+}
+
+/* An NDC position in the rasteriser's screen pixels - x right, y down from the top - by the
+ * mapping gl_draw_triangle_pv applies to every vertex. */
+static void gl_ndc_to_screen(const gl_context_t *ctx, const float ndc[3], float out[2]) {
+    const float hw = (float)ctx->vp_w * 0.5f, hh = (float)ctx->vp_h * 0.5f;
+    out[0] = ndc[0] * hw + (float)ctx->vp_x + hw;
+    out[1] = (float)ctx->height - (ndc[1] * hh + (float)ctx->vp_y + hh);
+}
+
+/*
+ * **Whether this draw smooths**, and how.
+ *
+ * The software rasteriser weighs every fragment by its coverage, so it smooths all three kinds.
+ * **The console smooths points and lines since 2026-09-20**, in the untextured pixel shader's
+ * coverage slot: the CPU widens the primitive into a quad and writes each corner's offset from
+ * the centre into the texture-coordinate parameter, which an untextured draw has spare, and the
+ * shader turns the interpolated offset into GL's coverage (`gl_ps_patch_coverage`).
+ *
+ * Two cases are still aliased there and earn the log line. **A textured one**, because the
+ * parameter the offset rides in is the texture coordinate and there is no other spare
+ * interpolant. And **GL_POLYGON_SMOOTH**, whose coverage is the product of three edge fades
+ * rather than one distance - a different shape of slot, and one nothing has needed yet.
+ */
+static GLboolean gl_smoothing(gl_context_t *ctx, GLboolean enabled, GLenum kind) {
+    if (!enabled) return GL_FALSE;
+    if (!ctx->use_hardware) return GL_TRUE;
+    if (kind != GL_POLYGON && gl_effective_texture_id(ctx) == 0u) {
+        ctx->aa_hw_on = GL_TRUE;
+        return GL_TRUE;
+    }
+    if (!ctx->hw_smooth_logged) {
+        gl_log_line("a smooth primitive is aliased on this path when it is textured, and a "
+                    "smooth polygon always: the coverage rides in the texture coordinate");
+        ctx->hw_smooth_logged = GL_TRUE;
+    }
+    return GL_FALSE;
+}
+
+/*
+ * One corner's offset from the primitive's centre, into the parameter the coverage slot reads.
+ *
+ * `across` and `along` are in pixels; `radius` is the primitive's own half-extent **plus a
+ * half**, because that is the constant GL's coverage subtracts the distance from and doing the
+ * addition here saves an instruction per fragment. A line passes zero for `along`, which makes
+ * the shader's `sqrt(x*x + y*y)` the absolute across distance and one shader form serve both.
+ *
+ * Only on the hardware path with a draw that smooths: the software rasteriser reads the real
+ * texture coordinate out of the same field, and it computes its coverage from the fragment's
+ * window position rather than from anything carried in the vertex.
+ */
+static void gl_aa_stamp(const gl_context_t *ctx, gl_vertex_t *v, float across, float along,
+                        float radius) {
+    if (!ctx->aa_hw_on) return;
+    v->tc[0][0] = across;
+    v->tc[0][1] = along;
+    v->tc[0][3] = radius;
+}
+
+/* The quad a line occupies between two points already in NDC, `ox`/`oy` its half-width offset in
+ * NDC. Each end keeps its own vertex's attributes. */
+static void gl_draw_line_quad(gl_context_t *ctx, const gl_mat4_t *inv_mvp,
+                              const gl_vertex_t *a, const float na[3], float wa,
+                              const gl_vertex_t *b, const float nb[3], float wb,
+                              float ox, float oy, const gl_vertex_t *pv) {
+    gl_vertex_t a0 = gl_vertex_at_ndc(inv_mvp, a, na[0] + ox, na[1] + oy, na[2], wa);
+    gl_vertex_t a1 = gl_vertex_at_ndc(inv_mvp, a, na[0] - ox, na[1] - oy, na[2], wa);
+    gl_vertex_t b0 = gl_vertex_at_ndc(inv_mvp, b, nb[0] + ox, nb[1] + oy, nb[2], wb);
+    gl_vertex_t b1 = gl_vertex_at_ndc(inv_mvp, b, nb[0] - ox, nb[1] - oy, nb[2], wb);
+    /* The two long edges are half the widened quad either side of the segment, which is the
+     * across distance the coverage slot reads. Both ends of an edge carry the same value, so the
+     * interpolation along the line is constant and the interpolation across it is the ramp. */
+    {
+        const float edge = ctx->aa_hw_half, rad = ctx->aa_hw_r;
+        gl_aa_stamp(ctx, &a0, edge, 0.0f, rad);
+        gl_aa_stamp(ctx, &b0, edge, 0.0f, rad);
+        gl_aa_stamp(ctx, &a1, -edge, 0.0f, rad);
+        gl_aa_stamp(ctx, &b1, -edge, 0.0f, rad);
+    }
+
+    const GLenum saved = ctx->prim_raster;
+    ctx->prim_raster = GL_LINE;
+    gl_draw_triangle_pv(ctx, &a0, &a1, &b1, pv);
+    gl_draw_triangle_pv(ctx, &a0, &b1, &b0, pv);
+    ctx->prim_raster = saved;
+}
+
+/* A point part-way along a line on screen, `t` from a to b: its NDC position is linear in `t`,
+ * its 1/w is, and its attributes are perspective-correct - each weighted by its end's 1/w - so a
+ * dash is coloured and textured exactly where the whole line would have been. */
+static void gl_line_point_at(const gl_vertex_t *a, const float na[3], float wa,
+                             const gl_vertex_t *b, const float nb[3], float wb, float t,
+                             gl_vertex_t *out, float n_out[3], float *w_out) {
+    const float ia = (1.0f - t) / wa, ib = t / wb;
+    const float iw = ia + ib;
+    const float ka = ia / iw, kb = ib / iw;
+    *out = *a;
+    out->r = ka * a->r + kb * b->r;
+    out->g = ka * a->g + kb * b->g;
+    out->b = ka * a->b + kb * b->b;
+    out->a = ka * a->a + kb * b->a;
+    out->sr = ka * a->sr + kb * b->sr;
+    out->sg = ka * a->sg + kb * b->sg;
+    out->sb = ka * a->sb + kb * b->sb;
+    out->fogc = ka * a->fogc + kb * b->fogc;
+    for (int u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        for (int k = 0; k < 4; k++) out->tc[u][k] = ka * a->tc[u][k] + kb * b->tc[u][k];
+    }
+    out->nx = ka * a->nx + kb * b->nx;
+    out->ny = ka * a->ny + kb * b->ny;
+    out->nz = ka * a->nz + kb * b->nz;
+    for (int i = 0; i < 3; i++) n_out[i] = na[i] + t * (nb[i] - na[i]);
+    *w_out = 1.0f / iw;
+}
+
+/* One line segment as two triangles, marked as a line for the triangle stage (no culling, no
+ * fill offset). `pv` is the vertex whose colour a flat-shaded segment takes: the segment's second
+ * vertex for a GL_LINES primitive, the polygon's own for an outline.
+ *
+ * **Under GL_LINE_STIPPLE the segment is cut into its dashes first.** GL counts the line's
+ * fragments along its major axis - one per pixel of the larger of its width and height - and
+ * keeps fragment s when bit (s / factor) mod 16 of the pattern is set, the count carrying on
+ * across a strip. So the segment is split at pixel steps along that axis and each run of kept
+ * fragments drawn as a quad of its own: a wide line's dashes are square-ended blocks across its
+ * whole width, which is what GL's stipple of a wide line is. The dashes are ordinary quads, so
+ * the hardware draws them too. */
 static void gl_draw_line_segment(gl_context_t *ctx, const gl_mat4_t *inv_mvp,
-                                 const gl_vertex_t *a, const gl_vertex_t *b) {
+                                 const gl_vertex_t *a, const gl_vertex_t *b,
+                                 const gl_vertex_t *pv) {
+    /* Selection and feedback take the line as GL has it - two endpoints - not the quad below. */
+    if (gl_fb_active(ctx)) {
+        gl_fb_line(ctx, a, b, pv);
+        return;
+    }
     float na[3], nb[3], wa, wb;
     if (!gl_project_ndc(ctx, a, na, &wa)) return;
     if (!gl_project_ndc(ctx, b, nb, &wb)) return;
@@ -870,98 +1337,321 @@ static void gl_draw_line_segment(gl_context_t *ctx, const gl_mat4_t *inv_mvp,
      * differ whenever the viewport is not square, which is almost always. */
     const float hx = (float)ctx->vp_w * 0.5f;
     const float hy = (float)ctx->vp_h * 0.5f;
-    float dx = (nb[0] - na[0]) * hx;
-    float dy = (nb[1] - na[1]) * hy;
-    const float len = gl_sqrt(dx * dx + dy * dy);
+    const float px_dx = (nb[0] - na[0]) * hx;
+    const float px_dy = (nb[1] - na[1]) * hy;
+    const float len = gl_sqrt(px_dx * px_dx + px_dy * px_dy);
     if (len < 1e-6f) return; /* a zero-length segment has no direction to be perpendicular to */
-    dx /= len;
-    dy /= len;
+    const float dx = px_dx / len;
+    const float dy = px_dy / len;
 
-    const float half = (ctx->line_width > 0.0f ? ctx->line_width : 1.0f) * 0.5f;
+    /* **A smooth line** is GL's rectangle of the unrounded width, centred on the segment: its quad
+     * reaches a pixel further on every side, so the pixels it only partly covers are drawn, and
+     * the rasteriser weighs each by how much of it the rectangle covers (`aa_*`). */
+    const GLboolean smooth = gl_smoothing(ctx, ctx->cap_line_smooth, GL_LINE);
+    const float width = smooth ? gl_smooth_size(ctx->line_width) : gl_aliased_size(ctx->line_width);
+    const float half = width * 0.5f + (smooth ? 1.0f : 0.0f);
     /* Perpendicular in pixels, then back into NDC through the same viewport scale. */
     const float ox = (-dy * half) / hx;
     const float oy = (dx * half) / hy;
+    if (smooth) {
+        ctx->aa_kind = GL_LINE;
+        gl_ndc_to_screen(ctx, na, ctx->aa_a);
+        gl_ndc_to_screen(ctx, nb, ctx->aa_b);
+        ctx->aa_hw = width * 0.5f;
+        ctx->aa_ends = (GLboolean)!ctx->cap_line_stipple;
+        ctx->aa_hw_half = half;
+        ctx->aa_hw_r = width * 0.5f + 0.5f;
+    }
 
-    const gl_vertex_t a0 = gl_vertex_at_ndc(inv_mvp, a, na[0] + ox, na[1] + oy, na[2], wa);
-    const gl_vertex_t a1 = gl_vertex_at_ndc(inv_mvp, a, na[0] - ox, na[1] - oy, na[2], wa);
-    const gl_vertex_t b0 = gl_vertex_at_ndc(inv_mvp, b, nb[0] + ox, nb[1] + oy, nb[2], wb);
-    const gl_vertex_t b1 = gl_vertex_at_ndc(inv_mvp, b, nb[0] - ox, nb[1] - oy, nb[2], wb);
+    if (!ctx->cap_line_stipple) {
+        if (smooth && !ctx->aa_hw_on) {
+            /* A pixel past each end, carrying the end's own attributes - the software
+             * rasteriser fades those pixels out by how far along the segment they are.
+             *
+             * **The console's quad stops at the ends instead.** Its coverage comes from one
+             * interpolated distance, the across one, so a pixel past the end would come out
+             * fully covered and the line would be a pixel too long at each cap. GL does not
+             * require the ends to be faded; a hard cap on an antialiased line is what most
+             * implementations draw, and it is the honest thing to do with one interpolant. */
+            float ea[3] = {na[0] - dx / hx, na[1] - dy / hy, na[2]};
+            float eb[3] = {nb[0] + dx / hx, nb[1] + dy / hy, nb[2]};
+            gl_draw_line_quad(ctx, inv_mvp, a, ea, wa, b, eb, wb, ox, oy, pv);
+            ctx->aa_kind = 0u;
+            return;
+        }
+        gl_draw_line_quad(ctx, inv_mvp, a, na, wa, b, nb, wb, ox, oy, pv);
+        ctx->aa_kind = 0u;
+        ctx->aa_hw_on = GL_FALSE;
+        return;
+    }
 
-    gl_draw_primitive_triangle(ctx, &a0, &a1, &b1);
-    gl_draw_primitive_triangle(ctx, &a0, &b1, &b0);
+    if (ctx->fb_line_reset) {
+        ctx->line_stipple_counter = 0;
+        ctx->fb_line_reset = GL_FALSE;
+    }
+    const float ax = px_dx < 0.0f ? -px_dx : px_dx;
+    const float ay = px_dy < 0.0f ? -px_dy : px_dy;
+    int n = (int)((ax > ay ? ax : ay) + 0.5f);
+    if (n < 1) n = 1;
+    const GLint factor = ctx->line_stipple_factor;
+    const GLushort pattern = ctx->line_stipple_pattern;
+    GLint s = ctx->line_stipple_counter;
+    int i = 0;
+    while (i < n) {
+        const GLboolean on = (GLboolean)((pattern >> ((s / factor) & 15)) & 1u);
+        int j = i;
+        while (j < n && (GLboolean)((pattern >> (((s + (j - i)) / factor) & 15)) & 1u) == on) j++;
+        if (on) {
+            gl_vertex_t da, db;
+            float nda[3], ndb[3], wda, wdb;
+            gl_line_point_at(a, na, wa, b, nb, wb, (float)i / (float)n, &da, nda, &wda);
+            gl_line_point_at(a, na, wa, b, nb, wb, (float)j / (float)n, &db, ndb, &wdb);
+            gl_draw_line_quad(ctx, inv_mvp, &da, nda, wda, &db, ndb, wdb, ox, oy, pv);
+        }
+        s += j - i;
+        i = j;
+    }
+    /* Kept small: only its value modulo 16 * factor matters. */
+    ctx->line_stipple_counter = s % (16 * factor);
+    ctx->aa_kind = 0u;
+    ctx->aa_hw_on = GL_FALSE;
 }
 
-/* One point as a screen-aligned square of `glPointSize` pixels. */
+/* **A point's derived size** (GL 1.4, 3.3): glPointSize's, divided by sqrt(a + b d + c d^2) for
+ * GL_POINT_DISTANCE_ATTENUATION's (a, b, c) and the point's eye distance d, then clamped to
+ * [GL_POINT_SIZE_MIN, GL_POINT_SIZE_MAX]. The clamp applies unattenuated too, as Mesa's does
+ * (state_tracker/st_atom_rasterizer.c:233-237). d is the specification's eye distance; Mesa takes
+ * |z_eye| (main/ffvertex_prog.c:1234-1235), which differs only off the view axis. */
+static float gl_point_derived_size(const gl_context_t *ctx, const gl_vertex_t *p) {
+    float size = ctx->point_size;
+    const float *k = ctx->point_atten;
+    if (k[0] != 1.0f || k[1] != 0.0f || k[2] != 0.0f) {
+        const float obj[4] = {p->x, p->y, p->z, p->w};
+        float eye[4];
+        mat4_transform_vec4(eye, &ctx->modelview_stack[ctx->modelview_depth], obj);
+        const float d = gl_sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]);
+        const float den = k[0] + k[1] * d + k[2] * d * d;
+        /* A denominator of zero or less has no square root; the size stays as it was. */
+        if (den > 0.0f) size /= gl_sqrt(den);
+    }
+    if (size < ctx->point_size_min) size = ctx->point_size_min;
+    if (size > ctx->point_size_max) size = ctx->point_size_max;
+    return size;
+}
+
+/* One point as a screen-aligned square of its derived size in pixels, marked as a point. */
 static void gl_draw_point_square(gl_context_t *ctx, const gl_mat4_t *inv_mvp,
-                                 const gl_vertex_t *p) {
+                                 const gl_vertex_t *p, const gl_vertex_t *pv) {
+    if (gl_fb_active(ctx)) {
+        gl_fb_point(ctx, p);
+        return;
+    }
     float np[3], w;
     if (!gl_project_ndc(ctx, p, np, &w)) return;
 
-    const float half = (ctx->point_size > 0.0f ? ctx->point_size : 1.0f) * 0.5f;
+    /* **A smooth point** is GL's disc of the unrounded size: its square reaches a pixel further,
+     * and the rasteriser weighs each pixel by how much of it the disc covers. */
+    const GLboolean smooth = gl_smoothing(ctx, ctx->cap_point_smooth, GL_POINT);
+    const float derived = gl_point_derived_size(ctx, p);
+    const float size = smooth ? gl_smooth_size(derived) : gl_aliased_size(derived);
+    const float half = size * 0.5f + (smooth ? 1.0f : 0.0f);
     const float ox = half / ((float)ctx->vp_w * 0.5f);
     const float oy = half / ((float)ctx->vp_h * 0.5f);
+    if (smooth) {
+        ctx->aa_kind = GL_POINT;
+        gl_ndc_to_screen(ctx, np, ctx->aa_c);
+        ctx->aa_r = size * 0.5f;
+        ctx->aa_hw_half = half;
+        ctx->aa_hw_r = size * 0.5f + 0.5f;
+    }
 
-    const gl_vertex_t c0 = gl_vertex_at_ndc(inv_mvp, p, np[0] - ox, np[1] - oy, np[2], w);
-    const gl_vertex_t c1 = gl_vertex_at_ndc(inv_mvp, p, np[0] + ox, np[1] - oy, np[2], w);
-    const gl_vertex_t c2 = gl_vertex_at_ndc(inv_mvp, p, np[0] + ox, np[1] + oy, np[2], w);
-    const gl_vertex_t c3 = gl_vertex_at_ndc(inv_mvp, p, np[0] - ox, np[1] + oy, np[2], w);
+    gl_vertex_t c0 = gl_vertex_at_ndc(inv_mvp, p, np[0] - ox, np[1] - oy, np[2], w);
+    gl_vertex_t c1 = gl_vertex_at_ndc(inv_mvp, p, np[0] + ox, np[1] - oy, np[2], w);
+    gl_vertex_t c2 = gl_vertex_at_ndc(inv_mvp, p, np[0] + ox, np[1] + oy, np[2], w);
+    gl_vertex_t c3 = gl_vertex_at_ndc(inv_mvp, p, np[0] - ox, np[1] + oy, np[2], w);
+    /* The four corners' offsets from the centre, for the console's coverage slot. The sign of
+     * each does not matter to it - it squares both - so the screen's flipped y is not a
+     * question here. */
+    gl_aa_stamp(ctx, &c0, -half, -half, ctx->aa_hw_r);
+    gl_aa_stamp(ctx, &c1, half, -half, ctx->aa_hw_r);
+    gl_aa_stamp(ctx, &c2, half, half, ctx->aa_hw_r);
+    gl_aa_stamp(ctx, &c3, -half, half, ctx->aa_hw_r);
 
-    gl_draw_primitive_triangle(ctx, &c0, &c1, &c2);
-    gl_draw_primitive_triangle(ctx, &c0, &c2, &c3);
+    const GLenum saved = ctx->prim_raster;
+    ctx->prim_raster = GL_POINT;
+    gl_draw_triangle_pv(ctx, &c0, &c1, &c2, pv);
+    gl_draw_triangle_pv(ctx, &c0, &c2, &c3, pv);
+    ctx->prim_raster = saved;
+    ctx->aa_kind = 0u;
+    ctx->aa_hw_on = GL_FALSE;
 }
 
-void glEnd(void) {
-    {
-        GLfloat f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        if (gl_list_capture(GL_LIST_OP_END, 0, 0, 0, f)) return;
+/* -------------------------------------------------------------------------
+ * Primitive assembly, once
+ *
+ * glEnd, glDrawArrays and glDrawElements each had their own copy of this switch, which is how
+ * the three came to disagree about which modes drew (see the refusal test). They now share it,
+ * each supplying only how to fetch vertex i.
+ *
+ * What a triangle of a triangulated primitive carries besides its vertices:
+ *
+ * - **Which of its edges are the primitive's own.** A quad is two triangles and a polygon a fan,
+ *   and the diagonals between them are not edges of anything: glPolygonMode(GL_LINE) draws a
+ *   quad's four sides, not five. Bit 0 is v0->v1, bit 1 v1->v2, bit 2 v2->v0.
+ * - **Whether edge flags apply.** Only to separate triangles, quads and polygons; a strip's or
+ *   fan's edges are all boundary edges, as the specification says.
+ * - **The provoking vertex** - whose colour a GL_FLAT primitive takes. The last vertex of each
+ *   triangle is right for triangles, strips and fans, and that is all this used to use: a
+ *   flat-shaded quad came out in two colours (its second triangle's third vertex is the quad's
+ *   fourth, its first triangle's is not) and a polygon in its last vertex's colour instead of its
+ *   first's. The specification's table of provoking vertices is followed exactly.
+ * ------------------------------------------------------------------------- */
+
+typedef void (*gl_vertex_fetch_fn)(gl_context_t *ctx, const void *src, int i, gl_vertex_t *out);
+
+/* One triangle of a polygon primitive, drawn the way glPolygonMode says for the face it turns
+ * out to be. The fast path - both faces GL_FILL, which is nearly always - is the triangle as it
+ * always was. Otherwise the face is decided here, culling applied here (it is a property of the
+ * polygon, not of the lines its outline becomes), and the boundary edges or their starting
+ * vertices drawn through the same expansion GL_LINES and GL_POINTS use. */
+static void gl_draw_polygon_tri(gl_context_t *ctx, const gl_vertex_t *v0, const gl_vertex_t *v1,
+                                const gl_vertex_t *v2, unsigned edges, GLboolean use_flags,
+                                const gl_vertex_t *pv) {
+    /* GL_SELECT and GL_FEEDBACK report the polygon instead of drawing it, and decide its face,
+     * culling and mode themselves - on the clipped polygon. */
+    if (gl_fb_active(ctx)) {
+        gl_fb_polygon_tri(ctx, v0, v1, v2, edges, use_flags, pv);
+        return;
     }
-    gl_context_t *ctx = gl_get_ctx();
-    if (!ctx || !ctx->imm_active) return;
-    ctx->imm_active = GL_FALSE;
+    /* **A smooth polygon** fades across its own edges only - the triangles' shared diagonals are
+     * not edges of anything, and fading across them would draw seams through its middle. */
+    const unsigned aa_edges =
+        gl_smoothing(ctx, ctx->cap_polygon_smooth, GL_POLYGON) ? (edges & 7u) : 0u;
+    if (ctx->polygon_mode[0] == GL_FILL && ctx->polygon_mode[1] == GL_FILL) {
+        ctx->aa_edges = aa_edges;
+        gl_draw_triangle_pv(ctx, v0, v1, v2, pv);
+        ctx->aa_edges = 0u;
+        return;
+    }
+    gl_update_mvp(ctx);
+    const gl_vertex_t *vtx[3] = {v0, v1, v2};
 
-    int n = ctx->imm_count;
-    const gl_vertex_t *v = ctx->imm_verts;
+    /* The facing, from the winding in normalised device coordinates - the same sign the
+     * rasteriser's screen-space area gives, before its y flip. A vertex behind the eye has no
+     * projection to wind with, and the triangle is then taken as front-facing. */
+    GLboolean front = GL_TRUE;
+    float n0[3], n1[3], n2[3], w;
+    if (gl_project_ndc(ctx, v0, n0, &w) && gl_project_ndc(ctx, v1, n1, &w) &&
+        gl_project_ndc(ctx, v2, n2, &w)) {
+        const float area = (n1[0] - n0[0]) * (n2[1] - n0[1]) - (n1[1] - n0[1]) * (n2[0] - n0[0]);
+        const GLboolean ccw = (GLboolean)(area > 0.0f);
+        front = (ctx->front_face == GL_CW) ? (GLboolean)!ccw : ccw;
+    }
+    if (ctx->cap_cull_face) {
+        if (ctx->cull_mode == GL_FRONT_AND_BACK) return;
+        if (ctx->cull_mode == GL_FRONT && front) return;
+        if (ctx->cull_mode == GL_BACK && !front) return;
+    }
 
-    switch (ctx->imm_mode) {
+    const GLenum mode = ctx->polygon_mode[front ? 0 : 1];
+    if (mode == GL_FILL) {
+        ctx->aa_edges = aa_edges;
+        gl_draw_triangle_pv(ctx, v0, v1, v2, pv);
+        ctx->aa_edges = 0u;
+        return;
+    }
+    gl_mat4_t inv_mvp;
+    if (!mat4_invert(&inv_mvp, &ctx->mvp)) return;
+
+    const GLboolean saved = ctx->prim_from_polygon;
+    const GLboolean saved_back = ctx->prim_polygon_back;
+    ctx->prim_from_polygon = GL_TRUE;
+    ctx->prim_polygon_back = (GLboolean)!front; /* the side two-sided lighting lights it with */
+    for (int e = 0; e < 3; e++) {
+        if (!(edges & (1u << e))) continue;
+        if (use_flags && !vtx[e]->edge) continue; /* a vertex's flag is the edge starting at it */
+        if (mode == GL_LINE) {
+            gl_draw_line_segment(ctx, &inv_mvp, vtx[e], vtx[(e + 1) % 3], pv);
+        } else {
+            /* Each vertex that starts a boundary edge, which draws every corner of a quad or a
+             * polygon exactly once however it was triangulated. */
+            gl_draw_point_square(ctx, &inv_mvp, vtx[e], pv);
+        }
+    }
+    ctx->prim_from_polygon = saved;
+    ctx->prim_polygon_back = saved_back;
+}
+
+/* `fb_line_reset` is set wherever GL resets the line stipple - at each independent line, the
+ * start of a strip or loop, and the start of each polygon whose outline is drawn - so feedback
+ * can report the next line as GL_LINE_RESET_TOKEN. Drawing never reads it. */
+static void gl_assemble(gl_context_t *ctx, GLenum mode, int n, gl_vertex_fetch_fn fetch,
+                        const void *src) {
+    gl_vertex_t a, b, c, d;
+    switch (mode) {
         case GL_TRIANGLES:
             for (int i = 0; i + 2 < n; i += 3) {
-                gl_draw_primitive_triangle(ctx, &v[i], &v[i + 1], &v[i + 2]);
+                fetch(ctx, src, i, &a); fetch(ctx, src, i + 1, &b); fetch(ctx, src, i + 2, &c);
+                ctx->fb_line_reset = GL_TRUE;
+                gl_draw_polygon_tri(ctx, &a, &b, &c, 7u, GL_TRUE, &c);
             }
             break;
         case GL_QUADS:
+            /* (0,1,2) and (0,2,3): the sides are 0-1, 1-2 in the first and 2-3, 3-0 in the
+             * second, and the quad's colour is its fourth vertex's. */
             for (int i = 0; i + 3 < n; i += 4) {
-                /* Quad as two triangles: (0, 1, 2) and (0, 2, 3) */
-                gl_draw_primitive_triangle(ctx, &v[i], &v[i + 1], &v[i + 2]);
-                gl_draw_primitive_triangle(ctx, &v[i], &v[i + 2], &v[i + 3]);
+                fetch(ctx, src, i, &a); fetch(ctx, src, i + 1, &b);
+                fetch(ctx, src, i + 2, &c); fetch(ctx, src, i + 3, &d);
+                ctx->fb_line_reset = GL_TRUE;
+                gl_draw_polygon_tri(ctx, &a, &b, &c, 3u, GL_TRUE, &d);
+                gl_draw_polygon_tri(ctx, &a, &c, &d, 6u, GL_TRUE, &d);
             }
             break;
         case GL_TRIANGLE_STRIP:
             for (int i = 0; i + 2 < n; i++) {
+                fetch(ctx, src, i, &a); fetch(ctx, src, i + 1, &b); fetch(ctx, src, i + 2, &c);
+                ctx->fb_line_reset = GL_TRUE;
                 if (i & 1) {
-                    gl_draw_primitive_triangle(ctx, &v[i + 1], &v[i], &v[i + 2]);
+                    gl_draw_polygon_tri(ctx, &b, &a, &c, 7u, GL_FALSE, &c);
                 } else {
-                    gl_draw_primitive_triangle(ctx, &v[i], &v[i + 1], &v[i + 2]);
+                    gl_draw_polygon_tri(ctx, &a, &b, &c, 7u, GL_FALSE, &c);
                 }
             }
             break;
         case GL_TRIANGLE_FAN:
+            if (n < 3) break;
+            fetch(ctx, src, 0, &a);
             for (int i = 1; i + 1 < n; i++) {
-                gl_draw_primitive_triangle(ctx, &v[0], &v[i], &v[i + 1]);
+                fetch(ctx, src, i, &b); fetch(ctx, src, i + 1, &c);
+                ctx->fb_line_reset = GL_TRUE;
+                gl_draw_polygon_tri(ctx, &a, &b, &c, 7u, GL_FALSE, &c);
             }
             break;
-        /* **A polygon is a fan.** GL requires it to be convex and planar, and a fan from vertex
-         * zero is the triangulation that gives - the same one GL_QUADS already gets. */
+        /* **A polygon is a fan** - GL requires it convex and planar, and a fan from vertex zero is
+         * the triangulation that gives. Its sides are the fan's outer edges only: 0-1 in the first
+         * triangle, i-(i+1) in every one, and (n-1)-0 in the last. Its colour is its first
+         * vertex's. */
         case GL_POLYGON:
+            if (n < 3) break;
+            fetch(ctx, src, 0, &a);
+            ctx->fb_line_reset = GL_TRUE;
             for (int i = 1; i + 1 < n; i++) {
-                gl_draw_primitive_triangle(ctx, &v[0], &v[i], &v[i + 1]);
+                fetch(ctx, src, i, &b); fetch(ctx, src, i + 1, &c);
+                const unsigned edges = 2u | (i == 1 ? 1u : 0u) | (i + 1 == n - 1 ? 4u : 0u);
+                gl_draw_polygon_tri(ctx, &a, &b, &c, edges, GL_TRUE, &a);
             }
             break;
         /* A quad strip's quads share an edge, and the winding alternates the way a triangle
-         * strip's does - taking them in declaration order would flip every other one. */
+         * strip's does - taking them in declaration order would flip every other one. Quad
+         * (i, i+1, i+3, i+2): sides i-(i+1) and (i+1)-(i+3) in the first triangle, (i+3)-(i+2)
+         * and (i+2)-i in the second; its colour is vertex i+3's. */
         case GL_QUAD_STRIP:
             for (int i = 0; i + 3 < n; i += 2) {
-                gl_draw_primitive_triangle(ctx, &v[i], &v[i + 1], &v[i + 3]);
-                gl_draw_primitive_triangle(ctx, &v[i], &v[i + 3], &v[i + 2]);
+                fetch(ctx, src, i, &a); fetch(ctx, src, i + 1, &b);
+                fetch(ctx, src, i + 2, &c); fetch(ctx, src, i + 3, &d);
+                ctx->fb_line_reset = GL_TRUE;
+                gl_draw_polygon_tri(ctx, &a, &b, &d, 3u, GL_FALSE, &d);
+                gl_draw_polygon_tri(ctx, &a, &d, &c, 6u, GL_FALSE, &d);
             }
             break;
         case GL_POINTS:
@@ -970,30 +1660,56 @@ void glEnd(void) {
         case GL_LINE_LOOP: {
             /* The inverse is computed once for the whole primitive rather than per segment, and
              * a modelview or projection that cannot be inverted draws nothing - which is what a
-             * matrix that collapses the scene to a plane should do. */
+             * matrix that collapses the scene to a plane should do. Selection and feedback widen
+             * nothing and need no inverse: a collapsed scene is still hit and reported there. */
             gl_update_mvp(ctx);
             gl_mat4_t inv_mvp;
-            if (!mat4_invert(&inv_mvp, &ctx->mvp)) break;
-            if (ctx->imm_mode == GL_POINTS) {
-                for (int i = 0; i < n; i++) gl_draw_point_square(ctx, &inv_mvp, &v[i]);
-            } else if (ctx->imm_mode == GL_LINES) {
+            if (gl_fb_active(ctx)) {
+                mat4_identity(&inv_mvp);
+            } else if (!mat4_invert(&inv_mvp, &ctx->mvp)) {
+                break;
+            }
+            if (mode == GL_POINTS) {
+                for (int i = 0; i < n; i++) {
+                    fetch(ctx, src, i, &a);
+                    gl_draw_point_square(ctx, &inv_mvp, &a, &a);
+                }
+            } else if (mode == GL_LINES) {
                 for (int i = 0; i + 1 < n; i += 2) {
-                    gl_draw_line_segment(ctx, &inv_mvp, &v[i], &v[i + 1]);
+                    fetch(ctx, src, i, &a); fetch(ctx, src, i + 1, &b);
+                    ctx->fb_line_reset = GL_TRUE;
+                    gl_draw_line_segment(ctx, &inv_mvp, &a, &b, &b);
                 }
             } else {
+                ctx->fb_line_reset = GL_TRUE;
                 for (int i = 0; i + 1 < n; i++) {
-                    gl_draw_line_segment(ctx, &inv_mvp, &v[i], &v[i + 1]);
+                    fetch(ctx, src, i, &a); fetch(ctx, src, i + 1, &b);
+                    gl_draw_line_segment(ctx, &inv_mvp, &a, &b, &b);
                 }
-                /* The loop closes; the strip does not. */
-                if (ctx->imm_mode == GL_LINE_LOOP && n > 2) {
-                    gl_draw_line_segment(ctx, &inv_mvp, &v[n - 1], &v[0]);
+                /* The loop closes, and the closing segment's provoking vertex is the first. */
+                if (mode == GL_LINE_LOOP && n > 2) {
+                    fetch(ctx, src, n - 1, &a); fetch(ctx, src, 0, &b);
+                    gl_draw_line_segment(ctx, &inv_mvp, &a, &b, &b);
                 }
             }
             break;
         }
         default: break;
     }
+}
 
+static void gl_fetch_immediate(gl_context_t *ctx, const void *src, int i, gl_vertex_t *out) {
+    (void)ctx;
+    *out = ((const gl_vertex_t *)src)[i];
+}
+
+void glEnd(void) {
+    if (gl_list_recording() && GL_LIST_REC0(GL_LIST_OP_END)) return;
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !ctx->imm_active) return;
+    ctx->imm_active = GL_FALSE;
+
+    gl_assemble(ctx, ctx->imm_mode, ctx->imm_count, gl_fetch_immediate, ctx->imm_verts);
     ctx->imm_count = 0;
 }
 
@@ -1063,6 +1779,99 @@ void glRectsv(const GLshort *v1, const GLshort *v2) {
  * ------------------------------------------------------------------------- */
 
 
+/*
+ * **An occlusion query on the GPU** (GL 1.5's GL_SAMPLES_PASSED; on this path since 2026-09-20).
+ *
+ * The depth block counts z-passing samples per render backend whenever DB_COUNT_CONTROL's
+ * ZPASS_ENABLE is set - which the measured recipe this library already emits has always had
+ * (`0x11000100`, bits [8,11] = 1, `gfx103.json:12552-12565`). So the counters have been running
+ * on every depth-tested frame all along; what was missing was reading them.
+ *
+ * `ZPASS_DONE` is an `EVENT_WRITE` that dumps every backend's counter to memory: event type 21
+ * with `EVENT_INDEX` 1, which is the dword `0x00000115`, and a 16-byte-aligned destination.
+ * Two of them, sixteen bytes apart per backend, bracket the query; the answer is the sum of the
+ * differences. obSCEne's `REQ-20260919T2048Z-4d19` ran exactly that against a 512-pixel draw and
+ * the sum came back `0x200`.
+ *
+ * **Two bits are added while a query runs** and taken away after: `PERFECT_ZPASS_COUNTS` (bit 1)
+ * and `DISABLE_CONSERVATIVE_ZPASS_COUNTS` (bit 2), making `0x11000106` - the value `-4d19`
+ * measured exact against. Without them the depth block is free to over-count, which for an
+ * occlusion query is the difference between "nothing is visible" and "something might be". They
+ * are added rather than built into the depth block so that a frame with no query emits the
+ * stream it always did, byte for byte, which is what the gl-cube oracle record pins.
+ *
+ * **Never before a depth surface is bound.** `REQ-20260919T1600Z-e3a7` set ZPASS_ENABLE with no
+ * depth target and the depth block stalled before the pixel shader ran - `canary-ps` never
+ * written, the fence never hit, the GPU wedged. So the arming below waits for `hw_z_bound`, and
+ * a query whose draws never test depth simply does not count on this path and says so.
+ */
+static void gl_hw_begin_frame(gl_context_t *ctx); /* below; the query's ends open a frame */
+
+static void gl_hw_emit_zpass_done(uint32_t **dw_ptr, uint64_t addr) {
+    uint32_t *dw = *dw_ptr;
+    *dw++ = 0xc0024600u; /* PKT3 EVENT_WRITE (0x46), three payload dwords */
+    *dw++ = 0x00000115u; /* ZPASS_DONE: event type 21, EVENT_INDEX 1 */
+    *dw++ = (uint32_t)addr;
+    *dw++ = (uint32_t)(addr >> 32);
+    *dw_ptr = dw;
+}
+
+/* The slots' base in GPU memory, and the same address as the CPU sees it - the payload is one
+ * mapping, so they are the same number. */
+static uint64_t gl_hw_zpass_base(const gl_context_t *ctx) {
+    return (uint64_t)(uintptr_t)ctx->gpu_payload + OOPS_GL_ZPASS_OFFSET;
+}
+
+void gl_hw_query_begin(gl_context_t *ctx) {
+    if (!ctx || !ctx->use_hardware || !ctx->gpu_payload) return;
+    /* Zeroed rather than left alone: a slot a backend never writes must read as no work, and
+     * the difference of two zeroes is zero whichever end is missing. */
+    memset((char *)ctx->gpu_payload + OOPS_GL_ZPASS_OFFSET, 0,
+           OOPS_GL_ZPASS_BACKENDS * OOPS_GL_ZPASS_STRIDE);
+    ctx->hw_query_counting = GL_FALSE;
+    ctx->hw_query_reg = GL_FALSE;
+}
+
+uint64_t gl_hw_query_end(gl_context_t *ctx, GLboolean *counted) {
+    if (counted) *counted = GL_FALSE;
+    if (!ctx || !ctx->use_hardware || !ctx->gpu_payload || !ctx->hw_query_counting) return 0u;
+    if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+    if (ctx->dcb_words + 8u + OOPS_GL_DCB_TRAILER_DW >= ctx->dcb_capacity_dw) {
+        gl_hw_flush(ctx);
+        gl_hw_begin_frame(ctx);
+        /* The counters keep running across a submission - they are depth-block state, not
+         * command-stream state - so the begin snapshot taken earlier is still the right one. */
+    }
+    uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
+    gl_hw_emit_zpass_done(&dw, gl_hw_zpass_base(ctx) + 8u);
+    /* Counting off again, and the recipe back to what every other frame carries. Only when this
+     * frame raised it: a frame that never bound the depth surface never raised it either, and
+     * writing DB_COUNT_CONTROL here would be the unbound-target case e3a7 hung on. */
+    if (ctx->hw_query_reg) {
+        *dw++ = 0xc0016900u;
+        *dw++ = 0x001u;
+        *dw++ = 0x11000100u;
+    }
+    ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
+    /* The results are read by the CPU, so the frame has to have run. */
+    gl_hw_flush(ctx);
+
+    const volatile uint32_t *slots =
+        (const volatile uint32_t *)((const char *)ctx->gpu_payload + OOPS_GL_ZPASS_OFFSET);
+    uint64_t sum = 0u;
+    for (unsigned i = 0; i < OOPS_GL_ZPASS_BACKENDS; i++) {
+        const unsigned w = i * (OOPS_GL_ZPASS_STRIDE / 4u);
+        /* Bit 63 is the hardware's valid marker, not part of the count. */
+        const uint64_t begin = ((uint64_t)(slots[w + 1] & 0x7fffffffu) << 32) | slots[w];
+        const uint64_t end = ((uint64_t)(slots[w + 3] & 0x7fffffffu) << 32) | slots[w + 2];
+        if (end > begin) sum += end - begin;
+    }
+    ctx->hw_query_counting = GL_FALSE;
+    ctx->hw_query_reg = GL_FALSE;
+    if (counted) *counted = GL_TRUE;
+    return sum;
+}
+
 /* The depth block: surface, extent and bases. Emitted the first time a frame draws with the
  * depth test on, so a frame that never tests depth carries exactly the measured no-depth recipe.
  * The register list and order are the ones oops_agc_draw_primitive carries (AgcCompositor.elf). */
@@ -1122,9 +1931,36 @@ static void gl_hw_emit_depth_block(gl_context_t *ctx, uint32_t **dw_ptr) {
     *dw_ptr = dw;
 }
 
+/* The stencil surface made live: DB_STENCIL_INFO (0x011) with FORMAT STENCIL_8, the depth
+ * surface's SW_MODE 24 (64KB_Z_X) and TILE_STENCIL_DISABLE - the measured recipe's own 0x20000180
+ * with the format field set, gfx103.json's fields (FORMAT bit 0, SW_MODE bits 4-8,
+ * TILE_STENCIL_DISABLE bit 29: no HTILE here, as DB_HTILE_DATA_BASE's zero says) - and the four
+ * base registers the depth block writes as zero. The extent is DB_DEPTH_SIZE_XY's, shared with
+ * depth, which is why the depth block is always emitted first. */
+static void gl_hw_emit_stencil_bind(gl_context_t *ctx, uint32_t **dw_ptr) {
+    uint32_t *dw = *dw_ptr;
+    const uint64_t s = (uint64_t)(uintptr_t)ctx->stencil_buffer;
+    const struct { uint32_t reg, val; } regs[] = {
+        {0x011u, 0x20000181u},             /* DB_STENCIL_INFO */
+        {0x013u, (uint32_t)(s >> 8)},      /* DB_STENCIL_READ_BASE */
+        {0x015u, (uint32_t)(s >> 8)},      /* DB_STENCIL_WRITE_BASE */
+        {0x01bu, (uint32_t)(s >> 40)},     /* DB_STENCIL_READ_BASE_HI */
+        {0x01du, (uint32_t)(s >> 40)},     /* DB_STENCIL_WRITE_BASE_HI */
+    };
+    for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+        *dw++ = 0xc0016900u;
+        *dw++ = regs[i].reg;
+        *dw++ = regs[i].val;
+    }
+    *dw_ptr = dw;
+}
+
 static void gl_hw_begin_frame(gl_context_t *ctx) {
     uint32_t *dw = ctx->dcb_mem;
     uint64_t color_gpu = (uint64_t)(uintptr_t)ctx->framebuffer;
+    /* The second colour target's address, 0 when GL names one buffer. Both buffers are
+     * allocated the same way (gl_front_buffer), so the pointer is the GPU address here too. */
+    const uint64_t also_gpu = (uint64_t)(uintptr_t)ctx->fb_also;
 
     /* An experiment's prelude (glSetHardwarePrelude) goes first, ahead of every register this
      * frame sets, so whatever it programs is what this frame's own state is written over. */
@@ -1164,11 +2000,25 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x31du, 0x00000000u}, /* CB_COLOR0_ATTRIB */
         {0x31eu, 0x00000000u}, /* CB_COLOR0_DCC_CONTROL: disabled */
         {0x3b0u, 0},           /* CB_COLOR0_ATTRIB2 (patched: extent) */
-        {0x3b8u, 0x08c00000u}, /* CB_COLOR0_ATTRIB3: COLOR_SW_MODE=LINEAR (the measured 0x08c6c000 carries 64KB_R_X, the compositor's tiled surface, and streaked our linear scratch buffer) */
+        {0x3b8u, 0x08c00000u}, /* CB_COLOR0_ATTRIB3: COLOR_SW_MODE=LINEAR (patched to OOPS_GL_RX_ATTRIB3 on the scanout path). 0x08c6c000 - agc_draw.c's value, whose source no log records - carries 64KB_R_X and streaked this linear buffer when it was used here */
+        /* **The second colour target**, which glDrawBuffer(GL_FRONT_AND_BACK) needs and which
+         * this path did without until 2026-09-20. Patched below from `ctx->fb_also`, and left
+         * unbound - INFO 0, and out of both masks - when GL names one buffer. Offsets from Mesa
+         * `src/amd/registers/gfx103.json`: CB_COLOR1_BASE :5508, _VIEW :5525, _INFO :5531,
+         * _ATTRIB :5537, _DCC_CONTROL :5543, _BASE_EXT :6060, _ATTRIB2 :6252, _ATTRIB3 :6300.
+         * The values are obSCEne's, measured together (`-3f62`, sweep `20260920-082906`). */
+        {0x327u, 0},           /* CB_COLOR1_BASE (patched) */
+        {0x391u, 0},           /* CB_COLOR1_BASE_EXT (patched) */
+        {0x32au, 0x00000000u}, /* CB_COLOR1_VIEW */
+        {0x32bu, 0},           /* CB_COLOR1_INFO (patched: colour 0's, or 0 when unbound) */
+        {0x32cu, 0x00000000u}, /* CB_COLOR1_ATTRIB */
+        {0x32du, 0x00000000u}, /* CB_COLOR1_DCC_CONTROL: disabled */
+        {0x3b1u, 0},           /* CB_COLOR1_ATTRIB2 (patched: extent) */
+        {0x3b9u, 0},           /* CB_COLOR1_ATTRIB3 (patched: colour 0's swizzle) */
         {0x109u, 0x00000000u}, /* CB_DCC_CONTROL: disabled */
-        {0x202u, 0x00cc0010u}, /* CB_COLOR_CONTROL: CB_NORMAL, ROP3_COPY */
+        {0x202u, 0x00cc0010u}, /* CB_COLOR_CONTROL: CB_NORMAL, ROP3_COPY (patched: glLogicOp) */
         {0x08eu, 0x0000000fu}, /* CB_TARGET_MASK (patched) */
-        {0x08fu, 0x0000000fu}, /* CB_SHADER_MASK: MRT0 four components */
+        {0x08fu, 0x0000000fu}, /* CB_SHADER_MASK: MRT0 four components (patched: MRT1 too) */
         {0x1e0u, 0x00000000u}, /* CB_BLEND0_CONTROL (patched) */
         {0x200u, 0x00000000u}, /* DB_DEPTH_CONTROL (patched) */
         {0x201u, 0x00010000u}, /* DB_EQAA */
@@ -1265,12 +2115,19 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x1c2u, 0x00000001u}, /* SPI_SHADER_IDX_FORMAT */
         {0x1c3u, 0x00000004u}, /* SPI_SHADER_POS_FORMAT: POS0 = 4COMP */
         {0x1c4u, 0x00000000u}, /* SPI_SHADER_Z_FORMAT: no Z export */
-        {0x1c5u, 0x00000009u}, /* SPI_SHADER_COL_FORMAT: COL0 = 32_ABGR */
-        {0x1b3u, 0x00000002u}, /* SPI_PS_INPUT_ENA: PERSP_CENTER_ENA */
-        {0x1b4u, 0x00000002u}, /* SPI_PS_INPUT_ADDR: PERSP_CENTER_ENA */
+        {0x1c5u, 0x00000009u}, /* SPI_SHADER_COL_FORMAT: COL0 = 32_ABGR (patched: COL1 too) */
+        {0x1b3u, 0x00000002u}, /* SPI_PS_INPUT_ENA: PERSP_CENTER_ENA (patched: the stipple) */
+        {0x1b4u, 0x00000002u}, /* SPI_PS_INPUT_ADDR: PERSP_CENTER_ENA (patched: the stipple) */
         {0x1b5u, 0x00000001u}, /* SPI_INTERP_CONTROL_0: FLAT_SHADE_ENA (no parameter is flagged flat) */
         {0x1b6u, 0x00000002u}, /* SPI_PS_IN_CONTROL: NUM_INTERP=2 */
         {0x1b8u, 0x01000000u}, /* SPI_BARYC_CNTL: FRONT_FACE_ALL_BITS */
+        /* TA_BC_BASE_ADDR and _HI (patched): the border colour table a sampler's
+         * SQ_TEX_BORDER_COLOR_REGISTER reads, in the payload - mm 0x28080 and 0x28084 for gfx103
+         * (gfx103.json:2932-2943), which radeonsi sets once in its GFX10 preamble
+         * (ac_cmdbuf.c:529-530). Read only by a texture whose border colour is none of the three
+         * built-in ones. */
+        {0x020u, 0},
+        {0x021u, 0},
     };
 
     for (size_t i = 0; i < sizeof(ctx_regs) / sizeof(ctx_regs[0]); i++) {
@@ -1278,10 +2135,17 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         uint32_t val = ctx_regs[i].val;
         if (reg == 0x318u) {
             val = (uint32_t)(color_gpu >> 8);
+        } else if (reg == 0x020u) {
+            val = (uint32_t)((payload_va + OOPS_GL_BORDER_TABLE_OFFSET) >> 8);
+        } else if (reg == 0x021u) {
+            val = (uint32_t)((payload_va + OOPS_GL_BORDER_TABLE_OFFSET) >> 40) & 0xffu;
         } else if (reg == 0x390u) {
             val = (uint32_t)(color_gpu >> 40);
         } else if (reg == 0x3b0u) {
             val = OOPS_AGC_CB_COLOR_ATTRIB2(w, h);
+        } else if (reg == 0x3b8u && ctx->hw_rx) {
+            /* The scanout path draws the scanout buffer in its own swizzle (gl_rx.h). */
+            val = OOPS_GL_RX_ATTRIB3;
         } else if (reg == 0x00du || reg == 0x082u || reg == 0x091u) {
             val = scissor_br;
         } else if (reg == 0x204u) {
@@ -1318,12 +2182,42 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
             val = gl_f32_bits(ctx->polygon_offset_units);
         } else if (reg == 0x1e0u) {
             val = gl_compute_cb_blend_control(ctx);
+        } else if (reg == 0x202u) {
+            val = gl_compute_cb_color_control(ctx);
         } else if (reg == 0x200u) {
             val = gl_compute_db_depth_control(ctx);
         } else if (reg == 0x205u) {
             val = gl_compute_pa_su_sc_mode_cntl(ctx);
         } else if (reg == 0x08eu) {
+            /* Both targets take the same write mask: GL writes the same fragment to both
+             * buffers, and glColorMask names channels, not buffers. */
             val = gl_compute_cb_target_mask(ctx);
+            if (also_gpu) val |= val << 4;
+        } else if (reg == 0x08fu || reg == 0x1c5u) {
+            /* The shader exports to MRT1 as well (gl_ps_patch_export), so both the mask and the
+             * export format carry a second copy: 0xff and 0x99, the values `-3f62` drew with. */
+            val = also_gpu ? (reg == 0x08fu ? 0x000000ffu : 0x00000099u) : val;
+        } else if (reg == 0x1b3u || reg == 0x1b4u) {
+            /* A stippled draw needs the fragment's window position: POS_X_FLOAT_ENA (bit 8) and
+             * POS_Y_FLOAT_ENA (bit 9) beside PERSP_CENTER_ENA, which puts POS_X in v2 and POS_Y
+             * in v3 after the barycentrics - measured by obSCEne's `-c7d4`. Both registers carry
+             * the same value there, as that check set them. */
+            val = gl_polygon_stipple_on(ctx) ? 0x00000302u : 0x00000002u;
+        } else if (reg == 0x327u) {
+            val = (uint32_t)(also_gpu >> 8);
+        } else if (reg == 0x391u) {
+            val = (uint32_t)(also_gpu >> 40);
+        } else if (reg == 0x32bu) {
+            /* Colour 0's format, or unbound. An unbound target is out of both masks as well; the
+             * format is zeroed too so that a mask edit alone cannot start writing memory the
+             * base register does not name. */
+            val = also_gpu ? 0x000088a8u : 0u;
+        } else if (reg == 0x3b1u) {
+            val = OOPS_AGC_CB_COLOR_ATTRIB2(w, h);
+        } else if (reg == 0x3b9u) {
+            /* The same swizzle as colour 0: both buffers are the same kind of surface, linear
+             * here and 64KB_R_X on the scanout path. */
+            val = ctx->hw_rx ? OOPS_GL_RX_ATTRIB3 : 0x08c00000u;
         }
         *dw++ = 0xc0016900u;
         *dw++ = reg;
@@ -1341,7 +2235,7 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
      * resource words from RSRC1/RSRC2_GS. RSRC1_GS is the measured 0x622c0042 with VGPRS raised
      * from 2 to 0x10: the measured value allocates twelve VGPRs in wave64 and the shader uses v20. */
     int textured = (gl_effective_texture_id(ctx) > 0u) ? 1 : 0;
-    uint64_t ps_init_offset = textured ? 0x200u : 0x300u;
+    uint64_t ps_init_offset = textured ? OOPS_GL_PS_TEX_OFFSET : OOPS_GL_PS_UNTEX_OFFSET;
     uint32_t ps_rsrc2 = textured ? 0x00000004u : 0u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor table */
     const struct {
         uint32_t base_reg;
@@ -1403,12 +2297,50 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
 
     ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
     ctx->hw_z_bound = GL_FALSE;
+    ctx->hw_stencil_bound = GL_FALSE;
     /* The viewport, scissor and clip registers above were just written from the current state. */
     ctx->hw_vport_dirty = GL_FALSE;
     ctx->hw_scissor_dirty = GL_FALSE;
     ctx->hw_clip_dirty = GL_FALSE;
+    ctx->hw_depth_range_dirty = GL_FALSE;
+    ctx->hw_color_control_dirty = GL_FALSE;
+    ctx->hw_blend_color_dirty = GL_TRUE; /* not in the table above; first constant-factor draw sends it */
     ctx->hw_frame_tex = 0u; /* the new frame's descriptor slot holds nothing yet */
+    ctx->hw_params = 2u;    /* the stage table above bound the two-parameter vertex shader */
     ctx->hw_frame_active = GL_TRUE;
+}
+
+/* **The vertex stage's interface, switched between two and three parameters** (since
+ * 2026-09-19): the NGG program - PGM_LO/HI of GS and ES, which the stage table points at the same
+ * code - and the three registers the parameter count lives in, as obSCEne measured them
+ * (REQ-20260919T1745Z-9c3e): SPI_VS_OUT_CONFIG's VS_EXPORT_COUNT, SPI_PS_IN_CONTROL's NUM_INTERP
+ * and SPI_PS_INPUT_CNTL_2, the third parameter read unpacked from slot 2. Emitted only on a
+ * change, so a frame that never needs a third parameter - gl-cube's - is the stream it was.
+ * 21 dwords, counted in OOPS_GL_DCB_DRAW_MAX_DW. */
+static void gl_hw_emit_param_count(gl_context_t *ctx, uint32_t **dw_ptr, uint32_t params) {
+    if (ctx->hw_params == params) return;
+    uint32_t *dw = *dw_ptr;
+    const uint64_t off = (params >= 4u)   ? OOPS_GL_VS_P4_OFFSET
+                         : (params == 3u) ? OOPS_GL_VS_P3_OFFSET
+                                          : 0u;
+    const uint64_t vs_va = (uint64_t)(uintptr_t)ctx->gpu_payload + off;
+    static const uint32_t pgm_regs[2] = {0x88u, 0xc8u}; /* SPI_SHADER_PGM_LO_GS, _LO_ES */
+    for (int i = 0; i < 2; i++) {
+        *dw++ = 0xc0017600u; *dw++ = pgm_regs[i];      *dw++ = (uint32_t)(vs_va >> 8);
+        *dw++ = 0xc0017600u; *dw++ = pgm_regs[i] + 1u; *dw++ = (uint32_t)(vs_va >> 40);
+    }
+    /* Two parameters, three, or four: the counts obSCEne measured, 0x4/0x3 for the third
+     * (`-9c3e`) and 0x6/0x4 with SPI_PS_INPUT_CNTL_3 0x3 for the fourth (`-8b1c`, whose arm
+     * retired with both canaries). SPI_PS_INPUT_CNTL_3 is 0x194 (Mesa
+     * src/amd/registers/gfx103.json:4203), the slot after the third parameter's. */
+    const uint32_t out_config = (params >= 4u) ? 0x6u : (params == 3u) ? 0x4u : 0x2u;
+    const uint32_t in_control = (params >= 4u) ? 0x4u : (params == 3u) ? 0x3u : 0x2u;
+    *dw++ = 0xc0016900u; *dw++ = 0x1b1u; *dw++ = out_config;                      /* VS_OUT_CONFIG */
+    *dw++ = 0xc0016900u; *dw++ = 0x1b6u; *dw++ = in_control;                      /* PS_IN_CONTROL */
+    *dw++ = 0xc0016900u; *dw++ = 0x193u; *dw++ = (params >= 3u) ? 0x2u : 0x0u;    /* PS_INPUT_CNTL_2 */
+    *dw++ = 0xc0016900u; *dw++ = 0x194u; *dw++ = (params >= 4u) ? 0x3u : 0x0u;    /* PS_INPUT_CNTL_3 */
+    ctx->hw_params = params;
+    *dw_ptr = dw;
 }
 
 /* PACKET3_DMA_DATA: the command processor fills memory with a 32-bit pattern. SRC_SEL=DATA takes
@@ -1457,7 +2389,9 @@ void gl_hw_clear(gl_context_t *ctx, GLbitfield mask, uint32_t colour, float dept
     if (!ctx->hw_frame_active) {
         gl_hw_begin_frame(ctx);
     }
-    if (ctx->dcb_words + 32u >= ctx->dcb_capacity_dw) {
+    /* Up to four DMA fills of 7 dwords each - colour, the second colour buffer, depth and
+     * stencil - and the flush trailer behind them. */
+    if (ctx->dcb_words + 32u + OOPS_GL_DCB_TRAILER_DW >= ctx->dcb_capacity_dw) {
         gl_hw_flush(ctx);
         gl_hw_begin_frame(ctx);
     }
@@ -1465,18 +2399,71 @@ void gl_hw_clear(gl_context_t *ctx, GLbitfield mask, uint32_t colour, float dept
     uint32_t h = ctx->height ? ctx->height : 1080u;
     uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
     if ((mask & GL_COLOR_BUFFER_BIT) && ctx->framebuffer) {
-        gl_hw_emit_dma_fill(&dw, (uint64_t)(uintptr_t)ctx->framebuffer, colour, w * h * 4u);
+        /* The whole buffer - on the scanout path its padding to whole 64KB_R_X blocks too,
+         * which a constant fills in any layout. */
+        const uint32_t bytes = ctx->color_tiled ? (uint32_t)gl_color_words(ctx) * 4u : w * h * 4u;
+        gl_hw_emit_dma_fill(&dw, (uint64_t)(uintptr_t)ctx->framebuffer, colour, bytes);
+        /* A fill needs no colour target, so a clear reaches both buffers GL_FRONT_AND_BACK
+         * names even here, where a draw reaches one. */
+        if (ctx->fb_also) {
+            gl_hw_emit_dma_fill(&dw, (uint64_t)(uintptr_t)ctx->fb_also, colour, bytes);
+        }
     }
     if ((mask & GL_DEPTH_BUFFER_BIT) && ctx->depth_buffer) {
         uint32_t px = ctx->depth_px ? (uint32_t)ctx->depth_px : w * h;
         gl_hw_emit_dma_fill(&dw, (uint64_t)(uintptr_t)ctx->depth_buffer, gl_f32_bits(depth), px * 4u);
     }
+    /* The stencil surface is tiled, but a constant is the same constant in any layout, so a whole
+     * clear is a fill of the byte four times over - the caller sends only unscissored, unmasked
+     * stencil clears here (since 2026-09-19). */
+    if ((mask & GL_STENCIL_BUFFER_BIT) && ctx->stencil_buffer) {
+        const uint32_t v = (uint32_t)(ctx->clear_stencil & 0xff) * 0x01010101u;
+        uint32_t px = ctx->stencil_px ? (uint32_t)ctx->stencil_px : w * h;
+        gl_hw_emit_dma_fill(&dw, (uint64_t)(uintptr_t)ctx->stencil_buffer, v, (px + 3u) & ~3u);
+    }
     ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
+}
+
+/* **Unit length only when the program asks** - GL_NORMALIZE, or GL 1.2's GL_RESCALE_NORMAL, which
+ * undoes a uniform scale in the modelview by the length of the inverse's third row (Mesa,
+ * main/light.c:1090-1103; nm is that inverse transposed, so the row is nm[2], nm[5], nm[8]).
+ * Lighting normalised every normal until 2026-09-19, so a program passing normals of another
+ * length without either lit as if it had asked, and no GL does that. A zero normal stays zero, and
+ * lights nothing diffusely. Texture generation takes the same normal, as Mesa's fixed-function
+ * program does. */
+void gl_eye_normal(const gl_context_t *ctx, const float *nm, const float *n, float out[3]) {
+    float nx = nm[0] * n[0] + nm[1] * n[1] + nm[2] * n[2];
+    float ny = nm[3] * n[0] + nm[4] * n[1] + nm[5] * n[2];
+    float nz = nm[6] * n[0] + nm[7] * n[1] + nm[8] * n[2];
+    if (ctx->cap_normalize) {
+        const float nlen = gl_sqrt(nx * nx + ny * ny + nz * nz);
+        if (nlen > 1e-12f) {
+            const float inv_n = 1.0f / nlen;
+            nx *= inv_n; ny *= inv_n; nz *= inv_n;
+        }
+    } else if (ctx->cap_rescale_normal) {
+        const float f = nm[2] * nm[2] + nm[5] * nm[5] + nm[8] * nm[8];
+        const float s = (f < 1e-12f) ? 1.0f : 1.0f / gl_sqrt(f);
+        nx *= s; ny *= s; nz *= s;
+    }
+    out[0] = nx; out[1] = ny; out[2] = nz;
 }
 
 void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *obj_norm,
                          const float *in_color, float *out_color) {
-    if (!ctx || !obj_pos || !obj_norm || !out_color) return;
+    float secondary[4];
+    gl_compute_lighting2(ctx, obj_pos, obj_norm, in_color, out_color, secondary);
+}
+
+void gl_compute_lighting2(gl_context_t *ctx, const float *obj_pos, const float *obj_norm,
+                          const float *in_color, float *out_color, float *out_secondary) {
+    gl_compute_lighting_side(ctx, obj_pos, obj_norm, in_color, out_color, out_secondary, GL_FALSE);
+}
+
+void gl_compute_lighting_side(gl_context_t *ctx, const float *obj_pos, const float *obj_norm,
+                              const float *in_color, float *out_color, float *out_secondary,
+                              GLboolean back) {
+    if (!ctx || !obj_pos || !obj_norm || !out_color || !out_secondary) return;
 
     /* 1. Transform vertex position to eye space: P_eye = ModelView * obj_pos */
     const gl_mat4_t *mv = &ctx->modelview_stack[ctx->modelview_depth];
@@ -1492,29 +2479,29 @@ void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *o
 
     /* 2. Transform normal to eye space using inverse-transpose normal matrix */
     gl_update_normal_matrix(ctx);
-    const float *nm = ctx->normal_matrix;
-    float nx = nm[0] * obj_norm[0] + nm[1] * obj_norm[1] + nm[2] * obj_norm[2];
-    float ny = nm[3] * obj_norm[0] + nm[4] * obj_norm[1] + nm[5] * obj_norm[2];
-    float nz = nm[6] * obj_norm[0] + nm[7] * obj_norm[1] + nm[8] * obj_norm[2];
-
-    /* Normalize normal vector */
-    float nlen = gl_sqrt(nx * nx + ny * ny + nz * nz);
-    if (nlen > 1e-6f) {
-        float inv_n = 1.0f / nlen;
-        nx *= inv_n; ny *= inv_n; nz *= inv_n;
-    } else {
-        nx = 0.0f; ny = 0.0f; nz = 1.0f;
+    float en[3];
+    gl_eye_normal(ctx, ctx->normal_matrix, obj_norm, en);
+    float nx = en[0], ny = en[1], nz = en[2];
+    /* The back of a two-sided polygon is lit as a surface facing the other way. */
+    if (back) {
+        nx = -nx; ny = -ny; nz = -nz;
     }
 
-    /* 3. Material properties with GL_COLOR_MATERIAL tracking */
+    /* 3. Material properties with GL_COLOR_MATERIAL tracking - the side's own material, and the
+     * current colour tracked into it only if glColorMaterial named that side. **The face was
+     * ignored until 2026-09-19**: glColorMaterial(GL_BACK, ...) changed the front material,
+     * which one-sided lighting then lit with. */
+    const gl_material_t *mat = back ? &ctx->mat_back : &ctx->mat_front;
     float mat_amb[4], mat_diff[4], mat_spec[4], mat_emis[4];
-    memcpy(mat_amb,  ctx->mat_front.ambient,  4 * sizeof(float));
-    memcpy(mat_diff, ctx->mat_front.diffuse,  4 * sizeof(float));
-    memcpy(mat_spec, ctx->mat_front.specular, 4 * sizeof(float));
-    memcpy(mat_emis, ctx->mat_front.emission, 4 * sizeof(float));
-    float shininess = ctx->mat_front.shininess;
+    memcpy(mat_amb,  mat->ambient,  4 * sizeof(float));
+    memcpy(mat_diff, mat->diffuse,  4 * sizeof(float));
+    memcpy(mat_spec, mat->specular, 4 * sizeof(float));
+    memcpy(mat_emis, mat->emission, 4 * sizeof(float));
+    float shininess = mat->shininess;
 
-    if (ctx->cap_color_material && in_color) {
+    const GLboolean tracks = (GLboolean)(ctx->color_material_face == GL_FRONT_AND_BACK ||
+                                         ctx->color_material_face == (back ? GL_BACK : GL_FRONT));
+    if (ctx->cap_color_material && in_color && tracks) {
         if (ctx->color_material_mode == GL_AMBIENT || ctx->color_material_mode == GL_AMBIENT_AND_DIFFUSE) {
             memcpy(mat_amb, in_color, 4 * sizeof(float));
         }
@@ -1534,6 +2521,8 @@ void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *o
     float g = mat_emis[1] + ctx->light_model_ambient[1] * mat_amb[1];
     float b = mat_emis[2] + ctx->light_model_ambient[2] * mat_amb[2];
     float a = mat_diff[3];
+    /* The specular term, summed apart so GL_SEPARATE_SPECULAR_COLOR can keep it apart. */
+    float sr = 0.0f, sg = 0.0f, sb = 0.0f;
 
     /* 5. View direction vector V in eye space */
     float vx, vy, vz;
@@ -1622,8 +2611,10 @@ void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *o
             g += factor * (ndotl * lt->diffuse[1] * mat_diff[1]);
             b += factor * (ndotl * lt->diffuse[2] * mat_diff[2]);
 
-            /* Specular component (Blinn-Phong half-vector) */
-            if (shininess > 0.0f) {
+            /* Specular component (Blinn-Phong half-vector). **A shininess of 0 is (n.h)^0 = 1**,
+             * full specular wherever n.h is positive; this skipped specular altogether for it
+             * until 2026-09-19, and 0 is the default. */
+            {
                 float hx = lx + vx;
                 float hy = ly + vy;
                 float hz = lz + vz;
@@ -1634,16 +2625,28 @@ void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *o
                     float ndoth = nx * hx + ny * hy + nz * hz;
                     if (ndoth > 0.0f) {
                         float spec_pow = gl_pow(ndoth, shininess);
-                        r += factor * (spec_pow * lt->specular[0] * mat_spec[0]);
-                        g += factor * (spec_pow * lt->specular[1] * mat_spec[1]);
-                        b += factor * (spec_pow * lt->specular[2] * mat_spec[2]);
+                        sr += factor * (spec_pow * lt->specular[0] * mat_spec[0]);
+                        sg += factor * (spec_pow * lt->specular[1] * mat_spec[1]);
+                        sb += factor * (spec_pow * lt->specular[2] * mat_spec[2]);
                     }
                 }
             }
         }
     }
 
-    /* 7. Clamp to [0.0, 1.0] */
+    /* 7. **GL_SINGLE_COLOR** sums the specular term into the colour; **GL_SEPARATE_SPECULAR_COLOR**
+     * keeps it as the secondary colour, which the fragment adds after texturing (GL 1.2, 2.13.1
+     * and 3.9) - so a texture modulates the diffuse light and not the highlight. Each clamped to
+     * [0, 1]. */
+    if (ctx->light_model_color_control == GL_SEPARATE_SPECULAR_COLOR) {
+        out_secondary[0] = (sr < 0.0f) ? 0.0f : ((sr > 1.0f) ? 1.0f : sr);
+        out_secondary[1] = (sg < 0.0f) ? 0.0f : ((sg > 1.0f) ? 1.0f : sg);
+        out_secondary[2] = (sb < 0.0f) ? 0.0f : ((sb > 1.0f) ? 1.0f : sb);
+    } else {
+        r += sr; g += sg; b += sb;
+        out_secondary[0] = out_secondary[1] = out_secondary[2] = 0.0f;
+    }
+    out_secondary[3] = 0.0f;
     out_color[0] = (r < 0.0f) ? 0.0f : ((r > 1.0f) ? 1.0f : r);
     out_color[1] = (g < 0.0f) ? 0.0f : ((g > 1.0f) ? 1.0f : g);
     out_color[2] = (b < 0.0f) ? 0.0f : ((b > 1.0f) ? 1.0f : b);
@@ -1652,6 +2655,14 @@ void gl_compute_lighting(gl_context_t *ctx, const float *obj_pos, const float *o
 
 void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
                                 const gl_vertex_t *v1, const gl_vertex_t *v2) {
+    gl_draw_triangle_pv(ctx, v0, v1, v2, v2);
+}
+
+/* One triangle, whose flat-shaded colour is `pv`'s - which may be one of its own vertices or not:
+ * a quad's first triangle takes the quad's fourth vertex, and an expanded line's corners take
+ * the line's endpoint. See gl_assemble. */
+static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const gl_vertex_t *v1,
+                                const gl_vertex_t *v2, const gl_vertex_t *pv) {
     if (!ctx || !v0 || !v1 || !v2) return;
 
     gl_update_mvp(ctx);
@@ -1681,7 +2692,14 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
     for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
         if (ctx->clip_plane_enabled[i]) { any_clip = GL_TRUE; break; }
     }
-    if (ctx->cap_fog) {
+    if (ctx->cap_fog && ctx->fog_coord_src == GL_FOG_COORD) {
+        /* GL 1.4's fog coordinate in place of the distance: the vertex's own value, used as given
+         * - no absolute value - as Mesa's fixed-function vertex program passes it through
+         * (main/ffvertex_prog.c:1062-1064). */
+        fog0 = gl_fog_factor(ctx, v0->fogc);
+        fog1 = gl_fog_factor(ctx, v1->fogc);
+        fog2 = gl_fog_factor(ctx, v2->fogc);
+    } else if (ctx->cap_fog) {
         /* **The distance is the eye-space distance to the vertex**, which is what the
          * specification says fog works from - not the window depth, which would make fog change
          * with the depth range, and not the object-space distance, which would ignore the
@@ -1744,27 +2762,93 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
     float col0[4] = {v0->r, v0->g, v0->b, v0->a};
     float col1[4] = {v1->r, v1->g, v1->b, v1->a};
     float col2[4] = {v2->r, v2->g, v2->b, v2->a};
+    /* The secondary colours: the vertices' own (glSecondaryColor, or its array) while lighting is
+     * off, clamped with the primary below; lighting replaces them with the specular term it keeps
+     * apart, or zero. Only read where gl_color_sum_on says the sum runs. */
+    float sec0[4] = {v0->sr, v0->sg, v0->sb, 0.0f};
+    float sec1[4] = {v1->sr, v1->sg, v1->sb, 0.0f};
+    float sec2[4] = {v2->sr, v2->sg, v2->sb, 0.0f};
 
+    /* **Which side two-sided lighting lights.** A polygon's facing is its winding in normalised
+     * device coordinates - the sign culling reads, taken here because lighting has to know it
+     * first. A polygon's outline or corners under glPolygonMode take their polygon's side
+     * (gl_draw_polygon_tri sets it); a GL_LINES or GL_POINTS primitive is always lit from the
+     * front, as GL lights everything but polygons. */
+    GLboolean back = GL_FALSE;
+    if (ctx->cap_lighting && ctx->light_model_two_side) {
+        if (gl_prim_is_polygon(ctx)) {
+            const float wind = (ndc1[0] - ndc0[0]) * (ndc2[1] - ndc0[1]) -
+                               (ndc1[1] - ndc0[1]) * (ndc2[0] - ndc0[0]);
+            const GLboolean ccw = (GLboolean)(wind > 0.0f);
+            back = (ctx->front_face == GL_CW) ? ccw : (GLboolean)!ccw;
+        } else if (ctx->prim_from_polygon) {
+            back = ctx->prim_polygon_back;
+        }
+    }
+
+    if (!ctx->cap_lighting) {
+        /* **Colours are clamped to [0, 1] before they are rasterised** (GL 1.x, 2.14.9), as lit
+         * ones already are. They were not until 2026-09-19: glColor3f(-1, ...) or a GL_BYTE
+         * array of -128 wrapped to full intensity in the framebuffer's bytes. */
+        for (int k = 0; k < 4; k++) {
+            col0[k] = (col0[k] < 0.0f) ? 0.0f : ((col0[k] > 1.0f) ? 1.0f : col0[k]);
+            col1[k] = (col1[k] < 0.0f) ? 0.0f : ((col1[k] > 1.0f) ? 1.0f : col1[k]);
+            col2[k] = (col2[k] < 0.0f) ? 0.0f : ((col2[k] > 1.0f) ? 1.0f : col2[k]);
+            sec0[k] = (sec0[k] < 0.0f) ? 0.0f : ((sec0[k] > 1.0f) ? 1.0f : sec0[k]);
+            sec1[k] = (sec1[k] < 0.0f) ? 0.0f : ((sec1[k] > 1.0f) ? 1.0f : sec1[k]);
+            sec2[k] = (sec2[k] < 0.0f) ? 0.0f : ((sec2[k] > 1.0f) ? 1.0f : sec2[k]);
+        }
+    }
     if (ctx->cap_lighting) {
         float p0[4] = {v0->x, v0->y, v0->z, v0->w};
         float n0[3] = {v0->nx, v0->ny, v0->nz};
         float in_col0[4] = {v0->r, v0->g, v0->b, v0->a};
-        gl_compute_lighting(ctx, p0, n0, in_col0, col0);
+        gl_compute_lighting_side(ctx, p0, n0, in_col0, col0, sec0, back);
 
         float p1[4] = {v1->x, v1->y, v1->z, v1->w};
         float n1[3] = {v1->nx, v1->ny, v1->nz};
         float in_col1[4] = {v1->r, v1->g, v1->b, v1->a};
-        gl_compute_lighting(ctx, p1, n1, in_col1, col1);
+        gl_compute_lighting_side(ctx, p1, n1, in_col1, col1, sec1, back);
 
         float p2[4] = {v2->x, v2->y, v2->z, v2->w};
         float n2[3] = {v2->nx, v2->ny, v2->nz};
         float in_col2[4] = {v2->r, v2->g, v2->b, v2->a};
-        gl_compute_lighting(ctx, p2, n2, in_col2, col2);
+        gl_compute_lighting_side(ctx, p2, n2, in_col2, col2, sec2, back);
     }
 
     if (ctx->shade_model == GL_FLAT) {
-        memcpy(col0, col2, 4 * sizeof(float));
-        memcpy(col1, col2, 4 * sizeof(float));
+        /* The provoking vertex's colour, lit if lighting is on - computed from `pv` itself when
+         * it is not one of the three, since its position and normal are what lighting reads.
+         * Its secondary colour too: flat shading holds both. */
+        float flat[4], flat_sec[4];
+        if (!pv || pv == v2) {
+            memcpy(flat, col2, sizeof(flat));
+            memcpy(flat_sec, sec2, sizeof(flat_sec));
+        } else if (pv == v0) {
+            memcpy(flat, col0, sizeof(flat));
+            memcpy(flat_sec, sec0, sizeof(flat_sec));
+        } else if (pv == v1) {
+            memcpy(flat, col1, sizeof(flat));
+            memcpy(flat_sec, sec1, sizeof(flat_sec));
+        } else {
+            const float pc[4] = {pv->r, pv->g, pv->b, pv->a};
+            const float ps[4] = {pv->sr, pv->sg, pv->sb, 0.0f};
+            for (int k = 0; k < 4; k++) {
+                flat[k] = (pc[k] < 0.0f) ? 0.0f : ((pc[k] > 1.0f) ? 1.0f : pc[k]);
+                flat_sec[k] = (ps[k] < 0.0f) ? 0.0f : ((ps[k] > 1.0f) ? 1.0f : ps[k]);
+            }
+            if (ctx->cap_lighting) {
+                const float pp[4] = {pv->x, pv->y, pv->z, pv->w};
+                const float pn[3] = {pv->nx, pv->ny, pv->nz};
+                gl_compute_lighting_side(ctx, pp, pn, pc, flat, flat_sec, back);
+            }
+        }
+        memcpy(col0, flat, sizeof(flat));
+        memcpy(col1, flat, sizeof(flat));
+        memcpy(col2, flat, sizeof(flat));
+        memcpy(sec0, flat_sec, sizeof(flat_sec));
+        memcpy(sec1, flat_sec, sizeof(flat_sec));
+        memcpy(sec2, flat_sec, sizeof(flat_sec));
     }
 
     /* **glDepthRange, which lived only in the hardware path until now.**
@@ -1786,27 +2870,30 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
     sv0.sz = ndc0[2] * dr_scale + dr_offset;
     sv0.inv_w = inv_w0;
     sv0.r = col0[0]; sv0.g = col0[1]; sv0.b = col0[2]; sv0.a = col0[3];
-    sv0.u = v0->u; sv0.v = v0->v;
+    memcpy(sv0.tc, v0->tc, sizeof(sv0.tc));
     for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) sv0.cd[i] = cd0[i];
     sv0.fog = fog0;
+    sv0.sr = sec0[0]; sv0.sg = sec0[1]; sv0.sb = sec0[2];
 
     sv1.sx = ndc1[0] * vp_w_half + vp_ox;
     sv1.sy = (float)ctx->height - (ndc1[1] * vp_h_half + vp_oy);
     sv1.sz = ndc1[2] * dr_scale + dr_offset;
     sv1.inv_w = inv_w1;
     sv1.r = col1[0]; sv1.g = col1[1]; sv1.b = col1[2]; sv1.a = col1[3];
-    sv1.u = v1->u; sv1.v = v1->v;
+    memcpy(sv1.tc, v1->tc, sizeof(sv1.tc));
     for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) sv1.cd[i] = cd1[i];
     sv1.fog = fog1;
+    sv1.sr = sec1[0]; sv1.sg = sec1[1]; sv1.sb = sec1[2];
 
     sv2.sx = ndc2[0] * vp_w_half + vp_ox;
     sv2.sy = (float)ctx->height - (ndc2[1] * vp_h_half + vp_oy);
     sv2.sz = ndc2[2] * dr_scale + dr_offset;
     sv2.inv_w = inv_w2;
     sv2.r = col2[0]; sv2.g = col2[1]; sv2.b = col2[2]; sv2.a = col2[3];
-    sv2.u = v2->u; sv2.v = v2->v;
+    memcpy(sv2.tc, v2->tc, sizeof(sv2.tc));
     for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) sv2.cd[i] = cd2[i];
     sv2.fog = fog2;
+    sv2.sr = sec2[0]; sv2.sg = sec2[1]; sv2.sb = sec2[2];
 
     /* 4. Backface culling via 2D signed area (screen coordinates) */
     float area = (sv1.sx - sv0.sx) * (sv2.sy - sv0.sy) - (sv1.sy - sv0.sy) * (sv2.sx - sv0.sx);
@@ -1825,7 +2912,7 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
      * `m` is `max(|dz/dx|, |dz/dy|)` from the plane through the three screen vertices; the
      * signed area is its denominator, which is why this sits after it. */
     float depth_bias = 0.0f;
-    if (ctx->cap_polygon_offset_fill && area != 0.0f) {
+    if (gl_prim_offsets(ctx) && area != 0.0f) {
         const float inv_area = 1.0f / area;
         const float dzdx = ((sv1.sz - sv0.sz) * (sv2.sy - sv0.sy) -
                             (sv2.sz - sv0.sz) * (sv1.sy - sv0.sy)) * inv_area;
@@ -1845,7 +2932,7 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
     sv1.sz += depth_bias;
     sv2.sz += depth_bias;
 
-    if (!ctx->use_hardware && ctx->cap_cull_face) {
+    if (!ctx->use_hardware && gl_prim_culls(ctx)) {
         /* Note: with Y-flip, CCW in 3D becomes negative in screen space */
         GLboolean is_ccw = (area < 0.0f) ? GL_TRUE : GL_FALSE;
         if (ctx->front_face == GL_CW) is_ccw = !is_ccw;
@@ -1864,7 +2951,17 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
             gl_hw_begin_frame(ctx);
         }
 
-        if (ctx->dcb_words + 160 >= ctx->dcb_capacity_dw) {
+        /* Room for the most one draw can emit below, counted rather than guessed: the depth block
+         * 72 (24 registers, first depth-tested draw only), the four per-draw state registers 12,
+         * viewport 6, depth range 4, scissor 4, clip planes and their enables 29,
+         * CB_COLOR_CONTROL 3, the blend constant 6, shader and user data 21, the draw itself 5,
+         * and the stencil surface's binding 15 (first stencil-tested draw only) and registers 5 -
+         * 182 dwords, held as OOPS_GL_DCB_DRAW_MAX_DW with some slack. **Plus the flush
+         * trailer.** This was a bare 160 until 2026-09-19, which reserved nothing for the 46
+         * dwords gl_hw_flush appends: a draw that just fitted left a stream that could not be
+         * closed inside the buffer. */
+        if (ctx->dcb_words + OOPS_GL_DCB_DRAW_MAX_DW + OOPS_GL_DCB_TRAILER_DW >=
+            ctx->dcb_capacity_dw) {
             gl_hw_flush(ctx);
             gl_hw_begin_frame(ctx);
         }
@@ -1881,58 +2978,357 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
          * ring of slots like the vertex buffer's would avoid it and is the change to make if a
          * frame ever switches textures often enough to matter. Only on a *different* texture:
          * rebinding the same one, which a display list does constantly, changes nothing. */
-        const GLuint eff_tex = gl_effective_texture_id(ctx);
-        if (eff_tex > 0u && ctx->hw_frame_tex != 0u && ctx->hw_frame_tex != eff_tex) {
+        GLuint eff_tex = gl_effective_texture_id(ctx);
+        gl_texture_object_t *eff_obj = (gl_texture_object_t *)gl_lookup_texture(ctx, eff_tex);
+        /*
+         * **Which units this path applies**, and one log line for a texture it leaves out.
+         *
+         * Unit 0 when it is textured, and unit 1 with it since 2026-09-20 (gl_multitex.h). Units
+         * above that are the software rasteriser's alone - and so is unit 1 when unit 0 has no
+         * texture, because this path's second stage combines against the first's result and
+         * there is no first. A unit that is left out earns the line whichever reason applies;
+         * saying "above GL_TEXTURE1" while dropping GL_TEXTURE1 would be worse than saying
+         * nothing.
+         */
+        const GLboolean unit1_applied =
+            (GLboolean)(ctx->hw_multitex && eff_tex != 0u && gl_unit_texture_id(ctx, 1u) != 0u);
+        for (GLuint tu = 1u; tu < OOPS_GL_MAX_TEXTURE_UNITS && !ctx->hw_unit_logged; tu++) {
+            if (gl_unit_texture_id(ctx, tu) == 0u) continue;
+            if (tu == 1u && unit1_applied) continue;
+            gl_log_line("a texture unit this path does not apply is bound: it is applied by the "
+                        "software rasteriser only and is left out of the draw");
+            ctx->hw_unit_logged = GL_TRUE;
+        }
+        /* **Two colour targets** (since 2026-09-20). A draw under GL_FRONT_AND_BACK or GL_LEFT
+         * reaches both buffers here: CB_COLOR1 is bound to `fb_also`, both masks carry MRT1, and
+         * the pixel shader exports to it (gl_ps_patch_export). It reached the back only until
+         * then, which left the front holding whatever the CPU's clears and pixel rectangles had
+         * put there. */
+        /* **A volume is sampled here since 2026-09-20.** Its slices are already laid out one
+         * after another by the upload, the descriptor carries TYPE 0xa and the last slice in
+         * WORD4, and the sample slot interpolates r, divides it by q and samples with
+         * `dim:SQ_RSRC_IMG_3D` (gl_ps_patch_sample). Like a cube map's direction, r rides in the
+         * third parameter, so such a draw runs at least the three-parameter vertex shader -
+         * `volume` forces it below.
+         *
+         * A volume with no storage yet has nothing to sample and is still drawn untextured,
+         * said once in the log - the same shape as an incomplete cube map below. */
+        GLboolean volume = GL_FALSE;
+        if (eff_obj && eff_obj->target == GL_TEXTURE_3D) {
+            volume = GL_TRUE;
+            /* **What is still missing is the mip chain, not the sample.** gl_tex_chain_levels
+             * builds none for a volume - a volume's levels halve depth as well, and the chain
+             * layout here is a 2D one - so LAST_LEVEL stays 0 and a minifying filter reads the
+             * base level on this path while the software rasteriser reads the chain. Said once,
+             * and only by a draw whose filter would have used it. */
+            if (!ctx->hw_3d_logged && gl_filter_uses_mipmaps(eff_obj->min_filter)) {
+                gl_log_line("a 3D texture's mip chain is not built on this path: minification "
+                            "samples the base level");
+                ctx->hw_3d_logged = GL_TRUE;
+            }
+        }
+        /* **A cube map is sampled here since 2026-09-20.** Its six faces are uploaded as one
+         * array (gl_tex_cube_upload), the descriptor carries TYPE 0xb, and the pixel shader's
+         * sample slot finds the face from the direction (gl_ps_patch_sample). What remains is
+         * the direction's third component: the vertex carries r in the third parameter, so such
+         * a draw runs at least the three-parameter vertex shader - `cube` forces it below.
+         *
+         * A cube map whose faces have not all arrived has no array to sample, and GL does not
+         * sample an incomplete one either (2.1, 3.8.10); that one is still drawn untextured. */
+        GLboolean cube = GL_FALSE;
+        if (eff_obj && eff_obj->target == GL_TEXTURE_CUBE_MAP) {
+            if (eff_obj->cube_hw_dim > 0 || eff_obj->cube) {
+                cube = GL_TRUE;
+            } else {
+                if (!ctx->hw_cube_logged) {
+                    gl_log_line("a cube map with no complete set of faces is not sampled on this "
+                                "path: the draw is untextured");
+                    ctx->hw_cube_logged = GL_TRUE;
+                }
+                eff_tex = 0u;
+                eff_obj = (gl_texture_object_t *)0;
+            }
+        }
+        /* **A depth texture is sampled here since 2026-09-20**, with GL 1.4's comparison and
+         * without it. The descriptor's image format is `32_FLOAT` rather than `8_8_8_8_UNORM`,
+         * because a depth texel is one float; the sampler's DEPTH_COMPARE_FUNC has carried
+         * GL_TEXTURE_COMPARE_FUNC since `-6c80` measured it; and the sample slot asks for one
+         * channel and spreads it as GL_DEPTH_TEXTURE_MODE says (gl_ps_patch_sample).
+         *
+         * Under GL_COMPARE_R_TO_TEXTURE the reference is r, which rides in the third parameter
+         * like a volume's and a cube map's - so `shadow` forces one below. Without the
+         * comparison the texel is the stored depth and no r is read.
+         *
+         * **The hardware compares per texel and then filters**, which is the percentage-closer
+         * filter; the software rasteriser does the same (gl_depth_texel), so GL_LINEAR agrees
+         * on both paths rather than one of them comparing a filtered depth. */
+        GLboolean depth_tex = GL_FALSE, shadow = GL_FALSE;
+        if (eff_obj) {
+            gl_tex_view_t dv;
+            if (gl_tex_level_view(eff_obj, eff_obj->base_level, &dv) &&
+                dv.base_format == GL_DEPTH_COMPONENT) {
+                depth_tex = GL_TRUE;
+                shadow = (GLboolean)(eff_obj->compare_mode == GL_COMPARE_R_TO_TEXTURE);
+            }
+        }
+        if (eff_obj) {
+            /* The texture's hardware image brought up to date - its mip chain built or rebuilt,
+             * its descriptors repacked. Building may have submitted the frame to free an old
+             * chain, in which case the frame is reopened here before anything is written. */
+            gl_tex_hw_prepare(ctx, eff_obj);
+            if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+            /* **The combine follows the texture as well as glTexEnv**: its base format decides
+             * which channels the environment touches, so a draw with a texture of another base
+             * format rewrites the shader's four words - submitting the draws built with the old
+             * ones first, and reopening the frame. */
+            /* GL_BLEND, GL_DECAL of RGBA and GL_COMBINE included since 2026-09-19, as a program
+             * in the longer slot; the log line is for a program that did not fit, which GL's
+             * argument counts rule out. */
+            if (!gl_ps_patch_tex_env(ctx) && !ctx->hw_env_logged) {
+                gl_log_line("a texture combine outgrew the pixel shader's slot: "
+                            "this draw modulates on this path");
+                ctx->hw_env_logged = GL_TRUE;
+            }
+            if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+        }
+        /* Fog, in both pixel shaders: the colour in the fog slot's literals, the factor in the
+         * vertex (below). A change submits the draws built with the old words first. */
+        gl_ps_patch_fog(ctx);
+        if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+        /* **Both colour buffers** (since 2026-09-20). Every draw sets the export, whether it
+         * exports to one target or two, for the reason the colour sum's slot is set every time:
+         * a draw after glDrawBuffer(GL_BACK) must stop writing the buffer GL no longer names. */
+        gl_ps_patch_export(ctx, (GLboolean)(ctx->fb_also != (uint32_t *)0));
+        if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+        /* **The polygon stipple** (on this path since 2026-09-20): the discard slot and the mask
+         * it reads. Set on every draw, like the two above - the stipple can be switched off, or
+         * glPolygonMode taken off GL_FILL, between two draws of a frame. */
+        gl_ps_patch_stipple(ctx, gl_polygon_stipple_on(ctx));
+        if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+        /* **Antialiasing's coverage** (since 2026-09-20), in the untextured shader's slot only -
+         * see gl_smoothing for why a textured smooth primitive is aliased here. Set on every
+         * draw, like the two above: a triangle after a smooth point must stop weighing its alpha
+         * by a texture coordinate. */
+        gl_ps_patch_coverage(ctx, (GLboolean)(ctx->aa_hw_on && eff_tex == 0u));
+        if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+        /* **The colour sum after texturing** (GL 1.4, 3.9; on this path since 2026-09-19). A
+         * textured draw whose secondary colour is not zero somewhere carries it in the third
+         * parameter, and the textured shader's sum slot adds it after the combine and before fog.
+         * Such a draw runs the three-parameter vertex shader. Everything else keeps two
+         * parameters and the sum slot's state, so gl-cube's stream is untouched. A change of the
+         * slot submits the draws built with the old words first. **Every textured draw sets
+         * the slot**, the sum on or not: a slot left holding the sum would add whatever attr2
+         * reads on a draw that exports two parameters. */
+        GLboolean p3 = GL_FALSE;
+        /* The third parameter a cube map's direction and a volume's r need, separate from the
+         * colour sum's use of the same export - see where it is set. */
+        GLboolean p3_needed = GL_FALSE;
+        /* **The second texture unit** (since 2026-09-20, and off until gl_multitex.h's gate or a
+         * test opens it). A draw uses it when unit 1 has an enabled texture of its own and unit 0
+         * is textured too - a second unit with nothing under it is no second unit. It implies the
+         * third parameter as well, the fourth shader exporting both. */
+        const GLboolean unit1 = unit1_applied;
+        if (eff_tex != 0u) {
+            if (gl_color_sum_on(ctx)) {
+                for (int k = 0; k < 3; k++) {
+                    if (sec0[k] > 0.0f || sec1[k] > 0.0f || sec2[k] > 0.0f) p3 = GL_TRUE;
+                }
+            }
+            /* A cube map's direction needs its third component, which the vertex carries in the
+             * third parameter - so such a draw exports one whether or not a colour sum wants it.
+             * gl_ps_patch_sum is still told `p3` and not this: the sum's slot is about the
+             * secondary colour, and turning it on here would add one nothing asked for. */
+            if (cube || volume || shadow) p3_needed = GL_TRUE;
+            gl_ps_patch_sum(ctx, p3);
+            if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+            /* One of the five forms, on every textured draw, for the reason every other slot is
+             * set on every draw: a draw that stops using a cube map must stop looking for a face,
+             * and one that stops comparing must stop asking for one channel. */
+            {
+                const gl_ps_sample_kind_t kind =
+                    shadow ? GL_PS_SAMPLE_SHADOW
+                           : (depth_tex ? GL_PS_SAMPLE_DEPTH
+                                        : (cube ? GL_PS_SAMPLE_CUBE
+                                                : (volume ? GL_PS_SAMPLE_3D : GL_PS_SAMPLE_2D)));
+                gl_ps_patch_sample(ctx, kind, eff_obj ? eff_obj->depth_mode : (GLenum)GL_LUMINANCE);
+            }
+            if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+            /* Both of the second unit's slots, on every textured draw and for the reason the sum
+             * and the export are: a draw that drops back to one unit must stop sampling and stop
+             * combining a texel it no longer fetches. */
+            gl_ps_patch_unit1(ctx, unit1);
+            if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+            gl_ps_patch_tex_env_unit1(ctx, unit1);
+            if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+        }
+        /* **Compared by content, not by texture.** The slot was reloaded only for a *different*
+         * texture until 2026-09-19, so changing one texture's wrap mode or filter mid-frame and
+         * drawing again rewrote the descriptors every earlier draw of the frame would read at the
+         * flush: they all sampled with the new parameters. Any change to what the slot holds now
+         * submits the draws that read the old contents first. */
+        if (eff_obj && ctx->hw_frame_tex != 0u) {
+            const uint32_t *slot =
+                (const uint32_t *)((const char *)ctx->gpu_payload + OOPS_GL_DESC_TABLE_OFFSET);
+            const void *border = (const char *)ctx->gpu_payload + OOPS_GL_BORDER_TABLE_OFFSET;
+            uint32_t samp[4];
+            memcpy(samp, eff_obj->samp_desc, 16);
+            samp[2] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[0], eff_obj));
+            if (memcmp(slot, eff_obj->img_desc, 32) != 0 ||
+                memcmp(slot + 8, samp, 16) != 0 ||
+                (eff_obj->border_in_table && memcmp(border, eff_obj->border_hw, 16) != 0)) {
+                gl_hw_flush(ctx);
+                gl_hw_begin_frame(ctx);
+            }
+        }
+
+        /* **A full vertex ring is submitted before it is reused.** Each triangle's vertices go
+         * into its own slot and the draw that reads them only runs at the flush, so the ring
+         * holds exactly one stream's worth. This took `triangles_drawn % 450` until 2026-09-19
+         * with nothing at the wrap: the 451st triangle of a frame overwrote the first one's
+         * vertices before the GPU had read them, and the frame drew triangle 451 twice and
+         * triangle 1 never. gl-cube's twelve and gl1-probe's handful never got near it; any
+         * real scene does. Submitting here is the same step a texture change already takes -
+         * the render target persists across submissions, so the frame simply continues.
+         *
+         * The fill is per stream (gl_hw_flush resets it), which is what makes this the ring's
+         * fill level. A larger buffer would submit less often; this makes it correct. It is
+         * counted in bytes since 2026-09-19, when a triangle became 144 bytes or 192 - three
+         * 64-byte vertices with the third parameter. The capacity is the 450 144-byte triangles it
+         * always was, so a stream of two-parameter draws submits exactly where it did. */
+        /* 2, 3 or 4 parameters, and so 48, 64 or 80 bytes a vertex. The fourth shader loads the
+         * third parameter too, so a two-unit vertex carries both. */
+        const uint32_t params = unit1 ? 4u : ((p3 || p3_needed) ? 3u : 2u);
+        const size_t vsz = (params >= 4u) ? 80u : (params == 3u) ? 64u : 48u;
+        const uint32_t tri_bytes = (uint32_t)(vsz * 3u);
+        if (ctx->hw_vbo_cursor + tri_bytes > OOPS_GL_VBO_RING_TRIANGLES * 144u) {
             gl_hw_flush(ctx);
             gl_hw_begin_frame(ctx);
         }
 
-        /* Compute VBO buffer offset for this triangle (3 vertices * 48 bytes = 144 bytes) */
-        size_t tri_idx = (size_t)ctx->triangles_drawn % 450;
-        size_t vbo_offset = tri_idx * 144;
+        /* This triangle's place in the vertex buffer: three vertices of 48 bytes, or 64. */
+        size_t vbo_offset = ctx->hw_vbo_cursor;
+        ctx->hw_vbo_cursor += tri_bytes;
+
+        /* **Untextured, the secondary colour joins the primary per vertex.** With no texture
+         * between them, that is GL's per-fragment sum, except where it saturates between
+         * the vertices. A textured draw that sums carries the secondary colour in the third
+         * parameter instead, for the pixel shader to add after the combine (`p3`, above). Until
+         * 2026-09-19 it was summed here too, and the texture modulated the colour it should have
+         * left alone. */
+        if (gl_color_sum_on(ctx) && !p3) {
+            for (int k = 0; k < 3; k++) {
+                col0[k] = (col0[k] + sec0[k] > 1.0f) ? 1.0f : col0[k] + sec0[k];
+                col1[k] = (col1[k] + sec1[k] > 1.0f) ? 1.0f : col1[k] + sec1[k];
+                col2[k] = (col2[k] + sec2[k] > 1.0f) ? 1.0f : col2[k] + sec2[k];
+            }
+        }
 
         if (ctx->vbo_mem) {
             char *vbo_ptr = (char *)ctx->vbo_mem + vbo_offset;
-            float uv0[4] = {v0->u, v0->v, 0.0f, 0.0f};
-            float uv1[4] = {v1->u, v1->v, 0.0f, 0.0f};
-            float uv2[4] = {v2->u, v2->v, 0.0f, 0.0f};
+            /* **Divided per vertex on this path**: the pixel shader samples the interpolated s
+             * and t as they come, so q is applied at the corners - exact where q is the same at
+             * all three, as it is for everything but a projected texture. A per-fragment divide
+             * wants q in the vertex's spare fourth texture component and a v_rcp and two v_mul in
+             * the pixel shader - the software rasteriser's rule, a shader change away. */
+            /* Unit 0's coordinate: the console samples one texture (see the unit 1 note above).
+             * **s and t undivided and q in w**: the textured pixel shader interpolates all three
+             * and divides per fragment (since 2026-09-19 - the vertex divided before, which is
+             * exact only while q is the same at every corner). A q of 0 goes as 1, the rule the
+             * software rasteriser's gl_q_inv applies, rather than as an infinity waiting in the
+             * shader's reciprocal. **z is the fog factor**, which the pixel shaders' fog slot
+             * interpolates (gl_ps_patch_fog) - 1, no fog, when fog is off. */
+            const float *t0 = v0->tc[0], *t1 = v1->tc[0], *t2 = v2->tc[0];
+            float uv0[4] = {t0[0], t0[1], fog0, (t0[3] != 0.0f) ? t0[3] : 1.0f};
+            float uv1[4] = {t1[0], t1[1], fog1, (t1[3] != 0.0f) ? t1[3] : 1.0f};
+            float uv2[4] = {t2[0], t2[1], fog2, (t2[3] != 0.0f) ? t2[3] : 1.0f};
 
-            /* Vertex 0 (48 bytes) */
-            memcpy(vbo_ptr + 0,   c0, 16);
-            memcpy(vbo_ptr + 16,  col0, 16);
-            memcpy(vbo_ptr + 32,  uv0, 16);
-            /* Vertex 1 (48 bytes) */
-            memcpy(vbo_ptr + 48,  c1, 16);
-            memcpy(vbo_ptr + 64,  col1, 16);
-            memcpy(vbo_ptr + 80,  uv1, 16);
-            /* Vertex 2 (48 bytes) */
-            memcpy(vbo_ptr + 96,  c2, 16);
-            memcpy(vbo_ptr + 112, col2, 16);
-            memcpy(vbo_ptr + 128, uv2, 16);
+            /* Each vertex: position, colour, the texture parameter - and with the third
+             * parameter, {secondary r, g, b, unit 0's r}, the secondary colour for the sum and r
+             * for what samples in three dimensions. */
+            const float *pos[3] = {c0, c1, c2};
+            const float *col[3] = {col0, col1, col2};
+            const float *uvs[3] = {uv0, uv1, uv2};
+            const float *sec[3] = {sec0, sec1, sec2};
+            const float *tcs[3] = {t0, t1, t2};
+            const float *u1[3] = {v0->tc[1], v1->tc[1], v2->tc[1]};
+            for (size_t k = 0; k < 3; k++) {
+                char *v = vbo_ptr + k * vsz;
+                memcpy(v + 0, pos[k], 16);
+                memcpy(v + 16, col[k], 16);
+                memcpy(v + 32, uvs[k], 16);
+                if (params >= 3u) {
+                    const float p2[4] = {sec[k][0], sec[k][1], sec[k][2], tcs[k][2]};
+                    memcpy(v + 48, p2, 16);
+                }
+                if (params >= 4u) {
+                    /* The second unit's coordinate, divided per fragment as the first is, with a
+                     * q of 0 going as 1 - gl_q_inv's rule. z is unused: the fog factor is the
+                     * first unit's to carry, and only one is interpolated. */
+                    const float p3v[4] = {u1[k][0], u1[k][1], 0.0f,
+                                          (u1[k][3] != 0.0f) ? u1[k][3] : 1.0f};
+                    memcpy(v + 64, p3v, 16);
+                }
+            }
 #if defined(__x86_64__)
-            __builtin_ia32_clflush((const void *)(vbo_ptr + 0));
-            __builtin_ia32_clflush((const void *)(vbo_ptr + 64));
-            __builtin_ia32_clflush((const void *)(vbo_ptr + 128));
+            /* Every cache line the triangle touches: it starts 16-byte aligned, so its last
+             * bytes can sit in a line of their own. */
+            for (size_t p = 0; p < tri_bytes; p += 64u) {
+                __builtin_ia32_clflush((const void *)(vbo_ptr + p));
+            }
+            __builtin_ia32_clflush((const void *)(vbo_ptr + tri_bytes - 1u));
 #endif
         }
 
         uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
         uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
-        uint64_t desc_table_va = payload_va + 0x900;
-        uint64_t ps_va = payload_va + 0x300; /* Default: untextured Gouraud */
+        uint64_t desc_table_va = payload_va + OOPS_GL_DESC_TABLE_OFFSET;
+        uint64_t ps_va = payload_va + OOPS_GL_PS_UNTEX_OFFSET; /* Default: untextured Gouraud */
         uint32_t ps_rsrc2 = 0u;
 
         if (eff_tex > 0u) {
-            ps_va = payload_va + 0x200; /* Stage 5: Textured + Gouraud */
+            ps_va = payload_va + OOPS_GL_PS_TEX_OFFSET; /* Stage 5: Textured + Gouraud */
             ps_rsrc2 = 0x00000004u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor table. 0x2 loads one SGPR and the primitive mask lands in s1 (measured 2026-09-14) */
             for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
                 if (ctx->textures[ti].used && ctx->textures[ti].id == eff_tex) {
                     uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload + 0x900);
                     memcpy(dt, ctx->textures[ti].img_desc, 32);
                     memcpy(dt + 8, ctx->textures[ti].samp_desc, 16);
+                    /* GL 1.4's bias, the texture's and the unit's, joins the sampler here rather
+                     * than in the texture's own descriptor, since half of it is context state. */
+                    dt[10] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[0],
+                                                                  &ctx->textures[ti]));
                     ctx->hw_frame_tex = eff_tex;
+                    /* The border colour table's one entry, for a sampler whose WORD3 names it. */
+                    float *bt = (float *)((char *)ctx->gpu_payload + OOPS_GL_BORDER_TABLE_OFFSET);
+                    if (ctx->textures[ti].border_in_table) {
+                        memcpy(bt, ctx->textures[ti].border_hw, 16);
+                    }
 #if defined(__x86_64__)
                     __builtin_ia32_clflush((const void *)dt);
+                    __builtin_ia32_clflush((const void *)bt);
+#endif
+                    break;
+                }
+            }
+            /* **The second unit's pair**, one stride along the table, where tex-prolog2.s loads
+             * it from. Its own texture, its own unit's LOD bias. Nothing writes it unless the
+             * draw uses the unit; a stale pair is never read, because the sample that would read
+             * it is a branch over itself then. */
+            if (unit1) {
+                const GLuint id1 = gl_unit_texture_id(ctx, 1u);
+                for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
+                    if (!ctx->textures[ti].used || ctx->textures[ti].id != id1) continue;
+                    gl_tex_hw_prepare(ctx, &ctx->textures[ti]);
+                    if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+                    uint32_t *dt1 = (uint32_t *)((char *)ctx->gpu_payload +
+                                                 OOPS_GL_DESC_TABLE_OFFSET +
+                                                 OOPS_GL_DESC_UNIT_STRIDE);
+                    memcpy(dt1, ctx->textures[ti].img_desc, 32);
+                    memcpy(dt1 + 8, ctx->textures[ti].samp_desc, 16);
+                    dt1[10] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[1],
+                                                                   &ctx->textures[ti]));
+#if defined(__x86_64__)
+                    __builtin_ia32_clflush((const void *)dt1);
 #endif
                     break;
                 }
@@ -1944,11 +3340,55 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
         uint32_t cur_blend_ctrl = gl_compute_cb_blend_control(ctx);
         uint32_t cur_cull_ctrl = gl_compute_pa_su_sc_mode_cntl(ctx);
         uint32_t cur_target_mask = gl_compute_cb_target_mask(ctx);
+        /* The same mask for the second target, when GL names both buffers - as the frame's own
+         * CB_TARGET_MASK carries it. A mid-frame glColorMask must not drop MRT1's half. */
+        if (ctx->fb_also) cur_target_mask |= cur_target_mask << 4;
 
         /* The first depth-tested draw of a frame binds the depth surface. */
         if (cur_depth_ctrl != 0u && !ctx->hw_z_bound) {
             gl_hw_emit_depth_block(ctx, &dw);
             ctx->hw_z_bound = GL_TRUE;
+        }
+        /* **An active occlusion query starts counting here** and nowhere earlier - the depth
+         * surface is bound by the line above, which is the condition e3a7 hung without. The
+         * precision bits go on once a frame, because a flush mid-query re-emits the depth block
+         * with the plain recipe; the begin snapshot is taken once a query. */
+        if (ctx->query_active != 0u && ctx->hw_z_bound && !ctx->hw_query_reg) {
+            *dw++ = 0xc0016900u; /* SET_CONTEXT_REG DB_COUNT_CONTROL (0x001) */
+            *dw++ = 0x001u;
+            *dw++ = 0x11000106u; /* + PERFECT_ZPASS_COUNTS, DISABLE_CONSERVATIVE_ZPASS_COUNTS */
+            ctx->hw_query_reg = GL_TRUE;
+            if (!ctx->hw_query_counting) {
+                gl_hw_emit_zpass_done(&dw, gl_hw_zpass_base(ctx));
+                ctx->hw_query_counting = GL_TRUE;
+            }
+        }
+        /* **The stencil test** (since 2026-09-19; written, not yet seen - gl1-probe's `stencil`
+         * is the measurement, obSCEne's fixture could not bind a non-passthrough stage,
+         * REQ-20260917T1845Z-3d5b). The first stencil-tested draw of a frame makes the stencil
+         * surface live - which a frame that never tests stencil, gl-cube's included, never
+         * emits - and every stencil-tested draw sets the operations and the reference. */
+        if (gl_hw_stencil_on(ctx)) {
+            if (!ctx->hw_stencil_bound) {
+                gl_hw_emit_stencil_bind(ctx, &dw);
+                ctx->hw_stencil_bound = GL_TRUE;
+            }
+            /* DB_STENCIL_CONTROL (0x10B), DB_STENCILREFMASK (0x10C), DB_STENCILREFMASK_BF (0x10D)
+             * - context registers 0x2842C, 0x28430, 0x28434 in gfx103.json - consecutive, so one
+             * packet. The fields are gfx103.json's; STENCILOPVAL 1 is radeonsi's, the step the
+             * increment and decrement operations take (si_state.c:1325-1333). The back-face
+             * copies match the front: GL 1.x has one stencil state. */
+            const uint32_t ops = gl_hw_stencil_op(ctx->stencil_fail) |
+                                 (gl_hw_stencil_op(ctx->stencil_zpass) << 4) |
+                                 (gl_hw_stencil_op(ctx->stencil_zfail) << 8);
+            const uint32_t refmask = ((uint32_t)ctx->stencil_ref & 0xffu) |
+                                     ((ctx->stencil_value_mask & 0xffu) << 8) |
+                                     ((ctx->stencil_writemask & 0xffu) << 16) | (1u << 24);
+            *dw++ = 0xc0036900u; /* PACKET3_SET_CONTEXT_REG, three data dwords */
+            *dw++ = 0x10bu;
+            *dw++ = ops | (ops << 12);
+            *dw++ = refmask;
+            *dw++ = refmask;
         }
 
         *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmDB_DEPTH_CONTROL (0x200) */
@@ -1982,6 +3422,17 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
             ctx->hw_vport_dirty = GL_FALSE;
         }
 
+        /* A depth range set after the frame's registers were written: PA_CL_VPORT_ZSCALE and
+         * ZOFFSET, the two registers after the four above (gfx103.json 0x2844c, 0x28450), with
+         * the same arithmetic as the frame table's arms for 0x113 and 0x114. */
+        if (ctx->hw_depth_range_dirty) {
+            *dw++ = 0xc0026900u; /* PACKET3_SET_CONTEXT_REG, two data dwords */
+            *dw++ = 0x113u;      /* mmPA_CL_VPORT_ZSCALE .. ZOFFSET */
+            *dw++ = gl_f32_bits((ctx->depth_far - ctx->depth_near) * 0.5f);
+            *dw++ = gl_f32_bits((ctx->depth_far + ctx->depth_near) * 0.5f);
+            ctx->hw_depth_range_dirty = GL_FALSE;
+        }
+
         /* A scissor box, or the test being switched, after the frame's registers were written.
          * Two consecutive registers, so one packet - and like the viewport, nothing is emitted
          * for a frame whose scissor was already current when it began. */
@@ -2006,6 +3457,31 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
             *dw++ = gl_compute_clip_cntl(ctx);
             ctx->hw_clip_dirty = GL_FALSE;
         }
+
+        /* A logic op switched, or its opcode changed, after the frame's registers were written. */
+        if (ctx->hw_color_control_dirty) {
+            *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmCB_COLOR_CONTROL (0x202) */
+            *dw++ = 0x202u;
+            *dw++ = gl_compute_cb_color_control(ctx);
+            ctx->hw_color_control_dirty = GL_FALSE;
+        }
+
+        /* The blend constant, only for a draw that reads it. CB_BLEND_RED, _GREEN, _BLUE and
+         * _ALPHA are consecutive from context offset 0x105 (gfx103.json, 0x28414..0x28420), and
+         * radeonsi writes them the same way - one sequence of the four floats' bits
+         * (gallium/drivers/radeonsi/si_state.c:730-738). */
+        if (ctx->hw_blend_color_dirty && gl_blend_reads_constant(ctx)) {
+            *dw++ = 0xc0046900u; /* PACKET3_SET_CONTEXT_REG, four data dwords */
+            *dw++ = 0x105u;      /* mmCB_BLEND_RED .. ALPHA */
+            *dw++ = gl_f32_bits(ctx->blend_color[0]);
+            *dw++ = gl_f32_bits(ctx->blend_color[1]);
+            *dw++ = gl_f32_bits(ctx->blend_color[2]);
+            *dw++ = gl_f32_bits(ctx->blend_color[3]);
+            ctx->hw_blend_color_dirty = GL_FALSE;
+        }
+
+        /* The vertex stage with two parameters or three, switched only on a change. */
+        gl_hw_emit_param_count(ctx, &dw, params);
 
         /* Emit Shader & User Data */
         *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_LO_PS */
@@ -2055,7 +3531,6 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
 #endif
 }
 
-#ifdef OOPS_HOST_BUILD
 /* One stencil operation, through the write mask.
  *
  * **The mask is applied to the result, not to the operand**: GL_INVERT with a mask of 0x0f
@@ -2063,10 +3538,12 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
  * inverting four bits. Getting that backwards gives a buffer that is right whenever the mask is
  * all-ones - which is the default, and so the only case most code exercises.
  *
- * GL_INCR and GL_DECR saturate rather than wrap; the wrapping forms are GL 1.4 and refused.
+ * GL_INCR and GL_DECR saturate; GL 1.4's GL_INCR_WRAP and GL_DECR_WRAP wrap round the eight
+ * bits instead.
  *
- * Inside the host-build guard with the rest of the software rasteriser: on the target the depth
- * block's stencil registers do this, and nothing here runs. */
+ * This, the blend factors, the sampler and the texture environment are compiled for the target
+ * too since 2026-09-19: pixel rectangles are fragments on both paths (gl_pixel_fragment), and on
+ * the target they are the CPU's. Only the triangle rasteriser below is host-only. */
 static void gl_stencil_apply(uint8_t *sp, GLenum op, GLint ref, uint32_t wmask) {
     const uint8_t old = *sp;
     uint8_t next = old;
@@ -2076,6 +3553,8 @@ static void gl_stencil_apply(uint8_t *sp, GLenum op, GLint ref, uint32_t wmask) 
         case GL_REPLACE: next = (uint8_t)(ref & 0xff); break;
         case GL_INCR:    next = (uint8_t)((old < 255u) ? (old + 1u) : 255u); break;
         case GL_DECR:    next = (uint8_t)((old > 0u) ? (old - 1u) : 0u); break;
+        case GL_INCR_WRAP: next = (uint8_t)(old + 1u); break;
+        case GL_DECR_WRAP: next = (uint8_t)(old - 1u); break;
         case GL_INVERT:  next = (uint8_t)(~old); break;
         default:         return;
     }
@@ -2083,9 +3562,16 @@ static void gl_stencil_apply(uint8_t *sp, GLenum op, GLint ref, uint32_t wmask) 
     *sp = (uint8_t)((next & m) | (old & (uint8_t)~m));
 }
 
-static float get_blend_factor(GLenum factor, float src_r, float src_g, float src_b, float src_a,
+static float get_blend_factor(GLenum factor, const float bc[4],
+                              float src_r, float src_g, float src_b, float src_a,
                               float dst_r, float dst_g, float dst_b, float dst_a, int channel) {
     switch (factor) {
+        /* The constant colour's alpha is what CONSTANT_COLOR contributes to the alpha channel,
+         * the same as the other *_COLOR factors take their own alpha there. */
+        case GL_CONSTANT_COLOR:           return bc[channel];
+        case GL_ONE_MINUS_CONSTANT_COLOR: return 1.0f - bc[channel];
+        case GL_CONSTANT_ALPHA:           return bc[3];
+        case GL_ONE_MINUS_CONSTANT_ALPHA: return 1.0f - bc[3];
         case GL_ZERO: return 0.0f;
         case GL_ONE: return 1.0f;
         case GL_SRC_COLOR:
@@ -2101,11 +3587,814 @@ static float get_blend_factor(GLenum factor, float src_r, float src_g, float src
         case GL_ONE_MINUS_DST_COLOR:
             return 1.0f - ((channel == 0) ? dst_r : ((channel == 1) ? dst_g : ((channel == 2) ? dst_b : dst_a)));
         case GL_SRC_ALPHA_SATURATE: {
+            /* min(As, 1 - Ad) for colour, but **1 for alpha**. This returned the minimum on
+             * all four channels until 2026-09-19, so the saturate factor also scaled the alpha
+             * it wrote. softpipe is explicit about it - "multiply alpha by 1.0"
+             * (gallium/drivers/softpipe/sp_quad_blend.c:467-470) - and the colour block does it
+             * itself for BLEND_SRC_ALPHA_SATURATE, so only this path had it wrong. */
+            if (channel == 3) return 1.0f;
             float f = 1.0f - dst_a;
             return (src_a < f) ? src_a : f;
         }
         default: return 1.0f;
     }
+}
+
+/* -------------------------------------------------------------------------
+ * The software sampler
+ *
+ * The specification's texturing, as the reference the host tests draw against: nearest and
+ * linear filtering, minification and magnification chosen by the level of detail, and mipmap
+ * selection among the levels a complete texture has. It used to be one expression -
+ * `round(u * (width - 1))`, whatever the filters said - which is not GL's nearest (that is
+ * `floor(u * width)`), never filtered, and could not see a mip level.
+ * ------------------------------------------------------------------------- */
+
+static float gl_floorf(float x) {
+    const float t = (float)(int)x;
+    return (t > x) ? t - 1.0f : t;
+}
+
+/* log2 for the level of detail: the exponent exactly, the mantissa by a quadratic good to about
+ * 0.005 - far finer than the half-level steps a mip filter rounds to. The quadratic is
+ * log2(m) + 1 over m in [1, 2), which is why the exponent's bias is 128 here and not 127: with
+ * 127 every level of detail came out one too high, and the test caught it at the first level.
+ * The triangle rasteriser's alone, so host-only with it. */
+#ifdef OOPS_HOST_BUILD
+static float gl_log2f(float x) {
+    if (!(x > 0.0f)) return -1000.0f;
+    union { float f; uint32_t u; } v;
+    v.f = x;
+    const float e = (float)((int)((v.u >> 23) & 0xffu) - 128);
+    v.u = (v.u & 0x007fffffu) | 0x3f800000u; /* the mantissa, as a float in [1, 2) */
+    const float m = v.f;
+    return e + (-0.34484843f * m + 2.02466578f) * m - 0.67487759f;
+}
+#endif
+
+/* A texel index brought into the image by the wrap mode - or GL_FALSE for one that is the border.
+ * GL_MIRRORED_REPEAT reflects every other repetition; GL_CLAMP and GL_CLAMP_TO_BORDER leave an
+ * index outside the image outside it, and the texel there is the border colour. (Until
+ * 2026-09-19 both clamped to the edge, and there was no border colour.) */
+static GLboolean gl_wrap_texel(int *i, int size, GLenum mode) {
+    switch (mode) {
+        case GL_REPEAT: {
+            const int m = *i % size;
+            *i = (m < 0) ? m + size : m;
+            return GL_TRUE;
+        }
+        case GL_MIRRORED_REPEAT: {
+            int m = *i % (2 * size);
+            if (m < 0) m += 2 * size;
+            *i = (m >= size) ? 2 * size - 1 - m : m;
+            return GL_TRUE;
+        }
+        case GL_CLAMP:
+        case GL_CLAMP_TO_BORDER:
+            return (GLboolean)(*i >= 0 && *i < size);
+        default: /* GL_CLAMP_TO_EDGE */
+            *i = (*i < 0) ? 0 : ((*i >= size) ? size - 1 : *i);
+            return GL_TRUE;
+    }
+}
+
+/* Texel (i, j) of slice `k`. A 1D or 2D level is a volume one slice deep, whose k is always 0. */
+/* **A depth texel as it is read** (GL 1.4, 3.8.14): under GL_COMPARE_R_TO_TEXTURE, 1 where the
+ * reference r - clamped to [0, 1] - passes GL_TEXTURE_COMPARE_FUNC against the stored depth and 0
+ * where it fails; the depth itself otherwise. Then GL_DEPTH_TEXTURE_MODE: (v, v, v, 1) for
+ * luminance, (v, v, v, v) intensity, (0, 0, 0, v) alpha. The reference is clamped as softpipe
+ * clamps it (gallium/drivers/softpipe/sp_tex_sample.c:2803-2806). **Compared per texel, before
+ * filtering**, so GL_LINEAR averages the comparisons - the percentage-closer filter a GPU's
+ * comparison sampler gives; softpipe compares the filtered depth instead, and GL 1.4 leaves the
+ * choice to the implementation. */
+static void gl_depth_texel(const gl_texture_object_t *tex, float d, float ref, float out[4]) {
+    float v = d;
+    if (tex->compare_mode == GL_COMPARE_R_TO_TEXTURE) {
+        const float r = !(ref > 0.0f) ? 0.0f : ((ref > 1.0f) ? 1.0f : ref);
+        GLboolean pass;
+        switch (tex->compare_func) {
+            case GL_NEVER:    pass = GL_FALSE; break;
+            case GL_LESS:     pass = (GLboolean)(r < d); break;
+            case GL_EQUAL:    pass = (GLboolean)(r == d); break;
+            case GL_GREATER:  pass = (GLboolean)(r > d); break;
+            case GL_NOTEQUAL: pass = (GLboolean)(r != d); break;
+            case GL_GEQUAL:   pass = (GLboolean)(r >= d); break;
+            case GL_ALWAYS:   pass = GL_TRUE; break;
+            default:          pass = (GLboolean)(r <= d); break; /* GL_LEQUAL */
+        }
+        v = pass ? 1.0f : 0.0f;
+    }
+    switch (tex->depth_mode) {
+        case GL_INTENSITY: out[0] = out[1] = out[2] = out[3] = v; break;
+        case GL_ALPHA:     out[0] = out[1] = out[2] = 0.0f; out[3] = v; break;
+        default:           out[0] = out[1] = out[2] = v; out[3] = 1.0f; break; /* GL_LUMINANCE */
+    }
+}
+
+static void gl_texel(const gl_texture_object_t *tex, const gl_tex_view_t *lv, int i, int j,
+                     int k, float ref, float out[4]) {
+    GLboolean in = gl_wrap_texel(&i, lv->width, tex->wrap_s);
+    in = (GLboolean)(gl_wrap_texel(&j, lv->height, tex->wrap_t) && in);
+    if (lv->depth > 1) {
+        in = (GLboolean)(gl_wrap_texel(&k, lv->depth, tex->wrap_r) && in);
+    } else {
+        k = 0;
+    }
+    const GLboolean depth = (GLboolean)(lv->base_format == GL_DEPTH_COMPONENT);
+    if (!in) {
+        /* A depth texture's border is the border colour's red, as a depth. */
+        if (depth) {
+            gl_depth_texel(tex, tex->border_color[0], ref, out);
+            return;
+        }
+        for (int n = 0; n < 4; n++) out[n] = tex->border_hw[n]; /* expanded as a texel is */
+        return;
+    }
+    const uint8_t *p =
+        lv->pixels + ((size_t)k * lv->slice + (size_t)j * lv->pitch + (size_t)i) * 4u;
+    if (depth) {
+        float d;
+        memcpy(&d, p, 4u);
+        gl_depth_texel(tex, d, ref, out);
+        return;
+    }
+    out[0] = (float)p[0] / 255.0f;
+    out[1] = (float)p[1] / 255.0f;
+    out[2] = (float)p[2] / 255.0f;
+    out[3] = (float)p[3] / 255.0f;
+}
+
+/* One level, GL_NEAREST or GL_LINEAR. Nearest is the texel containing (s * w, t * h, r * d);
+ * linear weights the four around it in a slice, with texel centres at half-integers - and for a
+ * volume the same four in the slice beyond, weighted by r: eight texels, the specification's 3D
+ * filter. */
+static void gl_sample_level(const gl_texture_object_t *tex, const gl_tex_view_t *lv, float s,
+                            float t, float r, GLenum filter, float out[4]) {
+    /* **GL_CLAMP clamps the coordinate to [0, 1] first** - so a linear filter at the edge
+     * reaches half a texel into the border and takes half the border colour, and a nearest one
+     * never leaves the image: the last texel at s = 1, as Mesa's software sampler has it. */
+    const float ref = r; /* a depth texture's comparison reference, before any wrap */
+    if (tex->wrap_s == GL_CLAMP) s = (s < 0.0f) ? 0.0f : ((s > 1.0f) ? 1.0f : s);
+    if (tex->wrap_t == GL_CLAMP) t = (t < 0.0f) ? 0.0f : ((t > 1.0f) ? 1.0f : t);
+    if (tex->wrap_r == GL_CLAMP) r = (r < 0.0f) ? 0.0f : ((r > 1.0f) ? 1.0f : r);
+    const float u = s * (float)lv->width;
+    const float v = t * (float)lv->height;
+    const float w = r * (float)lv->depth;
+    if (filter != GL_LINEAR) {
+        int i = (int)gl_floorf(u), j = (int)gl_floorf(v), k = (int)gl_floorf(w);
+        if (tex->wrap_s == GL_CLAMP && i >= lv->width) i = lv->width - 1;
+        if (tex->wrap_t == GL_CLAMP && j >= lv->height) j = lv->height - 1;
+        if (tex->wrap_r == GL_CLAMP && k >= lv->depth) k = lv->depth - 1;
+        gl_texel(tex, lv, i, j, k, ref, out);
+        return;
+    }
+    const float uu = u - 0.5f, vv = v - 0.5f;
+    const float fi = gl_floorf(uu), fj = gl_floorf(vv);
+    const float a = uu - fi, b = vv - fj;
+    const int i0 = (int)fi, j0 = (int)fj;
+    const GLboolean volume = (GLboolean)(lv->depth > 1);
+    int k0 = 0;
+    float c = 0.0f;
+    if (volume) {
+        const float ww = w - 0.5f;
+        const float fk = gl_floorf(ww);
+        c = ww - fk;
+        k0 = (int)fk;
+    }
+    float slice[2][4];
+    for (int z = 0; z < (volume ? 2 : 1); z++) {
+        float t00[4], t10[4], t01[4], t11[4];
+        gl_texel(tex, lv, i0, j0, k0 + z, ref, t00);
+        gl_texel(tex, lv, i0 + 1, j0, k0 + z, ref, t10);
+        gl_texel(tex, lv, i0, j0 + 1, k0 + z, ref, t01);
+        gl_texel(tex, lv, i0 + 1, j0 + 1, k0 + z, ref, t11);
+        for (int n = 0; n < 4; n++) {
+            slice[z][n] = (1.0f - a) * (1.0f - b) * t00[n] + a * (1.0f - b) * t10[n] +
+                          (1.0f - a) * b * t01[n] + a * b * t11[n];
+        }
+    }
+    for (int n = 0; n < 4; n++) {
+        out[n] = volume ? (1.0f - c) * slice[0][n] + c * slice[1][n] : slice[0][n];
+    }
+}
+
+/* The texture at (s, t) with level of detail `lod`, on a texture the caller knows is complete.
+ *
+ * Magnification or minification by the specification's rule: minify when lod exceeds c, where c
+ * is 0.5 if the magnification filter is GL_LINEAR and the minification one is a
+ * GL_NEAREST_MIPMAP_* - so the two filters meet without a seam - and 0 otherwise. A
+ * *_MIPMAP_NEAREST filter reads level ceil(lod + 1/2) - 1, a *_MIPMAP_LINEAR one blends
+ * floor(lod) and the level after it by the fraction, both clamped to the last level. */
+/* A level of the texture being sampled - of cube face `face`, or the texture's own for -1. */
+static GLboolean gl_sample_view(const gl_texture_object_t *tex, int face, int level,
+                                gl_tex_view_t *out) {
+    return (face >= 0) ? gl_tex_face_view(tex, face, level, out)
+                       : gl_tex_level_view(tex, level, out);
+}
+
+/* **A cube map's face and the coordinates on it** for the direction (rx, ry, rz): the major axis
+ * picks the face and the other two, divided by it, the place - softpipe's convert_cube
+ * (gallium/drivers/softpipe/sp_tex_sample.c:3220-3291), which restates GL 1.3's table 3.19. A tie
+ * goes to x, then y, as there. */
+static int gl_cube_face_coords(float rx, float ry, float rz, float *s, float *t) {
+    const float ax = rx < 0.0f ? -rx : rx, ay = ry < 0.0f ? -ry : ry, az = rz < 0.0f ? -rz : rz;
+    if (ax >= ay && ax >= az) {
+        const float ima = (ax > 0.0f) ? -0.5f / ax : 0.0f;
+        const float sign = (rx >= 0.0f) ? 1.0f : -1.0f;
+        *s = sign * rz * ima + 0.5f;
+        *t = ry * ima + 0.5f;
+        return (rx >= 0.0f) ? 0 : 1;
+    }
+    if (ay >= ax && ay >= az) {
+        const float ima = -0.5f / ay;
+        const float sign = (ry >= 0.0f) ? 1.0f : -1.0f;
+        *s = -rx * ima + 0.5f;
+        *t = sign * -rz * ima + 0.5f;
+        return (ry >= 0.0f) ? 2 : 3;
+    }
+    const float ima = -0.5f / az;
+    const float sign = (rz >= 0.0f) ? 1.0f : -1.0f;
+    *s = sign * -rx * ima + 0.5f;
+    *t = ry * ima + 0.5f;
+    return (rz >= 0.0f) ? 4 : 5;
+}
+
+/* The same projection onto a given face, for a neighbouring pixel's direction: the level of
+ * detail compares two places on one face, as softpipe keeps a whole quad on one face. The
+ * triangle rasteriser's alone, like gl_log2f. */
+#ifdef OOPS_HOST_BUILD
+static void gl_cube_on_face(int face, float rx, float ry, float rz, float *s, float *t) {
+    const float m = (face < 2) ? rx : ((face < 4) ? ry : rz);
+    const float am = m < 0.0f ? -m : m;
+    const float ima = (am > 0.0f) ? -0.5f / am : 0.0f;
+    const float sign = (face & 1) ? -1.0f : 1.0f;
+    if (face < 2) { *s = sign * rz * ima + 0.5f; *t = ry * ima + 0.5f; }
+    else if (face < 4) { *s = -rx * ima + 0.5f; *t = sign * -rz * ima + 0.5f; }
+    else { *s = sign * -rx * ima + 0.5f; *t = ry * ima + 0.5f; }
+}
+#endif
+
+static void gl_sample_texture(const gl_texture_object_t *tex, int face, float s, float t, float r,
+                              float lod, float out[4]) {
+    const GLenum minf = tex->min_filter, magf = tex->mag_filter;
+    /* GL 1.2's parameters: the level of detail clamped to [GL_TEXTURE_MIN_LOD,
+     * GL_TEXTURE_MAX_LOD] before anything reads it, and levels counted from
+     * GL_TEXTURE_BASE_LEVEL up to the top level - which GL_TEXTURE_MAX_LEVEL may cut short. */
+    if (lod < tex->min_lod) lod = tex->min_lod;
+    if (lod > tex->max_lod) lod = tex->max_lod;
+    const int b = tex->base_level;
+    gl_tex_view_t base;
+    (void)gl_sample_view(tex, face, b, &base);
+    const float c = (magf == GL_LINEAR &&
+                     (minf == GL_NEAREST_MIPMAP_NEAREST || minf == GL_NEAREST_MIPMAP_LINEAR))
+                        ? 0.5f : 0.0f;
+    if (lod <= c) {
+        gl_sample_level(tex, &base, s, t, r, magf, out);
+        return;
+    }
+    if (!gl_filter_uses_mipmaps(minf)) {
+        gl_sample_level(tex, &base, s, t, r, minf, out);
+        return;
+    }
+    const GLenum within = (minf == GL_NEAREST_MIPMAP_NEAREST || minf == GL_NEAREST_MIPMAP_LINEAR)
+                              ? GL_NEAREST : GL_LINEAR;
+    const int top = gl_tex_top_level(tex);
+    if (minf == GL_NEAREST_MIPMAP_NEAREST || minf == GL_LINEAR_MIPMAP_NEAREST) {
+        /* base + ceil(lod + 1/2) - 1, with ceil(x) written as -floor(-x). */
+        int d = b + ((lod <= 0.5f) ? 0 : (int)(-gl_floorf(-(lod + 0.5f))) - 1);
+        if (d > top) d = top;
+        gl_tex_view_t lv;
+        (void)gl_sample_view(tex, face, d, &lv);
+        gl_sample_level(tex, &lv, s, t, r, within, out);
+        return;
+    }
+    int d1 = b + (int)gl_floorf(lod);
+    if (d1 > top) d1 = top;
+    const int d2 = (d1 + 1 > top) ? top : d1 + 1;
+    const float f = (d1 == top) ? 0.0f : lod - gl_floorf(lod);
+    gl_tex_view_t l1, l2;
+    (void)gl_sample_view(tex, face, d1, &l1);
+    (void)gl_sample_view(tex, face, d2, &l2);
+    float a[4], c2[4];
+    gl_sample_level(tex, &l1, s, t, r, within, a);
+    gl_sample_level(tex, &l2, s, t, r, within, c2);
+    for (int k = 0; k < 4; k++) out[k] = (1.0f - f) * a[k] + f * c2[k];
+}
+
+/* **The texture environment**, the fragment colour `c` combined with a texel `t` as the texture's
+ * base format decides - Mesa's `calculate_derived_texenv` (main/texstate.c:173), which restates
+ * GL's table of texture functions as combiner settings:
+ *
+ * - the colour is the fragment's own for a GL_ALPHA texture, and for GL_DECAL of anything but
+ *   GL_RGB and GL_RGBA (which GL leaves undefined and Mesa defines so);
+ * - the alpha is the fragment's own for GL_LUMINANCE and GL_RGB textures, and always for
+ *   GL_DECAL;
+ * - otherwise, per mode: GL_REPLACE the texel, GL_MODULATE the product, GL_ADD the sum for colour
+ *   and the product for alpha (the sum for GL_INTENSITY), GL_DECAL the texel's colour laid over
+ *   the fragment's by the texel's alpha, GL_BLEND the environment colour and the fragment's mixed
+ *   by the texel (alpha mixed the same way for GL_INTENSITY, and multiplied otherwise).
+ *
+ * The texel arrives as the base format expanded it - (0, 0, 0, A), (L, L, L, 1), (I, I, I, I) -
+ * and the result is clamped to [0, 1]. Until 2026-09-19 every texture was RGBA here and GL_BLEND
+ * was drawn as GL_MODULATE. */
+/* One combiner argument: the source's colour (or alpha), or one minus it, per the operand -
+ * Mesa's get_source (main/ff_fragment_shader.c:423-466). GL_TEXTURE is this unit's texel,
+ * GL 1.4's GL_TEXTUREn unit n's (zero for a unit that applies nothing, :760-762), GL_PREVIOUS the
+ * colour the unit before left - the fragment's own for unit 0 - and GL_PRIMARY_COLOR the
+ * fragment's own always. With one unit until 2026-09-19, GL_PREVIOUS and GL_PRIMARY_COLOR were the
+ * same thing and GL_TEXTURE0 was this unit's. */
+static void gl_combine_arg(const gl_tex_unit_t *tu, GLuint unit, GLenum source, GLenum operand,
+                           const gl_unit_texels_t *texels, const float primary[4],
+                           const float c[4], float out[4]) {
+    const GLuint n = (GLuint)(source - GL_TEXTURE0);
+    const float *v = (source == GL_TEXTURE) ? texels->t[unit]
+                   : (n < OOPS_GL_MAX_TEXTURE_UNITS) ? texels->t[n]
+                   : (source == GL_CONSTANT) ? tu->tex_env_color
+                   : (source == GL_PRIMARY_COLOR) ? primary : c;
+    for (int i = 0; i < 4; i++) {
+        float x = (operand == GL_SRC_ALPHA || operand == GL_ONE_MINUS_SRC_ALPHA) ? v[3] : v[i];
+        if (operand == GL_ONE_MINUS_SRC_COLOR || operand == GL_ONE_MINUS_SRC_ALPHA) x = 1.0f - x;
+        out[i] = x;
+    }
+}
+
+/* One combiner function of its (up to three) arguments, per component - Mesa's emit_combine
+ * (main/ff_fragment_shader.c:563-588). The dot products are GL_DOT3's (2a - 1).(2b - 1). */
+static float gl_combine_fn(GLenum mode, const float a0[4], const float a1[4], const float a2[4],
+                           int i) {
+    switch (mode) {
+        case GL_REPLACE:     return a0[i];
+        case GL_ADD:         return a0[i] + a1[i];
+        case GL_ADD_SIGNED:  return a0[i] + a1[i] - 0.5f;
+        case GL_INTERPOLATE: return a0[i] * a2[i] + a1[i] * (1.0f - a2[i]);
+        case GL_SUBTRACT:    return a0[i] - a1[i];
+        case GL_DOT3_RGB:
+        case GL_DOT3_RGBA: {
+            float d = 0.0f;
+            for (int k = 0; k < 3; k++) d += (2.0f * a0[k] - 1.0f) * (2.0f * a1[k] - 1.0f);
+            return d;
+        }
+        default:             return a0[i] * a1[i]; /* GL_MODULATE */
+    }
+}
+
+/* **GL_COMBINE** (GL 1.3): the colour and alpha each from their own function of their own
+ * arguments, scaled by GL_RGB_SCALE and GL_ALPHA_SCALE and clamped to [0, 1] after the scale, as
+ * Mesa's emit_texenv does (main/ff_fragment_shader.c:629-735). GL_DOT3_RGBA puts the dot product
+ * in alpha too and the alpha function is not used. */
+static void gl_tex_combine(const gl_tex_unit_t *tu, GLuint unit, const gl_unit_texels_t *texels,
+                           const float primary[4], float c[4]) {
+    const gl_combine_t *cb = &tu->combine;
+    float r0[4], r1[4], r2[4], q0[4], q1[4], q2[4];
+    gl_combine_arg(tu, unit, cb->source_rgb[0], cb->operand_rgb[0], texels, primary, c, r0);
+    gl_combine_arg(tu, unit, cb->source_rgb[1], cb->operand_rgb[1], texels, primary, c, r1);
+    gl_combine_arg(tu, unit, cb->source_rgb[2], cb->operand_rgb[2], texels, primary, c, r2);
+    gl_combine_arg(tu, unit, cb->source_alpha[0], cb->operand_alpha[0], texels, primary, c, q0);
+    gl_combine_arg(tu, unit, cb->source_alpha[1], cb->operand_alpha[1], texels, primary, c, q1);
+    gl_combine_arg(tu, unit, cb->source_alpha[2], cb->operand_alpha[2], texels, primary, c, q2);
+    float out[4];
+    for (int i = 0; i < 3; i++) out[i] = gl_combine_fn(cb->mode_rgb, r0, r1, r2, i) * cb->scale_rgb;
+    out[3] = (cb->mode_rgb == GL_DOT3_RGBA)
+                 ? gl_combine_fn(GL_DOT3_RGBA, r0, r1, r2, 0) * cb->scale_alpha
+                 : gl_combine_fn(cb->mode_alpha, q0, q1, q2, 3) * cb->scale_alpha;
+    for (int i = 0; i < 4; i++) {
+        c[i] = !(out[i] > 0.0f) ? 0.0f : ((out[i] > 1.0f) ? 1.0f : out[i]);
+    }
+}
+
+void gl_tex_env_apply(const gl_context_t *ctx, GLuint unit, GLenum base,
+                      const gl_unit_texels_t *texels, const float primary[4], float c[4]) {
+    const gl_tex_unit_t *tu = &ctx->tex_unit[unit];
+    const float *t = texels->t[unit];
+    const GLenum mode = tu->tex_env_mode;
+    if (mode == GL_COMBINE) {
+        gl_tex_combine(tu, unit, texels, primary, c);
+        return;
+    }
+    const float *k = tu->tex_env_color;
+    const GLboolean keep_rgb = (GLboolean)(base == GL_ALPHA ||
+                                           (mode == GL_DECAL && base != GL_RGB && base != GL_RGBA));
+    const GLboolean keep_a = (GLboolean)(base == GL_LUMINANCE || base == GL_RGB || mode == GL_DECAL);
+    if (!keep_rgb) {
+        for (int i = 0; i < 3; i++) {
+            switch (mode) {
+                case GL_REPLACE: c[i] = t[i]; break;
+                case GL_ADD:     c[i] = c[i] + t[i]; break;
+                case GL_DECAL:   c[i] = (base == GL_RGBA) ? c[i] * (1.0f - t[3]) + t[i] * t[3] : t[i];
+                                 break;
+                case GL_BLEND:   c[i] = c[i] * (1.0f - t[i]) + k[i] * t[i]; break;
+                default:         c[i] = c[i] * t[i]; break; /* GL_MODULATE */
+            }
+        }
+    }
+    if (!keep_a) {
+        switch (mode) {
+            case GL_REPLACE: c[3] = t[3]; break;
+            case GL_ADD:     c[3] = (base == GL_INTENSITY) ? c[3] + t[3] : c[3] * t[3]; break;
+            case GL_BLEND:   c[3] = (base == GL_INTENSITY) ? c[3] * (1.0f - t[3]) + k[3] * t[3]
+                                                           : c[3] * t[3];
+                             break;
+            default:         c[3] = c[3] * t[3]; break; /* GL_MODULATE */
+        }
+    }
+    for (int i = 0; i < 4; i++) {
+        if (!(c[i] > 0.0f)) c[i] = 0.0f;
+        else if (c[i] > 1.0f) c[i] = 1.0f;
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * The per-fragment operations
+ *
+ * What happens to a shaded fragment, in GL's order: the alpha test, the stencil test, the depth
+ * test's verdict, blending, the logic op and the write masks. **One copy, for triangles and for
+ * pixel rectangles both** - glDrawPixels, glBitmap and glCopyPixels wrote straight into the colour
+ * buffer until 2026-09-19, past every one of these, and two copies of the list is how that kind of
+ * disagreement starts.
+ * ------------------------------------------------------------------------- */
+
+/* The state the tail reads that does not change within a primitive, hoisted out of the loop. */
+static void gl_frag_ops_init(const gl_context_t *ctx, gl_frag_ops_t *o, GLboolean stencil_ok) {
+    o->stencil_test = (GLboolean)(stencil_ok && ctx->cap_stencil_test && ctx->stencil_buffer != NULL);
+    o->stencil_func = ctx->stencil_func;
+    o->stencil_ref = ctx->stencil_ref;
+    o->stencil_vmask = ctx->stencil_value_mask;
+    o->stencil_wmask = ctx->stencil_writemask;
+    o->stencil_op_fail = ctx->stencil_fail;
+    o->stencil_op_zfail = ctx->stencil_zfail;
+    o->stencil_op_zpass = ctx->stencil_zpass;
+    /* A logic op replaces blending rather than following it (Mesa's state tracker leaves every
+     * blend target off when it is enabled, state_tracker/st_atom_blend.c:269-273). GL_COPY is a
+     * logic op that changes nothing, which is how radeonsi treats it too (si_state.c:341). */
+    o->logic_mode = gl_logicop_mode(ctx->logic_op);
+    o->logic_on = (GLboolean)(ctx->cap_color_logic_op && o->logic_mode != 12u);
+    o->blend = (GLboolean)(ctx->cap_blend && !ctx->cap_color_logic_op);
+}
+
+static inline GLboolean gl_depth_passes(GLenum func, float z, float cur) {
+    switch (func) {
+        case GL_LESS:     return (GLboolean)(z < cur);
+        case GL_LEQUAL:   return (GLboolean)(z <= cur);
+        case GL_GREATER:  return (GLboolean)(z > cur);
+        case GL_GEQUAL:   return (GLboolean)(z >= cur);
+        case GL_EQUAL:    return (GLboolean)(z == cur);
+        case GL_NOTEQUAL: return (GLboolean)(z != cur);
+        case GL_ALWAYS:   return GL_TRUE;
+        case GL_NEVER:    return GL_FALSE;
+        default:          return (GLboolean)(z < cur);
+    }
+}
+
+static inline void gl_fragment_colour(const gl_context_t *ctx, const gl_frag_ops_t *o,
+                                      uint32_t *px, float r, float g, float b, float a);
+
+/* From the alpha test to the colour write, for one shaded fragment. `px` is its colour-buffer
+ * pixel, `dz` its depth-buffer entry when the depth test ran and depth writes are on (NULL
+ * otherwise), `sp` its stencil byte when the stencil test runs, and `depth_failed` the depth
+ * test's verdict - taken by the caller, before shading, and honoured here after stencil. */
+static inline void gl_fragment_tail(gl_context_t *ctx, const gl_frag_ops_t *o, uint32_t *px,
+                                    float *dz, uint8_t *sp, float z, GLboolean depth_failed,
+                                    float r, float g, float b, float a) {
+    /* **The alpha test, which lived only in the hardware path until now.**
+     *
+     * `glAlphaFunc` is implemented on the GPU by patching a discard into the pixel shader, and
+     * this rasteriser knew nothing about it - so the same program drew one picture on the console
+     * and a different one on the host, with no error anywhere. gl1-probe found that on its first
+     * run, which is the whole reason the probe runs the identical suite on both paths.
+     *
+     * After the texture environment, fog and coverage, because GL applies the test to the *final*
+     * fragment alpha and a modulated texture changes it. */
+    if (ctx->cap_alpha_test) {
+        GLboolean keep;
+        switch (ctx->alpha_func) {
+            case GL_NEVER:    keep = GL_FALSE; break;
+            case GL_LESS:     keep = (GLboolean)(a <  ctx->alpha_ref); break;
+            case GL_EQUAL:    keep = (GLboolean)(a == ctx->alpha_ref); break;
+            case GL_LEQUAL:   keep = (GLboolean)(a <= ctx->alpha_ref); break;
+            case GL_GREATER:  keep = (GLboolean)(a >  ctx->alpha_ref); break;
+            case GL_NOTEQUAL: keep = (GLboolean)(a != ctx->alpha_ref); break;
+            case GL_GEQUAL:   keep = (GLboolean)(a >= ctx->alpha_ref); break;
+            default:          keep = GL_TRUE; break; /* GL_ALWAYS */
+        }
+        if (!keep) return; /* and the deferred depth write never happens */
+    }
+
+    /* **Stencil sits here because GL's order is alpha test, then stencil, then depth.** A
+     * fragment the alpha test discards never reaches the stencil buffer at all - not even the fail
+     * operation - which is why this cannot live earlier.
+     *
+     * The stencil buffer is written *even when the stencil test fails*. That is the whole point
+     * of the feature: GL_INCR or GL_REPLACE on the fail path is how a stencil mask gets built in
+     * the first place, and an implementation that skipped the write on failure would make every
+     * shadow-volume and outline technique silently do nothing. */
+    if (o->stencil_test && sp) {
+        const uint32_t masked_ref = (uint32_t)o->stencil_ref & o->stencil_vmask;
+        const uint32_t masked_val = (uint32_t)(*sp) & o->stencil_vmask;
+        GLboolean spass;
+        switch (o->stencil_func) {
+            case GL_NEVER:    spass = GL_FALSE; break;
+            case GL_LESS:     spass = (GLboolean)(masked_ref <  masked_val); break;
+            case GL_LEQUAL:   spass = (GLboolean)(masked_ref <= masked_val); break;
+            case GL_GREATER:  spass = (GLboolean)(masked_ref >  masked_val); break;
+            case GL_GEQUAL:   spass = (GLboolean)(masked_ref >= masked_val); break;
+            case GL_EQUAL:    spass = (GLboolean)(masked_ref == masked_val); break;
+            case GL_NOTEQUAL: spass = (GLboolean)(masked_ref != masked_val); break;
+            default:          spass = GL_TRUE; break; /* GL_ALWAYS */
+        }
+        if (!spass) {
+            gl_stencil_apply(sp, o->stencil_op_fail, o->stencil_ref, o->stencil_wmask);
+            return; /* no colour, and no depth - the deferred write is abandoned */
+        }
+        gl_stencil_apply(sp, depth_failed ? o->stencil_op_zfail : o->stencil_op_zpass,
+                         o->stencil_ref, o->stencil_wmask);
+    }
+    /* The depth test's verdict, honoured now that stencil has had its say. */
+    if (depth_failed) return;
+
+    /* **A sample passed** - what GL 1.5's GL_SAMPLES_PASSED counts: past the alpha, stencil and
+     * depth tests, one sample a fragment with no multisample buffer. */
+    if (ctx->query_active) ctx->query_samples++;
+
+    if (dz) *dz = z;
+
+    if (!px) return;
+    gl_fragment_colour(ctx, o, px, r, g, b, a);
+    /* **The second buffer glDrawBuffer(GL_FRONT_AND_BACK) names**, blended and masked against
+     * its own pixel - `px` is always the primary buffer's. */
+    if (ctx->fb_also) gl_fragment_colour(ctx, o, ctx->fb_also + (px - ctx->framebuffer), r, g, b, a);
+}
+
+/* A fragment's colour into one colour buffer's pixel: blending, the logic op and the colour
+ * mask (GL 1.x, 4.1.7 to 4.1.10, and 4.2.2). */
+static inline void gl_fragment_colour(const gl_context_t *ctx, const gl_frag_ops_t *o,
+                                      uint32_t *px, float r, float g, float b, float a) {
+    uint32_t ir = (uint32_t)(r * 255.0f + 0.5f);
+    uint32_t ig = (uint32_t)(g * 255.0f + 0.5f);
+    uint32_t ib = (uint32_t)(b * 255.0f + 0.5f);
+    uint32_t ia = (uint32_t)(a * 255.0f + 0.5f);
+    if (ir > 255) ir = 255;
+    if (ig > 255) ig = 255;
+    if (ib > 255) ib = 255;
+    if (ia > 255) ia = 255;
+
+    if (o->blend) {
+        uint32_t dst = *px;
+        float dr = (float)((dst >> 16) & 0xff) / 255.0f;
+        float dg = (float)((dst >> 8) & 0xff) / 255.0f;
+        float db_col = (float)(dst & 0xff) / 255.0f;
+        float da = (float)((dst >> 24) & 0xff) / 255.0f;
+
+        const float *bc = ctx->blend_color;
+        float sfr = get_blend_factor(ctx->blend_src, bc, r, g, b, a, dr, dg, db_col, da, 0);
+        float sfg = get_blend_factor(ctx->blend_src, bc, r, g, b, a, dr, dg, db_col, da, 1);
+        float sfb = get_blend_factor(ctx->blend_src, bc, r, g, b, a, dr, dg, db_col, da, 2);
+        float sfa = get_blend_factor(ctx->blend_src_alpha, bc, r, g, b, a, dr, dg, db_col, da, 3);
+
+        float dfr = get_blend_factor(ctx->blend_dst, bc, r, g, b, a, dr, dg, db_col, da, 0);
+        float dfg = get_blend_factor(ctx->blend_dst, bc, r, g, b, a, dr, dg, db_col, da, 1);
+        float dfb = get_blend_factor(ctx->blend_dst, bc, r, g, b, a, dr, dg, db_col, da, 2);
+        float dfa = get_blend_factor(ctx->blend_dst_alpha, bc, r, g, b, a, dr, dg, db_col, da, 3);
+
+        /* **The blend equation, which until now was stored and used by nothing.**
+         * `glBlendEquation` set a field that the attribute stack saved, `glGetIntegerv` reported
+         * and `glContextCreate` defaulted - and neither this rasteriser nor the hardware register
+         * emission ever read it. `glBlendEquation(GL_FUNC_SUBTRACT)` returned clean and added.
+         *
+         * That is a worse shape than the alpha test and depth range were: those at least worked
+         * on the hardware path. This worked nowhere, which is the silent lie D009 refuses
+         * everywhere else in this library.
+         *
+         * **GL_MIN and GL_MAX ignore the factors entirely**, which is the part an implementation
+         * that treats them as another sign gets wrong. */
+        float res_r, res_g, res_b, res_a;
+        switch (ctx->blend_equation) {
+            case GL_FUNC_SUBTRACT:
+                res_r = r * sfr - dr * dfr;
+                res_g = g * sfg - dg * dfg;
+                res_b = b * sfb - db_col * dfb;
+                res_a = a * sfa - da * dfa;
+                break;
+            case GL_FUNC_REVERSE_SUBTRACT:
+                res_r = dr * dfr - r * sfr;
+                res_g = dg * dfg - g * sfg;
+                res_b = db_col * dfb - b * sfb;
+                res_a = da * dfa - a * sfa;
+                break;
+            case GL_MIN:
+                res_r = r < dr ? r : dr;
+                res_g = g < dg ? g : dg;
+                res_b = b < db_col ? b : db_col;
+                res_a = a < da ? a : da;
+                break;
+            case GL_MAX:
+                res_r = r > dr ? r : dr;
+                res_g = g > dg ? g : dg;
+                res_b = b > db_col ? b : db_col;
+                res_a = a > da ? a : da;
+                break;
+            default: /* GL_FUNC_ADD */
+                res_r = r * sfr + dr * dfr;
+                res_g = g * sfg + dg * dfg;
+                res_b = b * sfb + db_col * dfb;
+                res_a = a * sfa + da * dfa;
+                break;
+        }
+
+        if (res_r < 0.0f) res_r = 0.0f; else if (res_r > 1.0f) res_r = 1.0f;
+        if (res_g < 0.0f) res_g = 0.0f; else if (res_g > 1.0f) res_g = 1.0f;
+        if (res_b < 0.0f) res_b = 0.0f; else if (res_b > 1.0f) res_b = 1.0f;
+        if (res_a < 0.0f) res_a = 0.0f; else if (res_a > 1.0f) res_a = 1.0f;
+
+        ir = (uint32_t)(res_r * 255.0f + 0.5f);
+        ig = (uint32_t)(res_g * 255.0f + 0.5f);
+        ib = (uint32_t)(res_b * 255.0f + 0.5f);
+        ia = (uint32_t)(res_a * 255.0f + 0.5f);
+    }
+
+    /* The logic op works on the stored bits, so it runs on the 8-bit values the colour block
+     * would hold - after conversion, before the colour mask. */
+    if (o->logic_on) {
+        const uint32_t d = *px;
+        ir = gl_logicop_apply(o->logic_mode, ir, (d >> 16) & 0xffu);
+        ig = gl_logicop_apply(o->logic_mode, ig, (d >> 8) & 0xffu);
+        ib = gl_logicop_apply(o->logic_mode, ib, d & 0xffu);
+        ia = gl_logicop_apply(o->logic_mode, ia, (d >> 24) & 0xffu);
+    }
+
+    /* The colour mask. Every channel on is a plain store, which is what keeps a pixel rectangle
+     * written into write-combined memory on the target from reading it back for nothing. */
+    const uint32_t src_px = (ia << 24) | (ir << 16) | (ig << 8) | ib;
+    if (gl_color_writes(ctx, 0) && gl_color_writes(ctx, 1) && gl_color_writes(ctx, 2) &&
+        gl_color_writes(ctx, 3)) {
+        *px = src_px;
+        return;
+    }
+    const uint32_t keep = (gl_color_writes(ctx, 0) ? 0u : 0x00ff0000u) |
+                          (gl_color_writes(ctx, 1) ? 0u : 0x0000ff00u) |
+                          (gl_color_writes(ctx, 2) ? 0u : 0x000000ffu) |
+                          (gl_color_writes(ctx, 3) ? 0u : 0xff000000u);
+    *px = (src_px & ~keep) | (*px & keep);
+}
+
+/* **Pixel rectangles as fragments** (GL 1.x, 3.6.4-3.6.5, 3.7 and 3.8). Each pixel glDrawPixels,
+ * glBitmap or glCopyPixels produces is a fragment at the raster position's window z, with the
+ * raster position's texture coordinate and its distance for fog - and from there it meets
+ * everything a triangle's fragment does: the texture environment, fog, the scissor, alpha,
+ * stencil and depth tests, blending, the logic op and the masks. What is constant across the
+ * rectangle is worked out once here, including the one texel every fragment samples.
+ *
+ * **The depth and stencil tests run on the console too** since 2026-09-19, against the GPU's
+ * tiled surfaces through gl_zs_depth_ptr and gl_zs_stencil_ptr - they were left out there, with a
+ * log line, while those surfaces could not be addressed from the CPU. It all runs on the CPU
+ * against the frame, after the flush the caller already makes. */
+void gl_pixel_frags_begin(gl_context_t *ctx, gl_pixel_frags_t *pf) {
+    gl_frag_ops_init(ctx, &pf->ops, GL_TRUE);
+    pf->depth_test = (GLboolean)(ctx->cap_depth_test && ctx->depth_buffer != NULL);
+    pf->z = ctx->raster_pos[2];
+
+    /* The scissor box, in window coordinates, inclusive; the whole buffer without it. */
+    pf->sc_x0 = 0;
+    pf->sc_y0 = 0;
+    pf->sc_x1 = (int)ctx->width - 1;
+    pf->sc_y1 = (int)ctx->height - 1;
+    if (ctx->cap_scissor_test) {
+        if (ctx->sc_x > pf->sc_x0) pf->sc_x0 = ctx->sc_x;
+        if (ctx->sc_y > pf->sc_y0) pf->sc_y0 = ctx->sc_y;
+        if (ctx->sc_x + ctx->sc_w - 1 < pf->sc_x1) pf->sc_x1 = ctx->sc_x + ctx->sc_w - 1;
+        if (ctx->sc_y + ctx->sc_h - 1 < pf->sc_y1) pf->sc_y1 = ctx->sc_y + ctx->sc_h - 1;
+    }
+
+    /* **One texel for the whole rectangle**: every fragment carries the raster position's
+     * texture coordinate (GL 1.x, 3.6.5 - "the current raster position's associated data"), so
+     * the sample is the same everywhere, and its level of detail is that of an unchanging
+     * coordinate: magnification. */
+    for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        pf->tex[u] = NULL;
+        pf->tex_format[u] = GL_RGBA;
+        for (int k = 0; k < 4; k++) pf->texel.t[u][k] = 0.0f;
+        const GLuint tex_id = gl_unit_texture_id(ctx, u);
+        const gl_texture_object_t *tex = tex_id ? gl_lookup_texture(ctx, tex_id) : NULL;
+        if (!tex) continue;
+        const float *tc = ctx->raster_texcoord[u];
+        const float iq = gl_q_inv(tc[3]);
+        float s = tc[0] * iq, t = tc[1] * iq, r = tc[2] * iq;
+        int face = -1;
+        if (tex->cube) face = gl_cube_face_coords(s, t, r, &s, &t);
+        gl_sample_texture(tex, face, s, t, (face >= 0) ? 0.0f : r, -1000.0f, pf->texel.t[u]);
+        pf->tex[u] = tex;
+        pf->tex_format[u] = gl_tex_sample_format(tex);
+    }
+
+    pf->fog_on = ctx->cap_fog;
+    pf->fog_f = ctx->cap_fog ? gl_fog_factor(ctx, ctx->raster_distance) : 1.0f;
+}
+
+/* One fragment of a pixel rectangle, at window (x, y) - y counting up from the bottom - with the
+ * colour its pixel conversion gave it. */
+void gl_pixel_fragment(gl_context_t *ctx, const gl_pixel_frags_t *pf, int x, int y,
+                       const float rgba[4]) {
+    if (x < pf->sc_x0 || x > pf->sc_x1 || y < pf->sc_y0 || y > pf->sc_y1) return;
+    if (!ctx->framebuffer) return;
+    const size_t i = gl_color_index(ctx, x, y);
+
+    GLboolean depth_failed = GL_FALSE;
+    float *dz = NULL;
+    if (pf->depth_test) {
+        float *cur = gl_zs_depth_ptr(ctx, x, y);
+        depth_failed = (GLboolean)!gl_depth_passes(ctx->depth_func, pf->z, *cur);
+        if (ctx->depth_mask) dz = cur;
+    }
+
+    float c[4] = {rgba[0], rgba[1], rgba[2], rgba[3]};
+    /* Each unit in turn on what the one before it left (GL 1.3, 3.8.13). */
+    for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        if (pf->tex[u]) gl_tex_env_apply(ctx, u, pf->tex_format[u], &pf->texel, rgba, c);
+    }
+    if (pf->fog_on) {
+        const float inv = 1.0f - pf->fog_f;
+        for (int k = 0; k < 3; k++) c[k] = pf->fog_f * c[k] + inv * ctx->fog_color[k];
+    }
+    uint8_t *sp = pf->ops.stencil_test ? gl_zs_stencil_ptr(ctx, x, y) : NULL;
+    gl_fragment_tail(ctx, &pf->ops, &ctx->framebuffer[i], dz, sp, pf->z, depth_failed,
+                     c[0], c[1], c[2], c[3]);
+}
+
+#ifdef OOPS_HOST_BUILD
+/* Whether an edge whose edge function rises by `a` a pixel right and `b` a pixel down owns the
+ * pixel centres on it (gl_rasterize_triangle's tie rule), and whether a weight is inside. */
+static inline GLboolean gl_edge_owns_ties(float a, float b) {
+    return (GLboolean)(a > 0.0f || (a == 0.0f && b > 0.0f));
+}
+#define GL_EDGE_IN(w, owns) ((w) > 0.0f || ((w) == 0.0f && (owns)))
+
+/* One texture unit as a triangle samples it: the texture (NULL for none - disabled, or
+ * incomplete, which gl_unit_texture_id answers as none), and what its level of detail needs,
+ * worked out once per triangle. */
+typedef struct {
+    const gl_texture_object_t *tex;
+    GLboolean needs_lod; /* the two filters differ, or one reads mipmaps */
+    float bias;          /* GL 1.4's, the texture's and the unit's */
+    float w, h, d;       /* the base level's size in texels */
+    GLenum format;       /* the base format the environment reads it as */
+} gl_unit_draw_t;
+
+/* One unit's texel for a fragment. `pb` is the fragment's perspective-correct barycentric weights,
+ * `b` its screen-space ones and `db` their slopes (d/dx, d/dy for each vertex in turn), from which
+ * the neighbours' coordinates - and so the level of detail - are found.
+ *
+ * **s, t, r and q interpolated, then divided here, per fragment** - GL's projective texturing
+ * (GL 1.x, 3.8). The vertex divided by its own q until 2026-09-19, which is right only where q is
+ * the same at every corner: a texture projected from a light, whose q varies across a polygon,
+ * bent. One unit's, inline in the fragment loop, until the second unit arrived the same day. */
+static void gl_unit_sample(const gl_unit_draw_t *ud, GLuint unit, const gl_screen_vertex_t *v0,
+                           const gl_screen_vertex_t *v1, const gl_screen_vertex_t *v2,
+                           const float pb[3], const float b[3], const float db[6],
+                           float texel[4]) {
+    const float *t0 = v0->tc[unit], *t1 = v1->tc[unit], *t2 = v2->tc[unit];
+    const float iq = gl_q_inv(pb[0] * t0[3] + pb[1] * t1[3] + pb[2] * t2[3]);
+    const float u = (pb[0] * t0[0] + pb[1] * t1[0] + pb[2] * t2[0]) * iq;
+    const float v = (pb[0] * t0[1] + pb[1] * t1[1] + pb[2] * t2[1]) * iq;
+    /* r, which only a volume reads, and whose rate of change enters its level of detail alongside
+     * s's and t's. */
+    const float rc = (pb[0] * t0[2] + pb[1] * t1[2] + pb[2] * t2[2]) * iq;
+    /* **A cube map is looked up by (s, t, r) as a direction**: the face it points at and the
+     * place on that face (gl_cube_face_coords). */
+    int face = -1;
+    float fs = u, ft = v;
+    if (ud->tex->cube) face = gl_cube_face_coords(u, v, rc, &fs, &ft);
+    /* The level of detail from the screen-space derivatives of the texture coordinate, taken by
+     * re-evaluating the perspective-correct coordinate one pixel to the right and one below. Only
+     * needed when the two filters differ or one reads mipmaps; otherwise any lod samples the
+     * same. A cube map's neighbours are projected onto the centre's face first. */
+    float lod = 0.0f;
+    if (ud->needs_lod) {
+        const float pxs[2] = {1.0f, 0.0f}, pys[2] = {0.0f, 1.0f};
+        float rho2 = 0.0f;
+        for (int k = 0; k < 2; k++) {
+            float q0 = b[0] + db[0] * pxs[k] + db[1] * pys[k];
+            float q1 = b[1] + db[2] * pxs[k] + db[3] * pys[k];
+            float q2 = b[2] + db[4] * pxs[k] + db[5] * pys[k];
+            q0 *= v0->inv_w; q1 *= v1->inv_w; q2 *= v2->inv_w;
+            const float qs = q0 + q1 + q2;
+            if (!(qs > 0.0f)) continue;
+            /* The neighbour's coordinate divided by its own q, as the fragment's is. */
+            const float nk = gl_q_inv((q0 * t0[3] + q1 * t1[3] + q2 * t2[3]) / qs) / qs;
+            float nu = (q0 * t0[0] + q1 * t1[0] + q2 * t2[0]) * nk;
+            float nv = (q0 * t0[1] + q1 * t1[1] + q2 * t2[1]) * nk;
+            const float nr = (q0 * t0[2] + q1 * t1[2] + q2 * t2[2]) * nk;
+            if (face >= 0) gl_cube_on_face(face, nu, nv, nr, &nu, &nv);
+            const float du = (nu - fs) * ud->w, dv = (nv - ft) * ud->h;
+            float d2 = du * du + dv * dv;
+            if (ud->d > 1.0f && face < 0) {
+                const float dr = (nr - rc) * ud->d;
+                d2 += dr * dr;
+            }
+            if (d2 > rho2) rho2 = d2;
+        }
+        lod = 0.5f * gl_log2f(rho2); /* log2(sqrt(rho2)) */
+    }
+    lod += ud->bias; /* GL 1.4's, before gl_sample_texture's LOD clamp */
+    gl_sample_texture(ud->tex, face, fs, ft, (face >= 0) ? 0.0f : rc, lod, texel);
 }
 
 void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
@@ -2120,6 +4409,12 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
     int max_x = (int)(fmax_x + 1.0f);
     int min_y = (int)fmin_y;
     int max_y = (int)(fmax_y + 1.0f);
+
+    /* A smooth polygon's pixels reach past its edges by part of a pixel. */
+    const unsigned aa_edges = (ctx->prim_raster == GL_FILL) ? ctx->aa_edges : 0u;
+    if (aa_edges) {
+        min_x--; max_x++; min_y--; max_y++;
+    }
 
     /* Clip against scissor / screen bounds */
     int clip_min_x = 0;
@@ -2162,27 +4457,65 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
         dx20 = -dx20; dy20 = -dy20;
     }
 
+    /* **The tie rule**: a pixel centre exactly on an edge belongs to one of the two triangles that
+     * share it, not both - GL's requirement that adjacent polygons draw each fragment once (GL
+     * 1.x, 3.5.1). Every centre on a quad's diagonal was drawn twice until 2026-09-19: blended
+     * twice, counted twice by a stencil operation and by GL 1.5's occlusion queries. The edge that
+     * owns its ties is a left one - the interior to its +x - or a horizontal one with the
+     * interior below it in these y-down screen rows, the top-left convention; the two triangles on
+     * a shared edge see it with opposite normals, so exactly one owns it. The coefficients are
+     * each edge function's x and y slopes, with the orientation's sign applied as the weights'
+     * is below. */
+    const float esgn = (area < 0.0f) ? -1.0f : 1.0f;
+    const GLboolean tl0 = gl_edge_owns_ties(esgn * (y1 - y2), esgn * (x2 - x1));
+    const GLboolean tl1 = gl_edge_owns_ties(esgn * (y2 - y0), esgn * (x0 - x2));
+    const GLboolean tl2 = gl_edge_owns_ties(esgn * (y0 - y1), esgn * (x1 - x0));
+
+    /* **Antialiasing's coverage** (GL 1.x, 3.3-3.5): the fraction of a pixel the primitive covers,
+     * which multiplies the fragment's alpha after fog. A point is a disc of radius r - coverage
+     * r + 1/2 minus the pixel centre's distance from its centre, clamped to [0, 1]; a line a
+     * rectangle, the same across its width and, but for a stipple's dashes, along its length; a
+     * polygon each of its own edges, faded over the pixel either side of it. Each is the linear
+     * approximation to the pixel's covered area, exact where the edge crosses a pixel straight.
+     *
+     * A polygon's edge function w_i is its edge's length times the pixel centre's distance from
+     * it: w0 is edge v1-v2 (gl_draw_polygon_tri's bit 1), w1 v2-v0 (bit 2), w2 v0-v1 (bit 0). */
+    const GLenum aa_kind = ctx->aa_kind;
+    const GLboolean aa_b0 = (GLboolean)((aa_edges >> 1) & 1u);
+    const GLboolean aa_b1 = (GLboolean)((aa_edges >> 2) & 1u);
+    const GLboolean aa_b2 = (GLboolean)(aa_edges & 1u);
+    float aa_il0 = 0.0f, aa_il1 = 0.0f, aa_il2 = 0.0f;
+    if (aa_edges) {
+        const float l0 = gl_sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
+        const float l1 = gl_sqrt((x0 - x2) * (x0 - x2) + (y0 - y2) * (y0 - y2));
+        const float l2 = gl_sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+        aa_il0 = (l0 > 0.0f) ? 1.0f / l0 : 0.0f;
+        aa_il1 = (l1 > 0.0f) ? 1.0f / l1 : 0.0f;
+        aa_il2 = (l2 > 0.0f) ? 1.0f / l2 : 0.0f;
+    }
+    float aa_dx = 0.0f, aa_dy = 0.0f, aa_len = 0.0f;
+    if (aa_kind == GL_LINE) {
+        aa_dx = ctx->aa_b[0] - ctx->aa_a[0];
+        aa_dy = ctx->aa_b[1] - ctx->aa_a[1];
+        aa_len = gl_sqrt(aa_dx * aa_dx + aa_dy * aa_dy);
+        if (aa_len > 0.0f) { aa_dx /= aa_len; aa_dy /= aa_len; }
+    }
+
     uint32_t *fb = ctx->framebuffer;
     float *db = ctx->depth_buffer;
     uint32_t pitch = ctx->width;
     GLboolean depth_test = ctx->cap_depth_test;
     GLboolean depth_write = ctx->depth_mask;
     GLenum depth_func = ctx->depth_func;
-    GLboolean blend = ctx->cap_blend;
+    gl_frag_ops_t ops;
+    gl_frag_ops_init(ctx, &ops, GL_TRUE);
+    const GLboolean stencil_test = ops.stencil_test;
 
     const GLboolean fog_on = ctx->cap_fog;
+    const GLboolean sec_on = gl_color_sum_on(ctx);
     const float fog_r = ctx->fog_color[0];
     const float fog_g = ctx->fog_color[1];
     const float fog_b = ctx->fog_color[2];
-
-    GLboolean stencil_test = (GLboolean)(ctx->cap_stencil_test && ctx->stencil_buffer != NULL);
-    GLenum stencil_func = ctx->stencil_func;
-    GLint stencil_ref = ctx->stencil_ref;
-    uint32_t stencil_vmask = ctx->stencil_value_mask;
-    uint32_t stencil_wmask = ctx->stencil_writemask;
-    GLenum stencil_op_fail = ctx->stencil_fail;
-    GLenum stencil_op_zfail = ctx->stencil_zfail;
-    GLenum stencil_op_zpass = ctx->stencil_zpass;
 
     /* Hoisted so the fragment loop reads a local array rather than the context, and so the
      * common case - no clip plane enabled - costs one test per fragment instead of six. */
@@ -2193,25 +4526,52 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
         if (clip_on[ci]) clip_any = GL_TRUE;
     }
 
-    /* Check for bound and enabled texture */
-    gl_texture_object_t *tex = NULL;
-    const GLuint eff_tex_id = gl_effective_texture_id(ctx);
-    if (eff_tex_id > 0u) {
-        for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
-            if (ctx->textures[ti].used && ctx->textures[ti].id == eff_tex_id) {
-                tex = &ctx->textures[ti];
-                break;
-            }
-        }
+    /* **Each unit's texture** (GL 1.3: two units since 2026-09-19), and what its level of detail
+     * needs, once per triangle: the base level's size in texels - GL_TEXTURE_BASE_LEVEL's image,
+     * from which the level of detail is measured - and whether the filters make it matter. */
+    gl_unit_draw_t ud[OOPS_GL_MAX_TEXTURE_UNITS];
+    GLboolean any_tex = GL_FALSE;
+    for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        const GLuint id = gl_unit_texture_id(ctx, u);
+        const gl_texture_object_t *tex = id ? gl_lookup_texture(ctx, id) : NULL;
+        ud[u].tex = tex;
+        if (!tex) continue;
+        any_tex = GL_TRUE;
+        ud[u].needs_lod = (GLboolean)(tex->min_filter != tex->mag_filter ||
+                                      gl_filter_uses_mipmaps(tex->min_filter));
+        ud[u].bias = gl_tex_lod_bias(&ctx->tex_unit[u], tex);
+        gl_tex_view_t bv;
+        const GLboolean has_base = gl_tex_level_view(tex, tex->base_level, &bv);
+        ud[u].w = has_base ? (float)bv.width : 1.0f;
+        ud[u].h = has_base ? (float)bv.height : 1.0f;
+        ud[u].d = (has_base && bv.depth > 1) ? (float)bv.depth : 1.0f;
+        ud[u].format = gl_tex_sample_format(tex);
     }
+    /* The barycentric weights' screen-space slopes (the edge functions' coefficients over the
+     * area), which the level of detail's neighbours are found from. */
+    const float dbw[6] = {
+        -(y2 - y1) * inv_area, (x2 - x1) * inv_area,
+        -(y0 - y2) * inv_area, (x0 - x2) * inv_area,
+        -(y1 - y0) * inv_area, (x1 - x0) * inv_area,
+    };
+
+    /* **The polygon stipple**, for filled polygons only - not the triangles a line or point
+     * becomes, nor a polygon's outline. Row `y` here counts down from the top and GL's window
+     * rows count up, so the mask row is the window row's; with the stipple off every row is all
+     * ones and the test below never discards. */
+    const GLboolean poly_stipple =
+        (GLboolean)(ctx->cap_polygon_stipple && ctx->prim_raster == GL_FILL);
 
     for (int y = min_y; y <= max_y; y++) {
         float py = (float)y + 0.5f;
         uint32_t *fb_row = fb ? &fb[(uint32_t)y * pitch] : NULL;
         float *db_row = db ? &db[(uint32_t)y * pitch] : NULL;
         uint8_t *sb_row = stencil_test ? &ctx->stencil_buffer[(uint32_t)y * pitch] : NULL;
+        const uint32_t stipple_row =
+            poly_stipple ? ctx->polygon_stipple[((int)ctx->height - 1 - y) & 31] : 0xffffffffu;
 
         for (int x = min_x; x <= max_x; x++) {
+            if (!((stipple_row >> (31 - (x & 31))) & 1u)) continue;
             float px = (float)x + 0.5f;
 
             /* Barycentric weights */
@@ -2223,12 +4583,66 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                 w0 = -w0; w1 = -w1; w2 = -w2;
             }
 
-            if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
+            /* Inside - or, across a smooth polygon's own edge, near enough to be partly
+             * covered - and how much of the pixel is covered. */
+            GLboolean inside;
+            float cov = 1.0f;
+            if (aa_edges) {
+                const float d0 = w0 * aa_il0, d1 = w1 * aa_il1, d2 = w2 * aa_il2;
+                inside = (GLboolean)((aa_b0 ? d0 > -0.75f : GL_EDGE_IN(w0, tl0)) &&
+                                     (aa_b1 ? d1 > -0.75f : GL_EDGE_IN(w1, tl1)) &&
+                                     (aa_b2 ? d2 > -0.75f : GL_EDGE_IN(w2, tl2)));
+                if (aa_b0) cov *= (d0 + 0.5f > 1.0f) ? 1.0f : ((d0 + 0.5f > 0.0f) ? d0 + 0.5f : 0.0f);
+                if (aa_b1) cov *= (d1 + 0.5f > 1.0f) ? 1.0f : ((d1 + 0.5f > 0.0f) ? d1 + 0.5f : 0.0f);
+                if (aa_b2) cov *= (d2 + 0.5f > 1.0f) ? 1.0f : ((d2 + 0.5f > 0.0f) ? d2 + 0.5f : 0.0f);
+            } else {
+                inside = (GLboolean)(GL_EDGE_IN(w0, tl0) && GL_EDGE_IN(w1, tl1) &&
+                                     GL_EDGE_IN(w2, tl2));
+            }
+            if (inside && aa_kind == GL_POINT) {
+                const float ex = px - ctx->aa_c[0], ey = py - ctx->aa_c[1];
+                const float c = ctx->aa_r + 0.5f - gl_sqrt(ex * ex + ey * ey);
+                cov = (c > 1.0f) ? 1.0f : c;
+            } else if (inside && aa_kind == GL_LINE) {
+                const float ex = px - ctx->aa_a[0], ey = py - ctx->aa_a[1];
+                const float along = ex * aa_dx + ey * aa_dy;
+                const float across = ex * -aa_dy + ey * aa_dx;
+                float c = ctx->aa_hw + 0.5f - (across < 0.0f ? -across : across);
+                c = (c > 1.0f) ? 1.0f : c;
+                if (ctx->aa_ends) {
+                    const float m = (along < aa_len - along) ? along : aa_len - along;
+                    const float ce = (m + 0.5f > 1.0f) ? 1.0f : m + 0.5f;
+                    c *= (ce > 0.0f) ? ce : 0.0f;
+                }
+                cov = c;
+            }
+            if (!(cov > 0.0f)) inside = GL_FALSE;
+
+            if (inside) {
                 float b0 = w0 * inv_area;
                 float b1 = w1 * inv_area;
                 float b2 = w2 * inv_area;
                 if (area < 0.0f) {
                     b0 = -b0; b1 = -b1; b2 = -b2;
+                }
+
+                /* **Perspective-correct weights for every attribute but depth.** b0..b2 are
+                 * affine in screen space, which is right for window z and wrong for anything
+                 * that was linear in clip space - colours, texture coordinates, fog, clip
+                 * distances. Weighting each vertex by its 1/w and renormalising is the
+                 * correction. Everything was interpolated affinely until 2026-09-19, so a
+                 * textured floor in perspective swam here and not on the hardware, whose
+                 * interpolators have always corrected. Under an orthographic projection every
+                 * 1/w is equal and the two agree exactly. */
+                float pb0 = b0 * v0->inv_w, pb1 = b1 * v1->inv_w, pb2 = b2 * v2->inv_w;
+                {
+                    const float s = pb0 + pb1 + pb2;
+                    if (s > 0.0f) {
+                        const float inv_s = 1.0f / s;
+                        pb0 *= inv_s; pb1 *= inv_s; pb2 *= inv_s;
+                    } else {
+                        pb0 = b0; pb1 = b1; pb2 = b2;
+                    }
                 }
 
                 /* **User clip planes, before anything else touches a buffer.**
@@ -2241,7 +4655,7 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                     GLboolean clipped = GL_FALSE;
                     for (int ci = 0; ci < OOPS_GL_CLIP_PLANE_COUNT; ci++) {
                         if (!clip_on[ci]) continue;
-                        if (b0 * v0->cd[ci] + b1 * v1->cd[ci] + b2 * v2->cd[ci] < 0.0f) {
+                        if (pb0 * v0->cd[ci] + pb1 * v1->cd[ci] + pb2 * v2->cd[ci] < 0.0f) {
                             clipped = GL_TRUE;
                             break;
                         }
@@ -2261,20 +4675,7 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
 
                 /* Depth test */
                 if (depth_test && db_row) {
-                    float cur_z = db_row[x];
-                    GLboolean pass = GL_FALSE;
-                    switch (depth_func) {
-                        case GL_LESS:     pass = (z < cur_z); break;
-                        case GL_LEQUAL:   pass = (z <= cur_z); break;
-                        case GL_GREATER:  pass = (z > cur_z); break;
-                        case GL_GEQUAL:   pass = (z >= cur_z); break;
-                        case GL_EQUAL:    pass = (z == cur_z); break;
-                        case GL_NOTEQUAL: pass = (z != cur_z); break;
-                        case GL_ALWAYS:   pass = GL_TRUE; break;
-                        case GL_NEVER:    pass = GL_FALSE; break;
-                        default:          pass = (z < cur_z); break;
-                    }
-                    if (!pass) {
+                    if (!gl_depth_passes(depth_func, z, db_row[x])) {
                         /* With no stencil there is nothing further to decide, so reject now and
                          * keep the fast path exactly as it was. */
                         if (!stencil_test) continue;
@@ -2289,80 +4690,47 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                 }
 
                 /* Interpolate color */
-                float r = b0 * v0->r + b1 * v1->r + b2 * v2->r;
-                float g = b0 * v0->g + b1 * v1->g + b2 * v2->g;
-                float b = b0 * v0->b + b1 * v1->b + b2 * v2->b;
-                float a = b0 * v0->a + b1 * v1->a + b2 * v2->a;
+                float r = pb0 * v0->r + pb1 * v1->r + pb2 * v2->r;
+                float g = pb0 * v0->g + pb1 * v1->g + pb2 * v2->g;
+                float b = pb0 * v0->b + pb1 * v1->b + pb2 * v2->b;
+                float a = pb0 * v0->a + pb1 * v1->a + pb2 * v2->a;
 
-                /* Texture application if active */
-                if (tex && tex->pixels && tex->width > 0 && tex->height > 0) {
-                    float u = b0 * v0->u + b1 * v1->u + b2 * v2->u;
-                    float v = b0 * v0->v + b1 * v1->v + b2 * v2->v;
-                    if (tex->wrap_s == GL_REPEAT) {
-                        u = u - (float)(int)u;
-                        if (u < 0.0f) u += 1.0f;
-                    } else {
-                        if (u < 0.0f) u = 0.0f;
-                        if (u > 1.0f) u = 1.0f;
+                /* **Texturing, unit by unit** (GL 1.3, 3.8.13): every applying unit sampled
+                 * first - a GL 1.4 crossbar source can name any of them - then each unit's
+                 * environment in turn on what the unit before it left. A unit applies only a
+                 * complete texture; gl_unit_texture_id answers none for an incomplete one. */
+                if (any_tex) {
+                    const float pb[3] = {pb0, pb1, pb2}, bs[3] = {b0, b1, b2};
+                    gl_unit_texels_t texels;
+                    for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+                        if (ud[u].tex) {
+                            gl_unit_sample(&ud[u], u, v0, v1, v2, pb, bs, dbw, texels.t[u]);
+                        } else {
+                            for (int k = 0; k < 4; k++) texels.t[u][k] = 0.0f;
+                        }
                     }
-                    if (tex->wrap_t == GL_REPEAT) {
-                        v = v - (float)(int)v;
-                        if (v < 0.0f) v += 1.0f;
-                    } else {
-                        if (v < 0.0f) v = 0.0f;
-                        if (v > 1.0f) v = 1.0f;
+                    const float primary[4] = {r, g, b, a};
+                    float frag[4] = {r, g, b, a};
+                    for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+                        if (ud[u].tex) gl_tex_env_apply(ctx, u, ud[u].format, &texels, primary, frag);
                     }
-                    int tx = (int)(u * (float)(tex->width - 1) + 0.5f);
-                    int ty = (int)(v * (float)(tex->height - 1) + 0.5f);
-                    if (tx < 0) tx = 0; if (tx >= tex->width) tx = tex->width - 1;
-                    if (ty < 0) ty = 0; if (ty >= tex->height) ty = tex->height - 1;
-
-                    uint32_t *tp = (uint32_t *)tex->pixels;
-                    /* Rows are `pitch` apart, which is the width rounded up - not the width.
-                     * Indexing by width here read progressively further into the previous row
-                     * for any texture whose width is not a multiple of 64 pixels. */
-                    const size_t trow = tex->pitch ? (size_t)tex->pitch : (size_t)tex->width;
-                    uint32_t tc = tp[(size_t)ty * trow + (size_t)tx];
-                    float tr = (float)(tc & 0xff) / 255.0f;
-                    float tg = (float)((tc >> 8) & 0xff) / 255.0f;
-                    float tb = (float)((tc >> 16) & 0xff) / 255.0f;
-                    float ta = (float)((tc >> 24) & 0xff) / 255.0f;
-
-                    if (ctx->tex_env_mode == GL_REPLACE) {
-                        r = tr;
-                        g = tg;
-                        b = tb;
-                        a = ta;
-                    } else if (ctx->tex_env_mode == GL_ADD) {
-                        r += tr;
-                        g += tg;
-                        b += tb;
-                        a *= ta;
-                        if (r > 1.0f) r = 1.0f;
-                        if (g > 1.0f) g = 1.0f;
-                        if (b > 1.0f) b = 1.0f;
-                    } else if (ctx->tex_env_mode == GL_DECAL) {
-                        r = r * (1.0f - ta) + tr * ta;
-                        g = g * (1.0f - ta) + tg * ta;
-                        b = b * (1.0f - ta) + tb * ta;
-                    } else { /* GL_MODULATE default */
-                        r *= tr;
-                        g *= tg;
-                        b *= tb;
-                        a *= ta;
-                    }
+                    r = frag[0];
+                    g = frag[1];
+                    b = frag[2];
+                    a = frag[3];
                 }
 
-                /* **The alpha test, which lived only in the hardware path until now.**
-                 *
-                 * `glAlphaFunc` is implemented on the GPU by patching a discard into the pixel
-                 * shader, and this rasteriser knew nothing about it - so the same program drew
-                 * one picture on the console and a different one on the host, with no error
-                 * anywhere. gl1-probe found that on its first run, which is the whole reason
-                 * the probe runs the identical suite on both paths.
-                 *
-                 * Placed after the texture environment, because GL applies the test to the
-                 * *final* fragment alpha and a modulated texture changes it. */
+                /* **The colour sum** (GL 1.4, 3.9): the secondary colour - the specular term
+                 * GL_SEPARATE_SPECULAR_COLOR kept apart, or unlit, glSecondaryColor's under
+                 * GL_COLOR_SUM - added after texturing and before fog, clamped. */
+                if (sec_on) {
+                    r += pb0 * v0->sr + pb1 * v1->sr + pb2 * v2->sr;
+                    g += pb0 * v0->sg + pb1 * v1->sg + pb2 * v2->sg;
+                    b += pb0 * v0->sb + pb1 * v1->sb + pb2 * v2->sb;
+                    if (r > 1.0f) r = 1.0f;
+                    if (g > 1.0f) g = 1.0f;
+                    if (b > 1.0f) b = 1.0f;
+                }
 
                 /* **Fog: after texturing, before the alpha test, and it does not touch alpha.**
                  *
@@ -2372,156 +4740,21 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                  * test it passes unfogged, so turning fog on would silently change which
                  * fragments a cut-out texture keeps. */
                 if (fog_on) {
-                    const float ff = b0 * v0->fog + b1 * v1->fog + b2 * v2->fog;
+                    const float ff = pb0 * v0->fog + pb1 * v1->fog + pb2 * v2->fog;
                     const float inv = 1.0f - ff;
                     r = ff * r + inv * fog_r;
                     g = ff * g + inv * fog_g;
                     b = ff * b + inv * fog_b;
                 }
 
-                if (ctx->cap_alpha_test) {
-                    GLboolean keep;
-                    switch (ctx->alpha_func) {
-                        case GL_NEVER:    keep = GL_FALSE; break;
-                        case GL_LESS:     keep = (GLboolean)(a <  ctx->alpha_ref); break;
-                        case GL_EQUAL:    keep = (GLboolean)(a == ctx->alpha_ref); break;
-                        case GL_LEQUAL:   keep = (GLboolean)(a <= ctx->alpha_ref); break;
-                        case GL_GREATER:  keep = (GLboolean)(a >  ctx->alpha_ref); break;
-                        case GL_NOTEQUAL: keep = (GLboolean)(a != ctx->alpha_ref); break;
-                        case GL_GEQUAL:   keep = (GLboolean)(a >= ctx->alpha_ref); break;
-                        default:          keep = GL_TRUE; break; /* GL_ALWAYS */
-                    }
-                    if (!keep) continue; /* and the deferred depth write never happens */
-                }
+                /* Antialiasing's coverage, after fog and before the alpha test (GL 1.x, 3.12). */
+                if (cov < 1.0f) a *= cov;
 
-                /* **Stencil sits here because GL's order is alpha test, then stencil, then
-                 * depth.** A fragment the alpha test discards never reaches the stencil buffer at
-                 * all - not even the fail operation - which is why this cannot live earlier.
-                 *
-                 * The stencil buffer is written *even when the stencil test fails*. That is the
-                 * whole point of the feature: GL_INCR or GL_REPLACE on the fail path is how a
-                 * stencil mask gets built in the first place, and an implementation that skipped
-                 * the write on failure would make every shadow-volume and outline technique
-                 * silently do nothing. */
-                if (stencil_test && sb_row) {
-                    uint8_t *sp = &sb_row[x];
-                    const uint32_t masked_ref = (uint32_t)stencil_ref & stencil_vmask;
-                    const uint32_t masked_val = (uint32_t)(*sp) & stencil_vmask;
-                    GLboolean spass;
-                    switch (stencil_func) {
-                        case GL_NEVER:    spass = GL_FALSE; break;
-                        case GL_LESS:     spass = (GLboolean)(masked_ref <  masked_val); break;
-                        case GL_LEQUAL:   spass = (GLboolean)(masked_ref <= masked_val); break;
-                        case GL_GREATER:  spass = (GLboolean)(masked_ref >  masked_val); break;
-                        case GL_GEQUAL:   spass = (GLboolean)(masked_ref >= masked_val); break;
-                        case GL_EQUAL:    spass = (GLboolean)(masked_ref == masked_val); break;
-                        case GL_NOTEQUAL: spass = (GLboolean)(masked_ref != masked_val); break;
-                        default:          spass = GL_TRUE; break; /* GL_ALWAYS */
-                    }
-                    if (!spass) {
-                        gl_stencil_apply(sp, stencil_op_fail, stencil_ref, stencil_wmask);
-                        continue; /* no colour, and no depth - the deferred write is abandoned */
-                    }
-                    gl_stencil_apply(sp, depth_failed ? stencil_op_zfail : stencil_op_zpass,
-                                     stencil_ref, stencil_wmask);
-                }
-                /* The depth test's verdict, honoured now that stencil has had its say. */
-                if (depth_failed) continue;
-
-                if (depth_pending && db_row) db_row[x] = z;
-
-                uint32_t ir = (uint32_t)(r * 255.0f + 0.5f);
-                uint32_t ig = (uint32_t)(g * 255.0f + 0.5f);
-                uint32_t ib = (uint32_t)(b * 255.0f + 0.5f);
-                uint32_t ia = (uint32_t)(a * 255.0f + 0.5f);
-                if (ir > 255) ir = 255;
-                if (ig > 255) ig = 255;
-                if (ib > 255) ib = 255;
-                if (ia > 255) ia = 255;
-
-                if (fb_row) {
-                    if (blend) {
-                        uint32_t dst = fb_row[x];
-                        float dr = (float)((dst >> 16) & 0xff) / 255.0f;
-                        float dg = (float)((dst >> 8) & 0xff) / 255.0f;
-                        float db_col = (float)(dst & 0xff) / 255.0f;
-                        float da = (float)((dst >> 24) & 0xff) / 255.0f;
-
-                        float sfr = get_blend_factor(ctx->blend_src, r, g, b, a, dr, dg, db_col, da, 0);
-                        float sfg = get_blend_factor(ctx->blend_src, r, g, b, a, dr, dg, db_col, da, 1);
-                        float sfb = get_blend_factor(ctx->blend_src, r, g, b, a, dr, dg, db_col, da, 2);
-                        float sfa = get_blend_factor(ctx->blend_src_alpha, r, g, b, a, dr, dg, db_col, da, 3);
-
-                        float dfr = get_blend_factor(ctx->blend_dst, r, g, b, a, dr, dg, db_col, da, 0);
-                        float dfg = get_blend_factor(ctx->blend_dst, r, g, b, a, dr, dg, db_col, da, 1);
-                        float dfb = get_blend_factor(ctx->blend_dst, r, g, b, a, dr, dg, db_col, da, 2);
-                        float dfa = get_blend_factor(ctx->blend_dst_alpha, r, g, b, a, dr, dg, db_col, da, 3);
-
-                        /* **The blend equation, which until now was stored and used by
-                         * nothing.** `glBlendEquation` set a field that the attribute stack
-                         * saved, `glGetIntegerv` reported and `glContextCreate` defaulted -
-                         * and neither this rasteriser nor the hardware register emission ever
-                         * read it. `glBlendEquation(GL_FUNC_SUBTRACT)` returned clean and added.
-                         *
-                         * That is a worse shape than the alpha test and depth range were: those
-                         * at least worked on the hardware path. This worked nowhere, which is
-                         * the silent lie D009 refuses everywhere else in this library.
-                         *
-                         * **GL_MIN and GL_MAX ignore the factors entirely**, which is the part
-                         * an implementation that treats them as another sign gets wrong. */
-                        float res_r, res_g, res_b, res_a;
-                        switch (ctx->blend_equation) {
-                            case GL_FUNC_SUBTRACT:
-                                res_r = r * sfr - dr * dfr;
-                                res_g = g * sfg - dg * dfg;
-                                res_b = b * sfb - db_col * dfb;
-                                res_a = a * sfa - da * dfa;
-                                break;
-                            case GL_FUNC_REVERSE_SUBTRACT:
-                                res_r = dr * dfr - r * sfr;
-                                res_g = dg * dfg - g * sfg;
-                                res_b = db_col * dfb - b * sfb;
-                                res_a = da * dfa - a * sfa;
-                                break;
-                            case GL_MIN:
-                                res_r = r < dr ? r : dr;
-                                res_g = g < dg ? g : dg;
-                                res_b = b < db_col ? b : db_col;
-                                res_a = a < da ? a : da;
-                                break;
-                            case GL_MAX:
-                                res_r = r > dr ? r : dr;
-                                res_g = g > dg ? g : dg;
-                                res_b = b > db_col ? b : db_col;
-                                res_a = a > da ? a : da;
-                                break;
-                            default: /* GL_FUNC_ADD */
-                                res_r = r * sfr + dr * dfr;
-                                res_g = g * sfg + dg * dfg;
-                                res_b = b * sfb + db_col * dfb;
-                                res_a = a * sfa + da * dfa;
-                                break;
-                        }
-
-                        if (res_r < 0.0f) res_r = 0.0f; else if (res_r > 1.0f) res_r = 1.0f;
-                        if (res_g < 0.0f) res_g = 0.0f; else if (res_g > 1.0f) res_g = 1.0f;
-                        if (res_b < 0.0f) res_b = 0.0f; else if (res_b > 1.0f) res_b = 1.0f;
-                        if (res_a < 0.0f) res_a = 0.0f; else if (res_a > 1.0f) res_a = 1.0f;
-
-                        ir = (uint32_t)(res_r * 255.0f + 0.5f);
-                        ig = (uint32_t)(res_g * 255.0f + 0.5f);
-                        ib = (uint32_t)(res_b * 255.0f + 0.5f);
-                        ia = (uint32_t)(res_a * 255.0f + 0.5f);
-                    }
-
-                    uint32_t old_dst = fb_row[x];
-                    uint32_t new_px = 0;
-                    new_px |= ctx->color_mask[0] ? (ir << 16) : (old_dst & 0x00ff0000u);
-                    new_px |= ctx->color_mask[1] ? (ig << 8)  : (old_dst & 0x0000ff00u);
-                    new_px |= ctx->color_mask[2] ? ib         : (old_dst & 0x000000ffu);
-                    new_px |= ctx->color_mask[3] ? (ia << 24) : (old_dst & 0xff000000u);
-                    fb_row[x] = new_px;
-                }
+                /* Alpha, stencil, the depth verdict, blending, the logic op and the masks. */
+                gl_fragment_tail(ctx, &ops, fb_row ? &fb_row[x] : NULL,
+                                 (depth_pending && db_row) ? &db_row[x] : NULL,
+                                 (stencil_test && sb_row) ? &sb_row[x] : NULL, z, depth_failed,
+                                 r, g, b, a);
             }
         }
     }
@@ -2533,6 +4766,81 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
 
 #endif /* OOPS_HOST_BUILD */
 
+/* The bytes of one component of an array element, or 0 for a type no array takes. */
+static size_t gl_array_type_bytes(GLenum type) {
+    switch (type) {
+        case GL_BYTE: case GL_UNSIGNED_BYTE: return 1u;
+        case GL_SHORT: case GL_UNSIGNED_SHORT: return 2u;
+        case GL_INT: case GL_UNSIGNED_INT: case GL_FLOAT: return 4u;
+        case GL_DOUBLE: return 8u;
+        default: return 0u;
+    }
+}
+
+/* An array's element stride: its own, or the element's size when that is 0 (tightly packed). */
+static int gl_array_stride(const gl_client_array_t *a) {
+    return a->stride ? a->stride : a->size * (int)gl_array_type_bytes(a->type);
+}
+
+/* **Component `i` of an array element, as its type stores it.** Colours and normals convert as the
+ * immediate-mode calls of their type do - unsigned over 2^b - 1, signed as (2c + 1) / (2^b - 1),
+ * Mesa's macros - and positions and texture coordinates as plain values. The arrays were read as
+ * floats (and a colour array as unsigned bytes too) until 2026-09-19, whatever type the pointer
+ * named: a GL_SHORT position array drew from reinterpreted bits. The components are copied out
+ * rather than dereferenced in place, since an element need not be aligned for its type. */
+static float gl_array_comp(GLenum type, const uint8_t *p, int i, GLboolean normalize) {
+    switch (type) {
+        case GL_BYTE: {
+            const GLbyte v = (GLbyte)p[i];
+            return normalize ? gl_b_to_f(v) : (float)v;
+        }
+        case GL_UNSIGNED_BYTE:
+            return normalize ? gl_ub_to_f(p[i]) : (float)p[i];
+        case GL_SHORT: {
+            GLshort v; memcpy(&v, p + (size_t)i * 2u, 2u);
+            return normalize ? gl_s_to_f(v) : (float)v;
+        }
+        case GL_UNSIGNED_SHORT: {
+            GLushort v; memcpy(&v, p + (size_t)i * 2u, 2u);
+            return normalize ? gl_us_to_f(v) : (float)v;
+        }
+        case GL_INT: {
+            GLint v; memcpy(&v, p + (size_t)i * 4u, 4u);
+            return normalize ? gl_i_to_f(v) : (float)v;
+        }
+        case GL_UNSIGNED_INT: {
+            GLuint v; memcpy(&v, p + (size_t)i * 4u, 4u);
+            return normalize ? gl_ui_to_f(v) : (float)v;
+        }
+        case GL_DOUBLE: {
+            GLdouble v; memcpy(&v, p + (size_t)i * 8u, 8u);
+            return (float)v;
+        }
+        default: {
+            GLfloat v; memcpy(&v, p + (size_t)i * 4u, 4u);
+            return v;
+        }
+    }
+}
+
+/* One unit's texture coordinate array element, as s, t, r, q with GL's defaults for the
+ * components the array's size leaves out - so a size-4 array's q is kept, not dropped. False, and
+ * `tc` untouched, when the unit's array is not enabled. */
+static GLboolean gl_array_texcoord_at(const gl_context_t *ctx, GLuint unit, int idx,
+                                      float tc[4]) {
+    const gl_client_array_t *a = &ctx->array_texcoord[unit];
+    const uint8_t *base = gl_array_base(ctx, a);
+    if (!a->enabled || !base) return GL_FALSE;
+    const GLenum t = a->type;
+    const int n = a->size;
+    const uint8_t *ptr = base + (idx * gl_array_stride(a));
+    tc[0] = gl_array_comp(t, ptr, 0, GL_FALSE);
+    tc[1] = (n > 1) ? gl_array_comp(t, ptr, 1, GL_FALSE) : 0.0f;
+    tc[2] = (n > 2) ? gl_array_comp(t, ptr, 2, GL_FALSE) : 0.0f;
+    tc[3] = (n > 3) ? gl_array_comp(t, ptr, 3, GL_FALSE) : 1.0f;
+    return GL_TRUE;
+}
+
 static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
     /* **Each array's base comes from gl_array_base, not from its `pointer` field.** With a
      * buffer object bound that field holds a byte *offset*, and an offset of zero is both legal
@@ -2540,39 +4848,29 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
      * data starts at offset 0 would have read as "no array" and drawn the default attribute. */
     const uint8_t *base_v = gl_array_base(ctx, &ctx->array_vertex);
     const uint8_t *base_c = gl_array_base(ctx, &ctx->array_color);
-    const uint8_t *base_t = gl_array_base(ctx, &ctx->array_texcoord);
     const uint8_t *base_n = gl_array_base(ctx, &ctx->array_normal);
 
     /* Position */
     if (ctx->array_vertex.enabled && base_v) {
-        int stride = ctx->array_vertex.stride ? ctx->array_vertex.stride : (ctx->array_vertex.size * (int)sizeof(float));
-        const uint8_t *ptr = base_v + (idx * stride);
-        const float *fp = (const float *)ptr;
-        out->x = fp[0];
-        out->y = (ctx->array_vertex.size > 1) ? fp[1] : 0.0f;
-        out->z = (ctx->array_vertex.size > 2) ? fp[2] : 0.0f;
-        out->w = (ctx->array_vertex.size > 3) ? fp[3] : 1.0f;
+        const GLenum t = ctx->array_vertex.type;
+        const int n = ctx->array_vertex.size;
+        const uint8_t *ptr = base_v + (idx * gl_array_stride(&ctx->array_vertex));
+        out->x = gl_array_comp(t, ptr, 0, GL_FALSE);
+        out->y = (n > 1) ? gl_array_comp(t, ptr, 1, GL_FALSE) : 0.0f;
+        out->z = (n > 2) ? gl_array_comp(t, ptr, 2, GL_FALSE) : 0.0f;
+        out->w = (n > 3) ? gl_array_comp(t, ptr, 3, GL_FALSE) : 1.0f;
     } else {
         out->x = 0.0f; out->y = 0.0f; out->z = 0.0f; out->w = 1.0f;
     }
 
     /* Color */
     if (ctx->array_color.enabled && base_c) {
-        int stride = ctx->array_color.stride ? ctx->array_color.stride :
-                     (ctx->array_color.type == GL_UNSIGNED_BYTE ? ctx->array_color.size : (ctx->array_color.size * (int)sizeof(float)));
-        const uint8_t *ptr = base_c + (idx * stride);
-        if (ctx->array_color.type == GL_UNSIGNED_BYTE) {
-            out->r = (float)ptr[0] / 255.0f;
-            out->g = (float)ptr[1] / 255.0f;
-            out->b = (float)ptr[2] / 255.0f;
-            out->a = (ctx->array_color.size > 3) ? ((float)ptr[3] / 255.0f) : 1.0f;
-        } else {
-            const float *fp = (const float *)ptr;
-            out->r = fp[0];
-            out->g = fp[1];
-            out->b = fp[2];
-            out->a = (ctx->array_color.size > 3) ? fp[3] : 1.0f;
-        }
+        const GLenum t = ctx->array_color.type;
+        const uint8_t *ptr = base_c + (idx * gl_array_stride(&ctx->array_color));
+        out->r = gl_array_comp(t, ptr, 0, GL_TRUE);
+        out->g = gl_array_comp(t, ptr, 1, GL_TRUE);
+        out->b = gl_array_comp(t, ptr, 2, GL_TRUE);
+        out->a = (ctx->array_color.size > 3) ? gl_array_comp(t, ptr, 3, GL_TRUE) : 1.0f;
     } else {
         out->r = ctx->cur_color[0];
         out->g = ctx->cur_color[1];
@@ -2580,24 +4878,45 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
         out->a = ctx->cur_color[3];
     }
 
-    /* Texcoord */
-    if (ctx->array_texcoord.enabled && base_t) {
-        int stride = ctx->array_texcoord.stride ? ctx->array_texcoord.stride : (ctx->array_texcoord.size * (int)sizeof(float));
-        const uint8_t *ptr = base_t + (idx * stride);
-        const float *fp = (const float *)ptr;
-        out->u = fp[0];
-        out->v = (ctx->array_texcoord.size > 1) ? fp[1] : 0.0f;
+    /* The secondary colour, normalised as the colour array is */
+    const uint8_t *base_s = gl_array_base(ctx, &ctx->array_secondary);
+    if (ctx->array_secondary.enabled && base_s) {
+        const GLenum t = ctx->array_secondary.type;
+        const uint8_t *ptr = base_s + (idx * gl_array_stride(&ctx->array_secondary));
+        out->sr = gl_array_comp(t, ptr, 0, GL_TRUE);
+        out->sg = gl_array_comp(t, ptr, 1, GL_TRUE);
+        out->sb = gl_array_comp(t, ptr, 2, GL_TRUE);
     } else {
-        out->u = ctx->cur_texcoord[0];
-        out->v = ctx->cur_texcoord[1];
+        out->sr = ctx->cur_secondary[0];
+        out->sg = ctx->cur_secondary[1];
+        out->sb = ctx->cur_secondary[2];
     }
 
-    /* Normal */
+    /* The fog coordinate, a plain value */
+    const uint8_t *base_f = gl_array_base(ctx, &ctx->array_fog_coord);
+    if (ctx->array_fog_coord.enabled && base_f) {
+        const uint8_t *ptr = base_f + (idx * gl_array_stride(&ctx->array_fog_coord));
+        out->fogc = gl_array_comp(ctx->array_fog_coord.type, ptr, 0, GL_FALSE);
+    } else {
+        out->fogc = ctx->cur_fog_coord;
+    }
+
+    /* Texcoords: each unit's array element, or its current coordinate. Projected after the normal
+     * is read, below, because generation may replace them and sphere mapping needs the normal. */
+    float tc[OOPS_GL_MAX_TEXTURE_UNITS][4];
+    for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        if (!gl_array_texcoord_at(ctx, u, idx, tc[u])) {
+            for (int k = 0; k < 4; k++) tc[u][k] = ctx->cur_texcoord[u][k];
+        }
+    }
+
+    /* Normal, normalised as glNormal3b and its siblings convert */
     if (ctx->array_normal.enabled && base_n) {
-        int stride = ctx->array_normal.stride ? ctx->array_normal.stride : (3 * (int)sizeof(float));
-        const uint8_t *ptr = base_n + (idx * stride);
-        const float *fp = (const float *)ptr;
-        out->nx = fp[0]; out->ny = fp[1]; out->nz = fp[2];
+        const GLenum t = ctx->array_normal.type;
+        const uint8_t *ptr = base_n + (idx * gl_array_stride(&ctx->array_normal));
+        out->nx = gl_array_comp(t, ptr, 0, GL_TRUE);
+        out->ny = gl_array_comp(t, ptr, 1, GL_TRUE);
+        out->nz = gl_array_comp(t, ptr, 2, GL_TRUE);
     } else {
         out->nx = ctx->cur_normal[0];
         out->ny = ctx->cur_normal[1];
@@ -2609,7 +4928,89 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
      * the same generated coordinate an immediate-mode vertex would - and it overrides the
      * texture-coordinate array above, exactly as it overrides glTexCoord. Applied after the
      * normal is read because sphere mapping needs it. */
-    gl_apply_texgen(ctx, out);
+    gl_vertex_texcoord(ctx, out, tc);
+
+    /* The edge flag: one GLboolean per element, or the current flag. */
+    const uint8_t *base_e = gl_array_base(ctx, &ctx->array_edge_flag);
+    if (ctx->array_edge_flag.enabled && base_e) {
+        const int stride = ctx->array_edge_flag.stride ? ctx->array_edge_flag.stride
+                                                       : (int)sizeof(GLboolean);
+        out->edge = *(const GLboolean *)(base_e + (idx * stride)) ? GL_TRUE : GL_FALSE;
+    } else {
+        out->edge = ctx->cur_edge_flag;
+    }
+}
+
+/* The two array-draw fetchers for gl_assemble: consecutive elements from `first`, and elements
+ * named by an index array of one of the three readable types. */
+static void gl_fetch_array(gl_context_t *ctx, const void *src, int i, gl_vertex_t *out) {
+    fetch_vertex(ctx, *(const GLint *)src + i, out);
+}
+
+typedef struct {
+    const void *indices;
+    GLenum type; /* checked readable by the caller before anything is fetched */
+} gl_element_src_t;
+
+static int gl_element_index(const gl_element_src_t *e, int i) {
+    if (e->type == GL_UNSIGNED_SHORT) return (int)((const uint16_t *)e->indices)[i];
+    if (e->type == GL_UNSIGNED_BYTE) return (int)((const uint8_t *)e->indices)[i];
+    return (int)((const uint32_t *)e->indices)[i];
+}
+
+static void gl_fetch_element(gl_context_t *ctx, const void *src, int i, gl_vertex_t *out) {
+    fetch_vertex(ctx, gl_element_index((const gl_element_src_t *)src, i), out);
+}
+
+/* One array element as the immediate-mode calls the specification defines it to be - the
+ * attribute calls for each enabled array, then the vertex - issued so that a display list being
+ * compiled records them. **This is how an array draw compiles**: the list keeps the values the
+ * arrays held at compile time, because it holds the calls, not the pointers.
+ *
+ * The texture coordinate is recorded as it sits in the array, before generation and the divide
+ * by q; both are properties of the vertex when the list *runs*, and gl_vertex_texcoord applies
+ * them then, from whatever generation state is current. */
+static void gl_list_record_element(gl_context_t *ctx, int idx) {
+    gl_vertex_t v;
+    fetch_vertex(ctx, idx, &v);
+    if (ctx->array_color.enabled && gl_array_base(ctx, &ctx->array_color)) {
+        glColor4f(v.r, v.g, v.b, v.a);
+    }
+    if (ctx->array_secondary.enabled && gl_array_base(ctx, &ctx->array_secondary)) {
+        glSecondaryColor3f(v.sr, v.sg, v.sb);
+    }
+    if (ctx->array_fog_coord.enabled && gl_array_base(ctx, &ctx->array_fog_coord)) {
+        glFogCoordf(v.fogc);
+    }
+    if (ctx->array_normal.enabled && gl_array_base(ctx, &ctx->array_normal)) {
+        glNormal3f(v.nx, v.ny, v.nz);
+    }
+    /* Each unit's array as the glMultiTexCoord call it stands for (GL 1.3, 2.8's ArrayElement). */
+    for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        float tc[4];
+        if (gl_array_texcoord_at(ctx, u, idx, tc)) {
+            glMultiTexCoord4f(GL_TEXTURE0 + u, tc[0], tc[1], tc[2], tc[3]);
+        }
+    }
+    if (ctx->array_edge_flag.enabled && gl_array_base(ctx, &ctx->array_edge_flag)) {
+        glEdgeFlag(v.edge);
+    }
+    const uint8_t *base_i = gl_array_base(ctx, &ctx->array_index);
+    if (ctx->array_index.enabled && base_i) {
+        const size_t bytes = gl_index_type_bytes(ctx->array_index.type);
+        const int stride = ctx->array_index.stride ? ctx->array_index.stride : (int)bytes;
+        const uint8_t *p = base_i + (idx * stride);
+        switch (ctx->array_index.type) {
+            case GL_UNSIGNED_BYTE: glIndexf((GLfloat)*p); break;
+            case GL_SHORT:         glIndexf((GLfloat)*(const GLshort *)p); break;
+            case GL_INT:           glIndexf((GLfloat)*(const GLint *)p); break;
+            case GL_DOUBLE:        glIndexf((GLfloat)*(const GLdouble *)p); break;
+            default:               glIndexf(*(const GLfloat *)p); break;
+        }
+    }
+    if (ctx->array_vertex.enabled && gl_array_base(ctx, &ctx->array_vertex)) {
+        glVertex4f(v.x, v.y, v.z, v.w);
+    }
 }
 
 /* `glArrayElement(i)` - one vertex pulled out of the enabled arrays, inside glBegin/glEnd.
@@ -2620,16 +5021,20 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
  * normal and texture coordinate for the ones that are not, which is exactly what the
  * specification says this does.
  *
- * Refused inside a display list for the same reason glDrawArrays is: a compiled list must
- * dereference the arrays at *compile* time, and recording the index to read later would replay
- * whatever the array holds then.
+ * Inside a display list it compiles as the attribute and vertex calls it stands for, read out of
+ * the arrays now (gl_list_record_element). It was refused there until 2026-09-19; recording the
+ * index to read later would replay whatever the array holds then, and the specification avoids
+ * that the same way this now does.
  */
 void glArrayElement(GLint i) {
-    if (gl_list_refuse()) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     if (i < 0) {
         gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    if (gl_list_recording()) {
+        gl_list_record_element(ctx, i);
         return;
     }
     /* Outside glBegin/glEnd this has nowhere to put the vertex. GL calls that undefined rather
@@ -2641,10 +5046,6 @@ void glArrayElement(GLint i) {
 }
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
-    // Cannot be compiled into a list: the specification has a list dereference the client
-    // arrays at *compile* time, and storing the pointer to read later would draw whatever the
-    // array holds then - a different picture from the one that was compiled.
-    if (gl_list_refuse()) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     /* A negative count is the caller's arithmetic having gone wrong, and GL says so with
@@ -2655,99 +5056,23 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         return;
     }
     if (!gl_accept_mode(ctx, mode)) return;
+    if (gl_draw_sources_mapped(ctx, GL_FALSE)) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
     if (count == 0) return;
 
-    gl_vertex_t v0, v1, v2, v3;
-
-    switch (mode) {
-        case GL_TRIANGLES:
-            for (GLint i = 0; i + 2 < count; i += 3) {
-                fetch_vertex(ctx, first + i, &v0);
-                fetch_vertex(ctx, first + i + 1, &v1);
-                fetch_vertex(ctx, first + i + 2, &v2);
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v2);
-            }
-            break;
-        case GL_QUADS:
-            for (GLint i = 0; i + 3 < count; i += 4) {
-                fetch_vertex(ctx, first + i, &v0);
-                fetch_vertex(ctx, first + i + 1, &v1);
-                fetch_vertex(ctx, first + i + 2, &v2);
-                fetch_vertex(ctx, first + i + 3, &v3);
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v2);
-                gl_draw_primitive_triangle(ctx, &v0, &v2, &v3);
-            }
-            break;
-        case GL_TRIANGLE_STRIP:
-            for (GLint i = 0; i + 2 < count; i++) {
-                if (i & 1) {
-                    fetch_vertex(ctx, first + i + 1, &v0);
-                    fetch_vertex(ctx, first + i, &v1);
-                    fetch_vertex(ctx, first + i + 2, &v2);
-                } else {
-                    fetch_vertex(ctx, first + i, &v0);
-                    fetch_vertex(ctx, first + i + 1, &v1);
-                    fetch_vertex(ctx, first + i + 2, &v2);
-                }
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v2);
-            }
-            break;
-        case GL_TRIANGLE_FAN:
-        case GL_POLYGON:
-            fetch_vertex(ctx, first, &v0);
-            for (GLint i = 1; i + 1 < count; i++) {
-                fetch_vertex(ctx, first + i, &v1);
-                fetch_vertex(ctx, first + i + 1, &v2);
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v2);
-            }
-            break;
-        case GL_QUAD_STRIP:
-            for (GLint i = 0; i + 3 < count; i += 2) {
-                fetch_vertex(ctx, first + i, &v0);
-                fetch_vertex(ctx, first + i + 1, &v1);
-                fetch_vertex(ctx, first + i + 2, &v2);
-                fetch_vertex(ctx, first + i + 3, &v3);
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v3);
-                gl_draw_primitive_triangle(ctx, &v0, &v3, &v2);
-            }
-            break;
-        /* **The array path expands points and lines the same way immediate mode does.** Accepting
-         * the mode in `gl_mode_is_drawable` and not handling it here would draw nothing and raise
-         * nothing, which is the silent-success failure this port refuses. */
-        case GL_POINTS:
-        case GL_LINES:
-        case GL_LINE_STRIP:
-        case GL_LINE_LOOP: {
-            gl_update_mvp(ctx);
-            gl_mat4_t inv_mvp;
-            if (!mat4_invert(&inv_mvp, &ctx->mvp)) break;
-            if (mode == GL_POINTS) {
-                for (GLint i = 0; i < count; i++) {
-                    fetch_vertex(ctx, first + i, &v0);
-                    gl_draw_point_square(ctx, &inv_mvp, &v0);
-                }
-            } else if (mode == GL_LINES) {
-                for (GLint i = 0; i + 1 < count; i += 2) {
-                    fetch_vertex(ctx, first + i, &v0);
-                    fetch_vertex(ctx, first + i + 1, &v1);
-                    gl_draw_line_segment(ctx, &inv_mvp, &v0, &v1);
-                }
-            } else {
-                for (GLint i = 0; i + 1 < count; i++) {
-                    fetch_vertex(ctx, first + i, &v0);
-                    fetch_vertex(ctx, first + i + 1, &v1);
-                    gl_draw_line_segment(ctx, &inv_mvp, &v0, &v1);
-                }
-                if (mode == GL_LINE_LOOP && count > 2) {
-                    fetch_vertex(ctx, first + count - 1, &v0);
-                    fetch_vertex(ctx, first, &v1);
-                    gl_draw_line_segment(ctx, &inv_mvp, &v0, &v1);
-                }
-            }
-            break;
-        }
-        default: break;
+    /* Inside a display list, the draw compiles as what it is defined to be - glBegin, one
+     * glArrayElement per index, glEnd - with the arrays read now. Refused until 2026-09-19. */
+    if (gl_list_recording()) {
+        glBegin(mode);
+        for (GLint i = 0; i < count; i++) gl_list_record_element(ctx, first + i);
+        glEnd();
+        return;
     }
+
+    const GLint src = first;
+    gl_assemble(ctx, mode, count, gl_fetch_array, &src);
 }
 
 /* `glDrawRangeElements` (GL 1.2) is glDrawElements plus a promise about the index range, which
@@ -2768,7 +5093,6 @@ void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count,
 }
 
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
-    if (gl_list_refuse()) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
     if (count < 0) {
@@ -2781,6 +5105,10 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
      * end of a byte-indexed array rather than merely returning nonsense. */
     if (!gl_index_type_is_readable(type)) {
         gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (gl_draw_sources_mapped(ctx, GL_TRUE)) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
 
@@ -2801,100 +5129,66 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     }
     if (count == 0 || !indices) return;
 
-    gl_vertex_t v0, v1, v2, v3;
+    const gl_element_src_t src = {indices, type};
 
-    #define GET_INDEX(i) \
-        ((type == GL_UNSIGNED_SHORT) ? (int)((const uint16_t *)indices)[i] : \
-        ((type == GL_UNSIGNED_BYTE)  ? (int)((const uint8_t *)indices)[i] : \
-                                       (int)((const uint32_t *)indices)[i]))
-
-    switch (mode) {
-        case GL_TRIANGLES:
-            for (GLsizei i = 0; i + 2 < count; i += 3) {
-                fetch_vertex(ctx, GET_INDEX(i), &v0);
-                fetch_vertex(ctx, GET_INDEX(i + 1), &v1);
-                fetch_vertex(ctx, GET_INDEX(i + 2), &v2);
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v2);
-            }
-            break;
-        case GL_QUADS:
-            for (GLsizei i = 0; i + 3 < count; i += 4) {
-                fetch_vertex(ctx, GET_INDEX(i), &v0);
-                fetch_vertex(ctx, GET_INDEX(i + 1), &v1);
-                fetch_vertex(ctx, GET_INDEX(i + 2), &v2);
-                fetch_vertex(ctx, GET_INDEX(i + 3), &v3);
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v2);
-                gl_draw_primitive_triangle(ctx, &v0, &v2, &v3);
-            }
-            break;
-        case GL_TRIANGLE_STRIP:
-            for (GLsizei i = 0; i + 2 < count; i++) {
-                if (i & 1) {
-                    fetch_vertex(ctx, GET_INDEX(i + 1), &v0);
-                    fetch_vertex(ctx, GET_INDEX(i), &v1);
-                    fetch_vertex(ctx, GET_INDEX(i + 2), &v2);
-                } else {
-                    fetch_vertex(ctx, GET_INDEX(i), &v0);
-                    fetch_vertex(ctx, GET_INDEX(i + 1), &v1);
-                    fetch_vertex(ctx, GET_INDEX(i + 2), &v2);
-                }
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v2);
-            }
-            break;
-        case GL_TRIANGLE_FAN:
-        case GL_POLYGON:
-            fetch_vertex(ctx, GET_INDEX(0), &v0);
-            for (GLsizei i = 1; i + 1 < count; i++) {
-                fetch_vertex(ctx, GET_INDEX(i), &v1);
-                fetch_vertex(ctx, GET_INDEX(i + 1), &v2);
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v2);
-            }
-            break;
-        case GL_QUAD_STRIP:
-            for (GLsizei i = 0; i + 3 < count; i += 2) {
-                fetch_vertex(ctx, GET_INDEX(i), &v0);
-                fetch_vertex(ctx, GET_INDEX(i + 1), &v1);
-                fetch_vertex(ctx, GET_INDEX(i + 2), &v2);
-                fetch_vertex(ctx, GET_INDEX(i + 3), &v3);
-                gl_draw_primitive_triangle(ctx, &v0, &v1, &v3);
-                gl_draw_primitive_triangle(ctx, &v0, &v3, &v2);
-            }
-            break;
-        /* The third switch. All three must agree about which modes draw, which is what the
-         * comment on the refusal test means by "three switches used to disagree about this". */
-        case GL_POINTS:
-        case GL_LINES:
-        case GL_LINE_STRIP:
-        case GL_LINE_LOOP: {
-            gl_update_mvp(ctx);
-            gl_mat4_t inv_mvp;
-            if (!mat4_invert(&inv_mvp, &ctx->mvp)) break;
-            if (mode == GL_POINTS) {
-                for (GLsizei i = 0; i < count; i++) {
-                    fetch_vertex(ctx, GET_INDEX(i), &v0);
-                    gl_draw_point_square(ctx, &inv_mvp, &v0);
-                }
-            } else if (mode == GL_LINES) {
-                for (GLsizei i = 0; i + 1 < count; i += 2) {
-                    fetch_vertex(ctx, GET_INDEX(i), &v0);
-                    fetch_vertex(ctx, GET_INDEX(i + 1), &v1);
-                    gl_draw_line_segment(ctx, &inv_mvp, &v0, &v1);
-                }
-            } else {
-                for (GLsizei i = 0; i + 1 < count; i++) {
-                    fetch_vertex(ctx, GET_INDEX(i), &v0);
-                    fetch_vertex(ctx, GET_INDEX(i + 1), &v1);
-                    gl_draw_line_segment(ctx, &inv_mvp, &v0, &v1);
-                }
-                if (mode == GL_LINE_LOOP && count > 2) {
-                    fetch_vertex(ctx, GET_INDEX(count - 1), &v0);
-                    fetch_vertex(ctx, GET_INDEX(0), &v1);
-                    gl_draw_line_segment(ctx, &inv_mvp, &v0, &v1);
-                }
-            }
-            break;
-        }
-        default: break;
+    /* Inside a display list: glBegin, the indexed elements read now, glEnd - the indices too,
+     * from the element buffer if one is bound, since a list keeps values rather than names. */
+    if (gl_list_recording()) {
+        glBegin(mode);
+        for (GLsizei i = 0; i < count; i++) gl_list_record_element(ctx, gl_element_index(&src, i));
+        glEnd();
+        return;
     }
-    #undef GET_INDEX
+
+    gl_assemble(ctx, mode, count, gl_fetch_element, &src);
+}
+
+/* GL 1.4's multi-draws: `drawcount` glDrawArrays or glDrawElements of one mode. **Every argument
+ * is checked before anything is drawn** - a negative drawcount or count a value error, the mode
+ * (and the index type) an enum error - as Mesa's validation does (main/draw.c:530-547 and
+ * :303-320), so a bad count at the end does not leave the ones before it drawn. Then each draw
+ * with a count above zero is issued, which is also how a display list compiles them (Mesa
+ * vbo/vbo_save_api.c:1727-1760). */
+void glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (drawcount < 0) { gl_record_error(ctx, GL_INVALID_VALUE); return; }
+    if (!gl_accept_mode(ctx, mode)) return;
+    if (drawcount == 0 || !first || !count) return;
+    for (GLsizei i = 0; i < drawcount; i++) {
+        if (count[i] < 0) { gl_record_error(ctx, GL_INVALID_VALUE); return; }
+    }
+    for (GLsizei i = 0; i < drawcount; i++) {
+        if (count[i] > 0) glDrawArrays(mode, first[i], count[i]);
+    }
+}
+
+void glMultiDrawElements(GLenum mode, const GLsizei *count, GLenum type,
+                         const GLvoid *const *indices, GLsizei drawcount) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (drawcount < 0) { gl_record_error(ctx, GL_INVALID_VALUE); return; }
+    if (!gl_accept_mode(ctx, mode)) return;
+    if (!gl_index_type_is_readable(type)) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
+    if (drawcount == 0 || !count || !indices) return;
+    for (GLsizei i = 0; i < drawcount; i++) {
+        if (count[i] < 0) { gl_record_error(ctx, GL_INVALID_VALUE); return; }
+    }
+    for (GLsizei i = 0; i < drawcount; i++) {
+        if (count[i] > 0) glDrawElements(mode, count[i], type, indices[i]);
+    }
+}
+
+/* GL_EXT_draw_range_elements' and GL_EXT_multi_draw_arrays' own spellings, which a program
+ * written before GL 1.2 and 1.4 took them into the core calls. */
+void glDrawRangeElementsEXT(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type,
+                            const GLvoid *indices) {
+    glDrawRangeElements(mode, start, end, count, type, indices);
+}
+void glMultiDrawArraysEXT(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount) {
+    glMultiDrawArrays(mode, first, count, drawcount);
+}
+void glMultiDrawElementsEXT(GLenum mode, const GLsizei *count, GLenum type,
+                            const GLvoid *const *indices, GLsizei drawcount) {
+    glMultiDrawElements(mode, count, type, indices, drawcount);
 }

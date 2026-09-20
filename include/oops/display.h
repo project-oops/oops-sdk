@@ -66,6 +66,59 @@ int oops_display_try_gpu_tiler(oops_display_t *disp);
 void oops_display_clear(oops_display_t *disp, uint32_t color);
 int oops_display_flip(oops_display_t *disp);
 
+/*
+ * **Another linear image on screen, without it becoming the framebuffer.**
+ * `pixels` is a width x height image of 0xAARRGGBB words, the framebuffer's size
+ * and layout. AGC tiles it onto the next scanout buffer and flips, as
+ * oops_display_flip does with the framebuffer. GNM's framebuffer is itself a
+ * scanout buffer, so it copies into the buffer on screen instead. Either way the
+ * framebuffer is untouched, which is what lets a GL front buffer be shown while
+ * the back buffer keeps its contents. Returns 0, or negative without a display.
+ */
+int oops_display_present(oops_display_t *disp, const uint32_t *pixels);
+
+/* The image on screen now - the last one flipped or presented - as the same
+ * kind of linear image. AGC detiles its scanout buffer; GNM copies it. Returns
+ * 0, or negative without a display. */
+int oops_display_read_shown(oops_display_t *disp, uint32_t *pixels);
+
+/*
+ * **For a renderer that draws the scanout buffers itself** - a GPU renderer, as
+ * a title on the console is - rather than handing the display a linear image to
+ * convert. The buffers are the display's two, in whatever layout VideoOut scans.
+ */
+typedef enum oops_display_scanout_layout {
+  OOPS_DISPLAY_SCANOUT_NONE = 0,   /* no display, or no scanout buffers */
+  OOPS_DISPLAY_SCANOUT_LINEAR = 1, /* rows of 0xAARRGGBB words, the width a row */
+  /* The GPU's 64KB_R_X render-target swizzle at 32 bits a pixel: 64 KiB blocks
+   * of 128 x 128 pixels, row by row across the width padded to 128, each
+   * addressed as <agc/tiler.h>'s agc_tile_pixel says. */
+  OOPS_DISPLAY_SCANOUT_RX = 2
+} oops_display_scanout_layout_t;
+
+oops_display_scanout_layout_t
+oops_display_scanout_layout(const oops_display_t *disp);
+
+/* The scanout buffer the next flip shows (`which` 0), or the one on screen
+ * now (1). NULL without one. */
+uint32_t *oops_display_scanout(oops_display_t *disp, int which);
+
+/* Wait - up to about 100 ms - until the next buffer is off screen: every flip
+ * submitted has completed, so the buffer that was on screen before the last one
+ * is free to draw into. 0 once it is, 1 on the timeout, negative without a
+ * display. */
+int oops_display_wait_scanout(oops_display_t *disp);
+
+/* Flip the next buffer as it was drawn - nothing tiled or copied into it - and
+ * make the other one next. */
+int oops_display_flip_scanout(oops_display_t *disp);
+
+/* A renderer that draws the scanout buffers in place says so here, once, so
+ * that oops_display_get_surface (<oops/draw.h>) describes the next scanout
+ * buffer rather than a framebuffer nothing will flip. Returns the layout, or
+ * OOPS_DISPLAY_SCANOUT_NONE - and nothing changes - without scanout buffers. */
+oops_display_scanout_layout_t oops_display_use_scanout(oops_display_t *disp);
+
 /* Close output and release video resources */
 void oops_display_close(oops_display_t *disp);
 

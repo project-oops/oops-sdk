@@ -25,7 +25,7 @@ static void test_memory_surface_integration(void) {
 
   /* Create offscreen surface and blit */
   uint32_t icon_buf[16 * 16];
-  oops_surface_t icon = {icon_buf, 16, 16, 16};
+  oops_surface_t icon = {icon_buf, 16, 16, 16, OOPS_SURFACE_LINEAR};
   oops_draw_clear(&icon, OOPS_COLOR_RED);
 
   oops_draw_blit(&surf, 20, 20, &icon, 0, 0, 16, 16);

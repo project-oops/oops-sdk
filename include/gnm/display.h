@@ -20,6 +20,16 @@ int gnm_display_get_last_error(const gnm_display_t *disp);
 int gnm_display_get_video_handle(const gnm_display_t *disp);
 void gnm_display_clear(gnm_display_t *disp, uint32_t color);
 int gnm_display_flip(gnm_display_t *disp);
+/* A caller's linear image into the buffer on screen; the framebuffer is untouched. */
+int gnm_display_present(gnm_display_t *disp, const uint32_t *pixels);
+/* The buffer on screen, copied out. */
+int gnm_display_read_shown(gnm_display_t *disp, uint32_t *pixels);
+/* The scanout buffers for a renderer that draws them itself - see
+ * oops_display_scanout_layout in <oops/display.h>, whose values these return. */
+int gnm_display_scanout_layout(const gnm_display_t *disp);
+uint32_t *gnm_display_scanout(gnm_display_t *disp, int which);
+int gnm_display_wait_scanout(gnm_display_t *disp);
+int gnm_display_flip_scanout(gnm_display_t *disp);
 int gnm_display_set_flip_rate(gnm_display_t *disp, unsigned int rate);
 void gnm_display_close(gnm_display_t *disp);
 

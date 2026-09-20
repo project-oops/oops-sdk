@@ -153,9 +153,20 @@ void handle_input(void) {
 
 ## 5. Tutorial 3: 3D Hardware Graphics with the fixed-function instrument (`oops-gl`)
 
-`oops-sdk` bundles a fixed-function 3D engine (`<GL/gl.h>`) running directly on RDNA2 AGC hardware. Its surface is OpenGL 1.1-class - immediate mode, vertex arrays, one 2D texture unit, lighting, the matrix stacks - and it is deliberately not a GL version: it exists so the command stream stays readable as a hardware record (D007).
+`oops-sdk` bundles a fixed-function 3D engine (`<GL/gl.h>`) running directly on RDNA2 AGC hardware. Its surface is the fixed-function OpenGL 1.x API - immediate mode, vertex arrays, two texture units, lighting, the matrix stacks - complete through GL 1.5 on the host's software rasteriser, with the console drawing the subset `docs/GL_ROADMAP.md` lists (one texture unit there, for one). It is deliberately not an advertised GL version: it exists so the command stream stays readable as a hardware record (D007).
 
 **Writing an application? Use [oops-mesa](../../oops-mesa/) instead**, which gives OpenGL 3.3 Core and GLSL 3.30. Follow this tutorial when you want to see PM4 come out of a draw call.
+
+### Porting a program written for OpenGL 1.x
+
+A program of that era asks what it is talking to before it draws, so here is what it is told.
+
+* `glGetString(GL_EXTENSIONS)` lists the extensions whose **own entry points exist here** - `glGenBuffersARB`, `glSecondaryColor3fEXT`, `glWindowPos2iARB` and the rest, each the core function under its published name - and those that are only state, such as `GL_ARB_texture_env_combine`. A name is on the list only where this library keeps the promise on the path in use, so **the list is shorter on the console**: `GL_ARB_multitexture` is on it for the software rasteriser and off on hardware, where a draw samples one unit. A port that reads the list takes its single-texture path there and draws a correct picture.
+* Extensions that work in software but not on the console are on neither list: cube maps, 3D textures, depth textures and shadow comparison draw untextured there, and occlusion queries count only the CPU's fragments. `docs/GL_ROADMAP.md` tracks each one.
+* `glGetString(GL_VERSION)` begins `"1.1"` by default. Every entry point of GL 1.0 through 1.5 is implemented, and the host rasteriser has their behaviour, but the default is deliberately conservative (D007): a program that gates a feature on the version number alone will take its oldest path. Gate on the extension list instead where you can.
+* **A GLUT program builds against `<GL/glut.h>`** (2026-09-20): `glutCreateWindow`, the callbacks, `glutMainLoop`, `glutPostRedisplay`, `glutSwapBuffers`, `glutGet`, and the solids over the GLU quadrics. Two differences worth knowing before you port: `glutMainLoop` **returns**, when the program calls `glutLeaveMainLoop()` (GLUT has no such call, and a console program otherwise has no way to stop), and **the pad arrives as keys** - the d-pad as the arrow specials, cross and circle as `\r` and escape, option leaving the loop - because a console often has no keyboard attached. `glutOopsPadKeys(0)` turns that off for a program that reads the pad itself. Subwindows, menus, overlays, the bitmap font, game mode and the teapot are absent: a program calling one fails to link, which says so where a stub would not.
+* **A port that cannot do that says what it targets:** `glContextSetVersion(1, 4)` makes the string begin `"1.4"`, so a program that refuses to run against a lower badge will run. It changes nothing else - no call becomes implemented, and the suffix still reads `oops-gl fixed-function subset`. `major` must be 1 and `minor` at most 5; anything else is `GL_INVALID_VALUE` and the version is left alone. `glContextGetVersion` reads it back, and a build serving ports that all expect the same later 1.x can move the default with `OOPS_GL_DEFAULT_VERSION_MINOR` instead of patching each of them.
+* There is no window system binding - no GLX, WGL or EGL. `glContextCreate(display)` is the whole of it, and `glSwapBuffers()` presents. A port's platform layer is the piece to rewrite.
 
 ```c
 #include <oops/oops.h>

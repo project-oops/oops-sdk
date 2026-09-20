@@ -10,7 +10,699 @@ Nothing has shipped yet - this is the initial commit.
 
 ## [unreleased] - as of 2026-09-03
 
+### Fixed
+
+- **The four-parameter vertex shader was never written into the payload** (2026-09-20).
+  `gl_vs_build_param4` was written, unit-tested against a scratch buffer, and wired into the
+  offset a draw selects when it needs four parameters - and `glContextCreate` never called it,
+  where it calls `gl_vs_build_param3` on the line above. **The first draw with two texture units
+  on a console jumped to `0xb00` and executed whatever the allocation held**: `ILLEGAL_INST` on
+  two waves at one PC, `GPU_FAULT_WAVEFRONT_ERROR_ASYNC`, a GPU reset, and the probe's remaining
+  checks unrun.
+  A definition nothing calls links and tests clean. `app.mk`'s undefined-symbol check catches
+  the opposite case - a call with no definition - and there is nothing on this side that catches
+  this one; it took a console, a `payload-va` line and one subtraction.
+  **With the line added, `multitexture` passes on hardware**, and with it `vs-param4.s`,
+  `tex-prolog2.s` and unit 1's combine stage, none of which had ever executed on the part.
+
 ### Added
+
+- **The GPU payload's address is logged** (2026-09-20). A GPU fault reports a program counter
+  and nothing else - `PC=0x0000000201390B04 ILLEGAL_INST`, one line per wave - and every shader
+  oops-gl runs lives at a fixed offset inside one allocation, so the base is the entire
+  difference between that number and a line of a `.s` file. The first draw with two texture
+  units faulted on 2026-09-20 and the log could not say which shader the address fell in.
+  `payload-va` now sits beside the init lines.
+
+### Changed
+
+- **The GL roadmap records what the console actually does** (2026-09-20). Its claims about the
+  hardware path were written from the host rasteriser and from register measurements. **The
+  suite now runs to the end on a console: `gl1-probe: 74/82 passed on hardware`**, and every
+  check in it has a verdict. The new section gives each of the eight failures the pixel it left
+  behind, groups six of them as one shape - the CPU writing colour into the render target - and
+  names the eleven things that had never drawn a frame there and now pass.
+  Three comments that the run falsified went with it: two saying no draw reaches the second
+  texture unit's slots, and one saying the fog words had never run on a console.
+
+### Fixed
+
+- **Four things `include/GL/gl.h` told a porter that stopped being true** (2026-09-20). The
+  header is what someone reads to decide whether to work around a feature, so a caveat that
+  outlived its cause costs real work:
+  - **The polygon stipple** said the hardware path "does not yet" apply it. It has since the
+    console got the fragment's position in the pixel shader.
+  - **`GL_COMBINE`** said it was combined by the software rasteriser. Both paths combine it; the
+    console writes the combiner into a slot as instructions.
+  - **Cube maps** said they were sampled by the software rasteriser. Both paths sample them.
+  - **Antialiasing** said the hardware draws every smooth primitive aliased. It draws smooth
+    points and lines properly; what stays aliased is a *textured* smooth primitive and
+    `GL_POLYGON_SMOOTH`, and the header now names both and says why.
+  Three internal comments went the same way: the second texture unit's two slots still said no
+  draw set them, which stopped being true when the multitexture gate opened, and the sample slot
+  said it had three forms when it has five. Found by reading the public headers for claims about
+  the console rather than by anything failing - which is the only way this class shows up.
+
+- **The extension enum aliases broke a hosted title, and one of them had the wrong type**
+  (2026-09-20, found the same day they were added). The `_ARB` and `_EXT` spellings added with
+  the depth-texture, 3D-texture and occlusion-query extensions were defined in terms of the core
+  names - `GL_DEPTH_COMPONENT16_ARB` as `GL_DEPTH_COMPONENT16`. A hosted title includes this
+  header **and** Mesa's own `GL/glext.h`, which defines the same enums as literals, and a macro
+  redefined with a *different* token sequence is a diagnostic under `-Werror` even when the value
+  is identical. Both oops-mesa probes stopped compiling. They are literals now, which is what the
+  `GL_TEXTUREn_ARB` block in the same file has always been and why that one never broke.
+  And `glTexImage3DEXT`'s `internalformat` is a **`GLenum`**, not the `GLint` the core call
+  takes: the extension predates GL 1.2 and declares it that way, so a program written against
+  the extension passes one. Meeting a real `GL/glext.h` is what said so - which is the argument
+  for building the hosted probes after any change to this header, not just the freestanding ones.
+
+### Added
+
+- **A robustness sweep over everything added on 2026-09-20**, given what a sloppy port gives it
+  rather than what the code was written against: a volume with a negative depth, a cube map whose
+  faces disagree, the comparison state set on a colour texture, every way a program gets the
+  occlusion query order wrong - ending one that never began, reading a result while it runs,
+  beginning a second, **deleting the active one** - and the font asked for bytes it has no glyph
+  for. On a console each of those is a fault rather than a diagnostic, so what they have to do is
+  refuse. All of it already did, which is the answer worth having.
+  **One deviation came out of it, and is now gone.** A zero-sized texture image was refused with
+  `GL_INVALID_VALUE`; GL says a zero size means no image at all, which is how a program releases
+  a level it no longer wants. It now does exactly that - the level's storage is freed and the
+  level left absent, which `gl_tex_level_view` already reported as "not there", so the texture
+  becomes incomplete if that level was needed and a draw with it is untextured. A negative size
+  is still an error.
+  **It was written up as a documented deviation first**, on the grounds that making a zero-sized
+  level exist would reach into completeness, the samplers and the chain layout. Looking again,
+  that was the wrong shape: a zero-sized level does not *exist*, it is released - and releasing
+  one is a path the code already had for every other reason. Documenting a difference that could
+  be removed in twenty lines is not the same as deciding it should stay.
+
+- **`make checks`, and `tools/header-check` under it** (2026-09-20), written the same day two
+  header bugs got through everything else.
+  **The mistakes it catches are not wrong values.** They are macros and declarations that only
+  conflict when two sets of GL headers meet, which happens in exactly one place: a hosted title
+  includes this SDK's `<GL/gl.h>` **and** Mesa's `<GL/glext.h>`, because it drives both. A test
+  that includes only our header cannot see them at all. So `header-check` compiles a translation
+  unit twice - once with the SDK's headers alone, once with `glext.h` after them - and the second
+  is what would have caught `GL_TEXTURE_3D_EXT` defined as a name rather than a literal, and
+  `glTexImage3DEXT` declared with the core call's `GLint` where the extension has a `GLenum`.
+  Confirmed by putting the first one back and watching it fail.
+  The `glext.h` half needs a sibling `oops-mesa` checkout. Without one it is **skipped with a
+  line saying which half did not run and what is therefore unchecked** - a check that looks like
+  it ran and did not is worse than none.
+  **And the alias values are now compile-time assertions** in `tests/unit/test_gl.c`. Writing
+  them as the core names could not be wrong and turned out to be unbuildable; writing them as
+  literals builds everywhere and can be mistyped. A `_Static_assert` per alias removes the risk
+  the change introduced, and stops the build rather than waiting for the one call that uses the
+  enum to return `GL_INVALID_ENUM` somewhere far from the typo.
+  `make checks` runs this and `libc-check` together. Both are out of `make test` because they
+  need the target compiler, and `make test` should still run on a machine without it.
+
+- **The reported GL version is the caller's to state** (2026-09-20). `glGetString(GL_VERSION)`
+  answered `"1.1 oops-gl fixed-function subset"` unconditionally - the honest class of what is
+  implemented everywhere, and deliberately conservative. The cost of that is a port written
+  against a later 1.x, which checks the badge before calling something this library *does* have -
+  1.2's 3D textures, 1.3's multitexture, 1.4's secondary colour, 1.5's buffer objects - and
+  refuses to run when it reads lower.
+  `glContextSetVersion(1, 4)` makes the string begin `"1.4"`. **It changes nothing else**: no call
+  becomes implemented, the suffix still reads `subset`, and a log line records that the program
+  asked. That is the claim in its right place - a program asserting what it targets, rather than
+  this library asserting a conformance it has not got, which is the mistake the old
+  `"OpenGL 1.3 oops-gl 2.0"` string made twice over. `major` must be 1 and `minor` at most 5;
+  anything else is `GL_INVALID_VALUE` and the version is left as it was, not half-set.
+  `glContextGetVersion` reads it back, and `OOPS_GL_DEFAULT_VERSION_MINOR` moves the default for
+  a build serving ports that all expect the same one.
+
+- **`sscanf`, because that is how a model file is read** (2026-09-20). An OBJ loader is a `fgets`
+  and an `sscanf("%f %f %f")`; so is an MTL loader, and so is every level format anyone wrote by
+  hand. `sscanf` and `vsscanf`, converting `%d %i %u %o %x %X %p`, the float forms, `%s %c %n %%`
+  and `%[...]` scansets, with the `hh h l ll L z j t` modifiers, a field width and `*` to skip a
+  field (`src/system/scanf.c`).
+  **It is checked against the host's own library, not against a list of expectations.** The tests
+  build on the host, where `<stdio.h>` is the real thing, so the same inputs and formats go to
+  both and the return value and every converted value are compared. That found **three**
+  differences, and all three were in what *fails* rather than in what converts - which is the
+  half nobody writes a case for:
+  - `"1e"` with `%f` is a **matching failure**, not the number one. C takes the longest sequence
+    that could begin a valid number - "1e" can, since "1e5" is one - and then fails when that
+    sequence is not itself valid. This library wound back and returned 1, which reads as the
+    friendlier answer and is the wrong one.
+  - `"0x"` with `%f`, and with `%x` or `%i`, is the same failure: once those two characters are
+    seen C has committed to a hexadecimal item, so a missing digit fails the conversion rather
+    than falling back to reading the "0" and leaving the "x".
+  - The **hexadecimal float** form - `%f` over `"0x10"` is sixteen - was missing entirely.
+  The difference that matters most is the one the first hand-written test got wrong in the other
+  direction: a *matching* failure returns 0 and an *input* failure returns `EOF`, and a loader's
+  read loop turns on exactly that - 0 means skip this line, `EOF` means stop.
+  **`fscanf` and `scanf` are not here.** Both need to put a character back when a conversion
+  reads one too many, and this SDK's file handles have no pushback.
+
+- **The C library gained the parts a GL 1.x port actually reaches for** (2026-09-20), which is
+  not the same set as "what a C library has".
+  **`qsort` and `bsearch`.** A fixed-function pipeline blends in the order the triangles arrive,
+  so there is no order-independent transparency: anything see-through is sorted back to front by
+  the program, every frame, and sorted with this. It is a median-of-three quicksort, insertion
+  sorting under sixteen, recursing into the **smaller** partition only - which bounds the stack
+  at log2(n) frames rather than n, and the input that would otherwise reach n is a *sorted* one,
+  which is exactly what a scene hands it on the frame after it sorted.
+  **The partition stops both scans on an element equal to the pivot**, and that is not a detail.
+  Walking the ascending scan over equals puts a run of identical elements entirely on one side,
+  so an all-equal array partitions into n-1 and 0 every time - the quadratic case the
+  median-of-three was chosen to avoid. The first version did that, and the test found it by
+  counting comparisons on an all-equal array rather than by checking the output, which was
+  correctly sorted throughout.
+  **`strtok`, `strtok_r`, `strdup`, `strspn`, `strcspn`, `strpbrk` and `strerror`.** An OBJ, MTL
+  or level loader is built out of those, and without them the loader is the part of the port
+  that gets rewritten. `strtok` keeps its state in a static, as C says it does, and terminates
+  its token in the caller's buffer, as C says it does - including the sharp edge where a string
+  literal is a write to read-only memory.
+  **`strtoul`, `strtof`, `llabs`, `div`, `ldiv`**; and from `<math.h>` `log2`, `copysign`,
+  `modf`, `ldexp`, `frexp` in both widths, and `isnan`, `isinf`, `isfinite`, `signbit`,
+  `isnormal` as macros over the compiler's builtins - so `if (isnan(x))` compiles, which until
+  now was a compile error rather than a link one and so the *first* thing a port had to edit.
+  **The algorithms live in `src/system/freestd.c`, not in `src/system/libc.c`.** That file is
+  target-only, because a host build's real C library owns those names - so an algorithm written
+  there could never be run by a test. `libc.c` keeps the promise its own header makes: every
+  function in it is a name change and nothing more.
+
+- **Smooth points and lines are antialiased on the console** (2026-09-20), the last of the six
+  gl1-probe checks written to fail on hardware.
+  **The roadmap said this needed the fragment's position in the pixel shader. It does not.** GL's
+  coverage for a smooth point is `r + 1/2` minus the distance from its centre, and for a smooth
+  line `w/2 + 1/2` minus the distance across it - and the *offset* those distances are taken from
+  is linear across the quad the CPU already widens the primitive into. So the CPU writes each
+  corner's offset into the vertex and the interpolator carries it in; nothing needs to know where
+  the fragment is. A line writes zero in the second component, which makes `sqrt(x*x + y*y)` the
+  absolute across distance and **one shader form serve both kinds**.
+  Fifteen words in the untextured pixel shader, between fog and the alpha test where GL applies
+  coverage and where the software rasteriser applies it (`tools/shader/coverage.s`). It kills the
+  fragments the primitive misses entirely, as the software path drops them, so the depth buffer
+  takes no write from a pixel outside the disc. Its two cross-check instructions - this shader's
+  own interpolation of the red channel and the lane kill the alpha test ends with - assembled to
+  words already in the tree. The alpha test's slot and the export moved up to make room, as they
+  did for fog.
+  **Two cases stay aliased and earn the log line, which is reworded to say which.** A *textured*
+  smooth primitive, because the parameter the offset rides in is the texture coordinate and there
+  is no other spare interpolant. And `GL_POLYGON_SMOOTH`, whose coverage is the product of three
+  edge fades rather than one distance.
+  **The console's smooth line does not fade its end caps.** The software rasteriser does, from
+  how far along the segment a pixel is - which one interpolated distance cannot say. Rather than
+  extend the quad a pixel past each end and have those pixels come out fully covered, making the
+  line a pixel too long, the quad stops at the ends. GL does not require the fade.
+
+- **A bitmap font, so `glutBitmapCharacter` works** (2026-09-20). Most GLUT code that draws
+  anything draws text too - a frame counter, a key legend - and draws it with this call, so a
+  port that cannot make it had to have its text rewritten, which is the one thing this library
+  exists to avoid. `glutBitmapCharacter`, `glutBitmapString`, `glutBitmapWidth`,
+  `glutBitmapLength` and `glutBitmapHeight`, over `glBitmap`.
+  **The glyphs are drawn here, not taken from X11.** `GLUT_BITMAP_8_BY_13` and
+  `GLUT_BITMAP_9_BY_15` are the X11 `fixed` fonts and every GLUT ships their data as a table;
+  copying one would be taking someone else's font. These are a 5x7 box with two descender rows,
+  and they are not those shapes and do not pretend to be - what they keep is what a program
+  depends on: the advance (8 and 9), the cell height (13 and 15), the baseline, and every
+  character from space to `~`.
+  **Each glyph is a picture in the source**, nine rows of `#` and `.` top row first, because a
+  font is data that is wrong in one glyph and looks right everywhere - a hex table can only be
+  tested one character at a time, and this one can be read. The conversion to bitmap bytes is
+  then the part that can be wrong, and `test_gl_bitmap_font_draws_what_it_is_a_picture_of` checks
+  it by drawing an `F` - asymmetric both ways, so a vertical flip and a horizontal mirror each
+  break it differently - plus the baseline through a descender, the advance, and that every
+  printable character has ink while the space has none. Flipping the row order in the converter
+  fails that test, which is how it was confirmed to discriminate.
+  **The proportional fonts are absent**, and a program using `GLUT_BITMAP_HELVETICA_18` still
+  fails to link. Offering a fixed-width font under a proportional name would return the wrong
+  `glutBitmapWidth` and break the layout of anything that measures before it draws.
+  `glutStrokeCharacter` is absent for the same reason - its glyphs are line segments.
+
+- **The GLUT surface a port actually calls** (2026-09-20): the Platonic solids, the one window's
+  own calls, and the `glutGet` queries this SDK can answer exactly.
+  **The solids are derived, not transcribed.** `glutSolidTetrahedron`, `glutSolidOctahedron`,
+  `glutSolidIcosahedron` and `glutSolidDodecahedron` with their wire twins, at the radii GLUT's
+  manual documents - 1 for two of them, sqrt(3) for the other two. Every GLUT ships these as
+  literal vertex and face tables; copying one would be taking another implementation's data, and
+  writing one out by hand is the kind of work that is wrong in one entry and looks right
+  everywhere. So the vertices come out of the definitions - alternate corners of a cube, the unit
+  axes, three golden rectangles - and the faces are found from the vertices: for the triangular
+  solids any three that are pairwise an edge apart, and for the dodecahedron the five furthest
+  along each of its face normals, which are the icosahedron's vertices because the two are duals.
+  **The first version of that was wrong and the test caught it.** There are two icosahedra in
+  those rectangles, mirror images of each other - (0, ±1, ±φ) and (0, ±φ, ±1) - and only one is
+  the dual of the dodecahedron as its vertices are written. The other put five vertices from
+  three different faces into each pentagon, which `test_gl_platonic_solids_are_the_solids_they_
+  claim` failed on the planarity check: a set of five furthest along a direction that does not lie
+  in one plane is not a face. That test reads the solids back through `GL_FEEDBACK` and checks
+  the face counts, the radii, **Euler's formula on the edges that came back** rather than on a
+  count assumed from the table, the winding, and that the pentagons are flat.
+  **The window calls are here because each is exact.** `glutGetWindow`, `glutSetWindow`,
+  `glutSetWindowTitle`, `glutSetIconTitle`, `glutFullScreen`, `glutSetCursor` and
+  `glutVisibilityFunc` - the window is the display and permanently full screen, there is one of
+  it, there is no cursor, and it is visible for as long as the program runs, so the callback is
+  called once with `GLUT_VISIBLE` when the main loop starts. `glutReshapeWindow`,
+  `glutPositionWindow` and `glutWarpPointer` are **not** here and still fail to link, because
+  they cannot be honoured - which is the same line `glutGet` is answered along: the queries that
+  have an exact answer here got one (the screen size, the window's position, the channel sizes,
+  the accumulation buffer's sixteen bits, `GLUT_WINDOW_CURSOR` answering `GLUT_CURSOR_NONE`
+  whatever was asked for) and the rest are absent rather than guessed.
+
+- **Occlusion queries count the GPU's own samples on the console** (2026-09-20). They held the
+  CPU's fragments alone there, with `GL_QUERY_COUNTER_BITS` 0 to say the number carried no
+  information; it is 32 on both paths now.
+  Two `EVENT_WRITE ZPASS_DONE` packets bracket the query - event type 21, `EVENT_INDEX` 1, the
+  dword `0x00000115` - each dumping every render backend's counter, begin at the slot and end
+  eight bytes on, and the result is the sum of the differences with bit 63 masked off as the
+  hardware's valid marker. `REQ-20260919T2048Z-4d19` measured every part of that: sixteen
+  backends, `enabled-rb-mask 0xffff`, and a sum of `0x200` against a draw of exactly 512 pixels.
+  **Four of its sixteen slots carried a zero or half difference**, which is why the answer is the
+  sum and never one slot - the work simply does not reach every backend.
+  **The counters were already running.** `DB_COUNT_CONTROL`'s `ZPASS_ENABLE` is bits [8,11]
+  (`gfx103.json:12552-12565`), and the measured depth-block recipe this library has emitted since
+  the beginning is `0x11000100` - that field set. What a query adds is `PERFECT_ZPASS_COUNTS` and
+  `DISABLE_CONSERVATIVE_ZPASS_COUNTS`, the `0x11000106` `-4d19` measured exact against, and it
+  adds them as a register write of their own after the depth surface is bound rather than inside
+  the depth block - so a frame with no query emits the stream it always did, which the gl-cube
+  oracle record pins byte for byte.
+  **Counting never starts before a depth surface is bound.** `REQ-20260919T1600Z-e3a7` set
+  `ZPASS_ENABLE` with no depth target and the depth block stalled before the pixel shader ran:
+  the canary unwritten, the fence never hit, the GPU wedged. So the arming waits for the first
+  draw that binds one, and a query whose draws never test depth keeps the CPU's count and says so
+  once in the log - `GL_SAMPLES_PASSED` with the depth test off is legal and common, and the
+  alternative is a hang.
+  `GL_ARB_occlusion_query` joins **both** extension lists, and its eight entry points -
+  `glBeginQueryARB` and the rest - arrive with it, the extension predating GL 1.5.
+
+- **Depth textures and GL 1.4's shadow comparison are sampled on the console** (2026-09-20).
+  Three things had to agree and now do.
+  **The image format.** A depth texel here is one 32-bit float, and every descriptor this library
+  writes carried `8_8_8_8_UNORM`, which would have read four bytes of colour. It is
+  `GFX10_FORMAT_32_FLOAT` for a depth texture - 22 against 56, `gfx10-rsrc.json:27` and `:61`,
+  the second being the value already in the tree, which is what says the table being read is the
+  right one. Both are four bytes a texel, so no pitch, chain layout or slice stride moved.
+  **The comparison is the sampler's.** `SQ_IMG_SAMP_WORD0`'s `DEPTH_COMPARE_FUNC` has carried
+  `GL_TEXTURE_COMPARE_FUNC` since `-6c80` measured a pass and a fail either side of the stored
+  depth. What the shader adds is the reference - r/q, clamped to [0, 1] as GL 1.4 3.8.14 and
+  softpipe both clamp it - handed over by `image_sample_c` as the first address register.
+  **One value comes back, not four**, so `dmask` is `0x1` and three moves spread it across
+  `v4..v7` as `GL_DEPTH_TEXTURE_MODE` says: (v, v, v, 1) luminance, (v, v, v, v) intensity,
+  (0, 0, 0, v) alpha - that last writing `v7` before it zeroes `v4`. The roadmap had expected the
+  depth mode to be the descriptor's destination swizzle; doing it in the shader keeps it clear of
+  the border colour, which is a *stored depth* the comparison still runs against and so goes into
+  the table as the border colour's red in all four rather than expanded by the mode. Expanding it
+  there would have zeroed red under `GL_ALPHA` - the one channel a 32_FLOAT image reads.
+  `tools/shader/tex-shadow.s`, whose four cross-check instructions - the plain 2D sample, the
+  prolog's divide of s by q, its `attr1.x` interpolation and `s_waitcnt vmcnt(0)` - assembled to
+  words already in the tree. `GL_ARB_depth_texture` and `GL_ARB_shadow` join **both** extension
+  lists, with the `_ARB` spellings of their enums; neither adds an entry point, a depth texture
+  being `glTexImage2D` with a `GL_DEPTH_COMPONENT` internal format and the comparison being
+  `glTexParameteri`.
+  **One value in it is documentation rather than measurement**: which address register
+  `image_sample_c` reads the reference from. `-6c80`'s two arms prove it is read from whichever
+  register they varied - their texture was a uniform 0.5 and only the reference changed between
+  the passing and the failing row - but not its index, so `REQ-20260920T1340Z-b4e1` asks for that
+  and for the descriptor word those arms did not print.
+
+- **3D textures are sampled on the console** (2026-09-20), which completes the two targets that
+  read a third texture coordinate. The volume's slices were already laid out one after another by
+  the upload and the descriptor already carried `TYPE 0xa` with the last slice in `WORD4`; what
+  was missing was the sample. The slot the cube map introduced now holds a third form,
+  `tools/shader/tex-3d.s`: r interpolated from the third parameter's `w`, multiplied by the
+  `1 / q` the prolog left in `v12`, the divided s and t copied up beside it - the address
+  registers have to be consecutive and `v4` is the texel's own - and `image_sample` with
+  `dim:SQ_RSRC_IMG_3D`. Seven words. Three cross-check instructions assembled to words already in
+  the tree: the 2D sample it replaces, the prolog's own divide of s by q, and its `attr1.x`
+  interpolation.
+  **The divide is the whole difference from the cube map's sample.** A volume's (s, t, r) is a
+  position GL 1.2 divides by q like the other two; a cube map's is a direction, which scaling
+  leaves unchanged, so that one interpolates all three components fresh instead. Both read r from
+  the same place, so a volume-textured draw also exports at least three parameters.
+  `GL_EXT_texture3D` joins **both** extension lists, and its two entry points - `glTexImage3DEXT`
+  and `glTexSubImage3DEXT` - arrive with it, along with the `_EXT` spellings of its enums. A list
+  entry whose entry points are missing is the promise this library refuses to make, and a program
+  of that era calls those names rather than GL 1.2's.
+  **Level 0 only.** A volume's mip levels halve depth as well, and the chain layout here is a 2D
+  one, so `LAST_LEVEL` stays 0 and a minifying filter reads the base level on the console while
+  the software rasteriser reads the chain. A draw whose filter would have used one says so once
+  in the log - which is what the line a 3D-textured draw used to earn now means. gl1-probe's
+  `texture-3d` is expected to pass on the console.
+
+- **Cube maps are sampled on the console** (2026-09-20). With the six faces uploaded as one array
+  and the descriptor carrying `TYPE 0xb`, the pixel shader gained the sample: a new slot holding
+  either the two-word 2D `image_sample` the prolog always ended with, or the twenty-four words a
+  cube needs.
+  **A cube map is not a sample with an extra coordinate.** The texture coordinate is a
+  *direction*, and the sampler wants the face it points at and the place on that face - which
+  RDNA2 computes in four instructions of its own, `V_CUBEID_F32`, `V_CUBESC_F32`, `V_CUBETC_F32`
+  and `V_CUBEMA_F32`. The shader divides the two coordinates by twice the major axis, biases them
+  by a half, and hands the sampler `(u, v, face)`. `tools/shader/tex-cube.s`, whose two
+  cross-check instructions - the 2D sample it replaces and the prolog's own `attr1.x`
+  interpolation - assembled to the words already in the tree.
+  **The direction is interpolated again rather than reused**: the prolog divides s and t by q
+  before the slot runs, which is right for a 2D sample and wrong for a direction. Dividing all
+  three components would leave a direction unchanged; dividing two of them does not. The third
+  component is `attr2.w`, where the vertex carries unit 0's r - so a cube-textured draw exports
+  at least three parameters, which the draw path now forces independently of the colour sum's
+  use of the same export.
+  `GL_ARB_texture_cube_map` joins **both** extension lists. It adds no entry point of its own,
+  only targets, enums and the `GL_NORMAL_MAP` and `GL_REFLECTION_MAP` generation modes, and every
+  one of those is kept on both paths now. An incomplete cube map is still drawn untextured, which
+  is what GL does with one anyway.
+
+- **A cube map's six faces upload as one array** (2026-09-20). The faces arrive one at a time,
+  each its own tight-packed image in process memory, because that is what the software rasteriser
+  samples - so a cube map had no hardware image at all and its descriptor described nothing.
+  `gl_tex_cube_upload` builds the array the hardware wants: face f at slice f in GL's order
+  (+X, -X, +Y, -Y, +Z, -Z), each slice laid out as a 2D image with the same 256-byte row pitch
+  every other image here has. It runs from `gl_tex_hw_prepare`, when a draw needs the image,
+  rather than as each face arrives - six faces would otherwise allocate and copy six times and
+  hold a half-built cube in between - and only when all six are present and square, an incomplete
+  cube map being one GL does not sample at all.
+  The descriptor takes the face size from the array rather than from the object, whose own image
+  fields stay empty for a cube map; a new face marks it stale.
+  **The slice stride is derived, not measured, and that is said where it is used.** `-6c80`
+  sampled a 3D image and a cube on the part, but each arm reported one texel and the 3D arm's 2D
+  control reported the same one, so any stride is consistent with those rows. Consecutive slices
+  of `pitch * height` is what addrlib computes for a linear array and what this library's own 3D
+  upload already writes. If it is wrong, face 0 is right and the other five are wrong - a picture
+  nobody would attribute to a stride - so `REQ-20260920T1050Z-5d7c` asks for slices that differ
+  from each other, and `test_pm4_gl_cube_faces_upload_as_one_array` pins the current one so a
+  corrected stride fails there first.
+  **Nothing samples it yet**: a cube-textured draw is still dropped with its log line, because
+  the pixel shader has no cube variant - `dim:SQ_RSRC_IMG_CUBE` and a direction for coordinates.
+  This is the storage half.
+
+- **The descriptors for 3D images, cube maps and depth comparison** (2026-09-20).
+  `REQ-20260920T0745Z-6c80` (sweep `20260920-103636`) sampled all three on the part with texels a
+  failed sample could not produce, and reported every descriptor and sampler word. Those words
+  are now what `gl_pack_descriptors` produces and what a test asserts - not a reading of the
+  register tables, the words the hardware actually sampled with:
+  - `TYPE` is the target's: 9 for 2D, `0xa` for 3D, `0xb` for a cube map. The check's 3D arm and
+    its 2D control describe the *same memory*, so that field alone is the difference between a
+    green texel and nothing.
+  - `WORD4` is **the last slice for a 3D image and a cube map**, not a row pitch - `0x1` for a
+    two-slice volume, `0x5` for six faces. Writing the pitch there would describe a volume one
+    row wide.
+  - `CLAMP_Z` carries `GL_TEXTURE_WRAP_R` for a 3D image, which is the whole difference between
+    the check's `0x92` and its 2D control's `0x12`.
+  - `DEPTH_COMPARE_FUNC` carries `GL_TEXTURE_COMPARE_FUNC` when the mode asks for it. The check
+    put one reference either side of the stored depth under `LEQUAL` and got a pass and a fail,
+    which is what says the field works rather than the sample returning nothing.
+  **And `glTexParameteri` now repacks for the compare mode and function.** Both returned early -
+  correctly, while they were state for the software sampler alone and the hardware drew a depth
+  texture untextured. Now that the sampler carries the comparison, a descriptor that did not
+  follow them would compare against whatever the field last held.
+  **A cube map still has no hardware image**: its six faces live on the CPU and the object's own
+  image fields stay empty, so there is nothing for a descriptor to point at and a cube-textured
+  draw is still dropped with a log line. The test asserts that gap rather than asserting words
+  for an image that does not exist, which would pass and mean nothing. `-6c80` settles the
+  hardware half, so what remains is uploading the faces as one array.
+
+- **The second texture unit is on: the console applies two** (2026-09-20). Everything for it was
+  written and gated; `REQ-20260920T0745Z-9a41` (sweep `20260920-103636`) opened the gate with the
+  controls `-8b1c` lacked:
+  - **The fourth parameter carries its own value.** Attributes 0-2 were `(1, 0, 0, 1)` and
+    attribute 3 `(0.25, 0.5, 0.75, 1)`. The three-parameter control printed red `0xff0000ff`; the
+    four-parameter arm printed `0xffbf8040`, attribute 3's own constant. `-8b1c` could not tell
+    these apart, because its control printed the arm's answer.
+  - **Two descriptor pairs are sampled in one pixel shader.** The two-sample arm binds images at
+    `0x2009000` and `0x2009100` and returns yellow; the *same fixture* with a single sample
+    returns red, which is what rules out a shader exporting a constant.
+  The check reports `desc1-sgpr 0x14` and `samp1-sgpr 0x1c` - s20 and s28, exactly where
+  `tools/shader/tex-prolog2.s` loads the second pair from, chosen here independently as the next
+  free range.
+  `GL_ARB_multitexture` joins the console's extension list, so a port reading it there takes its
+  multitexture path and gets the second layer. **A texture on unit 1 with unit 0 untextured is
+  still left out** - this path's second stage combines against the first's result and there is no
+  first - and the log line says a unit is dropped without claiming which ones are safe, because
+  "above GL_TEXTURE1" would have been wrong in exactly that case. `ctx->hw_multitex` moved to the
+  context defaults from the hardware-init block: it is a property of the build, and a host test
+  needs it true without a queue to talk to.
+
+- **`docs/PORTING.md`, and `<time.h>`** (2026-09-20). The guide is for someone holding a GL 1.x
+  program: what of GL, GLU, GLUT and the C library is here, what is absent, the entry point a
+  payload needs, and the differences that will bite - `glutMainLoop` returning, the pad arriving
+  as keys, `printf` going to the kernel log, `time()` not being a wall clock, the version badge.
+  It gives the absent list its own table and says why each entry **fails to link** rather than
+  stubbing: a stub that draws nothing is a bug found on a console, a link error is one found on
+  a desk.
+  Its sharpest section is *The one that will get you*: a payload link ignores unresolved symbols,
+  so a clean build is not evidence, and the `nm -u` line that is. glut-demo's eleven silently
+  undefined functions are written down there as the worked example, because a porter who has not
+  seen that failure will not believe it until it happens to them.
+  `<time.h>` is `time()` and `clock()` over the monotonic clock, and says out loud that `time()`
+  counts from the payload's start rather than the epoch - right for `srand(time(NULL))` and for
+  elapsed measurement, wrong for a date, which is why `localtime` and `strftime` are absent
+  rather than approximate.
+
+- **`<stdio.h>`, `<ctype.h>` and `<assert.h>`: a port loads its own files now** (2026-09-20). A
+  port loads a texture, a model, a level, a config - with `fopen` and `fgets`, parsed with
+  `isspace` and `atof`, reporting with `printf`. All of it sits on what this SDK already had
+  (`oops_fs_open`, `oops_klog`, `oops_vsnprintf`) under names nothing being ported calls.
+  **`stdout` and `stderr` are the kernel log**, buffered to a line so a line arrives as a line
+  and tagged `stdout`/`stderr`, because there is no terminal - a `printf` from a port lands where
+  every other diagnostic in this collection does. A line longer than the buffer is flushed in
+  pieces rather than truncated: a split diagnostic beats a cut one. `FILE` is a descriptor and
+  three flags; `fopen`'s mode string maps to the filesystem's flags including `+`. `<ctype.h>` is
+  the C locale's and says so - a port needing more than ASCII needs more than that header, and
+  should find out from the header rather than from a mis-parsed file. A failed `assert` writes
+  its expression, file and line to the log before ending the payload, the log being the only
+  place anyone will look.
+  **`tools/libc-check` grew a self-test**, because a checker that cannot fail says nothing when
+  it passes - it links a unit calling a function that exists nowhere and requires that name to
+  come back, before it trusts its own report about the real ones.
+
+- **The C library a port expects, and a check that it is really there** (2026-09-20). The SDK has
+  had the functions for a long time - as `oops_sqrtf`, `obs_strlen`, `oops_malloc`. Nothing being
+  ported calls them by those names: it writes `#include <math.h>` and `sqrtf`. `include/libc`
+  now holds `<math.h>`, `<string.h>` and `<stdlib.h>` under the names a port uses, and
+  `src/system/libc.c` implements them over what was already here. It is on the **target** include
+  path only; the host build must keep the real C library, or a host test including `<string.h>`
+  would get a freestanding one.
+  **`tools/libc-check` is the part that matters.** A payload link passes
+  `--unresolved-symbols=ignore-all` so the platform can resolve its own `sce*` imports at load,
+  which means a missing `sqrtf` links silently and faults on the console - the most expensive
+  place to find it. The tool calls every name the headers declare and fails if the linked object
+  leaves any undefined. That trap is not hypothetical: glut-demo was built with `-Werror` against
+  these headers before `libc.c` was in any source list, **linked clean, and left eleven standard
+  functions undefined**. The check caught it; nothing else would have until hardware.
+  So `libc.c` and `math.c` joined `CORE_SDK_SRCS` in oops-apps' `app.mk`: every payload gets them
+  whether it lists them or not, because leaving it to each app to remember is the wrong way round
+  when forgetting links clean.
+  The double forms are the float ones widened, `asinf`/`acosf` come from `atan2` and clamp at the
+  ends, `rand` is the usual linear congruential generator and says in its header that it is not
+  for anything that must be unguessable, and `exit`/`abort` go through the platform's own exit
+  because a payload has no process to return through.
+
+- **oops-glut: enough of GLUT that a program written against it builds and runs** (2026-09-20).
+  Most GL 1.x code in the world does not open a window or read input itself - it calls
+  `glutCreateWindow`, registers callbacks and hands control to `glutMainLoop`. Without that,
+  every port begins by rewriting the one part of the program that has nothing to do with what it
+  draws. `include/GL/glut.h` and `src/gl/glut.c` are the subset those programs use, over this
+  SDK's own display, input and timing: one window, the callbacks (display, reshape, idle,
+  keyboard and its up twin, special, mouse, motion, passive motion, timers),
+  `glutPostRedisplay`, `glutSwapBuffers`, `glutGet`, `glutGetModifiers`, and the solids over the
+  GLU quadrics.
+  **`glutMainLoop` returns**, through freeglut's `glutLeaveMainLoop`, because GLUT's contract -
+  that it never returns and the program lives in its callbacks - leaves a console program with no
+  way to stop. The keyboard arrives as HID usage codes and is mapped only where
+  `glutKeyboardFunc` and `glutSpecialFunc` can express it; a key neither can carry is dropped
+  rather than delivered as a plausible wrong character, and shifted punctuation is left alone
+  because those rows differ by layout. The mouse is relative and GLUT's callbacks are absolute,
+  so a cursor is kept here, clamped, and starts centred.
+  **The pad arrives as keys**, which is not GLUT's idea at all: a console often has no keyboard,
+  so without it many ports run and cannot be controlled. The d-pad is the arrow specials, cross
+  and circle are `\r` and escape, and the option button leaves the loop. `glutOopsPadKeys(0)`
+  turns it off. **Not here:** subwindows, menus, overlays, the font, game mode, and the teapot -
+  306 control points this does not carry, so a program that wants one fails to link rather than
+  drawing a sphere and hoping.
+
+- **A two-unit draw, end to end and gated off** (2026-09-20). The three pieces are wired
+  together: a draw with a texture on unit 1 *and* on unit 0 binds the four-parameter vertex
+  shader, sets `SPI_VS_OUT_CONFIG` 0x6, `SPI_PS_IN_CONTROL` 0x4 and `SPI_PS_INPUT_CNTL_3` 0x3
+  (0x194, Mesa `gfx103.json:4203`) - the registers `-8b1c`'s arm retired with - writes an 80-byte
+  vertex carrying unit 1's coordinate at offset 64, fills the second descriptor pair one stride
+  along the table, and turns on both shader slots. `gl_hw_emit_param_count` carries a count now
+  rather than a flag, since there are three interfaces to switch between.
+  **`ctx->hw_multitex` is `OOPS_GL_MULTITEX_MEASURED` in every real context**, so no draw takes
+  this path on a console. A test may set it, and `test_pm4_gl_two_unit_draw_binds_the_fourth_
+  parameter` does - which is how the whole path is checked before the measurement lands, the way
+  the scanout path's `hw_rx` was. It also checks the way back: dropping unit 1 rebinds the
+  two-parameter shader, zeroes `SPI_PS_INPUT_CNTL_3` and returns both slots to branches, because
+  a stale slot would sample a descriptor pair the draw no longer writes.
+  The log line about units above `GL_TEXTURE0` now says `GL_TEXTURE1` when the gate is open, so
+  it cannot claim a unit is dropped that is not.
+
+- **The second combine stage, and a latent bug in the first** (2026-09-20). The combine encoder
+  took unit 0's registers as given: the texel in `v4..v7`, everything else in `v8..v11`. It now
+  takes a `gl_ps_stage_t` - which register holds this unit's texel, which holds `GL_PREVIOUS`,
+  and whose environment state to read - so unit 1's stage is unit 0's with `{28, 4, 1}` in place
+  of `{4, 8, 0}`. `gl_ps_env_word`'s four hard-coded word tables became generated words for the
+  same reason; the assembler-pinned tests confirm unit 0's output is unchanged, which is what
+  makes the refactor safe to believe.
+  **The bug it surfaced:** `gl_tex_env_as_combine` encoded the incoming fragment colour as
+  `GL_PRIMARY_COLOR`. GL 1.3's table 3.18 says the fixed environment functions combine the texel
+  with the colour *the unit before left* - `GL_PREVIOUS`. At unit 0 the two are the same thing,
+  which is why this was harmless while one unit was applied. At unit 1 it is the difference
+  between a lightmap modulating the base map and a lightmap modulating the vertex colour with the
+  base map thrown away - the single most common multitexture setup there is. Corrected in all
+  five places. Nothing shipped changes: the software rasteriser threads the incoming colour
+  correctly and always has, and the hardware path has no second unit yet, so this was reachable
+  only by the code being written for it.
+  The second slot is 64 words after the first; off, it is a branch over itself, so a draw that
+  drops to one unit stops combining a texel it no longer samples.
+
+- **The second texture unit's sample slot** (2026-09-20). The sampling half of the multitexture
+  gap: unit 1's coordinate interpolated from the fourth parameter the four-parameter vertex
+  shader exports, its own image and sampler loaded from the second pair of the descriptor table
+  (`+0x40` and `+0x60`, now named `OOPS_GL_DESC_UNIT_STRIDE` rather than being four bare `0x900`s
+  and an assumption), and the texel in `v16..v19`. `tools/shader/tex-prolog2.s`, whose three
+  cross-check instructions - unit 0's own descriptor loads and sample - assembled to the words
+  the tree already writes.
+  **The texel goes to `v28..v31`, and that is not free choice**: `gl_ps_combine_program` gathers
+  the general combine form's arguments into `v16..v27`, so a texel parked there would be
+  overwritten by unit 0's *own* combine whenever its environment is `GL_COMBINE`, `GL_BLEND` or
+  `GL_DECAL` of an RGBA texture - correct under `GL_MODULATE` and wrong under the modes that need
+  a program, which is the worst shape a bug can have. The pixel shader's
+  `SPI_SHADER_PGM_RSRC1` is `0x000c0010`, VGPRS `0x10`, which is 136 registers in wave32.
+  **It sits before the prolog's exec restore**, so both samples are taken inside whole-quad mode.
+  A sample outside it has no helper pixels, so its implicit derivatives and its level of detail
+  are wrong along every quad edge - a seam of the wrong mip level rather than a missing picture,
+  which is why the test pins the placement and not just the words. Hoisting both samples above
+  both combines costs nothing: a sample depends on its coordinate, not on the combine before it,
+  and GL's order is kept by the combine slots. Off, the slot is a branch over itself rather than
+  twenty `s_nop`s, because every fragment of every textured draw runs through it.
+  The textured pixel shader **moved to 0x1000 with 320 words** to make room for this slot and the
+  second combine stage still to come; growing in place would have run into the three-parameter
+  vertex shader at 0x700. `gl_ps_flush_shaders` flushes the two shader ranges separately rather
+  than one span covering the gap between them.
+  **No draw sets it**, and the second combine stage is not written - `gl_multitex.h` holds the
+  gate and `REQ-20260920T0745Z-9a41` asks for the descriptor rows `-8b1c` did not report.
+
+- **The four-parameter vertex shader, towards a second texture unit on the console**
+  (2026-09-20). The software rasteriser applies every unit `glActiveTexture` names; the hardware
+  path samples one and logs a line, so a multitextured scene comes out on the console missing its
+  second layer - the largest single difference a port sees between the two paths.
+  `gl_vs_build_param4` (`tools/shader/vs-param4.s`) carries the second unit's coordinate in an
+  80-byte vertex exported as `param3`. That stride is not a shift, so the lane's offset is
+  lane * 64 plus lane * 16 - a program keeping the 64-byte shift would read every vertex but the
+  first from the wrong place, which is what the test pins. Every instruction shared with the
+  three-parameter program assembled to the word already in the tree.
+  **No draw runs it yet.** obSCEne's `-8b1c` showed the four-parameter interface retires on the
+  part with both canaries - so it is legal, where the packed form of the *third* parameter hung
+  the GPU - but not that the value arrives: its three-parameter control printed the same pixel as
+  the arm, and its two-sample arm reported no descriptor words at all. `gl_multitex.h` holds the
+  gate and the reasoning, as `gl_rx.h` did for the scanout path; `REQ-20260920T0745Z-9a41` asks
+  for the controls that could differ.
+
+- **The scanout path is on: oops-gl draws into the display's buffers as a title does**
+  (2026-09-20). `OOPS_GL_RX_MEASURED` was 0 because one link was unmeasured - whether the colour
+  block, told `COLOR_SW_MODE` 27, writes the layout VideoOut scans. Two obSCEne results settle
+  both halves of it, and `tools/rx-check` reads them rather than the prose around them:
+  - **Inside a block**, `-2d7f` (re-filing `-7e21`, sweep `20260920-085011`) dumped all 65,536
+    bytes of a 128x128 render, linear and tiled. Detiled through the display tiler's own vectors,
+    **every one of the 16,384 pixels equals the linear control**; read as rows only 10,408 do, so
+    the picture can tell the two layouts apart rather than agreeing because it cannot.
+  - **Across blocks**, `-4b19` dumped a 256x256 render straddling four blocks. There is no linear
+    control at that extent, so `rx-check --shape` detiles under **every** block order and keeps
+    those giving one run of drawn pixels per row with no gap between drawn rows. Exactly one
+    survives - the row-major order this library assumes - and its 24,512 pixels are the number the
+    check itself reported, which is the triangle's area from its own geometry rows.
+  The gap rule exists because the first pass kept two orders: swapping whole rows of blocks moves
+  image rows without splitting any, so "one run a row" cannot see it. Both verdicts are tracked as
+  `tools/rx-check/rx_check_7e21.txt` and `rx_check_4b19.txt`.
+  **What is still not settled** is recorded in `gl_rx.h`: both tiled arms matched, so the rows
+  cannot separate `0x08c6c000` from `0x0dc6c000`. Arm 1's value is taken because it is the smaller
+  change from the linear value already drawing correctly, not because the other was refused.
+  `include/agc/tiler.h` no longer calls the block order a computation.
+
+- **The GLU quadrics** (2026-09-20). `gluNewQuadric`, `gluDeleteQuadric`, `gluQuadricDrawStyle`,
+  `gluQuadricNormals`, `gluQuadricOrientation`, `gluQuadricTexture`, `gluQuadricCallback`,
+  `gluSphere`, `gluCylinder`, `gluDisk` and `gluPartialDisk` - the ball, tube and ring half the
+  tutorials in the world are built from, and so half the code being ported. They emit ordinary
+  `glVertex` calls, so a quadric lights, textures, compiles into a display list and reaches the
+  hardware path like typed-out geometry.
+  **Two conventions are the specification's and are pinned by a test**, because neither is
+  visible in a port's own source when it goes wrong: `s` runs 0 at the +y axis, 0.25 at +x, 0.5
+  at -y (a sphere whose `s` runs the other way looks plausible until the label on it reads
+  backwards), and GLU_OUTSIDE winds the surface counter-clockwise seen from outside, so it
+  survives the default `glCullFace` setup - a sphere wound the wrong way disappears entirely.
+  The test reads the geometry back through `GL_FEEDBACK` and checks both, in both orientations.
+  The poles are triangle fans and the bands between them quad strips, as GLU does it: a band
+  reaching a pole would be quads with two corners in the same place. **The winding test found
+  that** - eight of sixty-four faces had no outward direction to check, being degenerate.
+  A cone's normals lean with its slope rather than standing out as a cylinder's would, and every
+  normal is unit length. The tessellator and NURBS are still absent.
+
+- **The GLU functions a port actually calls** (2026-09-20). `src/gl/gl_glu.c` adds
+  `gluBuild2DMipmaps`, `gluBuild1DMipmaps`, `gluScaleImage`, `gluProject`, `gluUnProject` and
+  `gluGetString` beside the five that were already there. GLU is not part of GL, but a port that
+  cannot find it does not build, and every texture-loading path written before
+  `GL_GENERATE_MIPMAP` (1.4) calls `gluBuild2DMipmaps`.
+  The filter is a box, as SGI's GLU is: an output pixel is the average of the input pixels its
+  footprint covers, and magnification replicates. **Each mipmap level is built from the level
+  above**, not from the original - a chain sampled from the original looks right at level 1 and
+  wrong further down, which the test pins by requiring the 1x1 level of a 4x4 image to be the
+  mean of all sixteen texels. The builders scale to powers of two, upload through a known unpack
+  state and restore the caller's. `gluScaleImage` reads through `GL_UNPACK_*` and writes through
+  `GL_PACK_*`, as the specification says, and converts between types as it goes.
+  `gluProject`/`gluUnProject` are exact inverses through a perspective projection; both answer
+  GL_FALSE rather than dividing by zero on the eye plane or by a singular matrix. GLU's errors
+  are its own return codes and reach `glGetError` nowhere; `gluErrorString` names them now.
+  The quadrics, the tessellator and NURBS are still absent - a program needing them fails to
+  link, which is a better answer than a stub that draws nothing.
+
+- **The polygon stipple is applied on the console** (2026-09-20). It was a software-rasteriser
+  feature: a stippled polygon came out solid on the hardware path, and gl1-probe's
+  `polygon-stipple` was written expecting that failure. RDNA2 has no stipple hardware, so both
+  pixel shaders carry a sixteen-word discard between the canary block and the interpolation -
+  `tools/shader/polygon-stipple.s`, whose cross-check word is one the shaders already had. It
+  reads the fragment's window position from `v2` and `v3`, which arrive because a stippled draw
+  sets `SPI_PS_INPUT_ENA` and `SPI_PS_INPUT_ADDR` to `0x302`; that those two VGPRs carry `POS_X`
+  and `POS_Y` is obSCEne's `REQ-20260919T2258Z-c7d4`, measured against a control that had them
+  undefined. The slot sits before whole-quad mode, so the mask the sample restores is the one
+  the discard leaves, and a discarded fragment stays discarded while its quad's helpers still
+  run for the derivatives.
+  The mask is written to the payload at `OOPS_GL_STIPPLE_OFFSET` **in the form the shader wants**
+  rather than the form GL stores: row `i` is `polygon_stipple[(height - 1 - i) & 31]` with its
+  bits reversed, so the lookup is one load and one shift instead of the rotation and reversal the
+  software path does per fragment. `test_pm4_gl_polygon_stipple_discards_in_the_shader` asserts
+  the two forms select the same pixels across a 32x32 window - a dropped rotation would stipple
+  correctly but upside down, which a screenshot does not show.
+  Both shaders' slots moved up sixteen words for it; the textured shader now has 176 words (to
+  0x6c0) and the untextured one moved to 0x200 with 128, since 64 at 0x300 left three spare once
+  the stipple slot and the second export had taken theirs. A mid-frame `glPolygonStipple`
+  submits the draws built against the old mask first, as a mid-frame texture change already did:
+  one table serves every draw of a frame.
+
+- **A draw into both colour buffers reaches both on the console** (2026-09-20). `glDrawBuffer`
+  with `GL_FRONT_AND_BACK` or `GL_LEFT` wrote the back only there and logged a line saying so;
+  the front kept whatever the CPU's clears and pixel rectangles had put in it, so the two drifted
+  apart exactly where a draw had been. The draw now binds `CB_COLOR1_BASE` / `_BASE_EXT` /
+  `_VIEW` / `_INFO` / `_ATTRIB` / `_DCC_CONTROL` / `_ATTRIB2` / `_ATTRIB3` to `fb_also` (offsets
+  from Mesa `src/amd/registers/gfx103.json`), sets `CB_TARGET_MASK` and `CB_SHADER_MASK` to
+  `0xff` and `SPI_SHADER_COL_FORMAT` to `0x99`, and ends both pixel shaders with
+  `exp mrt0 ... vm` / `exp mrt1 ... done vm` - `done` marks a wave's last export, so the
+  single-target word could not simply be repeated. The registers are obSCEne's
+  `REQ-20260919T2258Z-3f62` (sweep `20260920-082906`), the shader words are
+  `tools/shader/mrt1-export.s`, whose cross-check instruction re-assembles the single-target
+  export already in the tree. `gl_ps_patch_export` runs on every draw, like the colour sum's
+  slot and for the same reason: a draw after `glDrawBuffer(GL_BACK)` must stop writing a buffer
+  GL no longer names, and an unbound second target has `CB_COLOR1_INFO` zeroed as well as being
+  dropped from both masks. `test_pm4_gl_front_buffer_targets` checks both directions - the
+  registers and the export words - and gl1-probe's `front-and-back` is expected to pass on
+  hardware now rather than to fail.
+
+- **`tools/rx-check` reads the block order out of a dump instead of assuming it** (2026-09-20).
+  Past one 64 KiB block the tool's addressing rests on the blocks running row-major across the
+  surface, which is what addrlib computes and what no hardware row has shown. For any extent
+  larger than one block it now prints a block map - which 64 KiB block of the dump holds which
+  128x128 block of the picture - and says whether that is row-major, not row-major, or
+  undecided because a block holds no drawn pixel of its own. It decides nothing: the pixel
+  comparison already fails an arm whose blocks are out of order. It says *how*, which is the
+  difference between a re-file and a fix. The self-test gained a four-block round (256x256, the
+  extent `-4b19` asks for) whose second arm has the same 64 KiB pieces transposed; the round
+  requires that arm to fail and the map to name the transposition.
+  `include/agc/tiler.h` now records which half of the scanout layout has a hardware anchor
+  (the vectors inside a tile, obSCEne `-a91a`) and which is still a computation (the order of
+  the tiles), and `docs/GL_ROADMAP.md` no longer calls the whole of it hardware-verified.
 
 - **60 FPS locked presentation: cached scratch buffer & sequential-write RDNA2 CPU tiler**
   (2026-09-18). Implemented in `src/agc/agc_display.c`, `src/agc/agc_tiler.c`, and `src/input/keyboard.c`.
@@ -56,6 +748,818 @@ Nothing has shipped yet - this is the initial commit.
   deliberately not what this does, because a probe's caller usually wants the rendered output
   left on screen to sample.
 
+- **The extension entry points a port calls, and an extension list that is no longer empty**
+  (2026-09-19). A homebrew port written for the OpenGL of that era reads
+  `glGetString(GL_EXTENSIONS)` and then calls *that extension's* names, not the core spellings
+  which arrived in versions it does not assume. The list was empty, by a rule worth keeping: an
+  extension is a promise about its own entry points, and only the core ones existed.
+  - **Those entry points exist now** (gl.h's compatibility section): all eleven of
+    `GL_ARB_vertex_buffer_object`, the seventeen of `GL_EXT_secondary_color`, five of
+    `GL_EXT_fog_coord`, sixteen of `GL_ARB_window_pos`, four of `GL_ARB_transpose_matrix`,
+    `GL_EXT_draw_range_elements`, `GL_EXT_multi_draw_arrays`, `GL_EXT_blend_color`,
+    `GL_EXT_blend_minmax`, and the point parameters under both suffixes. Each is the core
+    function under its published name, beside it in the source.
+  - **The list names those**, and the extensions that are state this library already keeps:
+    the texture environment's add, combine and dot3 under both suffixes, mirrored repeat,
+    border and edge clamp, the LOD bias, `GL_EXT_bgra`, stencil wrap, rescale normal and
+    separate specular colour.
+  - **It is the path's list.** `GL_ARB_multitexture` is on it for the software rasteriser and
+    off on the console, where a draw samples one unit: a port reading it there takes its
+    single-texture path and draws correctly, rather than losing a layer silently. It joins the
+    console's list when a draw samples two units.
+  - **Not listed:** cube maps, 3D textures, depth textures, shadow comparison and occlusion
+    queries, which work in software and not on the console.
+  - `test_gl_extension_entry_points_are_the_core_ones` calls the new names and checks each
+    against the core behaviour; `test_gl_strings_are_honest_and_parseable` checks the list's
+    shape, what is on it, and what is not.
+
+- **A third interpolant on the console, and the colour sum after texturing through it**
+  (2026-09-19; written, not yet run on one). Until now a textured draw's secondary colour
+  (lighting's separate specular term, or `GL_COLOR_SUM`'s) joined the primary per vertex, and
+  the texture modulated it. The third parameter is measured:
+  `REQ-20260919T1745Z-9c3e`'s unpacked form carried a value to the pixel shader byte for byte.
+  That form is `SPI_VS_OUT_CONFIG` 0x4, `SPI_PS_IN_CONTROL` 0x3, `SPI_PS_INPUT_CNTL_2` 0x2. Its
+  packed form hung the GPU, and it is not used.
+  - **The vertex shader:** `gl_vs_build_param3` (`tools/shader/vs-param3.s`, assembled, at
+    payload 0x700) is the two-parameter program with a 64-byte vertex and `exp param2`. The
+    third vec4 is `{secondary r, g, b, unit 0's r}`.
+  - **The switch:** `gl_hw_emit_param_count` points the NGG program at it and sets the three
+    registers, only on a change. A frame without such a draw, gl-cube's included, is the
+    stream it was.
+  - **The pixel shader:** its colour-sum slot (`gl_ps_patch_sum`, `tools/shader/colour-sum.s`)
+    adds the secondary colour after the combine and before fog, clamped. Fog, the alpha test
+    and the export moved from 108, 120 and 124 to 120, 132 and 136.
+  - **The vertex buffer** is filled by a byte cursor (`hw_vbo_cursor`), since a triangle is 144
+    bytes or 192. Its capacity is the old 450 triangles of 144, so two-parameter streams submit
+    where they did. The cache flush after the vertices now covers every line a triangle
+    touches.
+  - **Untextured draws** keep the per-vertex sum.
+  - **Tests:** `test_pm4_gl_param3_vertex_shader_is_the_assembled_one`, and
+    `test_pm4_gl_colour_sum_takes_the_third_parameter`, which covers the switch, the slot, the
+    wide vertex, the switch back, and the slot emptying when the sum is switched off after a
+    draw that summed. That last case was a bug in the first draft.
+  - **Command budget:** `OOPS_GL_DCB_DRAW_MAX_DW` is 224, adding the switch's 21 dwords.
+
+- **The CPU drawing calls take the GPU's tiled layout** (2026-09-19). `oops_surface_t` gains
+  `layout`: `OOPS_SURFACE_LINEAR`, which is 0, so every existing initializer keeps its
+  meaning; or `OOPS_SURFACE_RX`, the 64KB_R_X swizzle of the AGC scanout buffers.
+  - **Every `oops_draw_*` call** - fills, blends, gradients, lines, circles, text, and blits in
+    either direction between layouts - addresses a pixel through one index.
+    - Linear keeps its row pointers.
+    - Tiled uses two 128-entry tables built from `agc_tile_pixel`, because the swizzle is an
+      XOR of one term per coordinate bit.
+  - **`oops_display_get_surface` moved from `draw.c` into `display.c`,** because which buffer
+    the next flip shows is the display's to know. After a renderer calls the new
+    `oops_display_use_scanout`, it is the next scanout buffer, tiled. So a CPU overlay on a GL
+    frame drawn in place, such as gl1-cube's HUD, lands in what is flipped, with no change to
+    the app.
+  - **`draw.c` no longer reaches the display,** so the app selftests that stubbed display
+    calls for it no longer need to.
+  - **Tests:** `test_draw_rx_layout_matches_linear` draws one scene through every call onto
+    a 200 x 150 linear surface and a tiled one. The tiled one must match pixel for pixel,
+    with the padding untouched. Swapping the x and y tables makes 24,770 pixels differ.
+  - **Initializers:** the SDK's own tests now name the field.
+  - **Cost:** on a scanout buffer a blended call reads write-combined memory, which is slow for
+    the CPU.
+
+- **oops-gl's scanout path: written, and off until measured** (2026-09-19). A title on this
+  console draws straight into the buffers the display scans out. Those buffers are
+  `WC_GARLIC` memory in the GPU's 64KB_R_X swizzle. oops-gl draws a linear buffer instead,
+  and the display re-tiles it on the CPU at every flip. The pieces of the scanout path:
+  - **The display**, for a renderer that draws its scanout buffers itself:
+    `oops_display_scanout_layout`, `oops_display_scanout` (the next buffer or the shown
+    one), `oops_display_wait_scanout` and `oops_display_flip_scanout` (flip as drawn), on
+    AGC and GNM. The wait is the flip-status poll that `042d236` removed from every flip,
+    now asked for only by a renderer that needs it.
+  - **`agc_tile_pixel`**, the display tiler's forward direction for one pixel. It is checked
+    against `agc_detile_pixel` and `agc_tile_surface` for all 16,384 pixels of a block.
+  - **oops-gl:** `src/gl/gl_rx.h` holds the one unmeasured value (`CB_COLOR0_ATTRIB3`,
+    `COLOR_SW_MODE` 27) and `OOPS_GL_RX_MEASURED`.
+    - On the scanout path the back is the next scanout buffer and the front the one on
+      screen, and a swap flips in place.
+    - Every CPU colour access goes through `gl_color_index`: pixel rectangles, reads,
+      copies, the accumulation buffer, and the CP's copy, which `glGetFrameReadback` detiles.
+    - Whole clears and the readback copy are sized to the padded blocks.
+  - **`tools/rx-check`** reads `REQ-20260919T1927Z-7e21`'s rows. It detiles each arm's dump,
+    compares it with a linear control, and names the `ATTRIB3` value that draws the
+    display's layout. Its self-test proves it on synthetic rows in obSCEne's format. It
+    also parses the real 2026-09-16 rows, which show that run drew one pixel into a
+    **linear** target, despite `REQ-20260916T1250Z-6e0f`'s result claiming a 64KB_R_X
+    measurement.
+  - **Off on the console** until 7e21's rows pass rx-check. `test_pm4_gl_scanout_path_targets`
+    covers the path on the host, and a wrong swizzle fails it. gl1-cube's HUD follows the path
+    with no change to the app, through the tiled CPU drawing below.
+  - **Corrected comments:** `gl_zs_tiling.h` said depth's vectors were the display's with x
+    and y exchanged; they share only the upper four bits of each coordinate. Two comments
+    called `agc_draw.c`'s `0x08c6c000` a "measured" compositor value, and no log records it.
+
+- **Front-buffer rendering** (2026-09-19): GL 1.0's `glDrawBuffer(GL_FRONT)` and
+  `glReadBuffer(GL_FRONT)`, refused until now because the display handed oops-gl its back
+  buffer only. Every name a double-buffered mono visual has is accepted, as Mesa's
+  `main/buffers.c:145-170` and `:209-226` map them. `GL_LEFT` and `GL_FRONT_AND_BACK` draw
+  into both buffers and read the front.
+  - **The front** is a surface of oops-gl's own, allocated the first time a program names it
+    and filled with the picture on screen.
+  - **Writes and reads:** every write reaches the buffers `glDrawBuffer` names, each blended
+    and masked against its own pixel. Every read takes the one `glReadBuffer` names.
+  - **Presenting:** `glFlush` and `glFinish` put a drawn-into front on screen, and
+    `glSwapBuffers` makes the front the picture it presented.
+  - **Two new display calls** make that possible. `oops_display_present` puts a caller's linear
+    image on screen without touching the framebuffer: AGC tiles and flips it, and GNM, whose
+    framebuffer is a scanout buffer, copies it into the one on screen.
+    `oops_display_read_shown` returns what is on screen. `agc_gpu_tile` now takes its source.
+  - **Left on the console:** a *draw* into both buffers reaches only the back, with one log
+    line. A second colour target and an `exp mrt1` would be needed to reach both. Clears and
+    pixel rectangles reach both there.
+  - **Also fixed:** `glContextDestroy` now frees the stencil surface, which it had leaked on
+    the console.
+
+  `test_gl_front_buffer` and `test_pm4_gl_front_buffer_targets` cover it; gl1-probe's
+  `front-buffer` and `front-and-back` are the console measurements.
+
+- **Depth and stencil pixel operations on the console** (2026-09-19). They are written but have
+  not yet run on one. The console's depth and stencil surfaces are the GPU's, laid out 64KB_Z_X,
+  and every CPU operation on them was refused with `GL_INVALID_OPERATION`: `glReadPixels`,
+  `glDrawPixels` and `glCopyPixels` of depth or stencil, and a depth texture copied from the
+  frame. A pixel rectangle's own depth and stencil tests were left out. All of them now address
+  the surfaces as the DB lays them out. `tools/zs-tiling` builds Mesa's addrlib and computes
+  the mode's swizzle vectors under the part's identity and the `GB_ADDR_CONFIG` oops-mesa
+  derived (`0x4`, 16 pipes). It then checks every pixel of a three-by-two-block surface against
+  addrlib, and none disagree for depth or stencil; an eight-pipe control disagrees, as it must.
+  `src/gl/gl_zs_tiling.h` carries the vectors, and `gl_zs_depth_ptr`/`gl_zs_stencil_ptr` in
+  `gl_internal.h` are the one way any of this code reaches a depth or stencil pixel.
+  Coherence rests on the flush every pixel operation already made, and no HTILE is bound. The
+  frame's closing `RELEASE_MEM` writes the DB caches back and invalidates GL2 (`GCR` `0x603`),
+  so the CPU reads what the GPU drew and the next frame reads what the CPU wrote.
+  `gl_depth_buffer_cpu` and `gl_stencil_buffer_cpu`, the functions that refused, are gone.
+  `test_pm4_gl_zs_tiling_is_a_permutation` checks that each block maps one to one, with pinned
+  offsets. `test_pm4_gl_stencil_reaches_its_registers` now round-trips a stencil and a depth
+  value through the tiled addressing. gl1-probe's new `depth-readback` and `stencil-readback`
+  are the console measurement.
+
+- **The stencil test on the console** (2026-09-19) - written, not yet run on one; obSCEne could
+  not measure it (`REQ-20260917T1845Z-3d5b`, not-possible from its fixture), so gl1-probe's
+  `stencil` is the measurement. The console had no stencil buffer: stencil-tested draws drew
+  unmasked. Now the stencil buffer there is a GPU surface, STENCIL_8 at the depth surface's
+  64KB_Z_X swizzle and padded to 8-bit 64 KiB blocks (256 x 256, addrlib's
+  `ComputeThinBlockDimension`; it was sized to depth's 128-pixel padding while it was CPU memory,
+  which a tiled 8-bit surface would overrun). A frame that tests stencil makes it live -
+  `DB_STENCIL_INFO` `0x20000181`, the measured `0x20000180` with `FORMAT` `STENCIL_8`, and the four
+  bases - and each stencil-tested draw sets `DB_DEPTH_CONTROL`'s `STENCIL_ENABLE` and
+  `STENCILFUNC`, `DB_STENCIL_CONTROL` and `DB_STENCILREFMASK`/`_BF`, as radeonsi does. A frame
+  without stencil emits none of it, so gl-cube's stream is unchanged. A whole stencil clear is a
+  fill in the command stream; a boxed or masked one is drawn with `GL_REPLACE` through the write
+  mask. The stencil pixel operations were refused on the console at first, with one log line, as
+  the depth ones were; they had read and written a CPU buffer the GPU never tested. Both work
+  there since the evening (**Depth and stencil pixel operations on the console**, above).
+  `test_pm4_gl_stencil_reaches_its_registers`.
+
+- **A second texture unit** (2026-09-19) - GL 1.3 requires at least two ("must be at least two",
+  section 2.6; table 6.29), and oops-gl had one: `GL_MAX_TEXTURE_UNITS` answered 1 and
+  `GL_TEXTURE1` was refused everywhere, which the roadmap had wrongly called conformant. It
+  answers 2 now. Each unit has its own server state (`gl_tex_unit_t` - target enables and
+  bindings, environment and combiner, LOD bias, texture matrix stack, coordinate generation),
+  selected by `glActiveTexture`; its own current, raster and array texture coordinate
+  (`glMultiTexCoord*` and the client-active unit's `glTexCoordPointer`); and its coordinate in the
+  vertex. The software rasteriser samples every applying unit, then runs each unit's environment
+  on what the one before left: `GL_PREVIOUS` is that, `GL_PRIMARY_COLOR` the fragment's own, and
+  GL 1.4's `GL_TEXTUREn` unit n's texel - zero for a unit applying none, as Mesa reads it
+  (`main/ff_fragment_shader.c:760-762`). Pixel rectangles use every unit's raster coordinate.
+  `GL_TEXTURE_BIT` saves every unit and `GL_ACTIVE_TEXTURE` (table 6.20); `GL_CURRENT_BIT` every
+  current coordinate; the client vertex-array bit every array and `GL_CLIENT_ACTIVE_TEXTURE`.
+  Lists record `glMultiTexCoord` with its unit, and an array element compiles to one per unit.
+  Deleting a texture unbinds it from every unit (Mesa `main/texobj.c:1381`). Feedback reports
+  unit 0's coordinate and the evaluators feed unit 0, as Mesa's do
+  (`state_tracker/st_cb_feedback.c:114-118`, `vbo/vbo_exec_eval.c:88-92`). `GL_TEXTURE1` to
+  `GL_TEXTURE31` are declared (Mesa `include/GL/gl.h:1710-1740`). **The console applies unit 0
+  only** - a second coordinate is a pixel-shader interface change - and logs once when a draw uses
+  more. `test_gl_multitexture_state_is_per_unit`, `test_gl_two_texture_units_draw` (which fails
+  when unit 1 reads unit 0's coordinate - tried) and
+  `test_pm4_gl_second_unit_is_left_out_on_hardware`; gl1-probe's `multitexture`.
+
+- **`GL_BLEND`, RGBA `GL_DECAL` and `GL_COMBINE` on the console** (2026-09-19) - written, not yet
+  run on one. They modulated there, with a log line, because the textured pixel shader's combine
+  was four words - one per channel - and these are programs. The shader moved from payload
+  offset 0x200 to the free 0x400 (128 words; the fog slot had left it 59 of 64) and the combine
+  slot grew to sixty-four words: the four-word forms stay where they suffice, followed by an
+  `s_branch` over the rest of the slot, and the three are generated - arguments, function, scale,
+  clamp, as the software rasteriser's `gl_tex_combine` and Mesa's `emit_texenv` do, with
+  `GL_BLEND` and `GL_DECAL` restated as combiner settings first (`calculate_derived_texenv`). The
+  words come from an encoder in `gl_internal.h` whose every instruction form is checked against
+  the new `tools/shader/combine.s`, assembled; `test_pm4_gl_combine_programs_compute_what_software_does`
+  runs every generated program through a reader for those forms and holds it to the software
+  path's `gl_tex_env_apply`, on all five modes over all six base formats and 32 `GL_COMBINE`
+  settings (and fails when a constant in the generator is wrong - tried). The short `GL_ADD` form
+  gained its clamp, which only the colour buffer's conversion applied before - too late for fog
+  and the alpha test. gl1-probe's `combine` and new `tex-env-blend-decal` are the measurement.
+
+- **Fog on the console** (2026-09-19) - written, not yet run on one. RDNA2 has no fixed-function
+  fog and oops-gl's pixel shaders had none, so the hardware path drew every fogged primitive
+  unfogged, silently. Now the per-vertex factor the software path already computes - eye distance
+  or GL 1.4's fog coordinate, clamped - goes into the vertex's texture coordinate `z`, which the
+  vertex shader already exported unused, and both pixel shaders interpolate it and blend red,
+  green and blue towards the fog colour in a twelve-word slot before the alpha test
+  (`gl_ps_patch_fog`), the colour as three literals patched in place. Every word is from the new
+  `tools/shader/fog.s`, assembled for gfx1030 and read back. **The shader interface does not
+  move**: the registers `test_pm4_gl_honours_the_gl_cube_oracle_record` pins are unchanged, and
+  gl-cube, which uses no fog, runs twelve `s_nop` more. The alpha test's slots moved up twelve
+  words to make room. `test_pm4_gl_fog_reaches_both_shaders_and_the_vertex` checks the words and
+  the factors; gl1-probe's `fog` and `fog-coord` are the measurement.
+
+- **Vertex arrays read as their type, and checked** (2026-09-19). Every array was read as
+  floats - a colour array as unsigned bytes too - whatever type its pointer named, and no pointer
+  call checked anything, so `glVertexPointer(2, GL_SHORT, ...)` drew from reinterpreted bits. Each
+  array now takes the types GL 1.1 lists for it and is read as that type (`gl_array_comp`):
+  positions and texture coordinates as values, colours and normals normalised as `glColor*` and
+  `glNormal*` of that type convert them. A type outside the list is `GL_INVALID_ENUM`, a size
+  outside the range or a negative stride `GL_INVALID_VALUE`, each leaving the array as it was
+  (Mesa, `main/varray.c:918`, `:1180-1193`, `:1250-1262`, `:1330-1350`, `:1615-1629`). Elements are
+  copied out, so an unaligned stride is safe.
+  - **Colours are clamped to [0, 1] before rasterising** (GL 1.x, 2.14.9). Only lit ones were:
+    `glColor3f(-1, ...)` - or a `GL_BYTE` colour array's -128 - wrapped to full intensity in the
+    framebuffer's bytes.
+- **`glWindowPos`, all sixteen** (2026-09-19) - GL 1.4's raster position in window coordinates,
+  as Mesa's `window_pos3f` sets it (`main/rastpos.c`): always valid, no transform or clip test, z
+  clamped and put through the depth range, w 1, the colour and texture coordinate the current
+  ones unlit and ungenerated, the raster distance 0. A hit in `GL_SELECT`; compiled into lists.
+- **Secondary colour and `GL_COLOR_SUM`** (2026-09-19) - GL 1.4's `glSecondaryColor3*`, all
+  sixteen spellings, normalised as `glColor`'s are (Mesa `vbo/vbo_attrib_tmp.h:3258-3316`), and
+  `glSecondaryColorPointer`: any of the eight types, 3 or 4 components as Mesa accepts them
+  (`main/varray.c:1536-1553`), with its client state, queries and pointer. Unlit, `GL_COLOR_SUM`
+  adds the vertex's secondary colour, clamped, after texturing and before fog; lit, lighting's
+  secondary colour (the separate specular term, or zero) takes over and the sum runs regardless,
+  Mesa's rule (`main/ff_fragment_shader.c:69-78`, now `gl_color_sum_on`). Flat shading takes the
+  provoking vertex's; stippled and expanded lines interpolate it; array draws compiled into a list
+  record it. Saved with `GL_CURRENT_BIT`, the enable with `GL_FOG_BIT` and `GL_ENABLE_BIT` - where
+  Mesa's `attrib.c` saves it and never restores it - and the array with
+  `GL_CLIENT_VERTEX_ARRAY_BIT`. The hardware path sums per vertex, as it did for separate
+  specular; textured, it logs once.
+  - **The client arrays start at their GL sizes and types.** The zeroed context answered 0 for
+    `GL_VERTEX_ARRAY_SIZE` and every other size and type until a pointer call; they start at
+    Mesa's `init_default_vao_state` values now (`main/varray.c:4127-4150`).
+- **Fog coordinates** (2026-09-19) - GL 1.4's `glFogCoordf`, `glFogCoordd`, their vector forms and
+  `glFogCoordPointer` (`GL_FLOAT` or `GL_DOUBLE`, Mesa `main/varray.c:1408`), and
+  `GL_FOG_COORD_SRC`: under `GL_FOG_COORD` fog reads each vertex's coordinate, as given, in place
+  of the eye distance (Mesa `main/ffvertex_prog.c:1062-1064`), and the raster distance of
+  `glRasterPos` and `glWindowPos` is the current coordinate (`main/rastpos.c:475-479`,
+  `:730-733`). The GL 1.4 and GL 1.5 enum names are both defined. Lists record it, from arrays
+  too; `GL_CURRENT_BIT`, `GL_FOG_BIT` and `GL_CLIENT_VERTEX_ARRAY_BIT` save it - the source where
+  Mesa's pop does not. Software only on the console, with the rest of fog.
+  - **`GL_FOG_INDEX` is kept** rather than refused: colour-index fog is state in an RGBA context,
+    queryable and saved with `GL_FOG_BIT`, as Mesa has it (`main/fog.c:136-142`).
+- **Point parameters and multi-draw** (2026-09-19), the last GL 1.4 entry points - all 47 are
+  declared now. `glPointParameter{f,i}{,v}` with Mesa's checks and initial values
+  (`main/points.c:117-195`, `:211-219`): every point's size clamped to `GL_POINT_SIZE_MIN` and
+  `GL_POINT_SIZE_MAX` - unattenuated too, as Mesa's rasterizer state clamps it - and divided first
+  by `sqrt(a + b d + c d^2)` under `GL_POINT_DISTANCE_ATTENUATION`, d the eye distance. The point
+  is expanded on the CPU, so this holds on the console as well. The fade threshold is state only
+  (it fades multisampled points; there is no multisample buffer). Compiled into lists and saved
+  with `GL_POINT_BIT` (Mesa `main/attrib.c:936-939`). `glMultiDrawArrays` and
+  `glMultiDrawElements` validate every count before drawing anything, as Mesa does
+  (`main/draw.c:530-547`, `:303-320`), then issue each non-empty draw - which is also how a list
+  compiles them.
+- **Texture LOD bias, `GL_GENERATE_MIPMAP`, `GL_INCR_WRAP`/`GL_DECR_WRAP`** (2026-09-19), GL
+  1.4's value-level features but one (depth textures).
+  - `GL_TEXTURE_LOD_BIAS` through `glTexParameter` and through `glTexEnv`'s
+    `GL_TEXTURE_FILTER_CONTROL` target (Mesa `main/texenv.c:448-460`), queryable both ways, their
+    sum clamped to `GL_MAX_TEXTURE_LOD_BIAS` (14, Mesa's) and added to the level of detail before
+    `GL_TEXTURE_MIN_LOD`/`MAX_LOD`. The hardware draw writes the sum into the sampler's
+    `LOD_BIAS` field (`SQ_IMG_SAMP_WORD2` bits 0-13, signed with eight fraction bits, as radeonsi encodes
+    it for GFX10, `ac_descriptors.c:144-145`) as it copies the descriptor into the slot - never
+    into the texture's own descriptor, since half of it is context state - and a zero bias adds
+    no bits, so gl-cube's stream is unchanged. Derived, not yet measured.
+  - `GL_GENERATE_MIPMAP` (and `GL_GENERATE_MIPMAP_HINT`): a change to the base level - an
+    upload, a sub-image, a copy - rebuilds the levels above it up to `GL_TEXTURE_MAX_LEVEL`
+    (Mesa's condition, `main/teximage.c:2889-2897`), one cube face at a time. A 2x2 box filter
+    (2x2x2 for a volume) on the CPU, rounded half to even as Mesa's software path rounds; a row-
+    by-row copy generates once, at its end. The levels land where uploaded ones do, so the
+    hardware's mip chain carries them.
+  - `GL_INCR_WRAP` and `GL_DECR_WRAP`, which the stencil test refused; they wrap round the eight
+    bits where `GL_INCR` and `GL_DECR` saturate.
+- **Depth textures and the shadow comparison** (2026-09-19) - GL 1.4's last feature, which makes
+  GL 1.4 complete in software. `GL_DEPTH_COMPONENT` and `GL_DEPTH_COMPONENT16/24/32` internal
+  formats on 1D and 2D targets (Mesa `main/teximage.c:1744-1790`); depth data for them and only
+  for them (`:1795-1832`); stored as 32-bit floats in the four bytes a colour texel takes, and read
+  back, copied from the depth buffer (`glCopyTexImage`/`glCopyTexSubImage` into a depth texture
+  read depth) and mipmapped as depths. `GL_TEXTURE_COMPARE_MODE`, `GL_TEXTURE_COMPARE_FUNC` (all
+  eight, GL 1.5's set) and `GL_DEPTH_TEXTURE_MODE`, with `GL_TEXTURE_BIT`: each texel compared
+  against r clamped to [0, 1] before filtering, so `GL_LINEAR` gives percentage-closer filtering,
+  and the result read as luminance, intensity or alpha. On the console a depth-textured draw is
+  untextured, with one log line - a float descriptor and a comparison sample are the hardware half.
+  `GL_TEXTURE_COMPARE_MODE` was the "unkept parameter" example in the refusal test; a GL 3.3
+  swizzle is now.
+- **GL 1.5's mapping, read back and occlusion queries** (2026-09-19) - its last 12 entry points,
+  so every core GL 1.x entry point is now declared (499 in all).
+  - `glMapBuffer`, `glUnmapBuffer`, `glGetBufferPointerv` and `glGetBufferSubData`, with
+    `GL_BUFFER_ACCESS` and `GL_BUFFER_MAPPED`, checked in Mesa's order (`main/bufferobj.c:2671-2687`,
+    `:3059-3069`, `:3270-3286`, `:3876-3897`). The store is process memory, so the mapped pointer
+    is the store. A mapped buffer cannot be mapped again, updated, read back or drawn from
+    (`GL_INVALID_OPERATION`, `gl_draw_sources_mapped`); `glBufferData` and a delete unmap it.
+    `glBufferData` accepts all nine usages - it refused the `_READ` and `_COPY` ones.
+  - Occlusion queries on `GL_SAMPLES_PASSED` with Mesa's rules (`main/queryobj.c`): a name is a
+    query object once begun, `glBeginQuery` makes a new one in a compatibility context, one
+    active query at a time, begin and end compiled into lists. The software rasteriser counts
+    every fragment past the alpha, stencil and depth tests (in `gl_fragment_tail`, so pixel
+    rectangles too); the result is exact and always available. On the console
+    `GL_QUERY_COUNTER_BITS` is 0, with one log line - GL 1.5's way of saying the count is not
+    informative - until the GPU's samples are counted through `ZPASS_DONE`, whose render-backend
+    layout is filed with obSCEne as `REQ-20260919T1600Z-e3a7`.
+
+- **`GL_COLOR_MATERIAL` writes the material** (2026-09-19). The current colour was substituted
+  for the tracked properties while lighting and nowhere else: `glGetMaterial` read back the
+  material as last set, and when the enable went off the material was that value again instead
+  of the last colour it had tracked. It is written through now, as Mesa's
+  `_mesa_update_color_material` does (`main/light.c:759-772`) and when Mesa does it - each colour
+  change, the enable going on, `glColorMaterial` while on (`vbo/vbo_exec_api.c:237-240`,
+  `main/enable.c:568-577`, `main/light.c:800-803`) - and `glMaterial` leaves a tracked property
+  alone while the enable is on (`vbo/vbo_exec_api.c:590-598`). gl-cube, which tracks with it, lights
+  the same pixels.
+
+- **Antialiasing, in software** (2026-09-19) - `GL_POINT_SMOOTH`, `GL_LINE_SMOOTH` and
+  `GL_POLYGON_SMOOTH`, refused before. The software rasteriser multiplies each fragment's alpha,
+  after fog and before the alpha test, by the fraction of the pixel the primitive covers:
+  - a smooth point is a disc of the unrounded size and a smooth line a rectangle of the unrounded
+    width, their quads grown by a pixel so the partly covered pixels are drawn; a stipple's dashes
+    keep crisp ends;
+  - a smooth polygon fades across its own edges only - `gl_draw_polygon_tri`'s boundary bits -
+    so the diagonals its triangles share draw no seam. A corner the diagonal leaves comes out half
+    covered where a quarter is right, the approximation of fading triangle by triangle.
+  Smooth sizes step by an eighth; `GL_POINT_SIZE_GRANULARITY` and `GL_LINE_WIDTH_GRANULARITY`
+  (GL 1.2's `GL_SMOOTH_*`) report it, where they reported 1. The enables are on
+  `GL_ENABLE_BIT` and the point, line and polygon bits. The hardware draws all three aliased
+  and logs once.
+
+- **`GL_COMBINE`, in software** (2026-09-19) - GL 1.3's texture combiner, with `GL_DOT3_RGB` and
+  `GL_DOT3_RGBA`. It was refused with `GL_INVALID_ENUM`.
+  - State: the colour and alpha functions, three sources and operands each, and the two scales,
+    with GL 1.3's defaults (table 6.19); queryable, saved by `GL_TEXTURE_BIT`, compiled into
+    lists.
+  - Checked as Mesa's `set_combiner_*` check them (`main/texenv.c:107-370`): DOT3 a colour
+    function only, the alpha operands only alpha ones, the sources GL names (`GL_TEXTURE0` among
+    them, the one unit under GL 1.4's crossbar), each an enum error otherwise; a scale not 1, 2 or
+    4 a value error.
+  - Computed as Mesa's fixed-function program computes it (`main/ff_fragment_shader.c:563-735`):
+    each function per component, DOT3 as `(2a - 1).(2b - 1)` into colour (and alpha, for
+    `GL_DOT3_RGBA`), scaled, then clamped.
+  - `glTexEnvf` went through `glTexEnvi` and truncated - a scale of 1.5 would have been 1. It is
+    its own path, and the texture environment has one setter for every form.
+  - On the hardware a combined draw modulates and logs once, as `GL_BLEND` does: the pixel
+    shader's four combine words cannot hold it.
+
+- **Cube maps, in software** (2026-09-19) - GL 1.3's `GL_TEXTURE_CUBE_MAP`.
+  - Its binding, enable (outranking 3D, 2D and 1D, GL 1.3 3.8.15), default texture, and
+    `GL_TEXTURE_BINDING_CUBE_MAP` and `GL_MAX_CUBE_MAP_TEXTURE_SIZE` (1024: the six faces live on
+    the CPU, in a table of levels each cube-map object allocates when a face is first given).
+  - The six face targets in `glTexImage2D`, `glTexSubImage2D`, `glCopyTexImage2D`,
+    `glCopyTexSubImage2D`, `glGetTexImage` and `glGetTexLevelParameter`; a face must be square
+    (Mesa, `main/teximage.c:1079-1100`). `GL_PROXY_TEXTURE_CUBE_MAP`. The object target and the
+    image targets are kept apart: `glBindTexture` and `glTexParameter` take `GL_TEXTURE_CUBE_MAP`
+    and refuse a face; the image calls take a face and refuse `GL_TEXTURE_CUBE_MAP`.
+  - Cube completeness - six faces of one size and internal format, each mipmap complete under a
+    mipmap filter (`main/texobj.c:800-830`).
+  - The software sampler looks up by direction as softpipe's `convert_cube` does
+    (`gallium/drivers/softpipe/sp_tex_sample.c:3220-3291`), and measures the level of detail
+    with the neighbouring pixels projected onto the centre's face.
+  - `GL_REFLECTION_MAP` and `GL_NORMAL_MAP` generation for s, t and r (q refused, as Mesa's
+    `main/texgen.c:113-121`); refused before.
+  - Texture generation's eye-space normal is now lighting's (`gl_eye_normal`): through the
+    inverse-transpose, and unit length only under `GL_NORMALIZE` or `GL_RESCALE_NORMAL`. Sphere
+    mapping used the modelview's own 3x3 and always normalised.
+  - On the hardware a cube-mapped draw is untextured and logs once, as a 3D-textured one does.
+
+- **Two-sided lighting** (2026-09-19). `GL_LIGHT_MODEL_TWO_SIDE` was refused, on the reasoning
+  that lighting runs per vertex before a primitive's facing exists - but the triangle stage has
+  all three vertices when it lights them. It now winds the triangle in normalised device
+  coordinates first (the sign culling reads, under `glFrontFace`) and lights a polygon facing
+  away with the back material and its normal reversed (`gl_compute_lighting_side`). An outline
+  or corner drawn by `glPolygonMode` takes its polygon's side; `GL_LINES` and `GL_POINTS` are lit
+  from the front. Both paths, the lighting being CPU work on both. Queryable, and on
+  `GL_LIGHTING_BIT`.
+  - `glColorMaterial`'s face was ignored: `GL_BACK` changed the front material, which one-sided
+    lighting lit with. Each side now tracks the current colour only if the face names it. The
+    face and property are checked (`GL_INVALID_ENUM`, as Mesa's `_mesa_ColorMaterial`,
+    `main/light.c:776`), answered by `GL_COLOR_MATERIAL_FACE` and `_PARAMETER`, and saved by
+    `GL_LIGHTING_BIT` - none of which they were.
+
+- **GL 1.2's separate specular colour and `GL_RESCALE_NORMAL`** (2026-09-19).
+  - `GL_LIGHT_MODEL_COLOR_CONTROL` accepts `GL_SINGLE_COLOR` and `GL_SEPARATE_SPECULAR_COLOR`
+    (anything else `GL_INVALID_ENUM`) and is queryable and on `GL_LIGHTING_BIT`. Kept apart, the
+    specular term is a secondary colour: `gl_compute_lighting2` returns it, flat shading holds it,
+    and the software rasteriser interpolates it and adds it after the texture environment and
+    before fog. The hardware path has one colour interpolant, so there it joins the primary
+    colour per vertex - right untextured but where the sum saturates, wrong under a texture,
+    which the log says once; see GL_ROADMAP.md, "Needs a shader change".
+  - `GL_RESCALE_NORMAL` - an enable, on `GL_ENABLE_BIT` and `GL_TRANSFORM_BIT` - scales the
+    eye-space normal by the inverse modelview's third-row length, Mesa's factor
+    (`main/light.c:1090-1103`).
+  - **Normals were always normalised**, `GL_NORMALIZE` or not: a program's own normal lengths
+    never reached the lighting, as they do in every GL. They do now; gl-cube enables
+    `GL_NORMALIZE`, so its frame is unchanged.
+  - **A shininess of 0 lit no specular at all** - the term was skipped for it, and 0 is the
+    default. `(n.h)^0` is 1, a full highlight wherever `n.h` is positive.
+  - `GL_LIGHT_MODEL_LOCAL_VIEWER` was neither answered by `glGet` nor saved by
+    `GL_LIGHTING_BIT`; it is both.
+
+- **GL 1.2's texture LOD parameters** (2026-09-19) - `GL_TEXTURE_BASE_LEVEL`,
+  `GL_TEXTURE_MAX_LEVEL`, `GL_TEXTURE_MIN_LOD` and `GL_TEXTURE_MAX_LOD`, all refused before.
+  - Completeness counts from the base level to `min(p, MAX_LEVEL)` (GL 1.2, 3.8.8; Mesa,
+    `main/texobj.c:729-760`): setting the maximum level to the last level uploaded is how a program
+    keeps a short chain complete, and that now works. A base level with no image is incomplete,
+    and so is a mipmapped texture whose maximum level is below its base.
+  - The software sampler clamps the level of detail to [MIN_LOD, MAX_LOD] and counts levels, and
+    measures the level of detail, from the base level. The environment and the border colour use
+    the base level's format.
+  - The hardware chain is built from the base level, cut at the maximum level, and a base level
+    other than 0 is a chain even of one level - the descriptor's own image is level 0's. The
+    sampler's MIN_LOD and MAX_LOD carry the clamp in 4.8 fixed point, as radeonsi encodes it
+    before GFX12 (`ac_descriptors.c:139-140`); the default maximum stays the field's 0xfff, so
+    every descriptor that existed before - gl-cube's included - is unchanged.
+  - `glPushAttrib(GL_TEXTURE_BIT)` restored the bindings and nothing about the textures bound:
+    a routine that pushed, clamped the caller's texture and popped left it clamped. The bound
+    textures' parameters are saved and restored now, as Mesa's `copy_texture_attribs` does
+    (`main/attrib.c:251-275`).
+
+- **Texture parameters checked and complete but for the LOD ones; border colour and the wrap
+  modes GL has** (2026-09-19).
+  - `glTexParameter` stored any value for a wrap mode or filter; one GL does not have is now
+    `GL_INVALID_ENUM` and changes nothing (Mesa, `main/texparam.c`, `set_tex_parameteri`).
+  - `GL_TEXTURE_PRIORITY` and `GL_TEXTURE_BORDER_COLOR` are kept, clamped to [0, 1] as Mesa keeps
+    them without float textures, and `GL_TEXTURE_RESIDENT` is answered. `glPrioritizeTextures`
+    validated its priorities and dropped them; they are kept.
+  - `glTexParameterf` went through `glTexParameteri`, truncating - a priority of 0.5 was 0 - and
+    lists compiled it as the integer form. Each form now records and converts as its own: an
+    integer border colour by range (`INT_TO_FLOAT`), and the scalar forms refuse the border colour
+    as Mesa does.
+  - Wrap modes: `GL_CLAMP_TO_BORDER` (1.3) and `GL_MIRRORED_REPEAT` (1.4) added, and `GL_CLAMP` is
+    GL's - the coordinate clamped to [0, 1] and the border reached by a linear filter - where it
+    was `GL_CLAMP_TO_EDGE`. A border colour is expanded by the base format, as texels are.
+  - On the hardware, CLAMP_X/Y follow radeonsi's `si_tex_wrap` (`si_state.c:1927`), which makes
+    `GL_CLAMP` the half-border clamp it was not, and the border colour type its
+    `si_translate_border_color` (`si_state.c:4010-4074`): transparent black, opaque black and
+    opaque white built in, anything else from a one-entry table at payload + 0xa00 that every
+    frame now points `TA_BC_BASE_ADDR` at (`gfx103.json:2932-2943`; radeonsi sets it in its GFX10
+    preamble, `ac_cmdbuf.c:529-530`). That is two more context registers in every frame's
+    preamble, gl-cube's included; its pixels are unchanged.
+  - `glGetTexEnviv(GL_TEXTURE_ENV_COLOR)` multiplied by `2147483647.0f`, which is 2^31 as a float,
+    so a channel of 1.0 overflowed and read back as -2147483648. It converts in double, as Mesa's
+    `FLOAT_TO_INT`.
+
+- **Texture internal formats, the environment by base format, and proxy textures**
+  (2026-09-19). `internalformat` was ignored: every texture was RGBA, so a `GL_ALPHA` texture
+  under `GL_MODULATE` painted its black colour over the fragment's, a `GL_RGB` one under
+  `GL_REPLACE` threw away the fragment's alpha, and `GL_INTENSITY` did not exist. Now:
+  - **formats**: every base and sized GL 1.1 format, 1 to 4, and the GL 1.3 generic compressed
+    formats (stored uncompressed), per Mesa's `_mesa_base_tex_format` (`main/glformats.c:2408`);
+    anything else is `GL_INVALID_VALUE` (`main/teximage.c:1953`), and `glCopyTexImage*` refuses 1
+    to 4 as `GL_INVALID_ENUM`. Texels are still RGBA8, each held as its base format expands it;
+  - **queries**: `GL_TEXTURE_INTERNAL_FORMAT` answers the format as named (it answered `GL_RGBA`
+    for everything), a generic compressed one as its base; `GL_TEXTURE_RED_SIZE` through
+    `GL_TEXTURE_INTENSITY_SIZE` answer 8 or 0. `glGetTexImage` reports luminance and intensity in
+    red alone (`main/texgetimage.c:289-301`). A mip chain of mixed formats is incomplete
+    (`main/texobj.c:881`);
+  - **the environment**: `gl_tex_env_apply` does Mesa's `calculate_derived_texenv`
+    (`main/texstate.c:173`) for all five modes and six base formats. `GL_BLEND` was drawn as
+    `GL_MODULATE`; it now mixes towards `GL_TEXTURE_ENV_COLOR`. A mode other than the five is
+    refused - `GL_COMBINE` included - where it used to be stored and drawn as modulate;
+  - **the hardware combine** is chosen per draw from the mode and the bound texture's base format,
+    from `s_nop`, `v_mov_b32`, `v_mul_f32` and `v_add_f32` words assembled from the new
+    `tools/shader/tex-env.s` (the three multiplies already in the shader came out identical). That
+    brings `GL_ADD` and RGB `GL_DECAL` to the console. `GL_BLEND` and RGBA `GL_DECAL` do not fit
+    four words and modulate there, with one log line;
+  - **proxies**: `GL_PROXY_TEXTURE_1D`, `_2D`, `_3D` - sized and reported, never allocated, never
+    compiled into a list (`main/dlist.c:4163`);
+  - `glTexImage2D` refuses a non-zero border, as the 1D and 3D uploads already did.
+
+- **Every pixel type and every `glPixelStorei` parameter** (2026-09-19). Images were read as
+  `GL_UNSIGNED_BYTE` only, and `glPixelStorei` kept alignment, the unpack row length and the image
+  heights while refusing the rest. Now:
+  - **types**: `GL_BYTE`, `GL_SHORT`, `GL_INT` and their unsigned forms, `GL_FLOAT`, and the
+    twelve GL 1.2 packed types (`GL_UNSIGNED_BYTE_3_3_2` to `GL_UNSIGNED_INT_2_10_10_10_REV`),
+    both reading and writing. A packed type puts the format's first component in its most
+    significant bits and `_REV` in its least, checked against Mesa's `formats.csv`; a packed
+    type with a format it does not fit is `GL_INVALID_OPERATION`, per `glformats.c`;
+  - **formats**: `GL_RED`, `GL_GREEN` and `GL_BLUE` join the rest;
+  - **store**: the row, pixel and image skips, the pack row length and pack image height,
+    `GL_*_SWAP_BYTES` and `GL_*_LSB_FIRST`, each queryable and saved by
+    `GL_CLIENT_PIXEL_STORE_BIT`.
+
+  A new `src/gl/gl_pixel.c` walks client memory for every image entry point - `glTexImage*`,
+  `glTexSubImage*`, `glDrawPixels`, `glBitmap`, `glPolygonStipple`, `glReadPixels`,
+  `glGetTexImage` - where each had its own loop before, so they now agree by construction. A
+  display list takes the pixels the store selected when it compiles, packed tight in native byte
+  order, and replays them under neutral store state. Signed components convert by the
+  specification's `(2c + 1) / (2^b - 1)`; packing back, a tie goes toward zero as Mesa's
+  `FLOAT_TO_SHORT` does (`main/macros.h:83`), so 0.0 reads back as 0 rather than -1. Textures are
+  still stored RGBA8, so a float or 16-bit upload keeps eight bits a channel.
+
+- **3D textures, in software** (2026-09-19) - `glTexImage3D`, `glTexSubImage3D` and
+  `glCopyTexSubImage3D`, the last core GL 1.0-1.3 entry points: all 422 of Mesa's are declared,
+  and the 33 missing are the optional imaging subset and one vendor extension.
+
+  `GL_TEXTURE_3D` has its own binding, enable and default texture, and beats 2D and 1D when
+  several are enabled; `GL_TEXTURE_WRAP_R`, `GL_TEXTURE_DEPTH`, `GL_TEXTURE_BINDING_3D` and
+  `GL_MAX_3D_TEXTURE_SIZE` (256 - the volume lives on the CPU, and 256 on a side is 64 MB) are
+  answered; `GL_UNPACK_IMAGE_HEIGHT` and `GL_PACK_IMAGE_HEIGHT` place a caller's slices. The
+  upload, sub-upload and copy helpers take a depth and a z offset, so a volume is stored as its
+  slices laid out as 2D images are; mip levels halve depth too, and completeness counts it.
+  Compiled into lists with the volume packed at compile time (the recorder's argument limit went
+  from 8 to 10 for `glTexSubImage3D`).
+
+  The vertex now carries the texture coordinate's r, through generation and the texture matrix,
+  and the software sampler filters in three dimensions - GL_LINEAR is eight texels, with r's rate
+  of change in the level of detail. **The hardware path does not sample them yet**: that needs a
+  3D descriptor, r carried to the pixel shader and a three-dimensional sample - the shader
+  interface change fog and the polygon stipple wait on. Until then a 3D-textured draw on the
+  console is drawn untextured and logs one line (`gl_log_line`, new, the library's way to the
+  kernel log), rather than handing a 2D descriptor the first slice; gl1-probe's `texture-3d` is
+  expected to fail there.
+
+  Three tests had used `GL_TEXTURE_3D` or `GL_TEXTURE_WRAP_R` as their example of something
+  absent; they use `GL_TEXTURE_CUBE_MAP` and `GL_TEXTURE_MIN_LOD` now.
+- **The accumulation buffer** (2026-09-19) - `glAccum` with `GL_ACCUM`, `GL_LOAD`, `GL_RETURN`,
+  `GL_MULT` and `GL_ADD`; `glClearAccum`; `glClear`'s `GL_ACCUM_BUFFER_BIT`;
+  `GL_ACCUM_CLEAR_VALUE` and `GL_ACCUM_{RED,GREEN,BLUE,ALPHA}_BITS`; and `GL_ACCUM_BUFFER_BIT` on
+  the attribute stack, the last GL 1.x group it could not save. 419 of Mesa's 455 GL 1.0-1.3
+  entry points are declared; the three core ones left are the 3D-texture calls.
+
+  Signed 16-bit channels on the CPU, as Mesa's `MESA_FORMAT_RGBA_SNORM16` accumulation buffer
+  (`main/accum.c`), allocated the first time it is used - 16 MB at 1080p, which a program that
+  never accumulates does not pay. Reads go through `glReadPixels`' flush and readback and the
+  return is a CPU write like `glDrawPixels`', so **it works on the hardware path with no register
+  or shader involved**. Every operation and the clear keep to the scissor box when the test is
+  on; `GL_RETURN` goes through the colour mask and draws nothing in selection or feedback.
+  Products round, and sums clamp to the buffer's range: Mesa truncates and lets its GLshort
+  arithmetic wrap, so an overflowing `GL_ACCUM` came back as a large negative value.
+
+  Alongside it, the buffer sizes are answered for the first time: `GL_RED_BITS` through
+  `GL_ALPHA_BITS` (8) and `GL_DEPTH_BITS` (32, the float depth buffer both paths keep).
+- **Line and polygon stipple** (2026-09-19) - `glLineStipple`, `glPolygonStipple` and
+  `glGetPolygonStipple`, `GL_LINE_STIPPLE` and `GL_POLYGON_STIPPLE`, the pattern and repeat
+  queries, and `GL_POLYGON_STIPPLE_BIT` on the attribute stack (with each enable in its own group
+  too: the line's in `GL_LINE_BIT`, the polygon's in `GL_POLYGON_BIT`). 417 of Mesa's 455 GL
+  1.0-1.3 entry points are declared; the 5 core ones left are 3D textures and the accumulation
+  buffer.
+
+  **A stippled line is cut into its dashes before it is widened**: GL's fragment count runs
+  along the line's major axis, one per pixel, and keeps fragment s when bit (s / factor) mod 16
+  of the pattern is set - so the segment is split at those pixel steps, each run of kept
+  fragments becomes its own quad, and the colour, texture coordinate and normal at each cut are
+  interpolated perspective-correctly. The count carries across a strip's segments and restarts
+  for each separate line and each outlined polygon - the same places feedback reports
+  `GL_LINE_RESET_TOKEN`. The dashes are ordinary quads, so the hardware draws them; gl1-probe's
+  `line-stipple` should pass on a console.
+
+  **The polygon stipple is software-only for now.** The rasteriser drops a filled polygon's
+  fragment whose window position finds a 0 in the 32x32 mask - unpacked like a bitmap, bottom row
+  first, row words as Mesa packs them (`main/pack.c`) - and leaves lines, points and outlines
+  alone. The hardware path needs a discard in the pixel shader with the fragment's position,
+  which is the shader-interface change fog waits on; `polygon-stipple` is expected to fail on the
+  console until it lands, as `fog` is.
+- **Pixel transfer and pixel maps** (2026-09-19) - `glPixelTransfer{f,i}`,
+  `glPixelMap{fv,uiv,usv}` and `glGetPixelMap{fv,uiv,usv}`, with every transfer parameter and map
+  size answered by `glGet`, `GL_MAX_PIXEL_MAP_TABLE` (256, Mesa's), and `GL_PIXEL_MODE_BIT` on the
+  attribute stack - which also saves the pixel zoom. 414 of Mesa's 455 GL 1.0-1.3 entry points are
+  declared; the 8 core ones left are the stipples, 3D textures and the accumulation buffer.
+
+  Each colour component of a pixel rectangle is scaled and biased, then with `GL_MAP_COLOR`
+  replaced from its `GL_PIXEL_MAP_x_TO_x` table, then clamped - Mesa's order
+  (`main/pixeltransfer.c`) - on `glDrawPixels`, `glCopyPixels`, the texture uploads and
+  `glReadPixels`. **A texture copy is transferred once**: it reads through `glReadPixels` and
+  then uploads, and the upload would have applied it again. `glGetTexImage` is not transferred,
+  as in Mesa. The colour-index and stencil maps, the index shift and offset, `GL_MAP_STENCIL` and
+  the depth scale and bias are kept, compiled, saved and queried, and act on no pixels: the
+  index, stencil and depth formats they apply to are refused everywhere here.
+
+  Two places this follows the specification over Mesa (`main/pixel.c`): `GL_PIXEL_MAP_I_TO_I`
+  must be a power of two in size like the other index-looked-up maps, which Mesa's range check
+  skips; and `glGetPixelMapuiv`/`usv` read an index map back as the integers it was given, where
+  Mesa normalises `I_TO_I` and copies `S_TO_S`'s float bits.
+- **Selection and feedback** (2026-09-19), in a new `src/gl/gl_select.c` - `glRenderMode`,
+  `glSelectBuffer`, `glFeedbackBuffer`, `glInitNames`, `glLoadName`, `glPushName`, `glPopName`
+  and `glPassThrough`, with `GL_RENDER_MODE`, the name-stack and buffer queries and both buffer
+  pointers; and **`gluPickMatrix`** in the GLU, derived from the viewport transform. `GL_SELECT`
+  is how a GL 1.x program picks with the mouse, and feedback is how one exports vectors. 406 of
+  Mesa's 455 GL 1.0-1.3 entry points are declared now; 16 core ones remain.
+
+  Primitive assembly hands each polygon triangle, line and point to this instead of the
+  rasteriser - **before** a line or point is widened into triangles, so the geometry reported
+  is GL's own - and every way of drawing goes through that one point. The semantics are Mesa's
+  (`main/feedback.c`, `state_tracker/st_cb_feedback.c`), and what is not obvious:
+  - **It clips geometrically**, in clip space against the view volume and every enabled user
+    plane - Sutherland-Hodgman for a polygon, entry and exit parameters for a line - carrying
+    colour and texture coordinate along. The drawing path never needed to, since it rejects per
+    fragment; a hit's depth range and a feedback polygon are defined after clipping.
+  - A culled polygon is no hit; `glPolygonMode` decides whether a polygon is reported as a
+    polygon, its sides or its corners; colours are lit and flat-shaded as drawing does them.
+  - Nothing reaches the framebuffer, **`glClear` included** - a pick pass that begins with the
+    program's usual clear would otherwise wipe the frame it picks in.
+  - Hit depths are scaled to 2^32-1 in double. Mesa multiplies in float, where a depth of 1.0
+    rounds to 2^32 and does not fit an unsigned int.
+  - A refused `glRenderMode` changes nothing: `GL_SELECT` with no selection buffer is
+    `GL_INVALID_OPERATION` and the mode stays. Mesa raises the error and switches anyway.
+  - `GL_LINE_RESET_TOKEN` marks the first line of each independent line, strip, loop and
+    outlined polygon, where GL resets the stipple.
+  - Feedback texture coordinates are `(s/q, t/q, 0, 1)`: the vertex keeps its coordinate
+    divided, which is the same point projectively and loses only `r`, which no texture here reads.
+- **Evaluators** (2026-09-19), in a new `src/gl/gl_eval.c` - all 23 entry points: `glMap1{f,d}`,
+  `glMap2{f,d}`, `glGetMap{f,d,i}v`, the eight `glEvalCoord*`, `glMapGrid{1,2}{f,d}`,
+  `glEvalPoint{1,2}` and `glEvalMesh{1,2}`, with the eighteen `GL_MAP*` enables,
+  `GL_AUTO_NORMAL`, `GL_MAX_EVAL_ORDER` (30, Mesa's), the grid queries and `GL_EVAL_BIT`. This is
+  what `glutSolidTeapot` draws through, and the family was the largest core GL 1.x gap left
+  (398 of Mesa's 455 GL 1.0-1.3 entry points are now declared, and 24 core ones remain).
+
+  **CPU arithmetic ending in ordinary `glVertex` calls**: de Casteljau's construction, which also
+  gives the derivatives `GL_AUTO_NORMAL` needs, feeding the immediate-mode path - so an
+  evaluated patch is lit, textured, clipped, compiled into lists and sent to the hardware exactly
+  as the same vertices typed out would be. What is GL's rather than obvious, each checked against
+  Mesa (`main/eval.c`, `vbo/vbo_exec_eval.c`, `vbo/vbo_exec_api.c`, `main/draw.c`):
+  - **Evaluation never changes the current colour, normal or texture coordinate.** Each
+    evaluated value stands in for one vertex and the current one is put back.
+  - The highest enabled texture-coordinate map wins, `_VERTEX_4` wins over `_VERTEX_3` and is
+    projected, and with no vertex map enabled nothing is issued. Colour-index maps are stored and
+    queried and evaluate to nothing in this RGBA context.
+  - `GL_AUTO_NORMAL` takes the derivatives with respect to the domain values themselves, so a
+    domain given backwards turns the normal round with the surface. **Mesa differs here**: it
+    differentiates in the 0..1 parameter and so ignores a reversed domain.
+  - `glEvalMesh2(GL_FILL)` is quad strips, as the specification writes it. Mesa draws triangle
+    strips, which fill the same but outline each quad's diagonal under `glPolygonMode(GL_LINE)`.
+  - Grid points are computed from their index, not accumulated, and the last one is the domain's
+    end exactly - so adjacent patches agree on their shared edge to the bit.
+  - A compiled `glMap` keeps its control points packed at compile time. One whose stride was too
+    short fails when the list runs, as the call itself would have; Mesa's list replays it
+    successfully.
+  - `glEvalMesh` inside `glBegin` is `GL_INVALID_OPERATION`, refused before it could throw the
+    open primitive's vertices away.
+- **Mip chains on the hardware** (2026-09-19) - written from addrlib and Mesa, not yet seen on a
+  console. A texture that is complete, a power of two, and filtered through its mipmaps is copied
+  into GPU memory as a chain laid out **exactly as addrlib lays out a linear GFX10 surface**:
+  smallest level first and the base level last - the opposite of the obvious order - each level
+  `ceil(w / 2^i)` by `ceil(h / 2^i)` with its rows padded to 256 bytes
+  (`amd/addrlib/src/gfx10/gfx10addrlib.cpp:5082-5104`, `GetMipSize` at `gfx10addrlib.h:367-383`).
+  The descriptor points at the chain's start with `LAST_LEVEL` and `MAX_MIP` at its last level and
+  no custom pitch, and the sampler's `MIP_FILTER` is POINT or LINEAR, as radeonsi fills them
+  (`common/ac_descriptors.c:528-551`, `gallium/drivers/radeonsi/si_state.c:1950-1961`; field
+  positions from `registers/gfx10-rsrc.json`). The chain is rebuilt when a level changes, and a
+  texture that does not read mipmaps gets byte-for-byte the descriptors it always had.
+
+  **Power of two only**, because GL halves a level by floor and addrlib by ceil, and the two
+  agree only there; GL 1.x requires power-of-two textures, and one that is not keeps sampling its
+  base level. gl1-probe's `mipmap-levels` now draws an 8x8 chain across 4x4 pixels and needs the
+  second level's colour - the hardware's answer to whether the layout is right.
+- **Mipmap levels, texture completeness, and a software sampler that follows the filters**
+  (2026-09-19).
+
+  **`level` was ignored by every texture upload** (`(void)level`), so a program uploading its mip
+  chain one level at a time - as the Quake engines do - wrote each smaller image over the base
+  one and ended with the texture as its own 1x1 level: one flat colour where the texture should
+  be. Each level is now its own image (`mips` in the texture object), and `glTexSubImage*`,
+  `glCopyTexImage*`, `glCopyTexSubImage*`, `glGetTexImage` and `glGetTexLevelParameter*` all
+  address the level they are given; a level beyond the chain, or larger than its level can be,
+  is `GL_INVALID_VALUE`.
+
+  **Completeness**, by the specification's rule: a texture whose minification filter reads
+  mipmaps needs every level down to 1x1 at exactly the halved size, and **an incomplete texture
+  draws as if texturing were off**. That is what every GL does, and why a program that never
+  sets a non-mipmap filter draws untextured everywhere; this used to sample it anyway. Two SDK
+  tests relied on that and now set the filter, as a real program must.
+
+  **The software sampler is the specification's**: nearest as `floor(s * width)` (it was
+  `round(s * (width - 1))`, which is not GL's), bilinear with texel centres at half-integers,
+  the magnification/minification switch at GL's `c`, and `*_MIPMAP_NEAREST` /
+  `*_MIPMAP_LINEAR` from a per-pixel level of detail taken from the screen-space derivatives of
+  the texture coordinate. The hardware still samples only the base level - its descriptor's
+  LAST_LEVEL is 0, which is what it has always had - so a minified texture aliases on the
+  console; putting the chain in GPU memory needs its layout measured first.
+
+  gl1-probe has a `mipmap-levels` check for the part the console does see: the base image kept
+  and an incomplete texture drawn untextured.
+- **Colour-index state, multisample state, dithering and every hint** (2026-09-19). The ten
+  `glIndex*` spellings, `glClearIndex`, `glIndexMask`, `glIndexPointer` with `GL_INDEX_ARRAY`,
+  and `GL_INDEX_LOGIC_OP`; `glSampleCoverage` with `GL_MULTISAMPLE`,
+  `GL_SAMPLE_ALPHA_TO_COVERAGE`, `GL_SAMPLE_ALPHA_TO_ONE` and `GL_SAMPLE_COVERAGE`; `GL_DITHER`;
+  and the point-smooth, line-smooth, polygon-smooth, fog and texture-compression hints.
+
+  **All of it is state that changes no pixel, and that is correct rather than partial.** This
+  is an RGBA context - `GL_INDEX_MODE` answers false - and in one the specification keeps
+  colour-index state and draws nothing with it; with no multisample buffer (`GL_SAMPLE_BUFFERS`
+  0) it gives the multisample state no effect; a hint is a preference an implementation may
+  ignore; and the colour block rounds rather than dithers, which is also what Mesa's hardware
+  drivers make of `GL_DITHER`. What mattered was that these were **refused**: `GL_DITHER` and
+  `GL_MULTISAMPLE` are on by default in every GL context, and the `glDisable(GL_DITHER)` and
+  `glHint(GL_FOG_HINT, ...)` a great deal of 1.x start-up code carries were errors here. The
+  index is a plain number, not an intensity, so every spelling converts by cast (Mesa
+  `vbo/vbo_attrib_tmp.h:1978-1990`, `:2705-2761`); the defaults are Mesa's.
+
+  With them: **`glPushAttrib` accepts `GL_POINT_BIT`, `GL_LINE_BIT`, `GL_HINT_BIT` and
+  `GL_MULTISAMPLE_BIT`** - line width, point size and the hints existed and could not be saved,
+  so a `glPushAttrib(GL_LINE_BIT)` around a wireframe overlay was refused and its pop took a
+  frame it never pushed. **`GL_ALL_ATTRIB_BITS` is the Khronos `0xFFFFFFFF`**; this header had
+  GL 1.0's `0x000FFFFF`, and a program built against a standard header was refused outright.
+  Both are accepted as "all".
+
+  And **point size and line width are queryable**, with their ranges: `GL_POINT_SIZE`,
+  `GL_LINE_WIDTH`, the four `*_RANGE`s and the granularities were declared and answered by
+  nothing. They are drawn by the specification's aliased rule now - rounded, at least 1, at most
+  256 - where the raw float used to be the quad's width, so `glLineWidth(0.5)` could draw nothing.
+- **`glPolygonMode` and edge flags** (2026-09-19): `glPolygonMode`, `glEdgeFlag`, `glEdgeFlagv`,
+  `glEdgeFlagPointer` with `GL_EDGE_FLAG_ARRAY`, `GL_POLYGON_OFFSET_LINE` and
+  `GL_POLYGON_OFFSET_POINT`, the queries, and both attribute stacks. Wireframe and point-cloud
+  views of a mesh are the everyday use.
+
+  **An outline is the primitive's own edges.** A quad reaches the triangle stage as two triangles
+  and a polygon as a fan, and drawing each triangle's three edges would draw the diagonals
+  between them - a quad with five sides. Each triangle therefore carries which of its edges
+  belong to the primitive, and edge flags (which the specification applies to separate
+  triangles, quads and polygons only) choose among those. In point mode the vertices that start
+  a boundary edge are drawn, which puts each corner down exactly once however the primitive was
+  split. The lines and points go through the same screen-space expansion `GL_LINES` and
+  `GL_POINTS` use, so nothing new is asked of the hardware. **Culling is decided for the polygon
+  before its mode**, as the specification orders it - a culled back face draws no outline.
+
+  To carry all of that, **primitive assembly is now one function** (`gl_assemble`), given a
+  fetcher per caller. `glEnd`, `glDrawArrays` and `glDrawElements` each had their own copy of
+  the switch - the refusal test's comment records the time they disagreed about which modes drew.
+
+  Three things underneath it were wrong before it existed, and are fixed with it:
+  - **Culling applied to lines and points.** The quad a line becomes winds like any triangle, so
+    with `GL_CULL_FACE` on, every line whose quad happened to wind backwards vanished - in
+    software and, through `PA_SU_SC_MODE_CNTL`'s cull bits, on the hardware.
+  - **`GL_POLYGON_OFFSET_FILL` applied to lines and points** the same way; each offset enable now
+    covers only its own kind.
+  - **A flat-shaded quad came out in two colours, and a polygon in the wrong one.** The flat
+    colour was each triangle's last vertex, which is right for triangles, strips and fans; a quad
+    takes its fourth vertex (its first triangle does not contain it) and a polygon its first. The
+    specification's table of provoking vertices is followed exactly now, lighting included.
+
+  `glIsEnabled` now answers the client arrays (`GL_VERTEX_ARRAY` and the rest), and
+  `glGetIntegerv` each array's size, type, stride and buffer binding - all of which were refused
+  as unknown. `glInterleavedArrays` disables the edge-flag array, as Mesa's does
+  (`main/varray.c:2960`). gl1-probe has a `polygon-mode` check for the console.
+- **Display lists record every call the specification compiles** (2026-09-19). They recorded 21
+  operations - the vertex attributes, the enables, the matrix-stack calls and a handful of others
+  - and every other call **ran at compile time** under `GL_COMPILE`. So a `glMaterialfv` inside a
+  list changed the material while the list was being built and was absent when it was called: a
+  program giving each object its own material in its own list drew every object in the material
+  set last. That is the gears demo, and the shape of a great deal of GL 1.x code. `glLoadMatrix`,
+  `glMultMatrix` and `glBlendFunc` even had replay arms that nothing ever recorded.
+
+  Now about 75 entry points record - lighting and materials, blend and logic op, depth, stencil,
+  fog, the texture environment and generation, texture parameters and uploads, clip planes,
+  viewport and scissor, clears, `glOrtho`/`glFrustum`, the attribute stack, raster position,
+  `glBitmap`, `glDrawPixels`, `glCopyPixels`, `glListBase`, `glCallLists` - at the one place each
+  family's spellings converge. Only what the specification says executes immediately does:
+  queries, gen/delete, the client-side state, `glPixelStore`, `glReadPixels`, buffer objects.
+  What a list keeps follows the specification and Mesa's `main/dlist.c`:
+
+  - **Pointer arguments are copied when compiled** - a matrix, a light's position, a list of
+    names - and a `*v` call copies exactly as many values as its `pname` takes, so a
+    `glMaterialfv(GL_SHININESS, &one)` never reads past the one float it was given.
+  - **Images are unpacked through the compile-time `glPixelStorei` state** into tight rows and
+    replayed under default unpacking, so a list does not depend on what the pixel-store state has
+    become by the time it runs. `glBitmap` likewise - bitmap fonts in lists are most of what it
+    is used for.
+  - **The vertex-array draws compile**, as the `glBegin`/element/`glEnd` sequence they are
+    defined to be, with the arrays read now. They were refused with `GL_INVALID_OPERATION`.
+  - **`glCallLists` applies the list base current when it runs.** It used to be compiled as
+    individual `glCallList(base + name)` calls with the base of compile time.
+  - **`GL_COMPILE_AND_EXECUTE` records each call once.** The recorder appends the command and
+    then executes *that command* with recording suspended - so a recorded entry point that calls
+    another in its body (`glCopyTexImage2D` does) records once, and a list called while another
+    is compiled this way is not copied into it. Both recorded twice before.
+  - **A compiled call's error is raised when it runs**, as the specification has it, because the
+    replay goes through the same public entry points.
+
+  The storage changed with it: each list's commands and data now grow from the SDK heap, as a
+  texture's image or a buffer object's store does, instead of a fixed 4096 commands per list. The
+  fixed arrays cost 32 MiB of context whether or not a list was ever made, capped one list below
+  1400 triangles, and could not hold an image at all. The GL and PM4 suites run clean under
+  AddressSanitizer and UndefinedBehaviorSanitizer with leak checking.
+- **`glLogicOp` and `glBlendColor`** (2026-09-19), with `GL_COLOR_LOGIC_OP`, `GL_LOGIC_OP_MODE`,
+  `GL_BLEND_COLOR`, the four constant-colour blend factors, and both on the attribute stack under
+  `GL_COLOR_BUFFER_BIT` (the enable under `GL_ENABLE_BIT` too). Both paths are written.
+
+  **The logic op is radeonsi's recipe** (`gallium/drivers/radeonsi/si_state.c:341`, `:365-368`,
+  `:545-549`): `CB_COLOR_CONTROL`'s eight-bit `ROP3` holds the four-bit mode twice, `GL_COPY`
+  counts as off, and `DISABLE_DUAL_QUAD` is set with it on every RB+ part - which is every
+  GFX10_3 one (`amd/common/ac_gpu_info.c:1117`, `:1122-1125`). Off, the register is exactly the
+  `0x00cc0010` the frame table always carried, so gl-cube's stream does not change.
+
+  **The mode is not `opcode - GL_CLEAR`.** GL's enum is a truth table with its bits in the other
+  order - `GL_COPY` is `0x1503`, the table value 12 - so the mapping is Mesa's
+  `color_logicop_mapping` (`main/blend.c:835-852`) rather than arithmetic. `GL_XOR` is 6 either
+  way, which is why the tests use `GL_AND_REVERSE` and `GL_INVERT`, where the two readings differ.
+  A logic op replaces blending rather than following it, as Mesa's state tracker has it
+  (`state_tracker/st_atom_blend.c:269-273`). `GL_INDEX_LOGIC_OP` stays refused with the rest of
+  colour-index mode.
+
+  **The blend constant is not in the frame's register table.** `CB_BLEND_RED..ALPHA` (context
+  offset `0x105`, `gfx103.json`) go out at the first draw of a frame that reads a constant factor
+  and again after each `glBlendColor` - once per value, not per draw - so a program that never
+  uses one emits exactly the stream it did before. `glBlendColor` clamps to [0, 1] as Mesa does
+  (`main/blend.c:788-791`), and `BLEND_CONSTANT_COLOR` and friends are 13, 14, 19 and 20 in
+  `BlendOp`, not contiguous with the rest.
+
+  gl1-probe has `logic-op` and `blend-constant` checks for the console.
 - **Fog, in software** (2026-09-19): `glFogf`, `glFogi`, `glFogfv`, `glFogiv`, `GL_FOG` on the
   enables, the fog queries, and `GL_FOG_BIT` on the attribute stack - which was refused until now,
   on the correct grounds that there was no fog state to save. The attribute test's own rule
@@ -77,10 +1581,11 @@ Nothing has shipped yet - this is the initial commit.
   colour-index mode. An integer fog colour normalises; the integer distances are plain casts.
 
   **The hardware path is not written yet**, and gl1-probe has a `fog` check that is expected to fail
-  on the console until it is. The likely route does not need the third parameter export `-7c40`
-  confirmed: the vertex buffer's texture coordinate is a `vec4` whose `z` is unused and which the
-  vertex shader already exports whole, so a per-vertex fog factor computed on the CPU can ride there
-  and only the pixel shaders change.
+  on the console until it is. The likely route does not need a third parameter export: the vertex
+  buffer's texture coordinate is a `vec4` whose `z` is unused and which the vertex shader already
+  exports whole, so a per-vertex fog factor computed on the CPU can ride there and only the pixel
+  shaders change. (What `-7c40`'s sweep does show about a third export - that it draws, not that
+  its values arrive intact - is in `docs/GL_ROADMAP.md`, with the log's real arm names.)
 - **Points, lines, polygons and quad strips draw** (2026-09-17): `GL_POINTS`, `GL_LINES`,
   `GL_LINE_STRIP`, `GL_LINE_LOOP`, `GL_POLYGON` and `GL_QUAD_STRIP`, plus `glPointSize` and
   `glLineWidth`. All six were refused with `GL_INVALID_ENUM` until now.
@@ -895,6 +2400,262 @@ Nothing has shipped yet - this is the initial commit.
   right value for the reason the oracle already gave.
 
 ### Fixed
+
+- **The AGC display's render target was heap memory the GPU could not use** (2026-09-19).
+  `042d236` allocated `linear_scratch_fb` with `oops_malloc` to make CPU access cached. A large
+  `oops_malloc` is an anonymous `mmap` with no GPU access asked for, returned 24 bytes past its
+  page, behind the heap's block header. The GPU reads and writes this buffer: the compute
+  tiler reads it, oops-gl drew into it at `CB_COLOR0_BASE` in 256-byte units, and the CP copies
+  it. So every oops-gl draw on a console either faulted or landed 6 pixels early over the
+  header. No console run since the change had shown which. It is `oops_mem_alloc(...,
+  64 KiB, OOPS_MEM_WB_ONION)` now, freed with `oops_mem_free`. That is the "cached Onion memory
+  (type 0)" the allocation's own comment described: CPU-cached, GPU-mapped and aligned.
+  Whether the colour block writes Onion correctly is `REQ-20260919T1811Z-b52e`'s question.
+  oops-gl's scanout path, above, stops drawing into this buffer altogether.
+
+- **A read after a pixel rectangle read the pixels from before it, on the console**
+  (2026-09-19). `glReadPixels` and the accumulation buffer read the CP's CPU-cached copy of
+  the render target. The copy is made at the end of every submission, and nothing marked it
+  stale when the CPU wrote into the target. So a `glDrawPixels`, `glBitmap`, `glCopyPixels`
+  or `glAccum(GL_RETURN)` followed by a read, with no draw in between, read the frame as it
+  was before the write. The copy now records which buffer it is of (`readback_of`), and every
+  CPU write into a colour buffer clears that (`gl_raster_sync`). A read then takes the buffer
+  itself, through `gl_color_read_source`. `test_pm4_gl_front_buffer_targets`.
+
+- **State the specification lists that no query answered, and enums nothing declared**
+  (2026-09-19), found by auditing oops-gl against GL 1.5's state tables and Mesa's GL 1.0-1.5
+  enums rather than against its entry points. Every table name `glGet`/`glIsEnabled` names now
+  answers through every getter: ten were neither declared nor answered (`GL_TEXTURE_STACK_DEPTH`,
+  `GL_LIST_INDEX`, `GL_LIST_MODE`, `GL_MAX_LIST_NESTING`, `GL_AUX_BUFFERS`, `GL_DOUBLEBUFFER`,
+  `GL_STEREO`, `GL_SUBPIXEL_BITS`, `GL_CURRENT_RASTER_INDEX`, `GL_MAX_ELEMENTS_VERTICES`/`_INDICES`
+  - Mesa's answers where they are constants), and `glGetIntegerv` refused eleven float states it
+  now reaches through `glGetFloatv`, the normalised ones mapped linearly as GL 1.5's 6.1.2 and
+  Mesa's `TYPE_FLOATN` rows say. GL 1.3's `GL_TRANSPOSE_MODELVIEW_MATRIX`,
+  `_PROJECTION_MATRIX` and `_TEXTURE_MATRIX` answer. **`glCallLists` takes all ten of GL 1.0's
+  name types** - it took the three unsigned ones - decoded as Mesa decodes them
+  (`main/dlist.c:13481-13575`), `GL_2_BYTES` to `GL_4_BYTES` big-endian. **`glDrawBuffer`
+  accepts `GL_NONE`** (colour writes off, on the console through `CB_TARGET_MASK`) and
+  `GL_BACK_LEFT`, `glReadBuffer` `GL_BACK_LEFT`; the right and auxiliary buffers, which this
+  visual lacks, are `GL_INVALID_OPERATION`, and `GL_DRAW_BUFFER`/`GL_READ_BUFFER` answer what
+  was set, saved with the colour-buffer and pixel-mode groups. **`GL_CURRENT_BIT` saves the raster
+  position**, its colour, texture coordinates, distance and validity, as GL 1.3's table 6.5 and
+  Mesa's push do. And declared: the buffer names, `GL_2_BYTES`..`GL_4_BYTES`, GL 1.5's
+  `GL_SRC0_RGB`..`GL_SRC2_ALPHA`, GL 1.0's `GL_TEXTURE_COMPONENTS`, `GL_ALL_CLIENT_ATTRIB_BITS`,
+  and the `GL_TEXTUREn_ARB`/`GL_*_TEXTURE_ARB` enums beside the `_ARB` entry points.
+  `test_gl_state_table_audit_findings`. Front-buffer rendering stays refused - see the roadmap.
+- **The console sampled every texture at level zero** (2026-09-19) - written, not yet run on one.
+  The textured pixel shader's sample was `image_sample_lz`, which takes no level of detail: the
+  mip chain laid out for the GPU the same day could never be read past its base, a minified
+  texture used the magnification filter, and GL 1.4's LOD bias in the sampler had nothing to bias.
+  It is `image_sample` now, in whole-quad mode so the helper pixels of each quad supply the
+  implicit derivatives - the live pixels' mask kept and restored after the sample, as Mesa's ACO
+  does (`aco_insert_exec_mask.cpp:61-97`, `:150-163`), so the combine, fog, alpha test and export
+  see exactly the pixels they did. **And q is divided per fragment there too**: the vertex carries
+  s, t and q undivided, q in the texture parameter's spare `w`, and the shader divides after
+  interpolating. Words from the new `tools/shader/tex-prolog.s`, which also reassembles the
+  replaced `_lz` word as a cross-check; the shader is built by `gl_ps_build_textured`, which the
+  host can call, and `test_pm4_gl_textured_shader_samples_with_lod_and_divides_q` pins it. gl-cube
+  (linear filters, no mipmaps, q 1) draws the same picture. gl1-probe's `mipmap-levels`,
+  `lod-bias` and `projective-texture` are the measurement.
+- **An enabled 3D texture or cube map textured a drawn clear, and `GL_ENABLE_BIT` left the
+  texture generation enables out** (2026-09-19), both found moving the texture state into
+  per-unit form for the second unit GL 1.3 requires. A scissored or masked `glClear` is drawn as a
+  quad with every other per-fragment effect set aside - but only the 1D and 2D enables were set
+  aside, so with `GL_TEXTURE_3D` or `GL_TEXTURE_CUBE_MAP` on, the clear colour was modulated by
+  the texture. And `glPushAttrib(GL_ENABLE_BIT)` did not save `GL_TEXTURE_GEN_S` and the rest,
+  which GL 1.3's table 6.20 puts in the enable group as well as the texture group (Mesa,
+  `main/attrib.c:189-192`). `test_gl_drawn_clear_and_enable_bit_cover_every_texture_enable`.
+- **A texture coordinate's q was divided at the vertex** (2026-09-19). `glTexCoord4`, texture
+  generation with a q plane and a projective texture matrix all give q, and GL divides s, t and r
+  by it per fragment, after interpolation. oops-gl divided at the vertex and interpolated the
+  quotients, which agrees only while q is the same at every vertex of a primitive - so a
+  projected texture (a spotlight's image, a shadow map's coordinates) slid across its surface
+  instead of staying put. The vertex now keeps all four components undivided and the software
+  rasteriser divides per fragment, level of detail included; feedback reports all four, as Mesa
+  does (`main/feedback.c:136-139`), rather than `(s/q, t/q, 0, 1)`. The console path still divides
+  per vertex until its pixel shader takes q - `docs/GL_ROADMAP.md`, **Needs a shader change**.
+  `test_gl_projective_texcoords_divide_per_fragment` and gl1-probe's `projective-texture` hold it.
+- **Pixel centres on a shared edge were drawn by both triangles** (2026-09-19). The software
+  rasteriser took a centre exactly on an edge as inside every triangle it bounded, so the
+  diagonal of every quad - and every other shared edge a centre fell on - was drawn twice:
+  blended twice, stencil-incremented twice, and counted twice by an occlusion query (a 4x4 quad
+  counted 20 samples, which is how it was found). GL requires a shared edge to produce each
+  fragment once. A top-left tie rule now gives each such centre to exactly one triangle. Coverage
+  changes only for exact-edge centres: a width-1 line lying between two rows now fills one row,
+  not both, and a one-pixel quad on a pixel corner fills one pixel, not four. gl1-cube's picture
+  is unchanged.
+- **Depth and stencil pixel rectangles were refused** (2026-09-19). `glReadPixels` and
+  `glDrawPixels` of `GL_DEPTH_COMPONENT` and `GL_STENCIL_INDEX`, and `glCopyPixels` of `GL_DEPTH`
+  and `GL_STENCIL`, are GL 1.0 and answered `GL_INVALID_ENUM` - so reading the depth under the
+  cursor to unproject a click failed outright. Each works now, with its pixel transfer
+  (`GL_DEPTH_SCALE`/`BIAS`; `GL_INDEX_SHIFT`/`OFFSET` and `GL_MAP_STENCIL`, Mesa's order): a drawn
+  depth pixel is a fragment at its own z, through the depth test; a stencil index goes straight
+  into the stencil buffer through the scissor and write mask. On the hardware path the depth
+  operations answered `GL_INVALID_OPERATION` with one log line, the depth surface being the GPU's
+  and tiled. The stencil ones joined them when the console's stencil test made the stencil
+  surface the GPU's too. Both reach the tiled surfaces there since the same evening
+  (**Depth and stencil pixel operations on the console**).
+- **Colour-index images and the `GL_BITMAP` type were refused** (2026-09-19). GL 1.0 takes
+  `GL_COLOR_INDEX` images in an RGBA context: `glDrawPixels` and the texture uploads convert each
+  index through the index shift and offset and the `GL_PIXEL_MAP_I_TO_R/G/B/A` maps, as Mesa does
+  (`main/pack.c:1500-1548`), with no RGBA scale or bias after. They are never read back -
+  `glReadPixels` answers `GL_INVALID_OPERATION`, `glGetTexImage` `GL_INVALID_ENUM`. `GL_BITMAP` -
+  an index a bit, for colour and stencil indices only - draws, uploads, reads stencil back and
+  compiles into lists as glBitmap's bits do. A stencil read's transfer was also applied while the
+  transfer was suspended, which it no longer is.
+- **Pixel rectangles skipped every fragment operation** (2026-09-19). `glDrawPixels`, `glBitmap`
+  and `glCopyPixels` wrote their pixels straight into the colour buffer, so a bitmap label ignored
+  the scissor, a drawn sprite did not blend, and `glColorMask`, the alpha, stencil and depth
+  tests, the logic op, texturing and fog never touched them. Each pixel is now a fragment (GL 1.x
+  3.6.4-3.8): at the raster position's z, textured with the one texel its raster texture
+  coordinate samples, fogged by the raster distance, and then through the triangle rasteriser's
+  own per-fragment tail - one copy, `gl_fragment_tail`, which both now call. The sampler, blend
+  factors and stencil operations are compiled for the target too (about 18 KB), because there the
+  rectangle is the CPU's; the depth and stencil tests are left out on that path, with one log line,
+  since the depth surface is the GPU's and tiled. Found alongside:
+  - **`glCopyPixels` smeared overlapping copies.** It read and wrote pixel by pixel, so a copy
+    one row up or one column right read back what it had just written. The whole source is read
+    first now, as GL's read-then-draw definition requires, and the copy is zoomed like
+    `glDrawPixels` (it ignored `glPixelZoom`).
+  - **The zoom follows GL's rule**: a pixel covers the window columns whose centres fall in
+    `[xr + zx n, xr + zx (n + 1))`. The raster position was truncated and whole-pixel steps
+    taken, which put a mirrored image one column over, and a zoom of 0 drew at a zoom of 1.
+  - **`glBitmap` lands at floor(raster - origin)**, and a negative raster colour is black
+    rather than full intensity.
+- **`glClear` ignored the scissor box and every write mask, on both paths** (2026-09-19). GL
+  clears only inside the scissor box and only through `glColorMask`, `glDepthMask` and
+  `glStencilMask`; this filled the whole surface regardless, so a program clearing one viewport
+  of a split screen wiped the others and one clearing with a channel masked lost that channel.
+  The source even said the stencil write mask does not gate a clear, and a test pinned it - both
+  wrong: Mesa clears a masked stencil buffer through a quad whose stencil writemask is the
+  program's (`state_tracker/st_cb_clear.c`, `clear_with_quad`). Now:
+  - the depth mask drops the depth clear;
+  - the stencil clear, CPU memory on both paths, keeps to the box and goes through the mask;
+  - colour and depth through a partial scissor box or a colour mask are **drawn** - one quad at
+    the clear colour and depth, through the ordinary pipeline, with depth test `GL_ALWAYS` and
+    blending, logic op, alpha test, texturing, lighting, fog, stencil test, culling, offset,
+    stipple and clip planes set aside and put back. On the hardware the scissor registers and
+    `CB_TARGET_MASK` the draw path already emits do the rest, where the DMA fill of the whole
+    allocation could not; on the host it is the software rasteriser's scissor and mask, so the
+    two paths clear identically.
+  - An unscissored, unmasked clear is still the fill, which leaves gl-cube's recorded frame as it
+    was. `glClear` inside `glBegin` is `GL_INVALID_OPERATION`, and a bit naming no buffer is
+    `GL_INVALID_VALUE` - both were ignored.
+
+  Two tests had the old behaviour built in: the stencil test's "does not gate a clear" and the
+  logic-op test, whose masked draw followed a clear made under the same mask. The drawn clear is
+  unmeasured on a console; gl1-probe's `scissored-clear` measures it.
+- **`glReadPixels` into `GL_LUMINANCE` read the red component alone** (2026-09-19). GL reads
+  luminance from a colour buffer as R + G + B, clamped - Mesa's `main/readpix.c:484` and
+  `pack.c:1297` - so pure blue read as 0 here and as 1 anywhere else.
+- **The texture matrix was never applied** (2026-09-19). `glMatrixMode(GL_TEXTURE)` had a stack
+  that pushed, popped, loaded and answered `GL_TEXTURE_MATRIX` - and no vertex ever went through
+  it, so a program that scrolled or scaled a texture that way drew it unmoved, and a projected
+  texture (eye-linear generation, then a projection in the texture matrix) came out as the raw
+  planes. Every texture coordinate now goes through it after generation, on both paths, since
+  the coordinate reaching the hardware is computed here. gl1-probe's `texture-matrix` checks it
+  on the console.
+- **The raster position was not processed as a vertex** (2026-09-19). Its colour was the current
+  colour copied raw - GL lights it when lighting is on - and its texture coordinate skipped
+  generation and the texture matrix; both follow `glVertex` now (Mesa `main/rastpos.c`). Its w,
+  which `GL_CURRENT_RASTER_POSITION` reports, held 1/w; it is the clip w, as Mesa keeps it.
+- **`glGetPointerv(GL_INDEX_ARRAY_POINTER)` was refused** (2026-09-19), though the index array
+  had had a pointer since colour-index state landed.
+- **`glGetIntegerv`, `glGetFloatv` and `glGetDoublev` refused every enable** (2026-09-19). GL
+  answers each capability `glIsEnabled` knows through every `glGet` - `glGetIntegerv(GL_DEPTH_TEST)`
+  is 1 or 0 - and only `glGetBooleanv` did; the other three raised `GL_INVALID_ENUM` and left the
+  caller's buffer as it was. They now fall back to `glIsEnabled` before refusing.
+- **A texture parameter changed mid-frame re-sampled the frame's earlier draws** (2026-09-19).
+  Every textured draw loads its descriptors into one slot, and the draws run at the flush - so
+  the slot was reloaded only for a *different* texture, and a program that changed one texture's
+  wrap mode or filter between two draws of a frame had both drawn with the second setting on the
+  hardware. The slot is now compared by content, and any change submits the draws that read the
+  old contents first. (`desc_dirty` had been set for this and never read.)
+- **The software rasteriser interpolated in screen space** (2026-09-19): colours, texture
+  coordinates, fog and clip distances all used the affine barycentric weights, which is right
+  for window depth and wrong for anything linear in clip space - so a textured floor in
+  perspective swam on the host and not on the console, whose interpolators have always
+  corrected, and the comment on the perspective hint claiming otherwise was false. Every
+  attribute but depth is now weighted by its vertex's 1/w and renormalised. Under an orthographic
+  projection nothing changes; gl1-cube's lit-pixel count moved from 86833 to 89903.
+- **Texture 0 was never sampled** (2026-09-19). With nothing bound, an upload went to the
+  target's default texture - GL 1.x's texture 0, a real texture - and the draw then asked for
+  "the bound texture", found 0, and drew untextured. A program in the GL 1.0 style, which calls
+  `glTexImage2D` and never `glBindTexture`, drew nothing textured at all.
+- **`glGetTexImage` wrote past the end of the caller's buffer**, the same way `glReadPixels` did
+  (below): it zeroed `stride * height` bytes, the last row's alignment padding included.
+- **`glCopyTexImage1D` consumed the program's error** (2026-09-19). It checked its own allocation
+  with `glGetError()`, which clears the flag - so an error it raised was never reported, and an
+  older unrelated one aborted the copy. The 2D version's comment already warned of exactly this.
+- **`glDeleteTextures` reset only the 2D binding** (2026-09-19). Deleting a bound 1D texture left
+  `GL_TEXTURE_BINDING_1D` naming a texture that no longer existed.
+- **`glReadPixels` wrote past the end of the caller's buffer** (2026-09-19). It zeroed
+  `stride * height` bytes before filling them, and the stride includes the pack alignment's
+  padding - so the *last* row's padding was written too, which the caller never allocated: a 1x1
+  `GL_RGB` read at the default alignment of 4 wrote four bytes into three. It also clobbered the
+  padding between rows, which GL leaves alone. Found by running the suite under AddressSanitizer,
+  in the file's own `test_gl_read_pixels_formats_and_bounds`; only each row's pixels are written
+  now.
+- **The PM4 test fixtures handed `gl_hw_flush` a one-word fence and a one-word canary**
+  (2026-09-19), and every flush wrote the GPU clock 8 bytes past the first and seven canary words
+  past the second - on the stack, in one of them. The real context allocates a page for each, so
+  the library was right and the tests were overwriting their own frames; AddressSanitizer found it
+  the same way.
+- **A frame of more than 450 triangles drew wrongly on hardware** (2026-09-19). Each triangle's
+  vertices go into a slot of a 450-slot ring in the vertex buffer, and the draw that reads them
+  runs only when the stream is submitted - but the slot was `triangles_drawn % 450` with nothing
+  at the wrap. The 451st triangle of a frame overwrote the first one's vertices before the GPU had
+  read them, so the frame drew triangle 451 twice and triangle 1 never, and so on round the ring.
+  gl-cube's twelve triangles and gl1-probe's handful never came near it; any real scene does. A
+  full ring is now submitted before it is reused - the same step a texture change already takes,
+  and the render target persists across it. gl1-probe's new `many-triangles` check draws 600 in
+  one frame and counts the first one's pixels.
+- **The command buffer could be closed past its end** (2026-09-19). The per-draw room check
+  reserved 160 dwords and reserved nothing for the 46 dwords `gl_hw_flush` appends to close a
+  stream - two `RELEASE_MEM`s, the `WAIT_REG_MEM`, the readback copy and the padding. The clear
+  path reserved 32 for up to 14 of its own. Both now reserve the trailer explicitly
+  (`OOPS_GL_DCB_TRAILER_DW`), and the worst case of one draw is itemised where it is checked:
+  162 dwords, held as `OOPS_GL_DCB_DRAW_MAX_DW` with slack.
+- **`glDepthRange` inside a frame did nothing on hardware until the next frame** (2026-09-19).
+  `PA_CL_VPORT_ZSCALE`/`ZOFFSET` were written only by the frame's register table, on the stated
+  grounds that "the new range is in force from the next frame" - which is wrong for the way depth
+  range is used: narrow it, draw one thing, widen it again, all in one frame (a view weapon drawn
+  in front of the world is the classic case). The range is now flagged and re-emitted before the
+  next draw. `glPopAttrib(GL_VIEWPORT_BIT)` had the same hole for the viewport *and* the range - it
+  set neither flag, while the scissor arm beside it always did. gl1-probe's existing `depth-range`
+  check could not see any of it: it samples between its two halves, and a sample submits the
+  frame. The new `depth-range-in-frame` check does not.
+- **The blend factors defaulted to alpha blending** (2026-09-19). GL's defaults are `GL_ONE` and
+  `GL_ZERO` (Mesa `main/blend.c:1148-1151`); these were `GL_SRC_ALPHA` / `GL_ONE_MINUS_SRC_ALPHA`,
+  so a program that enabled `GL_BLEND` without calling `glBlendFunc` got a blend here and an
+  overwrite everywhere else, and `glGetIntegerv(GL_BLEND_SRC)` was wrong before any call. The one
+  test that asserted the old default now asserts GL's.
+- **`glBlendFunc`, `glBlendFuncSeparate` and `glBlendEquation` accepted anything** (2026-09-19).
+  An enum that was not a factor was stored, reported back, and blended as the old default by
+  `gl_blend_op`'s fallback. They now refuse with `GL_INVALID_ENUM` against Mesa's lists
+  (`main/blend.c:49-118`, `:435-447`), including `GL_SRC_ALPHA_SATURATE` as a *destination*
+  factor, which needs an extension this does not have.
+- **`GL_SRC_ALPHA_SATURATE` scaled alpha in the software rasteriser** (2026-09-19). Its alpha
+  factor is 1 - softpipe says so in as many words (`sp_quad_blend.c:467-470`) and the colour block
+  does it itself - but the software path applied `min(As, 1 - Ad)` to all four channels.
+- **The q coordinate was divided at the wrong place** (2026-09-19). `glTexCoord4` divided s, t and
+  r by q as it stored them, so `glGetFloatv(GL_CURRENT_TEXTURE_COORDS)` answered s/q where GL
+  answers s - and a q produced by **texture generation** was never divided at all, so eye-linear
+  projective texturing came out as if q were 1. The current coordinate is now stored as given and
+  the divide happens once, at the vertex, after generation (`gl_vertex_texcoord`). A size-4
+  texture-coordinate array's q is divided too, where it used to be dropped.
+- **Texture generation replaced an array's coordinates with glTexCoord's** (2026-09-19).
+  Generating only s kept "what glTexCoord left" for t - even for a vertex drawn from arrays, whose
+  t is the array's. Generation now starts from the vertex's own coordinate however it arrived.
+- **Queries that answered less than the state held** (2026-09-19).
+  `glGetFloatv(GL_CURRENT_TEXTURE_COORDS)` answered the constants 0 and 1 for r and q, from when
+  only s and t were tracked. `glGetIntegerv` refused `GL_COLOR_CLEAR_VALUE`, `GL_CURRENT_COLOR` and
+  `GL_FOG_COLOR` outright; it now maps them as Mesa does (`FLOAT_TO_INT`, `main/macros.h:111`).
+  And `glGetDoublev` - which copies exactly `gl_query_element_count` values - copied one component
+  of `GL_FOG_COLOR` and of the three current-raster vectors, leaving three of the caller's four as
+  they were.
+- **`glPopAttrib` left the 1D texture enable and binding alone** (2026-09-19). The attribute entry
+  had carried both fields since 1D textures landed; nothing filled or read them.
 
 - **Shader state was rewritten under draws that had not run yet** (2026-09-17). The pixel shader
   payload is one buffer shared by every draw in a frame, and on hardware a draw is *built* when

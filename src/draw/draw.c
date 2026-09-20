@@ -1,4 +1,5 @@
 #include "oops/draw.h"
+#include "agc/tiler.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -107,16 +108,54 @@ static const uint8_t s_font[95][8] = {
 
 };
 
-oops_surface_t oops_display_get_surface(oops_display_t *disp) {
-  oops_surface_t surf = {NULL, 0, 0, 0};
-  if (!disp)
-    return surf;
+/* oops_display_get_surface is the display's (src/display.c): which buffer the
+ * next flip shows is its to know. Nothing here reaches the display. */
 
-  surf.pixels = oops_display_get_framebuffer(disp);
-  surf.width = oops_display_get_width(disp);
-  surf.height = oops_display_get_height(disp);
-  surf.pitch = surf.width;
-  return surf;
+/*
+ * **A pixel's index in a surface, in either layout** (<oops/draw.h>). Linear
+ * is rows `pitch` apart. OOPS_SURFACE_RX is 128 x 128 blocks row by row, `pitch`
+ * pixels to a row of blocks, each block in the GPU's 64KB_R_X order.
+ * agc_tile_pixel gives that order as the XOR of one term per coordinate bit, so
+ * a pixel's place in its block is x's part XOR y's part. Each part comes from a
+ * table of 128 built from agc_tile_pixel the first time a tiled surface is
+ * drawn on. Building the tables twice at once would write the same values, so
+ * concurrent first draws are harmless.
+ */
+static uint32_t s_rx_x[128], s_rx_y[128];
+static int s_rx_ready;
+
+static void oops_rx_tables(void) {
+  for (uint32_t i = 0; i < 128u; i++) {
+    s_rx_x[i] = agc_tile_pixel(i, 0);
+    s_rx_y[i] = agc_tile_pixel(0, i);
+  }
+  s_rx_ready = 1;
+}
+
+static inline size_t oops_surf_index(const oops_surface_t *s, uint32_t x,
+                                     uint32_t y) {
+  if (s->layout == OOPS_SURFACE_RX) {
+    if (!s_rx_ready)
+      oops_rx_tables();
+    const size_t block =
+        (size_t)(y >> 7) * (size_t)(s->pitch >> 7) + (size_t)(x >> 7);
+    return block * 16384u + (size_t)(s_rx_x[x & 127u] ^ s_rx_y[y & 127u]);
+  }
+  return (size_t)y * s->pitch + (size_t)x;
+}
+
+/* One row's span [x0, x1) set to `color`, or `color` composited over it. The
+ * linear case keeps the row pointer it always had. */
+static void oops_span_fill(oops_surface_t *s, int y, int x0, int x1,
+                           oops_color_t color) {
+  if (s->layout == OOPS_SURFACE_RX) {
+    for (int x = x0; x < x1; x++)
+      s->pixels[oops_surf_index(s, (uint32_t)x, (uint32_t)y)] = color;
+    return;
+  }
+  uint32_t *row = s->pixels + (size_t)y * s->pitch;
+  for (int x = x0; x < x1; x++)
+    row[x] = color;
 }
 
 /* Straight-alpha source-over of one pixel: out = src.rgb * a + dst.rgb * (1 -
@@ -137,7 +176,7 @@ static inline uint32_t oops_src_over(uint32_t src, uint32_t dst) {
 }
 
 oops_surface_t oops_surface_from_sprite(const oops_sprite_t *sprite) {
-  oops_surface_t s = {NULL, 0, 0, 0};
+  oops_surface_t s = {NULL, 0, 0, 0, OOPS_SURFACE_LINEAR};
   if (!sprite || !sprite->pixels)
     return s;
   /* Read-only alias: the surface is a blit source only, never a draw target. */
@@ -153,12 +192,8 @@ void oops_draw_clear(oops_surface_t *surf, oops_color_t color) {
     return;
   /* Row by row: a surface can be a window onto a wider buffer, so pitch is not
    * width. */
-  for (uint32_t y = 0; y < surf->height; y++) {
-    uint32_t *row = surf->pixels + (size_t)y * surf->pitch;
-    for (uint32_t x = 0; x < surf->width; x++) {
-      row[x] = color;
-    }
-  }
+  for (uint32_t y = 0; y < surf->height; y++)
+    oops_span_fill(surf, (int)y, 0, (int)surf->width, color);
 }
 
 void oops_draw_pixel(oops_surface_t *surf, int x, int y, oops_color_t color) {
@@ -167,7 +202,7 @@ void oops_draw_pixel(oops_surface_t *surf, int x, int y, oops_color_t color) {
   if (x < 0 || (uint32_t)x >= surf->width || y < 0 ||
       (uint32_t)y >= surf->height)
     return;
-  surf->pixels[(size_t)y * surf->pitch + (size_t)x] = color;
+  surf->pixels[oops_surf_index(surf, (uint32_t)x, (uint32_t)y)] = color;
 }
 
 /* Clip [pos, pos + len) to [0, limit) in 64-bit, so absurd arguments clamp
@@ -198,12 +233,8 @@ void oops_draw_rect(oops_surface_t *surf, int x, int y, int w, int h,
   if (!oops_clip_span(y, h, surf->height, &y0, &y1))
     return;
 
-  for (int py = y0; py < y1; py++) {
-    uint32_t *row = surf->pixels + (size_t)py * surf->pitch;
-    for (int px = x0; px < x1; px++) {
-      row[px] = color;
-    }
-  }
+  for (int py = y0; py < y1; py++)
+    oops_span_fill(surf, py, x0, x1, color);
 }
 
 void oops_draw_rect_blend(oops_surface_t *surf, int x, int y, int w, int h,
@@ -226,9 +257,9 @@ void oops_draw_rect_blend(oops_surface_t *surf, int x, int y, int w, int h,
     return;
 
   for (int py = y0; py < y1; py++) {
-    uint32_t *row = surf->pixels + (size_t)py * surf->pitch;
     for (int px = x0; px < x1; px++) {
-      row[px] = oops_src_over(color, row[px]);
+      uint32_t *p = &surf->pixels[oops_surf_index(surf, (uint32_t)px, (uint32_t)py)];
+      *p = oops_src_over(color, *p);
     }
   }
 }
@@ -257,8 +288,8 @@ void oops_draw_rect_gradient(oops_surface_t *surf, int x, int y, int w, int h,
     span = 1;
 
   for (int py = y0; py < y1; py++) {
-    uint32_t *rowp = surf->pixels + (size_t)py * surf->pitch;
     for (int px = x0; px < x1; px++) {
+      uint32_t *p = &surf->pixels[oops_surf_index(surf, (uint32_t)px, (uint32_t)py)];
       int t = vertical ? (py - y) : (px - x);
       if (t < 0)
         t = 0;
@@ -269,7 +300,7 @@ void oops_draw_rect_gradient(oops_surface_t *surf, int x, int y, int w, int h,
       uint32_t cg = (uint32_t)(ag + (bg - ag) * t / span);
       uint32_t cb = (uint32_t)(ab + (bb - ab) * t / span);
       uint32_t c = (ca << 24) | (cr << 16) | (cg << 8) | cb;
-      rowp[px] = oops_src_over(c, rowp[px]);
+      *p = oops_src_over(c, *p);
     }
   }
 }
@@ -381,7 +412,7 @@ void oops_draw_pixel_blend(oops_surface_t *surf, int x, int y,
   if (x < 0 || (uint32_t)x >= surf->width || y < 0 ||
       (uint32_t)y >= surf->height)
     return;
-  uint32_t *p = surf->pixels + (size_t)y * surf->pitch + (size_t)x;
+  uint32_t *p = &surf->pixels[oops_surf_index(surf, (uint32_t)x, (uint32_t)y)];
   *p = oops_src_over(color, *p);
 }
 
@@ -513,12 +544,19 @@ void oops_draw_blit(oops_surface_t *dst, int dx, int dy,
     return;
 
   for (int y = 0; y < sh; y++) {
-    const uint32_t *src_row =
-        src->pixels + (size_t)(sy + y) * src->pitch + (size_t)sx;
-    uint32_t *dst_row =
-        dst->pixels + (size_t)(dy + y) * dst->pitch + (size_t)dx;
+    if (src->layout == OOPS_SURFACE_LINEAR && dst->layout == OOPS_SURFACE_LINEAR) {
+      const uint32_t *src_row =
+          src->pixels + (size_t)(sy + y) * src->pitch + (size_t)sx;
+      uint32_t *dst_row =
+          dst->pixels + (size_t)(dy + y) * dst->pitch + (size_t)dx;
+      for (int x = 0; x < sw; x++) {
+        dst_row[x] = src_row[x];
+      }
+      continue;
+    }
     for (int x = 0; x < sw; x++) {
-      dst_row[x] = src_row[x];
+      dst->pixels[oops_surf_index(dst, (uint32_t)(dx + x), (uint32_t)(dy + y))] =
+          src->pixels[oops_surf_index(src, (uint32_t)(sx + x), (uint32_t)(sy + y))];
     }
   }
 }
@@ -564,12 +602,12 @@ void oops_draw_blit_blend(oops_surface_t *dst, int dx, int dy,
     return;
 
   for (int y = 0; y < sh; y++) {
-    const uint32_t *src_row =
-        src->pixels + (size_t)(sy + y) * src->pitch + (size_t)sx;
-    uint32_t *dst_row =
-        dst->pixels + (size_t)(dy + y) * dst->pitch + (size_t)dx;
     for (int x = 0; x < sw; x++) {
-      dst_row[x] = oops_src_over(src_row[x], dst_row[x]);
+      const uint32_t s =
+          src->pixels[oops_surf_index(src, (uint32_t)(sx + x), (uint32_t)(sy + y))];
+      uint32_t *p =
+          &dst->pixels[oops_surf_index(dst, (uint32_t)(dx + x), (uint32_t)(dy + y))];
+      *p = oops_src_over(s, *p);
     }
   }
 }

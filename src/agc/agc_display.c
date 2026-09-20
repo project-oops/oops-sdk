@@ -3,7 +3,6 @@
 #include "agc/tiler.h"
 #include "oops/agc.h"
 #include "oops/gpu.h"
-#include "oops/heap.h"
 #include "oops/memory.h"
 #include "oops/system.h"
 #include "oops/time.h"
@@ -272,16 +271,25 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
    * reads and UI rendering run at L1/L2 cache speeds rather than issuing
    * uncached GDDR6 bus reads across Infinity Fabric. Falls back to direct
    * Garlic memory if Onion allocation fails.
+   *
+   * **Onion direct memory, through oops_mem_alloc - not the heap.** This came
+   * from oops_malloc from 2026-09-19 10:27 until that evening, which is neither
+   * of the things the comment above says: a large oops_malloc is an anonymous
+   * mmap with no GPU access asked for, returned 24 bytes past its page (the
+   * heap's block header). The GPU reads this buffer - the compute tiler does,
+   * and oops-gl drew into it and copied it - and it addresses it in 256-byte
+   * units. oops_mem_alloc maps direct memory with OOPS_PROT_GPU_RW, 64 KiB
+   * aligned, which is what the comment asked for.
    */
   disp->target_gpu_fb[0] = (uint32_t *)disp->mapped_base;
   disp->target_gpu_fb[1] =
       (uint32_t *)((unsigned char *)disp->mapped_base + AGC_STRIDE_BYTES);
   size_t scratch_bytes = (size_t)width * (size_t)height * sizeof(uint32_t);
-  void *scratch = oops_malloc(scratch_bytes);
+  void *scratch = oops_mem_alloc(scratch_bytes, 64 * 1024, OOPS_MEM_WB_ONION);
   if (scratch) {
     disp->linear_scratch_fb = (uint32_t *)scratch;
     disp->owns_scratch = 1;
-    agc_log("agc-scratch-heap", "scratch allocated in cached heap memory",
+    agc_log("agc-scratch-onion", "scratch allocated in cached Onion direct memory",
             (uint64_t)(uintptr_t)scratch);
   } else {
     disp->linear_scratch_fb =
@@ -471,17 +479,18 @@ unsigned int agc_display_get_height(const agc_display_t *disp) {
   return disp ? disp->height : 0;
 }
 
-/* Tiles the linear surface onto `dst` with the compute shader. Returns 0 when
- * the dispatch retired its fence, negative otherwise. */
-static int agc_gpu_tile(struct agc_display *disp, uint32_t *dst) {
+/* Tiles the linear surface `src` onto `dst` with the compute shader. Returns 0
+ * when the dispatch retired its fence, negative otherwise. */
+static int agc_gpu_tile(struct agc_display *disp, const uint32_t *src,
+                        uint32_t *dst) {
   uint32_t user_data[AGC_TILER_USER_DATA_COUNT];
   uint32_t groups_x = 0;
   uint32_t groups_y = 0;
 
-  if (!disp->gpu_queue || !disp->gpu_shader || !dst)
+  if (!disp->gpu_queue || !disp->gpu_shader || !src || !dst)
     return -1;
   if (agc_tiler_dispatch_params(user_data, &groups_x, &groups_y,
-                                (uint64_t)(uintptr_t)disp->linear_scratch_fb,
+                                (uint64_t)(uintptr_t)src,
                                 (uint64_t)(uintptr_t)dst, disp->width,
                                 disp->height) != 0) {
     return -1;
@@ -553,7 +562,7 @@ int agc_display_try_gpu_tiler(agc_display_t *disp) {
     disp->target_gpu_fb[1][i] = 0u;
   }
 
-  int rc = agc_gpu_tile(disp, disp->target_gpu_fb[1]);
+  int rc = agc_gpu_tile(disp, disp->linear_scratch_fb, disp->target_gpu_fb[1]);
   agc_log("agc-gpu-try", "dispatch rc", (uint64_t)(uint32_t)rc);
   if (rc != 0) {
     agc_gpu_teardown(disp);
@@ -595,7 +604,11 @@ int agc_display_try_gpu_tiler(agc_display_t *disp) {
   return 1;
 }
 
-int agc_display_flip(agc_display_t *disp) {
+/* Put the linear image `src` on screen: tiled onto the next scanout buffer and
+ * flipped. agc_display_flip passes the display's own linear surface;
+ * agc_display_present passes a caller's. With `src` NULL the next buffer is
+ * flipped as it stands - a renderer drew it in place (agc_display_flip_scanout). */
+static int agc_display_flip_from(agc_display_t *disp, const uint32_t *src) {
   if (!disp || !disp->ready)
     return -1;
 
@@ -604,10 +617,13 @@ int agc_display_flip(agc_display_t *disp) {
 
   uint64_t t_flip_start = oops_time_get_us();
 
-  /* Scanout buffer preparation: linear direct copy when tiling_mode == 1,
-   * CPU software display-tiling when tiling_mode == 0 (RDNA2 display-tiled). */
-  if (disp->tiling_mode == 1) {
-    const uint64_t *src64 = (const uint64_t *)disp->linear_scratch_fb;
+  /* Scanout buffer preparation: none when the buffer was drawn in place, a
+   * linear direct copy when tiling_mode == 1, CPU software display-tiling when
+   * tiling_mode == 0 (RDNA2 display-tiled). */
+  if (!src) {
+    /* Drawn in place. */
+  } else if (disp->tiling_mode == 1) {
+    const uint64_t *src64 = (const uint64_t *)src;
     uint64_t *dst64 = (uint64_t *)disp->target_gpu_fb[shown];
     size_t qwords = ((size_t)disp->width * disp->height * sizeof(uint32_t)) / sizeof(uint64_t);
     for (size_t i = 0; i < qwords; i++) {
@@ -620,24 +636,25 @@ int agc_display_flip(agc_display_t *disp) {
     /* Compute tiling, enabled only by agc_display_try_gpu_tiler() after it
      * matched this shader's output against the CPU tiler. A dispatch that stops
      * retiring later falls back rather than presenting a stale buffer. */
-    if (agc_gpu_tile(disp, disp->target_gpu_fb[shown]) != 0) {
+    if (agc_gpu_tile(disp, src, disp->target_gpu_fb[shown]) != 0) {
       agc_log("agc-gpu-fall", "dispatch failed mid-run, back to CPU tiling",
               disp->flip_count);
       agc_gpu_teardown(disp);
-      agc_tile_surface(disp->target_gpu_fb[shown], disp->linear_scratch_fb,
-                       disp->width, disp->height);
+      agc_tile_surface(disp->target_gpu_fb[shown], src, disp->width,
+                       disp->height);
     }
   } else {
-    /* CPU software tiling: swizzle linear scratch buffer into RDNA2 tiled scanout surface */
-    agc_tile_surface(disp->target_gpu_fb[shown], disp->linear_scratch_fb,
-                     disp->width, disp->height);
+    /* CPU software tiling: swizzle the linear image into RDNA2 tiled scanout surface */
+    agc_tile_surface(disp->target_gpu_fb[shown], src, disp->width,
+                     disp->height);
   }
 
   uint64_t t_tile_done = oops_time_get_us();
 
   if (disp->flip_count <= 5) {
     agc_log("agc-pix-0", "target_gpu_fb first pixel", (uint64_t)disp->target_gpu_fb[shown][0]);
-    agc_log("agc-scr-0", "linear_scratch_fb first pixel", (uint64_t)disp->linear_scratch_fb[0]);
+    if (src)
+      agc_log("agc-scr-0", "linear source first pixel", (uint64_t)src[0]);
   }
 
   disp->flip_count++;
@@ -661,6 +678,74 @@ int agc_display_flip(agc_display_t *disp) {
   }
 
   return frc;
+}
+
+int agc_display_flip(agc_display_t *disp) {
+  return disp ? agc_display_flip_from(disp, disp->linear_scratch_fb) : -1;
+}
+
+int agc_display_present(agc_display_t *disp, const uint32_t *pixels) {
+  return pixels ? agc_display_flip_from(disp, pixels) : -1;
+}
+
+/* The scanout buffers, for a renderer that draws them itself. Tiling mode 0 is
+ * the GPU's 64KB_R_X render-target swizzle the display tiler writes; 1 is rows. */
+int agc_display_scanout_layout(const agc_display_t *disp) {
+  if (!disp || !disp->ready)
+    return 0;
+  return disp->tiling_mode == 1 ? 1 : 2;
+}
+
+uint32_t *agc_display_scanout(agc_display_t *disp, int which) {
+  if (!disp || !disp->ready)
+    return (uint32_t *)0;
+  return disp->target_gpu_fb[which ? (disp->fb_index + 1) % 2 : disp->fb_index];
+}
+
+/* **Flip pacing for a buffer drawn in place.** The submit call queues and
+ * returns in microseconds, with up to 26 flips pending (obSCEne
+ * 080-video/visual-flip), so a renderer that drew the next buffer straight after
+ * a flip could be drawing into the buffer still on screen. Once no flip is
+ * pending, the last one submitted is on screen and the other buffer - the next -
+ * has left it. The same poll the display made before every flip until
+ * 2026-09-19: a millisecond at a time, for at most about 100 ms, and no wait at
+ * all where the status query is not linked. */
+int agc_display_wait_scanout(agc_display_t *disp) {
+  if (!disp || !disp->ready)
+    return -1;
+  if (disp->handle <= 0 || !sceVideoOutGetFlipStatus || !sceKernelUsleep)
+    return 0;
+  for (int i = 0; i < 100; i++) {
+    struct agc_flip_status status;
+    for (size_t k = 0; k < sizeof(status); k++)
+      ((unsigned char *)&status)[k] = 0;
+    if (sceVideoOutGetFlipStatus(disp->handle, &status) != 0)
+      return 0;
+    if (status.num_flip_pending <= 0)
+      return 0;
+    sceKernelUsleep(1000);
+  }
+  return 1;
+}
+
+int agc_display_flip_scanout(agc_display_t *disp) {
+  return agc_display_flip_from(disp, (const uint32_t *)0);
+}
+
+/* The scanout buffer last flipped is the one on screen: `fb_index` has already
+ * moved past it. Before the first flip both hold the image open() tiled into
+ * them, so either answers. */
+int agc_display_read_shown(agc_display_t *disp, uint32_t *pixels) {
+  if (!disp || !disp->ready || !pixels)
+    return -1;
+  const uint32_t *on_screen = disp->target_gpu_fb[(disp->fb_index + 1) % 2];
+  if (disp->tiling_mode == 1) {
+    for (size_t i = 0; i < (size_t)disp->width * disp->height; i++)
+      pixels[i] = on_screen[i];
+  } else {
+    agc_detile_surface(pixels, on_screen, disp->width, disp->height);
+  }
+  return 0;
 }
 
 void agc_display_clear(agc_display_t *disp, uint32_t color) {
@@ -726,7 +811,7 @@ void agc_display_close(agc_display_t *disp) {
     disp->shader_payload = (void *)0;
   }
   if (disp->owns_scratch && disp->linear_scratch_fb) {
-    oops_free(disp->linear_scratch_fb);
+    oops_mem_free(disp->linear_scratch_fb);
     disp->linear_scratch_fb = (uint32_t *)0;
     disp->owns_scratch = 0;
   }
