@@ -170,10 +170,28 @@ nulls levels out uses, and the library refused it until 2026-09-20.
 ## Where the console path differs from the software one
 
 The software rasteriser is the reference: it implements the whole of what is listed above. The
-console path is hardware, and a few features are still drawn differently or not at all -
-a smooth *textured* point or line and `GL_POLYGON_SMOOTH` (plain smooth points and lines are
-drawn there), texture units above the second, a volume's mip chain, and an
-occlusion query whose draws never test depth. Each one logs a line saying so the first time it
-matters, and `docs/GL_ROADMAP.md` lists them with what each is waiting on. A port that looks
-right on the host and wrong on the console should read the log first; it will usually name the
-feature.
+console path is hardware, and this is no longer a list of suspicions - as of 2026-09-20
+gl1-probe runs its whole suite on a console and reports **74 of 82 checks passing there**. What
+follows is what the other eight are.
+
+**The one most likely to reach your port: a pixel rectangle the CPU writes into the colour
+buffer does not appear.** That is `glDrawPixels`, `glBitmap`, `glCopyPixels` and `glAccum` -
+six of the eight failures, one cause, `REQ-20260920T2230Z-7c31` on the obSCEne bus. If your
+program draws a HUD, a loading bar, a font through `glutBitmapCharacter`, or anything else by
+putting pixels straight into the framebuffer, **that is the part that will be missing** while
+the geometry around it is correct. Two things it is *not*: `glReadPixels` of colour, depth or
+stencil all work, and so does `glDrawPixels` of a **stencil** rectangle.
+
+The other two failures are narrower. `glBlendColor`'s green channel comes back as the constant's
+alpha on the console (`REQ-20260920T2320Z-4b8d`), so `GL_CONSTANT_COLOR` blending is off in one
+channel; and `glDrawBuffer(GL_FRONT_AND_BACK)` reaches the back buffer correctly and the front
+one incorrectly.
+
+Then the features that are drawn differently rather than wrongly: a smooth *textured* point or
+line and `GL_POLYGON_SMOOTH` (plain smooth points and lines are drawn there and pass on
+hardware), texture units above the second, a volume's mip chain, and an occlusion query whose
+draws never test depth. Each of those logs a line saying so the first time it matters.
+
+`docs/GL_ROADMAP.md` lists every one with the pixel it produced and what it is waiting on. A
+port that looks right on the host and wrong on the console should read the log first; it will
+usually name the feature.
