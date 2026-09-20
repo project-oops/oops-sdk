@@ -4317,6 +4317,11 @@ void gl_pixel_fragment(gl_context_t *ctx, const gl_pixel_frags_t *pf, int x, int
     uint8_t *sp = pf->ops.stencil_test ? gl_zs_stencil_ptr(ctx, x, y) : NULL;
     gl_fragment_tail(ctx, &pf->ops, &ctx->framebuffer[i], dz, sp, pf->z, depth_failed,
                      c[0], c[1], c[2], c[3]);
+    /* The CPU has written a colour word, so it owes a drain before anything reads the buffer -
+     * gl_color_cpu_drain. Marked even when the tail wrote nothing (a failed depth test, a
+     * zero colour mask): the span costs a few cache lines at its ends and getting this wrong
+     * costs a frame that is right on the host and empty on the console. */
+    gl_color_cpu_touched(ctx, ctx->framebuffer, i);
 }
 
 #ifdef OOPS_HOST_BUILD

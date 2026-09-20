@@ -6690,6 +6690,92 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
   oops_display_close(disp);
 }
 
+/*
+ * **Every CPU pixel operation leaves nothing outstanding.**
+ *
+ * On the scanout path the colour buffer is the display's own memory, mapped write-combined, and
+ * a WC store is not ordered against a later load - so a pixel rectangle the CPU wrote can be
+ * read back, by this CPU or by the CP's DMA into `readback`, as whatever was there before. That
+ * is what six of gl1-probe's eight hardware failures were on 2026-09-20: `raster-ops`,
+ * `pixel-transfer`, `pixel-fragments`, `index-pixels`, `accumulation` and `array-types`, every
+ * one of them the CPU putting colour into the render target, every one of them passing on the
+ * host. `stencil-pixels` passed beside them because the stencil buffer is memory the CPU owns
+ * at both ends.
+ *
+ * `gl_color_cpu_drain` is the barrier and this test cannot see it: the host build compiles the
+ * `sfence` out, because a host framebuffer is ordinary memory. **What it can see is the
+ * bookkeeping that decides when the barrier runs**, which is the half that would rot silently -
+ * a new pixel operation that forgets `gl_raster_wrote`, or a fragment path that stops calling
+ * `gl_color_cpu_touched`, would leave the span behind and cost another console run to find.
+ *
+ * So: the span grows when a fragment is written, and every public operation that writes one
+ * ends with it empty.
+ */
+static void test_gl_cpu_pixel_ops_drain_what_they_wrote(void) {
+  const int W = 16, H = 16;
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  (void)glGetError();
+  glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0, 16.0, 0.0, 16.0, -1.0, 1.0);
+  glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  static GLubyte img[4 * 4 * 4];
+  for (int i = 0; i < 16; i++) {
+    img[i * 4] = 255; img[i * 4 + 1] = 0; img[i * 4 + 2] = 0; img[i * 4 + 3] = 255;
+  }
+  static const GLubyte ones[4] = {0xf0, 0xf0, 0xf0, 0xf0};
+
+  /* A fresh context owes nothing. */
+  ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
+
+  /* **The span grows with the fragments written into it.** Driven directly, because every
+   * public entry point drains on its way out and so can never be caught holding one. */
+  gl_pixel_frags_t pf;
+  gl_pixel_frags_begin(ctx, &pf);
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  gl_pixel_fragment(ctx, &pf, 4, 4, red);
+  ASSERT_TRUE(ctx->cpu_color_lo < ctx->cpu_color_hi);
+  ASSERT_EQ(ctx->cpu_color_hi - ctx->cpu_color_lo, (size_t)1);
+  ASSERT_TRUE(ctx->cpu_color_buf == ctx->framebuffer);
+  gl_pixel_fragment(ctx, &pf, 9, 4, red);
+  /* Same row, five columns along: one span covering both, not two records. */
+  ASSERT_EQ(ctx->cpu_color_hi - ctx->cpu_color_lo, (size_t)6);
+  gl_color_cpu_drain(ctx);
+  ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
+
+  /* **And each public operation drains its own.** These are the four that write colour with the
+   * CPU, which is the whole of the failing set. */
+  glWindowPos2i(2, 2);
+  glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
+  ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
+
+  glColor3f(1.0f, 1.0f, 1.0f);
+  glWindowPos2i(8, 8);
+  glBitmap(4, 4, 0.0f, 0.0f, 0.0f, 0.0f, ones);
+  ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
+
+  glWindowPos2i(2, 10);
+  glCopyPixels(2, 2, 4, 4, GL_COLOR);
+  ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
+
+  glAccum(GL_LOAD, 1.0f);
+  glAccum(GL_RETURN, 1.0f);
+  ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
+
+  /* A depth rectangle colours fragments too, and takes the early return out of glDrawPixels -
+   * the path that needs its own drain rather than the one at the end of the function. */
+  static GLfloat depths[4 * 4];
+  for (int i = 0; i < 16; i++) depths[i] = 0.5f;
+  glWindowPos2i(2, 2);
+  glDrawPixels(4, 4, GL_DEPTH_COMPONENT, GL_FLOAT, depths);
+  ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
+
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 /* The pixels of a buffer that are not black. */
 static int count_lit_pixels(const uint32_t *fb, int n) {
   int lit = 0;
@@ -13219,6 +13305,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_secondary_color_and_color_sum);
     RUN_TEST(test_gl_fog_coordinates);
     RUN_TEST(test_gl_pixel_rectangles_are_fragments);
+    RUN_TEST(test_gl_cpu_pixel_ops_drain_what_they_wrote);
     RUN_TEST(test_gl_point_parameters_and_multi_draw);
     RUN_TEST(test_gl_lod_bias_and_generate_mipmap);
     RUN_TEST(test_gl_depth_stencil_pixels_and_depth_textures);

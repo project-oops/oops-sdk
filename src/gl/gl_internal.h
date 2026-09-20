@@ -752,6 +752,28 @@ typedef struct gl_context {
      * on the console until REQ-20260919T1927Z-7e21 measures the swizzle. */
     GLboolean hw_rx;
     GLboolean color_tiled;
+    /*
+     * **The span of a colour buffer the CPU has written and not yet made real**, as word indices
+     * into `cpu_color_buf`; `cpu_color_lo >= cpu_color_hi` means there is nothing outstanding.
+     *
+     * On the scanout path the colour buffer is the display's own memory, which the CPU maps
+     * write-combined. A write to it goes into a write-combining buffer and reaches memory when
+     * that buffer is evicted, which is **not** ordered against a later read - the x86 rule is
+     * that WC writes are weakly ordered and a read may be served before them. So a pixel
+     * rectangle written by the CPU and read back by the CPU, with no fence between, can return
+     * what was there before, and the same is true of the CP's DMA copy into `readback`.
+     *
+     * That is what gl1-probe measured on 2026-09-20: `raster-ops`, `pixel-transfer`,
+     * `pixel-fragments`, `index-pixels`, `accumulation` and `array-types` all failed on the
+     * console and passed on the host, and every one of them is the CPU putting colour into the
+     * render target. `stencil-pixels` passed beside them, because the stencil buffer is ordinary
+     * memory the CPU owns at both ends.
+     *
+     * gl_color_cpu_drain makes the span real. See gl_rx.h.
+     */
+    size_t cpu_color_lo;
+    size_t cpu_color_hi;
+    uint32_t *cpu_color_buf;
     uint32_t width;
     uint32_t height;
     float *depth_buffer;
@@ -2161,6 +2183,30 @@ static inline uint8_t *gl_zs_stencil_ptr(gl_context_t *ctx, int x, int y) {
  * 128 x 128 blocks row by row, each addressed through the display tiler's own vectors
  * (agc_tile_pixel). The CP's copy of such a buffer is the same bytes, so it is addressed the
  * same way. `color_tiled` says which, for every colour buffer of the context at once. */
+/* **Makes the CPU's outstanding colour writes real**, so that a later read - by this CPU, by the
+ * CP's DMA, or by the display - sees them. Nothing to do when the span is empty, which is every
+ * frame that draws only with the GPU (gl_context.c). */
+void gl_color_cpu_drain(gl_context_t *ctx);
+
+/* **One word of a colour buffer the CPU has just written**, added to the outstanding span. Two
+ * comparisons per fragment, which is why the span is one range rather than a list: a pixel
+ * rectangle is contiguous in `y` and its fragments land in a band, so one range costs a few
+ * extra cache lines at the ends and no bookkeeping. A write to a *different* buffer drains the
+ * one before it, because the span names a single buffer.
+ *
+ * `gl_color_cpu_drain` is what makes it real; see the fields' comment for why it is needed. */
+static inline void gl_color_cpu_touched(gl_context_t *ctx, uint32_t *buf, size_t i) {
+    if (ctx->cpu_color_buf != buf) {
+        gl_color_cpu_drain(ctx);
+        ctx->cpu_color_buf = buf;
+        ctx->cpu_color_lo = i;
+        ctx->cpu_color_hi = i + 1u;
+        return;
+    }
+    if (i < ctx->cpu_color_lo) ctx->cpu_color_lo = i;
+    if (i + 1u > ctx->cpu_color_hi) ctx->cpu_color_hi = i + 1u;
+}
+
 static inline size_t gl_color_index(const gl_context_t *ctx, int x, int y) {
     const uint32_t row = ctx->height - 1u - (uint32_t)y;
     if (ctx->color_tiled) {

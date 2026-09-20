@@ -319,6 +319,25 @@ static void gl_raster_sync(gl_context_t *ctx) {
     ctx->readback_of = NULL;
 }
 
+/*
+ * **The other end of gl_raster_sync**: the CPU has finished putting pixels into the colour
+ * buffer, so the frame is no longer the clear it started as, and the words owe a drain before
+ * anything reads them back.
+ *
+ * On the scanout path the colour buffer is write-combined display memory, and a WC store is not
+ * ordered against a later load - so without this the pixels can be read back, by this CPU or by
+ * the CP's DMA, as whatever was there before. `gl_hw_flush` drains as well, which covers a read
+ * that flushes first; this covers one that does not, and costs a fence per pixel operation
+ * rather than per fragment.
+ *
+ * Every path in this file that wrote a fragment ends here. That is six places rather than four,
+ * because glDrawPixels and glCopyPixels each have a depth-or-stencil arm that returns early.
+ */
+static void gl_raster_wrote(gl_context_t *ctx) {
+    ctx->fb_cleared = GL_TRUE;
+    gl_color_cpu_drain(ctx);
+}
+
 void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type,
                   const GLvoid *pixels) {
     if (gl_list_recording() &&
@@ -374,7 +393,7 @@ void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type,
                 }
             }
         }
-        ctx->fb_cleared = GL_TRUE;
+        gl_raster_wrote(ctx);
         return;
     }
 
@@ -400,7 +419,7 @@ void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type,
             gl_zoomed_fragments(ctx, &pf, sx, sy, c);
         }
     }
-    ctx->fb_cleared = GL_TRUE;
+    gl_raster_wrote(ctx);
 }
 
 void glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type) {
@@ -474,7 +493,7 @@ void glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type) 
             }
         }
         gl_raster_scratch_free(vals);
-        ctx->fb_cleared = GL_TRUE;
+        gl_raster_wrote(ctx);
         return;
     }
 
@@ -524,7 +543,7 @@ void glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type) 
         }
     }
     gl_raster_scratch_free(src);
-    ctx->fb_cleared = GL_TRUE;
+    gl_raster_wrote(ctx);
 }
 
 /* A bitmap is one bit per pixel, drawn in the current raster colour, and it **moves the raster
@@ -592,7 +611,7 @@ void glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig,
                 }
             }
         }
-        ctx->fb_cleared = GL_TRUE;
+        gl_raster_wrote(ctx);
     }
 
     /* The move happens whatever was drawn, including for a null or empty bitmap. */
@@ -775,7 +794,7 @@ void glAccum(GLenum op, GLfloat value) {
             }
         }
     }
-    ctx->fb_cleared = GL_TRUE;
+    gl_raster_wrote(ctx);
 }
 
 /* The polygon stipple: a 32x32 bitmap, unpacked as glBitmap unpacks one - rows of four bytes,

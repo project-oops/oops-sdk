@@ -12,6 +12,20 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Fixed
 
+- **A pixel rectangle the CPU wrote could be read back as what was there before** (2026-09-20).
+  On the scanout path the colour buffer is the display's own memory, mapped **write-combined**,
+  and on x86 a WC store is not ordered against a later load - so `glDrawPixels`, `glBitmap`,
+  `glCopyPixels` and `glAccum` wrote pixels that the next read, by this CPU or by the CP's DMA
+  into `readback`, could miss entirely. Six of gl1-probe's eight hardware failures were this one
+  thing, and `stencil-pixels` passed beside them because the stencil buffer is memory the CPU
+  owns at both ends.
+  `gl_color_cpu_drain` makes those writes real: a `clflush` over the span written and an
+  `sfence`, at the end of every CPU pixel operation and at every flush. Only the span, because a
+  full-screen buffer is eight megabytes and a `glBitmap` glyph is a hundred bytes.
+  **This is reasoned from the architecture rather than measured**, so `REQ-20260920T2230Z-7c31`
+  stands; its control arm is what would confirm the cause is the store ordering and not
+  something the fence happens to hide.
+
 - **The four-parameter vertex shader was never written into the payload** (2026-09-20).
   `gl_vs_build_param4` was written, unit-tested against a scratch buffer, and wired into the
   offset a draw selects when it needs four parameters - and `glContextCreate` never called it,

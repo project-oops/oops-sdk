@@ -182,8 +182,53 @@ static void gl_scanout_begin(gl_context_t *ctx) {
 static inline __attribute__((unused)) void gl_hw_dump_stream(const gl_context_t *ctx, uint32_t total_words) { (void)ctx; (void)total_words; }
 #endif
 
+/*
+ * **The CPU's outstanding colour writes, made real.**
+ *
+ * `sfence` is the one that matters and `clflush` is the one that is usually a no-op, which is
+ * the opposite of how it reads. On the scanout path the colour buffer is the display's memory,
+ * mapped write-combined: a store goes into a write-combining buffer, reaches memory whenever
+ * that buffer is evicted, and **is not ordered against a later load** - so a pixel rectangle
+ * the CPU wrote can be read back, by this CPU or by the CP's DMA, as what was there before.
+ * `sfence` drains the buffers and orders them ahead of everything after it. The `clflush` loop
+ * covers the other case, a buffer mapped write-back, where the data sits in the cache rather
+ * than in a WC buffer; on a WC line it costs a cycle and does nothing.
+ *
+ * Only the span that was written is flushed. A full-screen buffer is eight megabytes and a
+ * glBitmap glyph is a hundred bytes, so flushing the whole buffer would make a HUD cost more
+ * than the frame under it.
+ *
+ * **This is what gl1-probe's six pixel-rectangle failures were** - see `cpu_color_lo` in
+ * gl_internal.h for the measurement, and gl_rx.h for the path. It lives outside this file's
+ * target-only section because the host build calls it too, where it is the bookkeeping and no
+ * barrier: the host's framebuffer is ordinary memory.
+ */
+void gl_color_cpu_drain(gl_context_t *ctx) {
+    if (!ctx) return;
+    if (ctx->cpu_color_lo < ctx->cpu_color_hi && ctx->cpu_color_buf) {
+#if defined(__x86_64__) && !defined(OOPS_HOST_BUILD)
+        const char *end = (const char *)(ctx->cpu_color_buf + ctx->cpu_color_hi);
+        /* From the start of the first line to the end of the last, so a span that begins or
+         * ends mid-line is covered whole. */
+        const char *base = (const char *)((uintptr_t)(ctx->cpu_color_buf + ctx->cpu_color_lo) &
+                                          ~(uintptr_t)63);
+        for (const char *p = base; p < end; p += 64) __builtin_ia32_clflush((const void *)p);
+        __builtin_ia32_sfence();
+#endif
+    }
+    ctx->cpu_color_lo = 1u;
+    ctx->cpu_color_hi = 0u;
+}
+
 void gl_hw_flush(gl_context_t *ctx) {
-    if (!ctx || !ctx->use_hardware || !ctx->hw_frame_active || ctx->dcb_words == 0) {
+    if (!ctx) return;
+    /* **Before the early return, not after it.** A flush is where "everything issued so far is
+     * real" is promised, and that has to hold for a frame with nothing to submit as much as for
+     * one with draws in it - a glDrawPixels followed by a glReadPixels builds no command stream
+     * at all, and it is exactly the case that was failing. The CP's DMA copy below reads the
+     * colour buffer too, so the drain has to precede it either way. */
+    gl_color_cpu_drain(ctx);
+    if (!ctx->use_hardware || !ctx->hw_frame_active || ctx->dcb_words == 0) {
         return;
     }
 
