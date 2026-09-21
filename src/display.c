@@ -27,6 +27,14 @@ static int s_opened =
 
 oops_display_t *oops_display_open(oops_display_backend_t backend,
                                   unsigned int width, unsigned int height) {
+  return oops_display_open_adopting(backend, width, height, 0, 0);
+}
+
+oops_display_t *oops_display_open_adopting(oops_display_backend_t backend,
+                                           unsigned int width,
+                                           unsigned int height,
+                                           void *const *adopt,
+                                           int adopt_count) {
   struct oops_display *disp = &s_unified_display;
   /* A second open without a close would overwrite the pointer to a live backend
    * and leak it. Closing a backend whose open failed is a no-op, so this is
@@ -42,7 +50,7 @@ oops_display_t *oops_display_open(oops_display_backend_t backend,
   if (backend == OOPS_DISPLAY_BACKEND_AUTO ||
       backend == OOPS_DISPLAY_BACKEND_AGC) {
     disp->backend = OOPS_DISPLAY_BACKEND_AGC;
-    disp->agc = agc_display_open(width, height);
+    disp->agc = agc_display_open_adopting(width, height, adopt, adopt_count);
     s_opened = 1;
     return disp;
   }
@@ -54,6 +62,10 @@ oops_display_t *oops_display_open(oops_display_backend_t backend,
   if (backend == OOPS_DISPLAY_BACKEND_AUTO ||
       backend == OOPS_DISPLAY_BACKEND_GNM) {
     disp->backend = OOPS_DISPLAY_BACKEND_GNM;
+    /* The PS4 backend names no foreign buffers; a caller that asked is told by
+     * oops_display_adopted_index returning -1, not by the open failing. */
+    (void)adopt;
+    (void)adopt_count;
     disp->gnm = gnm_display_open(width, height);
     s_opened = 1;
     return disp;
@@ -224,6 +236,31 @@ uint32_t *oops_display_scanout(oops_display_t *disp, int which) {
   return agc_display_scanout(disp->agc, which);
 #else
   return gnm_display_scanout(disp->gnm, which);
+#endif
+}
+
+int oops_display_adopted_index(const oops_display_t *disp, int nth) {
+  if (!disp)
+    return -1;
+#if OOPS_TARGET_IS_PROSPERO
+  return agc_display_adopted_index(disp->agc, nth);
+#else
+  /* The PS4 backend names no foreign buffers, so there is never an index to
+   * report. A caller that gets -1 keeps whatever copy it was doing, which is
+   * what it was doing before this existed. */
+  (void)nth;
+  return -1;
+#endif
+}
+
+int oops_display_flip_index(oops_display_t *disp, int index) {
+  if (!disp)
+    return -1;
+#if OOPS_TARGET_IS_PROSPERO
+  return agc_display_flip_index(disp->agc, index);
+#else
+  (void)index;
+  return -1;
 #endif
 }
 

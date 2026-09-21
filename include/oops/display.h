@@ -119,6 +119,47 @@ int oops_display_flip_scanout(oops_display_t *disp);
  * OOPS_DISPLAY_SCANOUT_NONE - and nothing changes - without scanout buffers. */
 oops_display_scanout_layout_t oops_display_use_scanout(oops_display_t *disp);
 
+/*
+ * **Open the display scanning out buffers the caller allocated.**
+ *
+ * For a renderer that draws into a target of its own, in the layout
+ * oops_display_scanout_layout reports, and wants it shown without a copy. The
+ * buffers are named to the display, not handed over: the caller keeps
+ * ownership and must keep them alive and mapped for as long as they may be
+ * shown. Use oops_display_adopted_index to learn where each one landed, then
+ * oops_display_flip_index to show it.
+ *
+ * `adopt` may be null with a count of zero, which is exactly
+ * oops_display_open.
+ *
+ * **Why they have to be named here and not later.** VideoOut buffer
+ * registration is single-shot and immutable - measured, obSCEne
+ * `REQ-20260921T1202Z-9a4c`. Once a handle has buffers, a second registration
+ * returns SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED whether it repeats the set,
+ * extends it or starts elsewhere; sceVideoOutUnregisterBuffer(s) are not
+ * exported at all, so a set cannot be released; and a concurrent handle on the
+ * same output is refused. There is exactly one moment to name a buffer, and
+ * this is it.
+ *
+ * The practical consequence for a caller: the buffer must already exist before
+ * the display opens. A renderer whose target is allocated lazily - on its first
+ * frame, say - has to force that allocation first.
+ */
+oops_display_t *oops_display_open_adopting(oops_display_backend_t backend,
+                                           unsigned int width,
+                                           unsigned int height,
+                                           void *const *adopt,
+                                           int adopt_count);
+
+/* The flip index the nth adopted buffer was given, or -1 if there is no such
+ * buffer. `nth` indexes the array passed to oops_display_open_adopting. */
+int oops_display_adopted_index(const oops_display_t *disp, int nth);
+
+/* Flip a buffer by its index, including one from oops_display_adopt_buffer -
+ * as it stands, with nothing tiled or copied into it. 0 on success, negative
+ * without a display or if the platform refuses the flip. */
+int oops_display_flip_index(oops_display_t *disp, int index);
+
 /* Close output and release video resources */
 void oops_display_close(oops_display_t *disp);
 

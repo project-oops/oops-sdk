@@ -35,6 +35,18 @@ int agc_display_scanout_layout(const agc_display_t *disp);
 uint32_t *agc_display_scanout(agc_display_t *disp, int which);
 int agc_display_wait_scanout(agc_display_t *disp);
 int agc_display_flip_scanout(agc_display_t *disp);
+/* Open the display naming buffers the caller allocated alongside its own pair,
+ * so a renderer can be scanned out of its own target with no copy. VideoOut
+ * registration is single-shot (obSCEne `-9a4c`), so this is the only chance to
+ * name them - there is no adding one later. `adopt` may be null with a count of
+ * zero, which is exactly agc_display_open. */
+agc_display_t *agc_display_open_adopting(unsigned int width,
+                                         unsigned int height,
+                                         void *const *adopt, int adopt_count);
+/* The flip index the nth adopted buffer was given, or -1. */
+int agc_display_adopted_index(const agc_display_t *disp, int nth);
+/* Flip a buffer by index, including an adopted one. 0 on success. */
+int agc_display_flip_index(agc_display_t *disp, int index);
 void agc_display_close(agc_display_t *disp);
 
 /*

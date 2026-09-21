@@ -96,6 +96,11 @@ __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
 #define AGC_TOTAL_ALLOC_BYTES 0x2000000u /* 32 MB (16 x 2MB pages) */
 #define AGC_VM_BASE 0x4000000000ULL
 
+/* How many foreign buffers one display will name to VideoOut alongside its own
+ * pair. Two is enough for a renderer that double-buffers its own target, which
+ * is the case this exists for; the cap keeps the registration array fixed. */
+#define AGC_DISPLAY_MAX_ADOPT 2
+
 struct agc_display {
   int handle;
   unsigned int width;
@@ -116,6 +121,11 @@ struct agc_display {
   int gpu_accelerated;
   int tiling_mode;
   int owns_scratch;
+  /* Buffers this display did not allocate, named to VideoOut in the one
+   * registration it is allowed (see agc_display_open_adopting). They take the
+   * flip indices after target_gpu_fb's pair, so the first is index 2. */
+  void *adopted[AGC_DISPLAY_MAX_ADOPT];
+  int adopted_count;
   /* The compute-tiler path, populated only by agc_display_try_gpu_tiler(). */
   oops_gpu_queue_t *gpu_queue;
   oops_gpu_shader_t *gpu_shader;
@@ -133,6 +143,12 @@ static void agc_log(const char *tag, const char *msg, uint64_t val) {
 }
 
 agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
+  return agc_display_open_adopting(width, height, 0, 0);
+}
+
+agc_display_t *agc_display_open_adopting(unsigned int width,
+                                         unsigned int height,
+                                         void *const *adopt, int adopt_count) {
   struct agc_display *disp = &s_agc_display;
   for (size_t i = 0; i < sizeof(*disp); i++) {
     ((unsigned char *)disp)[i] = 0;
@@ -323,16 +339,44 @@ agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
   agc_log("agc-attr-0", "attr word 0", *(const uint64_t *)(attr + 0));
   agc_log("agc-attr-8", "attr word 1", *(const uint64_t *)(attr + 8));
 
-  /* 5. Register buffers */
-  struct SceVideoOutBuffer buffers[2];
+  /*
+   * 5. Register buffers - this display's two, and any the caller brought.
+   *
+   * **This is the only chance to name them.** VideoOut buffer registration is
+   * single-shot and immutable, measured on hardware (obSCEne
+   * `REQ-20260921T1202Z-9a4c`): a second `sceVideoOutRegisterBuffers2` on a
+   * handle that already has buffers returns `0x80290010`
+   * (`SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED`) whether it repeats the set, extends
+   * it, or starts at a different index; `sceVideoOutUnregisterBuffer(s)` are
+   * absent from `libSceVideoOut` altogether, so a set cannot be released; and a
+   * concurrent handle on the same output is refused. Nothing can be added
+   * later.
+   *
+   * So a renderer that wants its own buffer scanned out - drawing straight into
+   * it instead of copying through this display's - has to hand it over here,
+   * before the output has been registered at all. Adopted buffers take the
+   * indices after this display's own pair, so the first is flip index 2.
+   */
+  struct SceVideoOutBuffer buffers[2 + AGC_DISPLAY_MAX_ADOPT];
   for (size_t i = 0; i < sizeof(buffers); i++) {
     ((unsigned char *)buffers)[i] = 0;
   }
   buffers[0].data = disp->target_gpu_fb[0];
   buffers[1].data = disp->target_gpu_fb[1];
 
-  int rrc =
-      sceVideoOutRegisterBuffers2(disp->handle, 0, 0, buffers, 2, attr, 0, 0);
+  int registered = 2;
+  for (int i = 0; adopt && i < adopt_count && i < AGC_DISPLAY_MAX_ADOPT; i++) {
+    if (!adopt[i])
+      continue;
+    buffers[registered].data = adopt[i];
+    disp->adopted[i] = adopt[i];
+    registered++;
+  }
+  disp->adopted_count = registered - 2;
+
+  int rrc = sceVideoOutRegisterBuffers2(disp->handle, 0, 0, buffers, registered,
+                                        attr, 0, 0);
+  agc_log("agc-reg-count", "buffers registered", (uint64_t)(uint32_t)registered);
   agc_log("agc-reg-rc", "RegisterBuffers2 rc", (uint64_t)(uint32_t)rrc);
   if (rrc != 0) {
     disp->last_error = (int)(0xE4000000u | (uint32_t)(rrc & 0xFFFFFF));
@@ -700,6 +744,50 @@ uint32_t *agc_display_scanout(agc_display_t *disp, int which) {
   if (!disp || !disp->ready)
     return (uint32_t *)0;
   return disp->target_gpu_fb[which ? (disp->fb_index + 1) % 2 : disp->fb_index];
+}
+
+/*
+ * The flip index a buffer handed to agc_display_open_adopting was given, or -1.
+ *
+ * `nth` is the position in the array passed at open, so the first adopted
+ * buffer is `nth = 0`. Indices run after this display's own pair, which makes
+ * the first one 2 - but that is an implementation detail and callers should ask
+ * rather than assume it.
+ *
+ * **There was an agc_display_adopt_buffer here until 2026-09-21, and it could
+ * never have worked.** It re-registered the display's set with a foreign buffer
+ * appended, after the display was already open. obSCEne `-9a4c` then measured
+ * that VideoOut registration is single-shot and immutable: a second
+ * registration returns `0x80290010` (`SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED`)
+ * however it is shaped, unregistration is not exported at all, and a concurrent
+ * handle is refused. So adoption has to happen *at open*, which is where it now
+ * happens, and the function that promised otherwise is gone rather than left to
+ * be found and trusted.
+ */
+int agc_display_adopted_index(const agc_display_t *disp, int nth) {
+  if (!disp || !disp->ready || nth < 0 || nth >= disp->adopted_count)
+    return -1;
+  if (!disp->adopted[nth])
+    return -1;
+  return 2 + nth;
+}
+
+/* Flip a buffer by its index, as it stands - nothing tiled or copied into it.
+ * This display's own two are 0 and 1; an adopted buffer's index comes from
+ * agc_display_adopted_index. */
+int agc_display_flip_index(agc_display_t *disp, int index) {
+  if (!disp || !disp->ready || disp->handle <= 0 || !sceVideoOutSubmitFlip)
+    return -1;
+  if (index < 0)
+    return -1;
+
+  int rc = sceVideoOutSubmitFlip(disp->handle, index, 1, 0);
+  if (rc != 0) {
+    disp->last_error = (int)(0xE4000000u | (uint32_t)(rc & 0xFFFFFF));
+    return -1;
+  }
+  disp->flip_count++;
+  return 0;
 }
 
 /* **Flip pacing for a buffer drawn in place.** The submit call queues and
