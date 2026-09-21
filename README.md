@@ -6,7 +6,7 @@
 
 | 📖 **[Developer User Guide](docs/USER_GUIDE.md)** | 📚 **[Complete API Reference](docs/API_REFERENCE.md)** | 📐 **[Architecture Decisions](docs/DECISIONS.md)** |
 | :--- | :--- | :--- |
-| *Step-by-step tutorials from Hello World to 3D graphics, audio, and JIT.* | *Exhaustive technical reference covering all 25 subsystem headers in `include/oops/` — oops-gl alone counts 187 declared entry points, see [GL_ROADMAP.md](docs/GL_ROADMAP.md).* | *Numbered ADRs (D001–D009) capturing provenance, compiler design, W^X, and oops-gl's scope.* |
+| *Step-by-step tutorials from Hello World to 3D graphics, audio, and JIT.* | *Exhaustive technical reference covering all 25 subsystem headers in `include/oops/` — oops-gl's declared entry points are counted in [GL_ROADMAP.md](docs/GL_ROADMAP.md).* | *Numbered ADRs capturing provenance, compiler design, W^X, and oops-gl's scope.* |
 
 ---
 
@@ -65,9 +65,9 @@ Detailed signatures, parameters, return codes, hardware invariants, and code exa
 
 | Subsystem | Header | Key APIs | Capabilities & Hardware Invariants |
 |---|---|---|---|
-| **[Display & Framebuffer](docs/API_REFERENCE.md#1-display--video-output-oopsdisplayh)** | `<oops/display.h>` | `oops_display_open`, `flip`, `close` | Direct video memory scanning, hardware vsync flip, double buffering, host SDL2/headless fallback |
+| **[Display & Framebuffer](docs/API_REFERENCE.md#1-display--video-output-oopsdisplayh)** | `<oops/display.h>` | `oops_display_open`, `flip`, `close` | Direct video memory scanning, hardware vsync flip, double buffering, AGC on Prospero and GNM on Orbis |
 | **[2D Software Rendering](docs/API_REFERENCE.md#2-2d-software-drawing-canvas-oopsdrawh)** | `<oops/draw.h>` | `oops_draw_clear`, `rect`, `text` | Software rasterizer, 8x8 font rendering, clipping rectangles, RGBA/BGRA blend modes |
-| **[Fixed-Function 3D Instrument](docs/API_REFERENCE.md#3-fixed-function-3d-instrument-glglh)** | `<GL/gl.h>`, `<oops/gl.h>` | `glBegin`, `glVertex3f`, `glLoadIdentity` | OpenGL 1.1-class fixed function, lowering directly to AGC PM4 so the stream reads as evidence. **Not** the GL for applications - that is [oops-mesa](../oops-mesa/), which gives OpenGL 3.3 (D007) |
+| **[Fixed-Function 3D Instrument](docs/API_REFERENCE.md#3-fixed-function-3d-instrument-glglh)** | `<GL/gl.h>` | `glBegin`, `glVertex3f`, `glLoadIdentity` | OpenGL 1.1-class fixed function, lowering directly to AGC PM4 so the stream reads as evidence. **Not** the GL for applications - that is [oops-mesa](../oops-mesa/), which gives OpenGL 3.3 (D007) |
 | **[Hardware AGC & Tiler](docs/API_REFERENCE.md#4-hardware-rdna2-agc-graphics-oopsagch-oopsgpuh)** | `<oops/agc.h>`, `<oops/gpu.h>`, `<agc/tiler.h>` | `oops_gpu_create_graphics_queue`, `oops_agc_draw_primitive`, `agc_tile_surface` | Direct RDNA2 universal queue submit, PM4 packets, fence synchronization, 64 KB micro-tile morton swizzle |
 | **[Direct Physical Memory](docs/API_REFERENCE.md#5-memory-management--direct-memory-oopsmemoryh)** | `<oops/memory.h>` | `oops_mem_alloc`, `map_direct`, `free` | Direct physical memory mapping, Onion (coherent CPU/GPU) and Garlic (high-speed GPU) bus management |
 | **[Dynamic Code Gen (JIT)](docs/API_REFERENCE.md#6-jit--dynamic-executable-memory-oopsjith)** | `<oops/jit.h>` | `oops_jit_alloc`, `flush_icache`, `free` | W^X-compliant dual-mapped pages (`rx_addr` execution / `rw_addr` write), auto-fallback to `mprotect_fix` |

@@ -454,4 +454,4 @@ oops_pkg_term();
    * All RDNA2 AGC submissions must handle fence timeouts safely. Never lock the physical hardware command ring in a busy loop.
 2. **Clean-Room Verification**:
    * Never copy or inspect proprietary Sony SDK headers (`kernel.h`, `pad.h`, `agc.h`).
-   * All interfaces in `oops-sdk` are derived from mathematically verified reverse-engineering, open-source references, and physical silicon probes ([CONVENTIONS §1](../docs/CONVENTIONS.md)).
+   * All interfaces in `oops-sdk` are derived from mathematically verified reverse-engineering, open-source references, and physical silicon probes ([CONVENTIONS §1](https://github.com/project-oops/OOPS/blob/main/docs/CONVENTIONS.md#1-provenance-is-a-hard-boundary)).

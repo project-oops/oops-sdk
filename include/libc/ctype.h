@@ -11,6 +11,11 @@
 #ifndef OOPS_LIBC_CTYPE_H
 #define OOPS_LIBC_CTYPE_H
 
+/* C linkage for a C++ includer; `stdlib.h` carries the reasoning. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 static inline int isdigit(int c) { return c >= '0' && c <= '9'; }
 static inline int isxdigit(int c) {
     return isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
@@ -29,5 +34,9 @@ static inline int iscntrl(int c) { return (c >= 0 && c < 0x20) || c == 0x7f; }
 static inline int ispunct(int c) { return isgraph(c) && !isalnum(c); }
 static inline int tolower(int c) { return isupper(c) ? c + 32 : c; }
 static inline int toupper(int c) { return islower(c) ? c - 32 : c; }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* OOPS_LIBC_CTYPE_H */

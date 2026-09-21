@@ -790,3 +790,108 @@ void glutSolidTorus(GLdouble inner, GLdouble outer, GLint sides, GLint rings) {
 void glutWireTorus(GLdouble inner, GLdouble outer, GLint sides, GLint rings) {
     glut_torus(inner, outer, sides, rings, GLU_LINE);
 }
+
+/*
+ * The teapot, and it is the only solid here that is not generated.
+ *
+ * Every other shape in this file comes out of arithmetic - a quadric, or the vertices of a
+ * platonic solid. The teapot is 129 measured control points that Martin Newell digitised off his
+ * own teapot in 1975, so it is transcribed rather than derived, and it carries its source with it
+ * in `glut_teapot_data.h`.
+ *
+ * # Ten patches become thirty-two by symmetry
+ *
+ * The data holds ten bicubic Bezier patches and the rest of the pot is their mirrors, which is
+ * why 129 points describe a shape that renders as thirty-two patches. The data's z is up and the
+ * body is a surface of revolution about it, so:
+ *
+ *   - the rim, body, lid and bottom (patches 0-5) are drawn four times: as given, mirrored in x,
+ *     mirrored in y, and mirrored in both, which walks them round all four quadrants;
+ *   - the handle and spout (patches 6-9) lie in the x-z plane and are drawn twice, mirrored in y
+ *     only - a teapot has one of each, not four.
+ *
+ * That split is the reason for the `i < 6` below, and it is freeglut's own comment on the data
+ * turned into code.
+ *
+ * # Why the transform looks arbitrary
+ *
+ * `glutSolidTeapot(size)` is expected to put a teapot of roughly `size` units at the origin,
+ * y-up. The data is z-up, off-centre, and about two units tall, so the rotate-scale-translate
+ * here is the fixed correction every GLUT has applied since 1994. Matching it matters more than
+ * tidying it: a program ported to this platform draws the teapot it expects, at the size and
+ * orientation it expects, or the port is not a port.
+ *
+ * `GL_AUTO_NORMAL` is what makes this shade. The evaluator differentiates the surface and emits
+ * a normal per vertex, so nothing here computes one - which is just as well, because mirroring a
+ * patch reverses its winding and hand-computed normals would point inwards on half the pot.
+ */
+#include "glut_teapot_data.h"
+
+/* Patches a side, per patch. GLUT's own default, and enough that the silhouette is smooth at
+ * the sizes a title draws this. */
+#define GLUT_TEAPOT_GRID 14
+
+static void glut_teapot(GLdouble size, GLenum mode) {
+    /* Zeroed because `r` and `s` are only filled for the first six patches, and a compiler that
+     * cannot see the `i < 6` pairing would call them uninitialised. */
+    GLfloat p[4][4][3] = {{{0}}}, q[4][4][3] = {{{0}}};
+    GLfloat r[4][4][3] = {{{0}}}, s[4][4][3] = {{{0}}};
+    static const GLfloat tex[2][2][2] = {{{0.0f, 0.0f}, {1.0f, 0.0f}},
+                                         {{0.0f, 1.0f}, {1.0f, 1.0f}}};
+    const GLfloat half = (GLfloat)(size * 0.5);
+    int i, j, k, l;
+
+    glPushAttrib(GL_ENABLE_BIT | GL_EVAL_BIT);
+    glEnable(GL_AUTO_NORMAL);
+    glEnable(GL_NORMALIZE);
+    glEnable(GL_MAP2_VERTEX_3);
+    glEnable(GL_MAP2_TEXTURE_COORD_2);
+
+    glPushMatrix();
+    glRotatef(270.0f, 1.0f, 0.0f, 0.0f);   /* the data is z-up; GLUT hands back y-up */
+    glScalef(half, half, half);
+    glTranslatef(0.0f, 0.0f, -1.5f);       /* and sits off-centre until this moves it */
+
+    for (i = 0; i < GLUT_TEAPOT_N_INPUT_PATCHES; i++) {
+        for (j = 0; j < 4; j++) {
+            for (k = 0; k < 4; k++) {
+                for (l = 0; l < 3; l++) {
+                    /* `3 - k` reverses the patch as it is mirrored, so the mirrored copy keeps
+                     * the same parameter direction and its normals face outwards. */
+                    p[j][k][l] = cpdata_teapot[patchdata_teapot[i][j * 4 + k]][l];
+                    q[j][k][l] = cpdata_teapot[patchdata_teapot[i][j * 4 + (3 - k)]][l];
+                    if (l == 1) { q[j][k][l] = -q[j][k][l]; }
+
+                    if (i < 6) {
+                        r[j][k][l] = cpdata_teapot[patchdata_teapot[i][j * 4 + (3 - k)]][l];
+                        if (l == 0) { r[j][k][l] = -r[j][k][l]; }
+                        s[j][k][l] = cpdata_teapot[patchdata_teapot[i][j * 4 + k]][l];
+                        if (l == 0 || l == 1) { s[j][k][l] = -s[j][k][l]; }
+                    }
+                }
+            }
+        }
+
+        glMap2f(GL_MAP2_TEXTURE_COORD_2, 0.0f, 1.0f, 2, 2, 0.0f, 1.0f, 4, 2, &tex[0][0][0]);
+        glMapGrid2f(GLUT_TEAPOT_GRID, 0.0f, 1.0f, GLUT_TEAPOT_GRID, 0.0f, 1.0f);
+
+        glMap2f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 3, 4, 0.0f, 1.0f, 12, 4, &p[0][0][0]);
+        glEvalMesh2(mode, 0, GLUT_TEAPOT_GRID, 0, GLUT_TEAPOT_GRID);
+        glMap2f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 3, 4, 0.0f, 1.0f, 12, 4, &q[0][0][0]);
+        glEvalMesh2(mode, 0, GLUT_TEAPOT_GRID, 0, GLUT_TEAPOT_GRID);
+
+        if (i < 6) {
+            glMap2f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 3, 4, 0.0f, 1.0f, 12, 4, &r[0][0][0]);
+            glEvalMesh2(mode, 0, GLUT_TEAPOT_GRID, 0, GLUT_TEAPOT_GRID);
+            glMap2f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 3, 4, 0.0f, 1.0f, 12, 4, &s[0][0][0]);
+            glEvalMesh2(mode, 0, GLUT_TEAPOT_GRID, 0, GLUT_TEAPOT_GRID);
+        }
+    }
+
+    glPopMatrix();
+    glPopAttrib();
+}
+
+void glutSolidTeapot(GLdouble size) { glut_teapot(size, GL_FILL); }
+
+void glutWireTeapot(GLdouble size) { glut_teapot(size, GL_LINE); }

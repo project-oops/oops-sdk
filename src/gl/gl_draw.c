@@ -466,6 +466,15 @@ void glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     v->sg = ctx->cur_secondary[1];
     v->sb = ctx->cur_secondary[2];
     v->fogc = ctx->cur_fog_coord;
+    /* GL 2.0's generic attributes, latched with the vertex like every other current value. In
+     * immediate mode they are always `glVertexAttrib`'s - the arrays are not read between
+     * glBegin and glEnd - so this is the whole of it here, and it is skipped until this context
+     * has made a shader or a program (see `gl2_used`). */
+    if (ctx->gl2_used) {
+        for (int ai = 0; ai < OOPS_GL_MAX_VERTEX_ATTRIBS; ai++) {
+            for (int k = 0; k < 4; k++) v->attrib[ai][k] = ctx->vertex_attribs[ai].current[k];
+        }
+    }
     gl_vertex_texcoord(ctx, v, ctx->cur_texcoord);
 }
 
@@ -1214,21 +1223,41 @@ static void gl_ndc_to_screen(const gl_context_t *ctx, const float ndc[3], float 
  * the centre into the texture-coordinate parameter, which an untextured draw has spare, and the
  * shader turns the interpolated offset into GL's coverage (`gl_ps_patch_coverage`).
  *
- * Two cases are still aliased there and earn the log line. **A textured one**, because the
- * parameter the offset rides in is the texture coordinate and there is no other spare
- * interpolant. And **GL_POLYGON_SMOOTH**, whose coverage is the product of three edge fades
- * rather than one distance - a different shape of slot, and one nothing has needed yet.
+ * **A textured one smooths too since 2026-09-21.** That paragraph used to say it could not,
+ * because the offset rides in the texture coordinate and a textured draw reads all four of its
+ * components. What changed is that the fourth parameter works: it carries the second texture
+ * unit's coordinate, a draw with one unit does not read it, and such a draw can escalate to
+ * four parameters to give the offset a home. `gl_ps_patch_coverage_where` picks the shader and
+ * the interpolant together.
+ *
+ * Two cases are still aliased and earn the log line. **Two texture units**, where the fourth
+ * parameter is spoken for and only its `z` is spare - one float where three are needed. And
+ * **GL_POLYGON_SMOOTH**, whose coverage is the product of three edge fades rather than one
+ * distance, and which needs the pixels a triangle only partly covers - which the rasteriser
+ * does not raise, so the outer half of every edge would simply not be drawn.
  */
 static GLboolean gl_smoothing(gl_context_t *ctx, GLboolean enabled, GLenum kind) {
     if (!enabled) return GL_FALSE;
     if (!ctx->use_hardware) return GL_TRUE;
-    if (kind != GL_POLYGON && gl_effective_texture_id(ctx) == 0u) {
-        ctx->aa_hw_on = GL_TRUE;
+    const GLboolean textured = (GLboolean)(gl_effective_texture_id(ctx) != 0u);
+    /* The same condition `unit1_applied` uses at the draw, because it is the same question: does
+     * this draw read the fourth parameter for a texture of its own? */
+    const GLboolean two_units =
+        (GLboolean)(textured && ctx->hw_multitex && gl_unit_texture_id(ctx, 1u) != 0u);
+    if (!two_units) {
+        /* **A polygon leaves `aa_hw_on` alone**: its coverage is not an offset a corner carries,
+         * so `gl_aa_stamp` has nothing to write. `ctx->aa_edges`, which the caller sets around
+         * the draw, is what tells the hardware path a polygon is smoothing and which of its
+         * edges fade. */
+        if (kind != GL_POLYGON) {
+            ctx->aa_hw_on = GL_TRUE;
+            ctx->aa_hw_tex = textured;
+        }
         return GL_TRUE;
     }
     if (!ctx->hw_smooth_logged) {
-        gl_log_line("a smooth primitive is aliased on this path when it is textured, and a "
-                    "smooth polygon always: the coverage rides in the texture coordinate");
+        gl_log_line("a smooth primitive is aliased on this path when it uses two texture units: "
+                    "the coverage needs the interpolant the second unit's coordinate is in");
         ctx->hw_smooth_logged = GL_TRUE;
     }
     return GL_FALSE;
@@ -1249,9 +1278,109 @@ static GLboolean gl_smoothing(gl_context_t *ctx, GLboolean enabled, GLenum kind)
 static void gl_aa_stamp(const gl_context_t *ctx, gl_vertex_t *v, float across, float along,
                         float radius) {
     if (!ctx->aa_hw_on) return;
-    v->tc[0][0] = across;
-    v->tc[0][1] = along;
-    v->tc[0][3] = radius;
+    /* **Unit 1's coordinate when the draw is textured**, because unit 0's is the texture's own
+     * and is read. The vertex written for a four-parameter draw takes `tc[1]`'s x, y and w into
+     * the fourth parameter's x, y and w, which is the layout the coverage slot reads - so this
+     * is the same three stores into a different field, not a different shape. The draw escalates
+     * to four parameters for it; see where `params` is chosen. */
+    const size_t unit = ctx->aa_hw_tex ? 1u : 0u;
+    v->tc[unit][0] = across;
+    v->tc[unit][1] = along;
+    v->tc[unit][3] = radius;
+}
+
+/*
+ * **A smooth polygon's geometry, for the hardware path**: the triangle widened outward so the
+ * rasteriser raises the pixels its edges only partly cover, and the three edge distances the
+ * coverage slot reads.
+ *
+ * Takes the three clip positions and rewrites them; fills `att[j]` with vertex j's fourth
+ * parameter, `{d0*w, d1*w, d2*w, w}`. Answers false when the triangle has no area to work with,
+ * and then nothing is changed and the draw is the aliased one it was.
+ *
+ * **The distances need no per-vertex geometry.** The signed distance from a point to edge *i* is
+ * `λ_i * h_i` - the barycentric coordinate times the height from vertex *i* - so the attribute
+ * is one-hot: at vertex *j* only component *j* is non-zero, and it is that vertex's height. The
+ * interpolator does the rest. An edge that is **not** antialiased carries 1.0 at all three
+ * vertices instead, which interpolates to 1.0 everywhere and fades nothing - a polygon
+ * triangulated into several triangles must not fade across the diagonals it was cut along.
+ *
+ * **Each component is multiplied by that vertex's w, and w rides in the fourth slot**, because
+ * `v_interp` is perspective-correct and a distance to a line is screen-space linear. Dividing
+ * the one by the other in the shader gives the linear value exactly - the identity the textured
+ * prolog already uses to undo the same correction for `q`.
+ *
+ * **The widening is a scale about the incenter**, which moves every edge outward by the same
+ * distance: scaling by `1 + e/r` for an inradius `r` moves each edge out by `e`. One pixel is
+ * enough for a fade that reaches half a pixel either side, and the shader's kill removes
+ * whatever the widening added beyond it. Each vertex keeps its own attributes, which is what
+ * `gl_draw_line_quad` already does when it widens a line - the alternative is extrapolating
+ * every attribute to the moved corners, for an error of one pixel in a primitive's worth.
+ */
+static GLboolean gl_hw_polygon_smooth_setup(const gl_context_t *ctx, unsigned aa_edges,
+                                            float c0[4], float c1[4], float c2[4],
+                                            float att[3][4]) {
+    float *const c[3] = {c0, c1, c2};
+    const float vw = (float)(ctx->width ? ctx->width : 1u);
+    const float vh = (float)(ctx->height ? ctx->height : 1u);
+    /* Window positions, and the w each came from. A vertex at or behind the eye has no window
+     * position, so such a triangle keeps the aliased path. */
+    float px[3], py[3], pw[3];
+    for (int j = 0; j < 3; j++) {
+        const float w = c[j][3];
+        if (!(w > 1e-6f) && !(w < -1e-6f)) return GL_FALSE;
+        pw[j] = w;
+        px[j] = (c[j][0] / w * 0.5f + 0.5f) * vw;
+        py[j] = (0.5f - c[j][1] / w * 0.5f) * vh;
+    }
+    /* Twice the area, and the three side lengths - side `i` being the one opposite vertex `i`,
+     * which is the edge the software rasteriser's `w_i` measures against. */
+    const float a2 = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
+    const float area2 = a2 < 0.0f ? -a2 : a2;
+    if (!(area2 > 1e-6f)) return GL_FALSE;
+    float len[3];
+    len[0] = gl_sqrt((px[2] - px[1]) * (px[2] - px[1]) + (py[2] - py[1]) * (py[2] - py[1]));
+    len[1] = gl_sqrt((px[0] - px[2]) * (px[0] - px[2]) + (py[0] - py[2]) * (py[0] - py[2]));
+    len[2] = gl_sqrt((px[1] - px[0]) * (px[1] - px[0]) + (py[1] - py[0]) * (py[1] - py[0]));
+    const float perim = len[0] + len[1] + len[2];
+    if (!(perim > 1e-6f)) return GL_FALSE;
+
+    /* Vertex j's fourth parameter. Component i is this vertex's height when i is j and the edge
+     * fades, 1.0 at every vertex when it does not, and zero otherwise - all times w. */
+    for (int j = 0; j < 3; j++) {
+        for (int i = 0; i < 3; i++) {
+            const GLboolean fades = (GLboolean)((aa_edges >> ((i + 2) % 3)) & 1u);
+            float d;
+            if (!fades) {
+                d = 1.0f; /* no fade: one everywhere, so the clamp is one */
+            } else {
+                d = (i == j) ? (area2 / len[i]) : 0.0f; /* the height, or on the edge */
+            }
+            att[j][i] = d * pw[j];
+        }
+        att[j][3] = pw[j];
+    }
+
+    /* The incenter, in window coordinates, weighted by the opposite side lengths - and the
+     * inradius, twice the area over the perimeter. */
+    const float ix = (len[0] * px[0] + len[1] * px[1] + len[2] * px[2]) / perim;
+    const float iy = (len[0] * py[0] + len[1] * py[1] + len[2] * py[2]) / perim;
+    const float r = area2 / perim;
+    if (!(r > 1e-6f)) return GL_FALSE;
+    const float k = 1.0f + 1.0f / r; /* one pixel outward on every edge */
+
+    /* Back to clip space. Scaling the window position about the incenter is the same scale of
+     * the normalised device position about the incenter's, and multiplying by w undoes the
+     * divide this started with. z and w are left alone: the vertex keeps its depth, as a
+     * widened line's corners keep theirs. */
+    const float inx = (ix / vw - 0.5f) * 2.0f;
+    const float iny = (0.5f - iy / vh) * 2.0f;
+    for (int j = 0; j < 3; j++) {
+        const float nx = c[j][0] / pw[j], ny = c[j][1] / pw[j];
+        c[j][0] = (inx + k * (nx - inx)) * pw[j];
+        c[j][1] = (iny + k * (ny - iny)) * pw[j];
+    }
+    return GL_TRUE;
 }
 
 /* The quad a line occupies between two points already in NDC, `ox`/`oy` its half-width offset in
@@ -2020,6 +2149,16 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x08eu, 0x0000000fu}, /* CB_TARGET_MASK (patched) */
         {0x08fu, 0x0000000fu}, /* CB_SHADER_MASK: MRT0 four components (patched: MRT1 too) */
         {0x1e0u, 0x00000000u}, /* CB_BLEND0_CONTROL (patched) */
+        /* **Blending is per target.** The colour block keeps one control register for each MRT -
+         * radeonsi writes `R_028780_CB_BLEND0_CONTROL + i * 4` in a loop over all eight
+         * (`si_state.c:420`) - and `CB_BLEND1_CONTROL` is `0x028784`
+         * (`mesa/src/amd/common/amdgfxregs.h:12802`), context offset 0x1e1.
+         *
+         * Without it, a draw under `glDrawBuffer(GL_FRONT_AND_BACK)` blended into the back and
+         * *replaced* in the front, which is what gl1-probe's `front-and-back` measured: its back
+         * came out the cyan GL asks for and its front did not. Unbound it stays zero, which is
+         * blending off, which is what one colour target wants. */
+        {0x1e1u, 0x00000000u}, /* CB_BLEND1_CONTROL (patched: colour 0's, or 0 when unbound) */
         {0x200u, 0x00000000u}, /* DB_DEPTH_CONTROL (patched) */
         {0x201u, 0x00010000u}, /* DB_EQAA */
         {0x203u, 0x00000010u}, /* DB_SHADER_CONTROL: EARLY_Z_THEN_LATE_Z */
@@ -2182,6 +2321,11 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
             val = gl_f32_bits(ctx->polygon_offset_units);
         } else if (reg == 0x1e0u) {
             val = gl_compute_cb_blend_control(ctx);
+        } else if (reg == 0x1e1u) {
+            /* The second target blends exactly as the first does, because GL has one blend state
+             * and `GL_FRONT_AND_BACK` sends the same fragment to both. Left at zero when there is
+             * no second target, which is this register's disabled value. */
+            val = ctx->fb_also ? gl_compute_cb_blend_control(ctx) : 0u;
         } else if (reg == 0x202u) {
             val = gl_compute_cb_color_control(ctx);
         } else if (reg == 0x200u) {
@@ -2306,6 +2450,9 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     ctx->hw_color_control_dirty = GL_FALSE;
     ctx->hw_blend_color_dirty = GL_TRUE; /* not in the table above; first constant-factor draw sends it */
     ctx->hw_frame_tex = 0u; /* the new frame's descriptor slot holds nothing yet */
+    ctx->hw_desc_slot = 0u; /* and its textures start at the original table - see the ring */
+    ctx->hw_gl2_uniform_slot = 0u;    /* the GL 2.0 uniform ring restarts with the frame ... */
+    ctx->hw_gl2_uniform_program = 0u; /* ... and its first slot holds nothing */
     ctx->hw_params = 2u;    /* the stage table above bound the two-parameter vertex shader */
     ctx->hw_frame_active = GL_TRUE;
 }
@@ -2667,15 +2814,49 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
 
     gl_update_mvp(ctx);
 
+    /* **A GL 2.0 program replaces this stage entirely** (since 2026-09-21).
+     *
+     * With one in use the transform, the lighting and the texture coordinate generation below
+     * are not run: the vertex shader computes `gl_Position` and whatever it interpolates, and
+     * what the fixed-function code would have produced is what the shader was written to
+     * replace. Everything after the screen vertices is unchanged - clipping, culling, the
+     * polygon offset and the rasteriser are common to both.
+     *
+     * The shader runs **per triangle, per vertex**, so a vertex shared by a strip is computed
+     * more than once. That is the reference's arrangement rather than a decision about
+     * performance: this path defines the answer and the console path has to match it. */
+    gl_program_object_t *prog = gl_active_program(ctx);
+    const GLboolean prog_vs = (GLboolean)(prog != (gl_program_object_t *)0 && prog->vs);
+
     /* 1. Transform vertices to clip space */
     float c0[4], c1[4], c2[4];
     float in0[4] = {v0->x, v0->y, v0->z, v0->w};
     float in1[4] = {v1->x, v1->y, v1->z, v1->w};
     float in2[4] = {v2->x, v2->y, v2->z, v2->w};
 
-    mat4_transform_vec4(c0, &ctx->mvp, in0);
-    mat4_transform_vec4(c1, &ctx->mvp, in1);
-    mat4_transform_vec4(c2, &ctx->mvp, in2);
+    gl_shader_vertex_out_t vso[3];
+    if (prog_vs) {
+        const gl_vertex_t *vin[3] = {v0, v1, v2};
+        for (int i = 0; i < 3; i++) {
+            if (!gl_shader_run_vertex(ctx, prog, vin[i], &vso[i])) {
+                /* **Nothing is drawn, and the reason is on the log.** A shader that could not
+                 * be run is not a triangle to place somewhere plausible; drawing it with the
+                 * fixed-function transform instead would put geometry on screen that the
+                 * program never asked for. */
+                gl_record_error(ctx, GL_INVALID_OPERATION);
+                return;
+            }
+        }
+        for (int k = 0; k < 4; k++) {
+            c0[k] = vso[0].position[k];
+            c1[k] = vso[1].position[k];
+            c2[k] = vso[2].position[k];
+        }
+    } else {
+        mat4_transform_vec4(c0, &ctx->mvp, in0);
+        mat4_transform_vec4(c1, &ctx->mvp, in1);
+        mat4_transform_vec4(c2, &ctx->mvp, in2);
+    }
 
     /* User clip distances, in eye space, one per plane per vertex.
      *
@@ -2692,7 +2873,40 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
     for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
         if (ctx->clip_plane_enabled[i]) { any_clip = GL_TRUE; break; }
     }
-    if (ctx->cap_fog && ctx->fog_coord_src == GL_FOG_COORD) {
+    if (prog_vs) {
+        /* **A vertex shader's fog coordinate is `gl_FogFragCoord`, whatever GL_FOG_COORD_SRC
+         * says**, because the eye-space distance the other source would use is something only
+         * the fixed-function transform computed. A shader that writes nothing leaves it zero,
+         * which is a fog coordinate of zero rather than an unfogged fragment - the same as
+         * `glFogCoord(0)`.
+         *
+         * User clipping likewise moves to `gl_ClipVertex`. A shader that never writes one is
+         * not clipped at all: the distances stay zero, and zero is on the plane rather than
+         * behind it. The specification calls the result undefined; not clipping is the choice
+         * that loses no geometry. */
+        if (ctx->cap_fog) {
+            fog0 = gl_fog_factor(ctx, vso[0].vary[GL_SHADER_VARY_FOG]);
+            fog1 = gl_fog_factor(ctx, vso[1].vary[GL_SHADER_VARY_FOG]);
+            fog2 = gl_fog_factor(ctx, vso[2].vary[GL_SHADER_VARY_FOG]);
+        }
+        if (any_clip) {
+            for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
+                if (!ctx->clip_plane_enabled[i]) continue;
+                const float *p = ctx->clip_plane[i];
+                const gl_shader_vertex_out_t *s[3] = {&vso[0], &vso[1], &vso[2]};
+                float *dst[3] = {&cd0[i], &cd1[i], &cd2[i]};
+                for (int k = 0; k < 3; k++) {
+                    if (!s[k]->wrote_clip_vertex) { *dst[k] = 0.0f; continue; }
+                    const float *cv = s[k]->clip_vertex;
+                    *dst[k] = p[0] * cv[0] + p[1] * cv[1] + p[2] * cv[2] + p[3] * cv[3];
+                }
+            }
+            for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
+                if (!ctx->clip_plane_enabled[i]) continue;
+                if (cd0[i] < 0.0f && cd1[i] < 0.0f && cd2[i] < 0.0f) return;
+            }
+        }
+    } else if (ctx->cap_fog && ctx->fog_coord_src == GL_FOG_COORD) {
         /* GL 1.4's fog coordinate in place of the distance: the vertex's own value, used as given
          * - no absolute value - as Mesa's fixed-function vertex program passes it through
          * (main/ffvertex_prog.c:1062-1064). */
@@ -2713,7 +2927,7 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
         fog1 = gl_fog_factor(ctx, gl_sqrt(f1[0]*f1[0] + f1[1]*f1[1] + f1[2]*f1[2]));
         fog2 = gl_fog_factor(ctx, gl_sqrt(f2[0]*f2[0] + f2[1]*f2[1] + f2[2]*f2[2]));
     }
-    if (any_clip) {
+    if (any_clip && !prog_vs) {
         const gl_mat4_t *mv_clip = &ctx->modelview_stack[ctx->modelview_depth];
         float e0[4], e1[4], e2[4];
         mat4_transform_vec4(e0, mv_clip, in0);
@@ -2786,7 +3000,22 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
         }
     }
 
-    if (!ctx->cap_lighting) {
+    if (prog_vs) {
+        /* **`gl_FrontColor` and `gl_FrontSecondaryColor` are what the shader put here**, and
+         * neither lighting nor flat shading applies to them: a vertex shader *is* the lighting
+         * stage, and `glShadeModel(GL_FLAT)` names a stage that no longer exists. A program
+         * with no fragment shader still reaches the fixed-function texture combiner through
+         * these, which is what makes a half-programmable pipeline work. */
+        const gl_shader_vertex_out_t *s[3] = {&vso[0], &vso[1], &vso[2]};
+        float *dc[3] = {col0, col1, col2};
+        float *ds[3] = {sec0, sec1, sec2};
+        for (int k = 0; k < 3; k++) {
+            for (int i = 0; i < 4; i++) {
+                dc[k][i] = s[k]->vary[GL_SHADER_VARY_COLOR + i];
+                ds[k][i] = s[k]->vary[GL_SHADER_VARY_SECONDARY + i];
+            }
+        }
+    } else if (!ctx->cap_lighting) {
         /* **Colours are clamped to [0, 1] before they are rasterised** (GL 1.x, 2.14.9), as lit
          * ones already are. They were not until 2026-09-19: glColor3f(-1, ...) or a GL_BYTE
          * array of -128 wrapped to full intensity in the framebuffer's bytes. */
@@ -2799,7 +3028,7 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
             sec2[k] = (sec2[k] < 0.0f) ? 0.0f : ((sec2[k] > 1.0f) ? 1.0f : sec2[k]);
         }
     }
-    if (ctx->cap_lighting) {
+    if (ctx->cap_lighting && !prog_vs) {
         float p0[4] = {v0->x, v0->y, v0->z, v0->w};
         float n0[3] = {v0->nx, v0->ny, v0->nz};
         float in_col0[4] = {v0->r, v0->g, v0->b, v0->a};
@@ -2816,7 +3045,7 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
         gl_compute_lighting_side(ctx, p2, n2, in_col2, col2, sec2, back);
     }
 
-    if (ctx->shade_model == GL_FLAT) {
+    if (ctx->shade_model == GL_FLAT && !prog_vs) {
         /* The provoking vertex's colour, lit if lighting is on - computed from `pv` itself when
          * it is not one of the three, since its position and normal are what lighting reads.
          * Its secondary colour too: flat shading holds both. */
@@ -2895,6 +3124,23 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
     sv2.fog = fog2;
     sv2.sr = sec2[0]; sv2.sg = sec2[1]; sv2.sb = sec2[2];
 
+    /* What the shader interpolates, and the texture coordinates it wrote - which a program
+     * with no fragment shader still reaches the fixed-function combiner through. `vary` stays
+     * NULL without a program, which is what the rasteriser tests. */
+    sv0.vary = sv1.vary = sv2.vary = (const float *)0;
+    if (prog_vs) {
+        sv0.vary = vso[0].vary;
+        sv1.vary = vso[1].vary;
+        sv2.vary = vso[2].vary;
+        gl_screen_vertex_t *svp[3] = {&sv0, &sv1, &sv2};
+        for (int k = 0; k < 3; k++) {
+            for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+                const int base = GL_SHADER_VARY_TEXCOORD + (int)u * 4;
+                for (int i = 0; i < 4; i++) svp[k]->tc[u][i] = vso[k].vary[base + i];
+            }
+        }
+    }
+
     /* 4. Backface culling via 2D signed area (screen coordinates) */
     float area = (sv1.sx - sv0.sx) * (sv2.sy - sv0.sy) - (sv1.sy - sv0.sy) * (sv2.sx - sv0.sx);
 
@@ -2946,17 +3192,38 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
 
     /* 5. Hardware AGC Path (AMD RDNA2 GFX10.3) */
     if (ctx->use_hardware) {
+        /* **A GL 2.0 program draws with its own compiled pixel shader, or not at all.**
+         *
+         * The back end compiles the fragment stage at link time (`glsl_ps.c`); a program it
+         * would not generate for has `hw_ps_words` zero, and this refuses rather than running
+         * the fixed-function instruments in its place - which would put a picture on screen
+         * that no part of the program asked for, from a call that reported success.
+         *
+         * A program with **no** fragment stage is the one case that needs no compiled shader:
+         * the fixed-function pixel shader is what runs for it, exactly as the specification
+         * says, and its vertex shader's `gl_FrontColor` and `gl_TexCoord[]` are what reach it. */
+        if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words == 0u) {
+            if (!ctx->hw_prog_logged) {
+                ctx->hw_prog_logged = GL_TRUE;
+                gl_log_line(prog->hw_ps_log[0]
+                                ? prog->hw_ps_log
+                                : "this program's fragment shader has no console code");
+            }
+            gl_record_error(ctx, GL_INVALID_OPERATION);
+            return;
+        }
         if (ctx->hw_failed) return; /* the failure is on the log and the status query; nothing is drawn */
         if (!ctx->hw_frame_active) {
             gl_hw_begin_frame(ctx);
         }
 
         /* Room for the most one draw can emit below, counted rather than guessed: the depth block
-         * 72 (24 registers, first depth-tested draw only), the four per-draw state registers 12,
+         * 72 (24 registers, first depth-tested draw only), the four per-draw state registers 13
+         * (blending covers both targets in one packet, so five dwords there, not four),
          * viewport 6, depth range 4, scissor 4, clip planes and their enables 29,
          * CB_COLOR_CONTROL 3, the blend constant 6, shader and user data 21, the draw itself 5,
          * and the stencil surface's binding 15 (first stencil-tested draw only) and registers 5 -
-         * 182 dwords, held as OOPS_GL_DCB_DRAW_MAX_DW with some slack. **Plus the flush
+         * 183 dwords, held as OOPS_GL_DCB_DRAW_MAX_DW with some slack. **Plus the flush
          * trailer.** This was a bare 160 until 2026-09-19, which reserved nothing for the 46
          * dwords gl_hw_flush appends: a draw that just fitted left a stream that could not be
          * closed inside the buffer. */
@@ -2966,29 +3233,39 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
             gl_hw_begin_frame(ctx);
         }
 
-        /* **There is one descriptor slot, and every textured draw in the frame points at it.**
+        /* **There is a ring of descriptor slots, and each draw points at its own** (since
+         * 2026-09-21).
          *
-         * The image and sampler descriptors are copied to a single address below, and each draw
-         * hands the shader that same address - so a second texture bound later in the frame
-         * overwrites the first, and at the flush every textured draw samples whichever texture
-         * was bound last. The draws are built, not executed, so nothing notices until submit.
+         * There was one slot. Every textured draw handed the shader the same address, so a
+         * second texture bound later in the frame overwrote the first and every built draw
+         * would have sampled whichever was bound last - the draws are built, not executed, so
+         * nothing noticed until the submit. Submitting the frame on any descriptor change was
+         * what kept that correct, and the note here said a ring "would avoid it and is the
+         * change to make if a frame ever switches textures often enough to matter". A scene
+         * with twenty materials matters: it submitted twenty times a frame and waited on a
+         * fence each time.
          *
-         * Submitting the frame first is what gives the built draws the descriptors they were
-         * built with. It costs a flush per texture change, which is the price of one slot; a
-         * ring of slots like the vertex buffer's would avoid it and is the change to make if a
-         * frame ever switches textures often enough to matter. Only on a *different* texture:
-         * rebinding the same one, which a display list does constantly, changes nothing. */
+         * So a texture change now takes the next slot and the stream carries on. The wrap
+         * submits, and so does a border colour, which lives in a table a frame register names.
+         * See `OOPS_GL_DESC_RING_OFFSET`. Only a *different* texture takes a slot: rebinding
+         * the same one, which a display list does constantly, changes nothing. */
         GLuint eff_tex = gl_effective_texture_id(ctx);
         gl_texture_object_t *eff_obj = (gl_texture_object_t *)gl_lookup_texture(ctx, eff_tex);
         /*
          * **Which units this path applies**, and one log line for a texture it leaves out.
          *
-         * Unit 0 when it is textured, and unit 1 with it since 2026-09-20 (gl_multitex.h). Units
-         * above that are the software rasteriser's alone - and so is unit 1 when unit 0 has no
-         * texture, because this path's second stage combines against the first's result and
-         * there is no first. A unit that is left out earns the line whichever reason applies;
-         * saying "above GL_TEXTURE1" while dropping GL_TEXTURE1 would be worse than saying
-         * nothing.
+         * Unit 0 when it is textured, and unit 1 with it since 2026-09-20 (gl_multitex.h). The
+         * one unit this can leave out is **unit 1 when unit 0 has no texture**, because this
+         * path's second stage combines against the first's result and there is no first; that
+         * is what the line below reports.
+         *
+         * **It is not about units above the second, and this comment said it was until
+         * 2026-09-21.** There are none, anywhere: `OOPS_GL_MAX_TEXTURE_UNITS` is 2, every
+         * per-unit array in the library is that size, `GL_MAX_TEXTURE_UNITS` reports 2, and
+         * `glActiveTexture(GL_TEXTURE2)` is refused with `GL_INVALID_ENUM` by `gl_mt_unit` - in
+         * the software rasteriser exactly as here. The loop below can only ever take `tu` to 1.
+         * A third unit is a whole-library feature, not a gap in this path, and the docs that
+         * listed it as a console difference were wrong.
          */
         const GLboolean unit1_applied =
             (GLboolean)(ctx->hw_multitex && eff_tex != 0u && gl_unit_texture_id(ctx, 1u) != 0u);
@@ -3016,11 +3293,14 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
         GLboolean volume = GL_FALSE;
         if (eff_obj && eff_obj->target == GL_TEXTURE_3D) {
             volume = GL_TRUE;
-            /* **What is still missing is the mip chain, not the sample.** gl_tex_chain_levels
-             * builds none for a volume - a volume's levels halve depth as well, and the chain
-             * layout here is a 2D one - so LAST_LEVEL stays 0 and a minifying filter reads the
-             * base level on this path while the software rasteriser reads the chain. Said once,
-             * and only by a draw whose filter would have used it. */
+            /* **What is still missing is the mip chain, not the sample**, and the reason moved
+             * on 2026-09-21 from structural to measured. The chain layout was two-dimensional,
+             * which was reason enough; `gl_tex_chain_layout_3d` fixed that, and the console read
+             * the base level anyway - `volume-mipmap` answered `saw 0xffff0000`, red, level 0,
+             * with `LAST_LEVEL` 1 in the descriptor. Where a level sits inside a 3D image is not
+             * the 2D rule with a depth term, and `REQ-20260921T1300Z-9b73` asks what it is. See
+             * `gl_tex_chain_levels`. Said once, and only by a draw whose filter would have used
+             * the chain. */
             if (!ctx->hw_3d_logged && gl_filter_uses_mipmaps(eff_obj->min_filter)) {
                 gl_log_line("a 3D texture's mip chain is not built on this path: minification "
                             "samples the base level");
@@ -3105,11 +3385,25 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
          * glPolygonMode taken off GL_FILL, between two draws of a frame. */
         gl_ps_patch_stipple(ctx, gl_polygon_stipple_on(ctx));
         if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
-        /* **Antialiasing's coverage** (since 2026-09-20), in the untextured shader's slot only -
-         * see gl_smoothing for why a textured smooth primitive is aliased here. Set on every
-         * draw, like the two above: a triangle after a smooth point must stop weighing its alpha
-         * by a texture coordinate. */
-        gl_ps_patch_coverage(ctx, (GLboolean)(ctx->aa_hw_on && eff_tex == 0u));
+        /* **Antialiasing's coverage** (since 2026-09-20; the textured shader's slot too since
+         * 2026-09-21). Set on every draw, like the two above: a triangle after a smooth point
+         * must stop weighing its alpha by an interpolant meant for something else, and a
+         * textured smooth point after an untextured one must move the slot to the other shader.
+         * `gl_smoothing` has already decided whether this draw smooths at all. */
+        /* **The polygon's widening is decided here, before the slot is patched**, because the
+         * two have to agree: a triangle the widening refuses - no area, no inradius, a vertex
+         * with no window position - exports no fourth parameter, and a slot left reading
+         * `attr3` would take its coverage from a routing that does not exist. */
+        float poly_att[3][4];
+        const GLboolean poly_smooth =
+            (GLboolean)(ctx->aa_edges != 0u &&
+                        gl_hw_polygon_smooth_setup(ctx, ctx->aa_edges, c0, c1, c2, poly_att));
+        gl_ps_patch_coverage_where(
+            ctx, poly_smooth
+                     ? ((eff_tex != 0u) ? GL_COVERAGE_POLYGON_TEX : GL_COVERAGE_POLYGON_UNTEX)
+                 : !ctx->aa_hw_on ? GL_COVERAGE_OFF
+                 : (eff_tex != 0u) ? GL_COVERAGE_TEXTURED
+                                   : GL_COVERAGE_UNTEXTURED);
         if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
         /* **The colour sum after texturing** (GL 1.4, 3.9; on this path since 2026-09-19). A
          * textured draw whose secondary colour is not zero somewhere carries it in the third
@@ -3167,18 +3461,64 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
          * flush: they all sampled with the new parameters. Any change to what the slot holds now
          * submits the draws that read the old contents first. */
         if (eff_obj && ctx->hw_frame_tex != 0u) {
-            const uint32_t *slot =
-                (const uint32_t *)((const char *)ctx->gpu_payload + OOPS_GL_DESC_TABLE_OFFSET);
+            const uint32_t *slot = (const uint32_t *)((const char *)ctx->gpu_payload +
+                                                      gl_hw_desc_slot_offset(ctx->hw_desc_slot));
             const void *border = (const char *)ctx->gpu_payload + OOPS_GL_BORDER_TABLE_OFFSET;
             uint32_t samp[4];
             memcpy(samp, eff_obj->samp_desc, 16);
             samp[2] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[0], eff_obj));
-            if (memcmp(slot, eff_obj->img_desc, 32) != 0 ||
-                memcmp(slot + 8, samp, 16) != 0 ||
-                (eff_obj->border_in_table && memcmp(border, eff_obj->border_hw, 16) != 0)) {
+            const GLboolean moved = (GLboolean)(memcmp(slot, eff_obj->img_desc, 32) != 0 ||
+                                                memcmp(slot + 8, samp, 16) != 0);
+            /* **A border colour still submits**, whatever the ring has room for: the table it
+             * lives in is named by `TA_BC_BASE_ADDR`, a register the frame sets once, so a
+             * second border in one frame is not something a slot can carry. Rare enough that a
+             * ring of its own would be weight for nothing. */
+            const GLboolean border_moved =
+                (GLboolean)(eff_obj->border_in_table &&
+                            memcmp(border, eff_obj->border_hw, 16) != 0);
+            if (border_moved || (moved && ctx->hw_desc_slot >= OOPS_GL_DESC_RING_SLOTS)) {
+                /* The ring is full, or the border changed: the frame runs, and the draws it
+                 * holds sample the descriptors they were built with. */
                 gl_hw_flush(ctx);
                 gl_hw_begin_frame(ctx);
+            } else if (moved) {
+                /* **The next slot, not a submission.** The draws already built keep pointing at
+                 * the slot they were given; this one gets its own. */
+                ctx->hw_desc_slot++;
             }
+        }
+
+        /* **The GL 2.0 uniform ring, on the descriptors' own rule.** A uniform block is per
+         * draw in exactly the way a texture's descriptors are: the draws already built read the
+         * slot they were handed at the flush, so a draw whose uniforms differ from what the
+         * current slot holds must take the next one rather than overwrite it. Without this, a
+         * frame that draws two objects in one program with different colours draws both in the
+         * second colour - and the software path, which has no slot at all, draws it correctly,
+         * so nothing on the host would ever show it.
+         *
+         * Which slot, only. The block is copied into it where the shader's address is chosen. */
+        if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u &&
+            prog->value_floats > 0) {
+            if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+            const float *uslot =
+                (const float *)((const char *)ctx->gpu_payload +
+                                gl_hw_gl2_uniform_slot_offset(ctx->hw_gl2_uniform_slot));
+            const size_t ubytes = (size_t)prog->value_floats * sizeof(float);
+            const GLboolean umoved =
+                (GLboolean)(ctx->hw_gl2_uniform_program != 0u &&
+                            (ctx->hw_gl2_uniform_program != prog->name ||
+                             memcmp(uslot, prog->values, ubytes) != 0));
+            if (umoved) {
+                if (ctx->hw_gl2_uniform_slot + 1u >= OOPS_GL_GL2_UNIFORM_SLOTS) {
+                    /* The ring is full: the frame runs, and the draws it holds read the values
+                     * they were built with. `gl_hw_begin_frame` puts the slot back to 0. */
+                    gl_hw_flush(ctx);
+                    gl_hw_begin_frame(ctx);
+                } else {
+                    ctx->hw_gl2_uniform_slot++;
+                }
+            }
+            ctx->hw_gl2_uniform_program = prog->name;
         }
 
         /* **A full vertex ring is submitted before it is reused.** Each triangle's vertices go
@@ -3197,7 +3537,25 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
          * always was, so a stream of two-parameter draws submits exactly where it did. */
         /* 2, 3 or 4 parameters, and so 48, 64 or 80 bytes a vertex. The fourth shader loads the
          * third parameter too, so a two-unit vertex carries both. */
-        const uint32_t params = unit1 ? 4u : ((p3 || p3_needed) ? 3u : 2u);
+        /* **A textured smooth primitive escalates to four**, because that is where its coverage
+         * offset rides - the second unit's parameter, which such a draw has spare by definition
+         * (`gl_smoothing` refuses to smooth when unit 1 is applied). It costs eighty bytes a
+         * vertex and the four-parameter vertex shader, both of which a two-unit draw already
+         * uses. */
+        const GLboolean aa_p4 = (GLboolean)(ctx->aa_hw_on && ctx->aa_hw_tex && eff_tex != 0u);
+        /* **A smooth polygon escalates too**, and for the same reason: its three edge distances
+         * and their w need the whole of the fourth parameter. `poly_smooth` was decided above,
+         * with the slot, so the two cannot disagree. */
+        /* **A GL 2.0 program's parameter count is its varyings'**, not the fixed-function
+         * pipeline's: nothing in a compiled pixel shader reads the colour or the texture
+         * coordinate, so the questions above - a second texture unit, a smooth primitive - are
+         * about a stage this draw does not use. `hw_params` was worked out at link time and is
+         * two at minimum, which is the pipeline's smallest configuration. */
+        const uint32_t params = (prog_vs && prog && prog->fs)
+                                    ? prog->hw_params
+                                    : ((unit1 || aa_p4 || poly_smooth)
+                                           ? 4u
+                                           : ((p3 || p3_needed) ? 3u : 2u));
         const size_t vsz = (params >= 4u) ? 80u : (params == 3u) ? 64u : 48u;
         const uint32_t tri_bytes = (uint32_t)(vsz * 3u);
         if (ctx->hw_vbo_cursor + tri_bytes > OOPS_GL_VBO_RING_TRIANGLES * 144u) {
@@ -3251,6 +3609,33 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
             const float *sec[3] = {sec0, sec1, sec2};
             const float *tcs[3] = {t0, t1, t2};
             const float *u1[3] = {v0->tc[1], v1->tc[1], v2->tc[1]};
+            /* **A GL 2.0 program's vertex carries its varyings and nothing else.**
+             *
+             * The position is the same field it always was - `c0` is `gl_Position`, which the
+             * vertex shader computed on the CPU - and the parameters after it are the
+             * interpolated block, four floats at a time. The fixed-function colour and texture
+             * coordinate are not written: nothing in a compiled pixel shader reads them, and
+             * writing them would only mean the parameter slots carried two things.
+             *
+             * A program with a vertex shader and **no** fragment shader is the exception and
+             * takes the arm below, because the fixed-function pixel shader is what runs for it -
+             * and `gl_FrontColor` and `gl_TexCoord[]` already reached `col` and `uvs` through
+             * the screen vertices. */
+            if (prog_vs && prog && prog->fs) {
+                for (size_t k = 0; k < 3; k++) {
+                    char *v = vbo_ptr + k * vsz;
+                    memcpy(v + 0, pos[k], 16);
+                    for (uint32_t pi = 0; pi < params; pi++) {
+                        float slot[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                        for (int c = 0; c < 4; c++) {
+                            const int at = (int)(pi * 4u) + c;
+                            if (at < prog->varying_floats) slot[c] = vso[k].vary[at];
+                        }
+                        memcpy(v + 16 + pi * 16u, slot, 16);
+                    }
+                }
+                goto vertices_written;
+            }
             for (size_t k = 0; k < 3; k++) {
                 char *v = vbo_ptr + k * vsz;
                 memcpy(v + 0, pos[k], 16);
@@ -3264,11 +3649,22 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
                     /* The second unit's coordinate, divided per fragment as the first is, with a
                      * q of 0 going as 1 - gl_q_inv's rule. z is unused: the fog factor is the
                      * first unit's to carry, and only one is interpolated. */
-                    const float p3v[4] = {u1[k][0], u1[k][1], 0.0f,
-                                          (u1[k][3] != 0.0f) ? u1[k][3] : 1.0f};
+                    /* **A smooth polygon owns this parameter outright** - `{d0*w, d1*w, d2*w, w}`
+                     * from the widening above - which is why it is refused when the second unit
+                     * wants the same four floats. */
+                    const float p3v[4] = {
+                        poly_smooth ? poly_att[k][0] : u1[k][0],
+                        poly_smooth ? poly_att[k][1] : u1[k][1],
+                        poly_smooth ? poly_att[k][2] : 0.0f,
+                        poly_smooth ? poly_att[k][3]
+                                    : ((u1[k][3] != 0.0f) ? u1[k][3] : 1.0f)};
                     memcpy(v + 64, p3v, 16);
                 }
             }
+            /* Both arms land here. The `(void)0` is what makes the label legal at the end of a
+             * block on a target where the flush below is compiled out. */
+vertices_written:
+            (void)0;
 #if defined(__x86_64__)
             /* Every cache line the triangle touches: it starts 16-byte aligned, so its last
              * bytes can sit in a line of their own. */
@@ -3281,16 +3677,75 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
 
         uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
         uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
-        uint64_t desc_table_va = payload_va + OOPS_GL_DESC_TABLE_OFFSET;
+        /* This draw's own descriptor slot - slot 0 is the original table, so a frame that never
+         * changes texture hands over the address it always did. */
+        uint64_t desc_table_va = payload_va + gl_hw_desc_slot_offset(ctx->hw_desc_slot);
         uint64_t ps_va = payload_va + OOPS_GL_PS_UNTEX_OFFSET; /* Default: untextured Gouraud */
         uint32_t ps_rsrc2 = 0u;
 
-        if (eff_tex > 0u) {
+        /* **A GL 2.0 program's own pixel shader, copied into the payload's one slot.**
+         *
+         * Copied rather than compiled here: the words were generated at link time and the copy
+         * is what a draw can afford. The upload goes through the same synchronisation a patched
+         * shader slot uses - the payload is GPU-visible memory and an edit the GPU has not seen
+         * flushed would be the previous shader running against this draw's parameters.
+         *
+         * `ps_rsrc2` gains its user-SGPR pair only when the program has uniforms: they are what
+         * the pair's address points at, and a shader with none loads nothing and is handed
+         * nothing. A shader that **sampled** a texture would want the descriptors at that same
+         * address, one block with the descriptors at one offset and the uniforms at another -
+         * which is the shape this will take when `image_sample` is generated, and is why the
+         * uniform ring is its own region rather than a widened descriptor slot.
+         *
+         * **RSRC1 is not touched.** The frame's stage table already reserves 136 VGPRs for the
+         * pixel stage, and `glsl_ps.c` refuses a shader that would need more - so the register
+         * that says how much of the file to allocate stays at the measured value rather than
+         * becoming a second thing to get right. */
+        if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u) {
+            uint32_t *const slot =
+                (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_GL2_OFFSET);
+            if (ctx->hw_ps_program != prog->name) {
+                gl_ps_sync_payload_edit(ctx, slot, prog->hw_ps, prog->hw_ps_words);
+                memcpy(slot, prog->hw_ps, prog->hw_ps_words * sizeof(uint32_t));
+                /* Everything after the shader is left as it was; `s_endpgm` is the last word it
+                 * wrote, so nothing beyond it is reachable. */
+                gl_ps_flush_shaders(ctx);
+                ctx->hw_ps_program = prog->name;
+            }
+            ps_va = payload_va + OOPS_GL_PS_GL2_OFFSET;
+            ps_rsrc2 = 0u;
+
+            /* **The uniforms, into the slot the ring above chose.**
+             *
+             * `prog->values` is the pool every `glUniform*` writes and `glGetUniformfv` reads,
+             * copied verbatim - so what the shader loads and what the API reports back are the
+             * same bytes rather than two layouts to keep in step. The shader's two
+             * `s_load_dwordx16`s read from the address handed over below, which is why
+             * `ps_rsrc2` gains its user-SGPR pair here: a compiled shader with no uniforms
+             * still takes none.
+             *
+             * Flushed from the CPU's cache like every other payload edit: this is GPU-visible
+             * memory and an unflushed write is the previous draw's uniforms running against
+             * this draw's geometry. */
+            if (prog->value_floats > 0) {
+                const uint32_t uoff = gl_hw_gl2_uniform_slot_offset(ctx->hw_gl2_uniform_slot);
+                float *ub = (float *)((char *)ctx->gpu_payload + uoff);
+                memcpy(ub, prog->values, (size_t)prog->value_floats * sizeof(float));
+#if defined(__x86_64__)
+                for (uint32_t b = 0; b < OOPS_GL_GL2_UNIFORM_STRIDE; b += 64u) {
+                    __builtin_ia32_clflush((const void *)((const char *)ub + b));
+                }
+#endif
+                desc_table_va = payload_va + uoff;
+                ps_rsrc2 = 0x00000004u; /* USER_SGPR=2: s[0:1] is the uniform block's address */
+            }
+        } else if (eff_tex > 0u) {
             ps_va = payload_va + OOPS_GL_PS_TEX_OFFSET; /* Stage 5: Textured + Gouraud */
             ps_rsrc2 = 0x00000004u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor table. 0x2 loads one SGPR and the primitive mask lands in s1 (measured 2026-09-14) */
             for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
                 if (ctx->textures[ti].used && ctx->textures[ti].id == eff_tex) {
-                    uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload + 0x900);
+                    uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload +
+                                                gl_hw_desc_slot_offset(ctx->hw_desc_slot));
                     memcpy(dt, ctx->textures[ti].img_desc, 32);
                     memcpy(dt + 8, ctx->textures[ti].samp_desc, 16);
                     /* GL 1.4's bias, the texture's and the unit's, joins the sampler here rather
@@ -3321,7 +3776,7 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
                     gl_tex_hw_prepare(ctx, &ctx->textures[ti]);
                     if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
                     uint32_t *dt1 = (uint32_t *)((char *)ctx->gpu_payload +
-                                                 OOPS_GL_DESC_TABLE_OFFSET +
+                                                 gl_hw_desc_slot_offset(ctx->hw_desc_slot) +
                                                  OOPS_GL_DESC_UNIT_STRIDE);
                     memcpy(dt1, ctx->textures[ti].img_desc, 32);
                     memcpy(dt1 + 8, ctx->textures[ti].samp_desc, 16);
@@ -3363,9 +3818,10 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
                 ctx->hw_query_counting = GL_TRUE;
             }
         }
-        /* **The stencil test** (since 2026-09-19; written, not yet seen - gl1-probe's `stencil`
-         * is the measurement, obSCEne's fixture could not bind a non-passthrough stage,
-         * REQ-20260917T1845Z-3d5b). The first stencil-tested draw of a frame makes the stencil
+        /* **The stencil test** (since 2026-09-19; **seen on hardware 2026-09-20**, gl1-probe's
+         * `stencil` passing - this said "written, not yet seen" until 2026-09-21. obSCEne's own
+         * fixture could not bind a non-passthrough stage, `REQ-20260917T1845Z-3d5b`, so the probe
+         * is what measured it.) The first stencil-tested draw of a frame makes the stencil
          * surface live - which a frame that never tests stencil, gl-cube's included, never
          * emits - and every stencil-tested draw sets the operations and the reference. */
         if (gl_hw_stencil_on(ctx)) {
@@ -3395,9 +3851,15 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
         *dw++ = 0x200u;
         *dw++ = cur_depth_ctrl;
 
-        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmCB_BLEND0_CONTROL (0x1e0) */
+        /* **Both targets' blend controls, in one packet**, because 0x1e0 and 0x1e1 are adjacent -
+         * the colour block keeps one per MRT and radeonsi writes them as
+         * `R_028780_CB_BLEND0_CONTROL + i * 4` (`si_state.c:420`). MRT1's copy is the same state,
+         * or zero when nothing is bound there; a mid-frame glBlendFunc must not leave the second
+         * target on the frame's opening value. */
+        *dw++ = 0xc0026900u; /* PACKET3_SET_CONTEXT_REG mmCB_BLEND0_CONTROL (0x1e0), two dwords */
         *dw++ = 0x1e0u;
         *dw++ = cur_blend_ctrl;
+        *dw++ = ctx->fb_also ? cur_blend_ctrl : 0u;
 
         *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmPA_SU_SC_MODE_CNTL (0x205) */
         *dw++ = 0x205u;
@@ -3881,6 +4343,61 @@ static void gl_sample_texture(const gl_texture_object_t *tex, int face, float s,
     for (int k = 0; k < 4; k++) out[k] = (1.0f - f) * a[k] + f * c2[k];
 }
 
+/* -------------------------------------------------------------------------
+ * The sampler, as a GLSL `texture2D` reaches it
+ *
+ * Here rather than in glsl_exec.c because everything it needs - `gl_sample_texture`, the cube
+ * face projection, the level views - is this file's, and a second copy of the filtering rules
+ * next door would be a second thing to keep right.
+ *
+ * **The texture enables play no part.** `glEnable(GL_TEXTURE_2D)` selects a target for the
+ * fixed-function pipeline; a shader's `uniform sampler2D` names one itself, and a program that
+ * forgets the enable - which it has no reason to call at all - must still sample (GL 2.0,
+ * 3.8.15). So the target comes from the sampler's declared type and the binding is read
+ * directly.
+ * ------------------------------------------------------------------------- */
+GLboolean gl_shader_sample(const gl_context_t *ctx, GLuint unit, GLenum sampler_type,
+                           const float coord[4], float lod, float out[4]) {
+    out[0] = 0.0f; out[1] = 0.0f; out[2] = 0.0f; out[3] = 1.0f;
+    if (!ctx || !coord || unit >= (GLuint)OOPS_GL_MAX_TEXTURE_UNITS) return GL_FALSE;
+    const gl_tex_unit_t *tu = &ctx->tex_unit[unit];
+
+    GLuint id = 0u;
+    switch (sampler_type) {
+        case GL_SAMPLER_1D:
+        case GL_SAMPLER_1D_SHADOW:
+            id = tu->bound_texture_1d ? tu->bound_texture_1d : OOPS_GL_DEFAULT_TEXTURE_1D;
+            break;
+        case GL_SAMPLER_2D:
+        case GL_SAMPLER_2D_SHADOW:
+            id = tu->bound_texture_2d ? tu->bound_texture_2d : OOPS_GL_DEFAULT_TEXTURE_2D;
+            break;
+        case GL_SAMPLER_3D:
+            id = tu->bound_texture_3d ? tu->bound_texture_3d : OOPS_GL_DEFAULT_TEXTURE_3D;
+            break;
+        case GL_SAMPLER_CUBE:
+            id = tu->bound_texture_cube ? tu->bound_texture_cube : OOPS_GL_DEFAULT_TEXTURE_CUBE;
+            break;
+        default:
+            return GL_FALSE;
+    }
+    const gl_texture_object_t *tex = gl_lookup_texture(ctx, id);
+    if (!tex || !gl_texture_complete(tex)) return GL_FALSE;
+
+    /* A cube map is looked up by (s, t, r) as a direction: which face it points at, and where
+     * on that face. The same projection the fixed-function path uses. */
+    int face = -1;
+    float s = coord[0], t = coord[1];
+    const float r = coord[2];
+    if (tex->cube) face = gl_cube_face_coords(coord[0], coord[1], coord[2], &s, &t);
+
+    /* **A shadow sampler's reference is the coordinate's third component**, and the lookup is a
+     * comparison rather than a fetch - which `gl_sample_level` already does when the texture's
+     * compare mode says so, so nothing extra is needed here beyond passing r through. */
+    gl_sample_texture(tex, face, s, t, (face >= 0) ? 0.0f : r, lod, out);
+    return GL_TRUE;
+}
+
 /* **The texture environment**, the fragment colour `c` combined with a texel `t` as the texture's
  * base format decides - Mesa's `calculate_derived_texenv` (main/texstate.c:173), which restates
  * GL's table of texture functions as combiner settings:
@@ -4014,21 +4531,34 @@ void gl_tex_env_apply(const gl_context_t *ctx, GLuint unit, GLenum base,
  * ------------------------------------------------------------------------- */
 
 /* The state the tail reads that does not change within a primitive, hoisted out of the loop. */
-static void gl_frag_ops_init(const gl_context_t *ctx, gl_frag_ops_t *o, GLboolean stencil_ok) {
+/* **The stencil state is the primitive's face's** (GL 2.0, `glStencilOpSeparate`). The face is
+ * a property of the polygon, not of the fragment, so it is resolved once here rather than per
+ * pixel - and `front` is GL_TRUE for everything that is not a polygon, which is what the
+ * specification says of a point or a line.
+ *
+ * `glStencilOp` and its two relatives set both faces to the same thing, so a GL 1.x program
+ * takes the front arm either way and nothing below it changes. */
+static void gl_frag_ops_init_face(const gl_context_t *ctx, gl_frag_ops_t *o,
+                                  GLboolean stencil_ok, GLboolean front) {
     o->stencil_test = (GLboolean)(stencil_ok && ctx->cap_stencil_test && ctx->stencil_buffer != NULL);
-    o->stencil_func = ctx->stencil_func;
-    o->stencil_ref = ctx->stencil_ref;
-    o->stencil_vmask = ctx->stencil_value_mask;
-    o->stencil_wmask = ctx->stencil_writemask;
-    o->stencil_op_fail = ctx->stencil_fail;
-    o->stencil_op_zfail = ctx->stencil_zfail;
-    o->stencil_op_zpass = ctx->stencil_zpass;
+    o->stencil_func = front ? ctx->stencil_func : ctx->stencil_back_func;
+    o->stencil_ref = front ? ctx->stencil_ref : ctx->stencil_back_ref;
+    o->stencil_vmask = front ? ctx->stencil_value_mask : ctx->stencil_back_value_mask;
+    o->stencil_wmask = front ? ctx->stencil_writemask : ctx->stencil_back_writemask;
+    o->stencil_op_fail = front ? ctx->stencil_fail : ctx->stencil_back_fail;
+    o->stencil_op_zfail = front ? ctx->stencil_zfail : ctx->stencil_back_zfail;
+    o->stencil_op_zpass = front ? ctx->stencil_zpass : ctx->stencil_back_zpass;
     /* A logic op replaces blending rather than following it (Mesa's state tracker leaves every
      * blend target off when it is enabled, state_tracker/st_atom_blend.c:269-273). GL_COPY is a
      * logic op that changes nothing, which is how radeonsi treats it too (si_state.c:341). */
     o->logic_mode = gl_logicop_mode(ctx->logic_op);
     o->logic_on = (GLboolean)(ctx->cap_color_logic_op && o->logic_mode != 12u);
     o->blend = (GLboolean)(ctx->cap_blend && !ctx->cap_color_logic_op);
+}
+
+/* The front face's state, for the callers that do not know a facing yet. */
+static void gl_frag_ops_init(const gl_context_t *ctx, gl_frag_ops_t *o, GLboolean stencil_ok) {
+    gl_frag_ops_init_face(ctx, o, stencil_ok, GL_TRUE);
 }
 
 static inline GLboolean gl_depth_passes(GLenum func, float z, float cur) {
@@ -4166,38 +4696,45 @@ static inline void gl_fragment_colour(const gl_context_t *ctx, const gl_frag_ops
          *
          * **GL_MIN and GL_MAX ignore the factors entirely**, which is the part an implementation
          * that treats them as another sign gets wrong. */
+        /* **The colour and the alpha take their own equation** (GL 2.0,
+         * `glBlendEquationSeparate`). `glBlendEquation` sets both to the same thing, which is
+         * every GL 1.x program, so the two arms below agree unless somebody asked for them not
+         * to. The hardware's `CB_BLEND0_CONTROL` already carries `ALPHA_COMB_FCN` in its own
+         * field, so this costs a second lookup there and nothing else. */
         float res_r, res_g, res_b, res_a;
         switch (ctx->blend_equation) {
             case GL_FUNC_SUBTRACT:
                 res_r = r * sfr - dr * dfr;
                 res_g = g * sfg - dg * dfg;
                 res_b = b * sfb - db_col * dfb;
-                res_a = a * sfa - da * dfa;
                 break;
             case GL_FUNC_REVERSE_SUBTRACT:
                 res_r = dr * dfr - r * sfr;
                 res_g = dg * dfg - g * sfg;
                 res_b = db_col * dfb - b * sfb;
-                res_a = da * dfa - a * sfa;
                 break;
             case GL_MIN:
                 res_r = r < dr ? r : dr;
                 res_g = g < dg ? g : dg;
                 res_b = b < db_col ? b : db_col;
-                res_a = a < da ? a : da;
                 break;
             case GL_MAX:
                 res_r = r > dr ? r : dr;
                 res_g = g > dg ? g : dg;
                 res_b = b > db_col ? b : db_col;
-                res_a = a > da ? a : da;
                 break;
             default: /* GL_FUNC_ADD */
                 res_r = r * sfr + dr * dfr;
                 res_g = g * sfg + dg * dfg;
                 res_b = b * sfb + db_col * dfb;
-                res_a = a * sfa + da * dfa;
                 break;
+        }
+        switch (ctx->blend_equation_alpha) {
+            case GL_FUNC_SUBTRACT:         res_a = a * sfa - da * dfa; break;
+            case GL_FUNC_REVERSE_SUBTRACT: res_a = da * dfa - a * sfa; break;
+            case GL_MIN:                   res_a = a < da ? a : da; break;
+            case GL_MAX:                   res_a = a > da ? a : da; break;
+            default:                       res_a = a * sfa + da * dfa; break;
         }
 
         if (res_r < 0.0f) res_r = 0.0f; else if (res_r > 1.0f) res_r = 1.0f;
@@ -4402,6 +4939,55 @@ static void gl_unit_sample(const gl_unit_draw_t *ud, GLuint unit, const gl_scree
     gl_sample_texture(ud->tex, face, fs, ft, (face >= 0) ? 0.0f : rc, lod, texel);
 }
 
+/* The interpolated block at one set of affine barycentric weights - the shader's varyings and
+ * the fixed-function interpolants that sit beside them.
+ *
+ * **Perspective-correct**, like every other attribute here: weighting each vertex by its 1/w
+ * and renormalising. Taking the affine weights instead is right only for depth, and a textured
+ * floor drawn with them swims.
+ *
+ * Without a vertex shader there is no block to interpolate, so one is built from the screen
+ * vertices - which is where the fixed-function stage left the same quantities. That is what
+ * lets a program with only a fragment shader read `gl_Color` and `gl_TexCoord[]`. */
+static void gl_shader_vary_at(const gl_screen_vertex_t *v0, const gl_screen_vertex_t *v1,
+                              const gl_screen_vertex_t *v2, float b0, float b1, float b2,
+                              GLboolean have_block, float out[GL_SHADER_VARY_FLOATS]) {
+    float pb0 = b0 * v0->inv_w, pb1 = b1 * v1->inv_w, pb2 = b2 * v2->inv_w;
+    const float s = pb0 + pb1 + pb2;
+    if (s > 0.0f) {
+        const float inv = 1.0f / s;
+        pb0 *= inv; pb1 *= inv; pb2 *= inv;
+    } else {
+        pb0 = b0; pb1 = b1; pb2 = b2;
+    }
+
+    if (have_block) {
+        for (int k = 0; k < GL_SHADER_VARY_FLOATS; k++) {
+            out[k] = pb0 * v0->vary[k] + pb1 * v1->vary[k] + pb2 * v2->vary[k];
+        }
+        return;
+    }
+    for (int k = 0; k < GL_SHADER_VARY_FLOATS; k++) out[k] = 0.0f;
+    out[GL_SHADER_VARY_COLOR + 0] = pb0 * v0->r + pb1 * v1->r + pb2 * v2->r;
+    out[GL_SHADER_VARY_COLOR + 1] = pb0 * v0->g + pb1 * v1->g + pb2 * v2->g;
+    out[GL_SHADER_VARY_COLOR + 2] = pb0 * v0->b + pb1 * v1->b + pb2 * v2->b;
+    out[GL_SHADER_VARY_COLOR + 3] = pb0 * v0->a + pb1 * v1->a + pb2 * v2->a;
+    out[GL_SHADER_VARY_SECONDARY + 0] = pb0 * v0->sr + pb1 * v1->sr + pb2 * v2->sr;
+    out[GL_SHADER_VARY_SECONDARY + 1] = pb0 * v0->sg + pb1 * v1->sg + pb2 * v2->sg;
+    out[GL_SHADER_VARY_SECONDARY + 2] = pb0 * v0->sb + pb1 * v1->sb + pb2 * v2->sb;
+    out[GL_SHADER_VARY_SECONDARY + 3] = 1.0f;
+    for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        const int base = GL_SHADER_VARY_TEXCOORD + (int)u * 4;
+        for (int i = 0; i < 4; i++) {
+            out[base + i] = pb0 * v0->tc[u][i] + pb1 * v1->tc[u][i] + pb2 * v2->tc[u][i];
+        }
+    }
+    /* `gl_FogFragCoord` stays zero here: the screen vertex carries the fog *factor*, which is
+     * what the blend below reads, and not the eye distance the factor came from. A fragment
+     * shader that reads it with no vertex shader in the program gets zero, which is what
+     * `glFogCoord(0)` would have given. */
+}
+
 void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                            const gl_screen_vertex_t *v1, const gl_screen_vertex_t *v2) {
     /* Compute triangle 2D bounding box */
@@ -4513,7 +5099,19 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
     GLboolean depth_write = ctx->depth_mask;
     GLenum depth_func = ctx->depth_func;
     gl_frag_ops_t ops;
-    gl_frag_ops_init(ctx, &ops, GL_TRUE);
+    /* **Which face this triangle is**, from its own winding - the same sign culling reads: with
+     * the y-flip, counter-clockwise in normalised device coordinates is a negative signed area
+     * here. Two things want it: GL 2.0's separate stencil state, which is per face, and a
+     * fragment shader's `gl_FrontFacing`.
+     *
+     * Anything that is not a polygon - a point or a line expanded into triangles - is
+     * front-facing, which is what the specification says of them. */
+    GLboolean prim_front = GL_TRUE;
+    if (gl_prim_is_polygon(ctx)) {
+        const GLboolean is_ccw = (GLboolean)(area < 0.0f);
+        prim_front = (ctx->front_face == GL_CCW) ? is_ccw : (GLboolean)!is_ccw;
+    }
+    gl_frag_ops_init_face(ctx, &ops, GL_TRUE, prim_front);
     const GLboolean stencil_test = ops.stencil_test;
 
     const GLboolean fog_on = ctx->cap_fog;
@@ -4566,6 +5164,29 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
      * ones and the test below never discards. */
     const GLboolean poly_stipple =
         (GLboolean)(ctx->cap_polygon_stipple && ctx->prim_raster == GL_FILL);
+
+    /* **A GL 2.0 fragment program replaces the texturing, the colour sum and the fog** below.
+     * It needs the interpolated block the vertex shader wrote, which only a vertex shader
+     * produces - a program with a fragment shader and no vertex shader is served by the
+     * fixed-function interpolants, which live in the same block and are filled in beside the
+     * varyings when there is no vertex stage.
+     *
+     * `needs_deriv` decides whether each fragment is evaluated once or three times: a shader
+     * with a mipmapped texture lookup or a `dFdx` needs the neighbouring pixels' values, and
+     * most shaders need neither. */
+    gl_program_object_t *fprog = gl_active_program(ctx);
+    const GLboolean prog_fs = (GLboolean)(fprog && fprog->fs);
+    const GLboolean needs_deriv =
+        (GLboolean)(prog_fs && gl_shader_needs_derivatives(fprog));
+    /* Without a vertex shader the block still has to exist, because the fragment shader reads
+     * `gl_Color` and `gl_TexCoord[]` out of it. It is filled per fragment from the screen
+     * vertices, which is where the fixed-function stage left them. */
+    const GLboolean have_vary_block = (GLboolean)(v0->vary && v1->vary && v2->vary);
+
+    /* `gl_FrontFacing` is `prim_front` above, taken from the winding. It used to come from
+     * `prim_polygon_back`, which is two-sided *lighting*'s flag and is set only while
+     * GL_LIGHTING and GL_LIGHT_MODEL_TWO_SIDE are both on - so a shader reading it with lighting
+     * off, which is every GL 2.0 program, was told every fragment faced forward. */
 
     for (int y = min_y; y <= max_y; y++) {
         float py = (float)y + 0.5f;
@@ -4670,6 +5291,69 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
 
                 /* Interpolate depth Z */
                 float z = b0 * v0->sz + b1 * v1->sz + b2 * v2->sz;
+
+                /* **The fragment program, ahead of the depth test.**
+                 *
+                 * That order is the specification's and it is the whole reason the shader is
+                 * here rather than where the texture combiner is: a shader may `discard`, and
+                 * it may write `gl_FragDepth`, so the depth test cannot have happened yet.
+                 * Running it after would test the interpolated depth and then write the
+                 * shader's, which is a depth buffer that disagrees with what was drawn. */
+                float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+                GLboolean shaded = GL_FALSE;
+                if (prog_fs) {
+                    float vc[GL_SHADER_VARY_FLOATS];
+                    float vdx[GL_SHADER_VARY_FLOATS], vdy[GL_SHADER_VARY_FLOATS];
+                    gl_shader_vary_at(v0, v1, v2, b0, b1, b2, have_vary_block, vc);
+                    gl_shader_fragment_in_t in;
+                    in.vary = vc;
+                    in.vary_dx = (const float *)0;
+                    in.vary_dy = (const float *)0;
+                    if (needs_deriv) {
+                        /* The neighbouring pixels' weights, from the barycentrics' own screen
+                         * slopes - which the level of detail already uses. No second edge
+                         * evaluation is needed: the weights are affine in x and y. */
+                        gl_shader_vary_at(v0, v1, v2, b0 + dbw[0], b1 + dbw[2], b2 + dbw[4],
+                                          have_vary_block, vdx);
+                        gl_shader_vary_at(v0, v1, v2, b0 + dbw[1], b1 + dbw[3], b2 + dbw[5],
+                                          have_vary_block, vdy);
+                        in.vary_dx = vdx;
+                        in.vary_dy = vdy;
+                    }
+                    /* **`gl_FragCoord` is window coordinates with y counting up from the
+                     * bottom**, which is the opposite of this rasteriser's rows - a shader that
+                     * reads it and gets the row index draws its gradient upside down. Its w is
+                     * 1/w_clip, not w_clip. */
+                    in.frag_coord[0] = px;
+                    in.frag_coord[1] = (float)ctx->height - py;
+                    in.frag_coord[2] = z;
+                    in.frag_coord[3] = pb0 * v0->inv_w + pb1 * v1->inv_w + pb2 * v2->inv_w;
+                    for (int k = 0; k < 4; k++) {
+                        in.frag_coord_dx[k] = in.frag_coord[k];
+                        in.frag_coord_dy[k] = in.frag_coord[k];
+                    }
+                    in.frag_coord_dx[0] += 1.0f;
+                    in.frag_coord_dy[1] -= 1.0f;
+                    in.front_facing = prim_front;
+
+                    gl_shader_fragment_out_t fo;
+                    if (!gl_shader_run_fragment(ctx, fprog, &in, &fo)) {
+                        gl_record_error(ctx, GL_INVALID_OPERATION);
+                        return;
+                    }
+                    /* `discard` writes nothing at all - no colour, no depth, no stencil - which
+                     * is why it is a `continue` here and not a colour of zero. */
+                    if (fo.discarded) continue;
+                    if (fo.wrote_depth) {
+                        z = fo.depth < 0.0f ? 0.0f : (fo.depth > 1.0f ? 1.0f : fo.depth);
+                    }
+                    r = fo.colour[0];
+                    g = fo.colour[1];
+                    b = fo.colour[2];
+                    a = fo.colour[3];
+                    shaded = GL_TRUE;
+                }
+
                 GLboolean depth_pending = GL_FALSE;
 
                 /* Whether the depth test would reject this fragment. With stencil off this is
@@ -4695,16 +5379,18 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                 }
 
                 /* Interpolate color */
-                float r = pb0 * v0->r + pb1 * v1->r + pb2 * v2->r;
-                float g = pb0 * v0->g + pb1 * v1->g + pb2 * v2->g;
-                float b = pb0 * v0->b + pb1 * v1->b + pb2 * v2->b;
-                float a = pb0 * v0->a + pb1 * v1->a + pb2 * v2->a;
+                if (!shaded) {
+                    r = pb0 * v0->r + pb1 * v1->r + pb2 * v2->r;
+                    g = pb0 * v0->g + pb1 * v1->g + pb2 * v2->g;
+                    b = pb0 * v0->b + pb1 * v1->b + pb2 * v2->b;
+                    a = pb0 * v0->a + pb1 * v1->a + pb2 * v2->a;
+                }
 
                 /* **Texturing, unit by unit** (GL 1.3, 3.8.13): every applying unit sampled
                  * first - a GL 1.4 crossbar source can name any of them - then each unit's
                  * environment in turn on what the unit before it left. A unit applies only a
                  * complete texture; gl_unit_texture_id answers none for an incomplete one. */
-                if (any_tex) {
+                if (any_tex && !shaded) {
                     const float pb[3] = {pb0, pb1, pb2}, bs[3] = {b0, b1, b2};
                     gl_unit_texels_t texels;
                     for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
@@ -4728,7 +5414,7 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                 /* **The colour sum** (GL 1.4, 3.9): the secondary colour - the specular term
                  * GL_SEPARATE_SPECULAR_COLOR kept apart, or unlit, glSecondaryColor's under
                  * GL_COLOR_SUM - added after texturing and before fog, clamped. */
-                if (sec_on) {
+                if (sec_on && !shaded) {
                     r += pb0 * v0->sr + pb1 * v1->sr + pb2 * v2->sr;
                     g += pb0 * v0->sg + pb1 * v1->sg + pb2 * v2->sg;
                     b += pb0 * v0->sb + pb1 * v1->sb + pb2 * v2->sb;
@@ -4744,7 +5430,11 @@ void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                  * than it looks: fogging alpha too would make a fogged fragment fail an alpha
                  * test it passes unfogged, so turning fog on would silently change which
                  * fragments a cut-out texture keeps. */
-                if (fog_on) {
+                /* **A fragment shader replaces fog too.** GL 2.0 makes fog part of the fragment
+                 * stage, so a shader that wants it applies it itself from `gl_FogFragCoord` and
+                 * `gl_Fog` - and a driver that blended fog over a shader's output would darken
+                 * a picture the program had already finished. */
+                if (fog_on && !shaded) {
                     const float ff = pb0 * v0->fog + pb1 * v1->fog + pb2 * v2->fog;
                     const float inv = 1.0f - ff;
                     r = ff * r + inv * fog_r;
@@ -4943,6 +5633,48 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
         out->edge = *(const GLboolean *)(base_e + (idx * stride)) ? GL_TRUE : GL_FALSE;
     } else {
         out->edge = ctx->cur_edge_flag;
+    }
+
+    /* **GL 2.0's generic attribute arrays**, one element per enabled slot - and the current
+     * value where the slot's array is off, which is the generic pipeline's glColor.
+     *
+     * On the vertex, not in the context: a draw fetches every vertex into a buffer before any
+     * of them is shaded, so a slot written into the context would hold the last vertex's value
+     * for all of them. See the note on `gl_vertex_t::attrib`.
+     *
+     * **Skipped entirely until this context makes a shader or a program.** Sixteen slots of
+     * four floats each is real work per vertex, and a fixed-function draw never reads one; a
+     * GL 1.x program should pay nothing for a pipeline it does not use. The values left behind
+     * are whatever the buffer held, which nothing reads for the same reason. */
+    if (!ctx->gl2_used) return;
+    for (int ai = 0; ai < OOPS_GL_MAX_VERTEX_ATTRIBS; ai++) {
+        const gl_vertex_attrib_t *a = &ctx->vertex_attribs[ai];
+        const uint8_t *base_a = (const uint8_t *)0;
+        gl_client_array_t as;
+        if (a->enabled) {
+            as.size = a->size;
+            as.type = a->type;
+            as.stride = a->stride;
+            as.pointer = a->pointer;
+            as.enabled = GL_TRUE;
+            as.buffer = a->buffer;
+            base_a = gl_array_base(ctx, &as);
+        }
+        if (!base_a) {
+            for (int k = 0; k < 4; k++) out->attrib[ai][k] = a->current[k];
+            continue;
+        }
+        const uint8_t *ptr = base_a + (idx * gl_array_stride(&as));
+        /* **`normalized` is the caller's word, not the type's**, which is the whole difference
+         * between `glVertexAttribPointer(.., GL_UNSIGNED_BYTE, GL_TRUE, ..)` giving 1.0 and
+         * giving 255.0 - and the reason this cannot reuse the named arrays' fixed per-attribute
+         * rule. A float array with GL_TRUE is not scaled: there is nothing to scale from. */
+        const GLboolean norm = (GLboolean)(a->normalized && a->type != GL_FLOAT &&
+                                           a->type != GL_DOUBLE);
+        out->attrib[ai][0] = gl_array_comp(a->type, ptr, 0, norm);
+        out->attrib[ai][1] = (a->size > 1) ? gl_array_comp(a->type, ptr, 1, norm) : 0.0f;
+        out->attrib[ai][2] = (a->size > 2) ? gl_array_comp(a->type, ptr, 2, norm) : 0.0f;
+        out->attrib[ai][3] = (a->size > 3) ? gl_array_comp(a->type, ptr, 3, norm) : 1.0f;
     }
 }
 

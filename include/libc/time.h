@@ -16,6 +16,11 @@
 #ifndef OOPS_LIBC_TIME_H
 #define OOPS_LIBC_TIME_H
 
+/* C linkage for a C++ includer; `stdlib.h` carries the reasoning. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -27,5 +32,9 @@ typedef int64_t clock_t;
 /* Seconds from the payload's start. See above: not since the epoch. */
 time_t time(time_t *out);
 clock_t clock(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* OOPS_LIBC_TIME_H */

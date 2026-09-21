@@ -91,6 +91,26 @@ exists to prevent.
   interpolation of the red channel and the lane kill the alpha test ends with - came out as words
   already in the tree. Checked by
   `test_pm4_gl_smooth_points_and_lines_carry_their_coverage`.
+- `coverage-tex.s` - the same coverage in the **textured** pixel shader, reading `attr3` instead
+  of `attr1`. A textured draw reads all four components of the texture-coordinate parameter, so
+  the offset goes in the second texture unit's, which a one-unit draw has spare; such a draw
+  escalates to four parameters for it. **This file is what makes "the two programs differ only
+  in the ATTR field" a checked claim rather than an assertion**: it assembles both forms, and its
+  seven cross-check lines - `coverage.s`'s own six interpolations and the lane kill - came out as
+  words already in the tree, so the six that moved are the only six that moved. ATTR is bits
+  [15:10], which is why each is `+0x800`. gl1-probe's `smooth-textured` passed on hardware the
+  first time it ran, 2026-09-21. Checked by
+  `test_pm4_gl_smooth_points_and_lines_carry_their_coverage`.
+- `coverage-poly.s` - `GL_POLYGON_SMOOTH`'s coverage: the product of three edge fades where the
+  two files above use one distance. Twenty-six words, and **one program for both shaders**,
+  because a polygon's distances always ride in `attr3`. The three arrive as `d*w` with `w`
+  beside them and are divided per fragment: `v_interp` is perspective-correct and a distance to
+  a line is screen-space linear, so this undoes the correction exactly the way `tex-prolog.s`
+  already undoes it for `q`. Its four cross-check lines - `coverage.s`'s alpha weighting and
+  lane kill, and `coverage-tex.s`'s interpolation of `attr3.x` - came out as words already in
+  the tree. The slot grew from sixteen words to twenty-eight to hold it, and the alpha test and
+  export moved up in both shaders. Checked by
+  `test_pm4_gl_smooth_polygon_carries_three_edge_distances`.
 - `tex-shadow.s` - sampling a depth texture, with GL 1.4's comparison and without. `dmask:0x1`,
   because a depth texel is one float and a comparison's result is one value, and moves that
   spread it across `v4..v7` as `GL_DEPTH_TEXTURE_MODE` says - three forms, of which `GL_ALPHA`'s
@@ -106,17 +126,51 @@ exists to prevent.
   arguments, so unit 0's own combine cannot overwrite it. Seventeen words, placed **before** the
   prolog's exec restore so that
   both samples are taken in whole-quad mode. Its three cross-check instructions are unit 0's own
-  descriptor loads and sample, which assembled to the words already in the tree. **No draw sets
-  it** - see `src/gl/gl_multitex.h`. Checked by
-  `test_pm4_gl_second_unit_samples_inside_whole_quad_mode`.
+  descriptor loads and sample, which assembled to the words already in the tree. This said **no
+  draw sets it** until 2026-09-21, which stopped being true when `gl_multitex.h`'s gate opened on
+  `REQ-20260920T0745Z-9a41`: a two-unit draw sets it, and gl1-probe's `multitexture` passes on
+  hardware. Checked by `test_pm4_gl_second_unit_samples_inside_whole_quad_mode`.
 - `vs-param4.s` - the vertex shader for a draw with two texture units: the three-parameter
   program with an 80-byte vertex and a fifth vec4 exported as `param3`. The 80-byte stride is not
   a shift, so the lane's offset is lane * 64 plus lane * 16. Every instruction it shares with the
-  three-parameter program assembled to the word already in the tree. **No draw runs it** - see
-  `src/gl/gl_multitex.h`. Checked by `test_pm4_gl_param4_vertex_shader_is_the_assembled_one`.
+  three-parameter program assembled to the word already in the tree. This said **no draw runs
+  it** until 2026-09-21, and it was worse than stale: the program was never *called*, because
+  `glContextCreate` built the three-parameter shader beside it and not this one. The first draw
+  that selected it jumped into whatever the allocation held and took `ILLEGAL_INST` and a GPU
+  reset. Two kinds of draw run it now - two texture units, and a textured smooth point or line,
+  whose coverage rides in the parameter it adds - and both pass on hardware. Checked by
+  `test_pm4_gl_param4_vertex_shader_is_the_assembled_one`.
 - `polygon-stipple.s` - the polygon stipple's discard: the fragment's window position converted
   from `v2` and `v3`, a row of the mask loaded with `global_load_dword`'s saddr form, and the
   lanes whose bit is clear taken out of `exec_lo`. Sixteen words, two of them the table's address
   as placeholder literals that `gl_ps_patch_stipple` overwrites. It also assembles the wait both
   shaders do after their canary store and `s_endpgm`, which came out as the words already in the
   tree. Checked by `test_pm4_gl_polygon_stipple_discards_in_the_shader`.
+
+### The two tables
+
+Every file above is a **program**: a sequence that ships as literal words and does one job, and
+what is pinned is that sequence. The two below are **tables**. GL 2.0's back end
+(`src/gl/glsl_gen.c`) builds a shader whose words depend on the GLSL it was handed, so what has
+to be pinned is each instruction's *encoding* rather than any particular order of them - and the
+hazard is worse than anywhere else here, because a wrong encoding in a hand-written shader is
+wrong once and a wrong encoding in a compiler is wrong in every shader it ever emits.
+
+- `gl2-transform.s` - the arithmetic the code generator emits: the moves, the adds, subtracts and
+  multiplies, the fused multiply-add a matrix product is made of, and the inline constants for
+  `1.0` and zero. Checked by `test_glsl_emit_matches_the_assembler` and
+  `test_glsl_emit_mat4_is_column_major`.
+
+- `gl2-fragment.s` - everything a compiled **pixel** shader is built from, in five groups: the
+  interpolation (`v_interp_p1_f32`/`p2`, across all four channels and a high attribute, so the
+  attribute field is pinned separately from its channel), the export, the VOP1 transcendentals,
+  the VOP2 pairs and the conditional move, the VOPC comparisons with the lane kill - and, since
+  2026-09-21, **scalar memory**: the five `s_load_dword*` widths and the `s_waitcnt lgkmcnt(0)`
+  that has to follow them, which is how a uniform reaches a compiled shader. Its three
+  cross-check lines (`s_endpgm`, `s_nop 0`, `s_waitcnt vmcnt(0)`) came out as words already in
+  the tree. Checked by `test_glsl_emit_matches_the_assembler`.
+
+  Three traps are recorded in the file rather than in anyone's memory, because each produces a
+  shader that runs: `v_sin_f32` takes **revolutions** and not radians, `v_exp_f32` and
+  `v_log_f32` are base **two**, and an SGPR is a legal operand only in `src0` - `vsrc1` is eight
+  bits and always a VGPR.

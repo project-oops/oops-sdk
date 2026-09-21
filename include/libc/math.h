@@ -21,6 +21,12 @@
 #ifndef OOPS_LIBC_MATH_H
 #define OOPS_LIBC_MATH_H
 
+/* C linkage for a C++ includer; `stdlib.h` carries the reasoning. The macros below are
+   unaffected - only the declarations need it. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "oops/math.h"
 
 #define M_PI    3.14159265358979323846
@@ -91,6 +97,26 @@ double fmax(double a, double b);
 #define signbit(x)    __builtin_signbit(x)
 #define isnormal(x)   __builtin_isnormal(x)
 
+/*
+ * **The five classification categories, and `fpclassify` over them** (2026-09-21). The macros
+ * above answer one question each; C99 also requires the set they partition, and a caller that
+ * wants to know *which* of the five a value is writes `fpclassify`.
+ *
+ * Found by libc++: its own `<math.h>` defines `fpclassify` for every floating type in terms of
+ * `__builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, x)`, so a C++
+ * standard library compiled against this header failed on five undeclared identifiers before
+ * reaching anything of its own. The values are the ones every libc uses in this order; nothing
+ * about them is ours to choose, and the builtin only needs them to be distinct.
+ */
+#define FP_NAN       0
+#define FP_INFINITE  1
+#define FP_ZERO      2
+#define FP_SUBNORMAL 3
+#define FP_NORMAL    4
+
+#define fpclassify(x)                                                          \
+  __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, x)
+
 /* The rest of what a port's own maths reaches for: the pieces that split or rebuild a float,
  * and log2's double form beside the float one that was already here. */
 double log2(double x);
@@ -102,5 +128,9 @@ float ldexpf(float x, int exp);
 double ldexp(double x, int exp);
 float frexpf(float x, int *exp);
 double frexp(double x, int *exp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* OOPS_LIBC_MATH_H */

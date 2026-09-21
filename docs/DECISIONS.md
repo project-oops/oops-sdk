@@ -24,6 +24,9 @@ decisions made with the reasoning to hand.
 | 🟢 | D007 | [oops-gl is an instrument scoped to fixed-function, and oops-mesa is the GL anyone runs](decisions/D007-oops-gl-is-an-instrument-scoped-to-fixed.md) | decided | 2026-09-16 |
 | 🟢 | D008 | [oops-gl grows to OpenGL 1 and 2, superseding D007's instrument-only scope](decisions/D008-oops-gl-grows-to-opengl-1-and-2-superseding.md) | decided | 2026-09-17 |
 | 🟢 | D009 | [An absent feature is an absent symbol, not a function that refuses](decisions/D009-an-absent-feature-is-an-absent-symbol.md) | decided | 2026-09-17 |
+| 🟢 | D010 | [oops-sdl is a backend inside upstream SDL, not an implementation of SDL](decisions/D010-oops-sdl-is-a-backend-inside-upstream.md) | decided | 2026-09-21 |
+| 🟢 | D011 | [The display names its scanout buffers once, and they must be plain](decisions/D011-the-display-names-its-scanout-buffers-once.md) | decided | 2026-09-21 |
+| 🟡 | D012 | [One renderer API, and the display open moves inside it](decisions/D012-one-renderer-api-and-the-display-open-moves-inside-it.md) | proposed | 2026-09-21 |
 
 | | meaning |
 |---|---|

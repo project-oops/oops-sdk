@@ -32,8 +32,21 @@ static void fail(glsl_parser_t *p, const char *why) {
 }
 
 static void bump(glsl_parser_t *p) {
-    /* glsl_lex_next writes EOF and returns false at the end, so the lookahead stays valid and
+    /* **The one place a token enters the parser**, which is what lets the preprocessor be
+     * slotted in front of the lexer rather than run as a separate pass over the text. With `pp`
+     * set, directives are obeyed and macros expanded before the grammar ever sees anything; with
+     * it null the raw lexer is read, which is how this file's own tests drive it.
+     *
+     * Either source writes EOF and returns false at the end, so the lookahead stays valid and
      * every `accept` afterwards simply fails. */
+    if (p->pp) {
+        glsl_pp_next(p->pp, &p->tok);
+        if (p->tok.type == GLSL_TOK_ERROR) {
+            fail(p, p->tok.error ? p->tok.error
+                                 : (p->pp->error ? p->pp->error : "invalid token"));
+        }
+        return;
+    }
     glsl_lex_next(&p->lx, &p->tok);
     if (p->tok.type == GLSL_TOK_ERROR) {
         fail(p, p->tok.error ? p->tok.error : "invalid token");
@@ -79,8 +92,30 @@ void glsl_parser_init(glsl_parser_t *p, glsl_ast_t *ast, const char *source, siz
     p->error = (const char *)0;
     p->error_line = 0;
     p->error_column = 0;
+    p->pp = (glsl_pp_t *)0;
+    p->version = 0;   /* not stated: enforce nothing - see glsl_parser_t */
     glsl_lexer_init(&p->lx, source, length);
     bump(p);
+}
+
+void glsl_parser_init_pp(glsl_parser_t *p, glsl_ast_t *ast, glsl_pp_t *pp) {
+    if (!p) return;
+    p->ast = ast;
+    if (ast) ast->count = 0;
+    p->error = (const char *)0;
+    p->error_line = 0;
+    p->error_column = 0;
+    p->pp = pp;
+    /* The lexer is left inert: with `pp` set nothing reads it, and the preprocessor has its
+     * own over the same source. */
+    glsl_lexer_init(&p->lx, (const char *)0, 0);
+    p->version = 0;
+    /* **This consumes every directive before the first real token**, so `#version` has already
+     * been read when this returns - which is what lets a caller refuse a language it does not
+     * implement before parsing a line of it. */
+    bump(p);
+    /* A shader that says nothing is GLSL 1.10, which the specification states outright. */
+    p->version = (pp && pp->version) ? pp->version : 110;
 }
 
 static int32_t parse_assignment(glsl_parser_t *p);
@@ -402,6 +437,34 @@ static GLboolean is_qualifier(glsl_token_type_t t) {
     return (GLboolean)(t == GLSL_TOK_KW_CONST || t == GLSL_TOK_KW_ATTRIBUTE ||
                        t == GLSL_TOK_KW_VARYING || t == GLSL_TOK_KW_UNIFORM ||
                        t == GLSL_TOK_KW_IN || t == GLSL_TOK_KW_OUT || t == GLSL_TOK_KW_INOUT);
+}
+
+/*
+ * **GLSL 1.20's `invariant` and `centroid`**, which sit *before* the storage qualifier rather
+ * than in place of it - `invariant centroid varying vec3 v;` is one declaration with three
+ * qualifiers on it.
+ *
+ * Both are consumed and neither is recorded, because **neither has anything to change here**,
+ * and that is a statement about this implementation rather than a shortcut:
+ *
+ *   - `invariant` asks that a value computed the same way in two shaders come out bit-identical.
+ *     There is one code path per stage and no optimiser reordering arithmetic between them, so
+ *     the guarantee already holds for everything.
+ *   - `centroid` moves a varying's sample point inside the primitive under multisampling. There
+ *     is no multisample buffer - `GL_SAMPLE_BUFFERS` answers 0 - so every sample is already at
+ *     the pixel centre, which is where centroid sampling would put it.
+ *
+ * Refused in a 1.10 shader by name, because they are 1.20's and a shader that uses one has said
+ * which language it is written in.
+ */
+static void parse_aux_qualifiers(glsl_parser_t *p) {
+    while (check(p, GLSL_TOK_KW_INVARIANT) || check(p, GLSL_TOK_KW_CENTROID)) {
+        if (p->version != 0 && p->version < 120) {
+            fail(p, "`invariant` and `centroid` are GLSL 1.20; this shader is 1.10");
+            return;
+        }
+        bump(p);
+    }
 }
 
 /* Is this token a built-in type name? */
@@ -745,6 +808,21 @@ static int32_t parse_parameter_list(glsl_parser_t *p) {
  * declaration. All three start with a type, so they are told apart by what follows the name -
  * `(` means a function, anything else a variable. */
 static int32_t parse_external_declaration(glsl_parser_t *p) {
+    /* **`invariant name;` on its own is a whole declaration** in GLSL 1.20 - a restatement that
+     * a variable already declared, usually `gl_Position`, is invariant. It has no type and
+     * declares nothing new, so it is consumed and produces no node. Taken before the qualifier
+     * loop below, which expects a type to follow. */
+    parse_aux_qualifiers(p);
+    if (p->error) return GLSL_NO_NODE;
+    /* An identifier where a type should be, after `invariant`, is the restatement form -
+     * `invariant gl_Position;` - which declares nothing and produces no node. */
+    if (check(p, GLSL_TOK_IDENTIFIER)) {
+        bump(p);
+        if (accept(p, GLSL_TOK_SEMICOLON)) return GLSL_NO_NODE;
+        fail(p, "expected `;` after an invariant restatement");
+        return GLSL_NO_NODE;
+    }
+
     glsl_token_type_t qualifier = GLSL_TOK_EOF;
     if (is_qualifier(p->tok.type)) {
         qualifier = p->tok.type;
@@ -840,6 +918,10 @@ int32_t glsl_parse_translation_unit(glsl_parser_t *p) {
         }
         int32_t d = parse_external_declaration(p);
         if (p->error) return GLSL_NO_NODE;
+        /* **No node and no error is a declaration that declares nothing** - GLSL 1.20's
+         * `invariant gl_Position;`. It is skipped rather than chained, because a
+         * GLSL_NO_NODE in the chain would end the list early and lose everything after it. */
+        if (d == GLSL_NO_NODE) continue;
         if (first == GLSL_NO_NODE) first = d; else p->ast->nodes[prev].sibling = d;
         /* A declarator list chains through `sibling` too, so the tail has to be found rather
          * than assumed to be the node just returned. */

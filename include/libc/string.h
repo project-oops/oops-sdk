@@ -11,6 +11,11 @@
 #ifndef OOPS_LIBC_STRING_H
 #define OOPS_LIBC_STRING_H
 
+/* C linkage for a C++ includer; `stdlib.h` carries the reasoning. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 
 void *memset(void *dest, int value, size_t len);
@@ -49,5 +54,9 @@ char *strpbrk(const char *s, const char *accept);
 /* There is no errno here, so every code reads as one string: "unknown error". It exists because
  * a program that prints it needs it to link, not because it says anything. */
 char *strerror(int errnum);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* OOPS_LIBC_STRING_H */

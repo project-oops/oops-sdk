@@ -32,6 +32,20 @@ static void sema_fail(glsl_sema_t *s, const char *why, int32_t node) {
     }
 }
 
+/* The type predicates and the diagnostic sink, for the built-in library next door.
+ *
+ * Wrappers rather than the statics made public, so every call site in this file keeps using the
+ * short names and there is still exactly one definition of each rule. A second copy of
+ * "what counts as a vector" in another file is the kind of thing that agrees on the day it is
+ * written and not afterwards. */
+void glsl_sema_fail(glsl_sema_t *s, const char *why, int32_t node);
+GLboolean glsl_type_is_vector(glsl_type_t t);
+GLboolean glsl_type_is_matrix(glsl_type_t t);
+GLboolean glsl_type_is_sampler(glsl_type_t t);
+glsl_type_t glsl_type_base(glsl_type_t t);
+glsl_type_t glsl_type_vector_of(glsl_type_t base, int n);
+int glsl_type_matrix_dim(glsl_type_t t);
+
 void glsl_sema_init(glsl_sema_t *s, glsl_ast_t *ast) {
     if (!s) return;
     s->ast = ast;
@@ -42,6 +56,37 @@ void glsl_sema_init(glsl_sema_t *s, glsl_ast_t *ast) {
     s->error_column = 0;
     s->current_return = GLSL_TYPE_VOID;
     s->loop_depth = 0;
+    s->stage = 0u;
+    s->version = 0;   /* unstated: 1.10's rules, which convert nothing */
+}
+
+/* -------------------------------------------------------------------------
+ * GLSL 1.20's implicit conversion
+ *
+ * **int to float, and `ivecN` to `vecN`. That is the whole of it** (1.20, 4.1.10). Not float to
+ * int, not bool to anything, and not in the other direction - so `int i = 1.0;` is still an
+ * error in 1.20, which is the half people expect to work and which does not.
+ *
+ * 1.10 converts nothing at all, and that refusal is deliberate rather than incidental: without
+ * it `1 + 1.0` silently picks a type its author did not write.
+ * ------------------------------------------------------------------------- */
+
+static glsl_type_t widen_to_float(glsl_type_t t) {
+    switch (t) {
+        case GLSL_TYPE_INT:   return GLSL_TYPE_FLOAT;
+        case GLSL_TYPE_IVEC2: return GLSL_TYPE_VEC2;
+        case GLSL_TYPE_IVEC3: return GLSL_TYPE_VEC3;
+        case GLSL_TYPE_IVEC4: return GLSL_TYPE_VEC4;
+        default: return t;
+    }
+}
+
+/* Whether a value of `got` may be used where `want` is expected - the test every assignment,
+ * initialiser, argument and return goes through, so the rule lives in one place. */
+GLboolean glsl_type_accepts(const glsl_sema_t *s, glsl_type_t want, glsl_type_t got) {
+    if (want == got) return GL_TRUE;
+    if (!s || s->version < 120) return GL_FALSE;
+    return (GLboolean)(widen_to_float(got) == want);
 }
 
 glsl_type_t glsl_type_from_token(glsl_token_type_t t) {
@@ -123,6 +168,14 @@ static int matrix_dim(glsl_type_t t) {
     return t == GLSL_TYPE_MAT2 ? 2 : t == GLSL_TYPE_MAT3 ? 3 : t == GLSL_TYPE_MAT4 ? 4 : 0;
 }
 
+void glsl_sema_fail(glsl_sema_t *s, const char *why, int32_t node) { sema_fail(s, why, node); }
+GLboolean glsl_type_is_vector(glsl_type_t t) { return is_vector(t); }
+GLboolean glsl_type_is_matrix(glsl_type_t t) { return is_matrix(t); }
+GLboolean glsl_type_is_sampler(glsl_type_t t) { return is_sampler(t); }
+glsl_type_t glsl_type_base(glsl_type_t t) { return base_of(t); }
+glsl_type_t glsl_type_vector_of(glsl_type_t base, int n) { return vector_of(base, n); }
+int glsl_type_matrix_dim(glsl_type_t t) { return matrix_dim(t); }
+
 /* -------------------------------------------------------------------------
  * Scopes
  * ------------------------------------------------------------------------- */
@@ -177,8 +230,17 @@ GLboolean glsl_declare(glsl_sema_t *s, const char *name, size_t len, glsl_type_t
     s->symbols[s->count].scope = s->scope;
     s->symbols[s->count].is_function = is_function;
     s->symbols[s->count].qualifier = GLSL_TOK_EOF;
+    s->symbols[s->count].array_size = 0;
     s->symbols[s->count].param_count = 0;
     s->count++;
+    return GL_TRUE;
+}
+
+GLboolean glsl_declare_array(glsl_sema_t *s, const char *name, size_t len, glsl_type_t type,
+                             int count, glsl_token_type_t qualifier) {
+    if (!glsl_declare(s, name, len, type, GL_FALSE)) return GL_FALSE;
+    s->symbols[s->count - 1].array_size = count;
+    s->symbols[s->count - 1].qualifier = qualifier;
     return GL_TRUE;
 }
 
@@ -294,6 +356,16 @@ static glsl_type_t binary_type(glsl_sema_t *s, glsl_token_type_t op, glsl_type_t
                                glsl_type_t r, int32_t node) {
     if (l == GLSL_TYPE_ERROR || r == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
 
+    /* **One side float and the other int widens the int one** (GLSL 1.20). Done here, once, so
+     * every rule below sees a pair that already agrees on its base type and none of them has to
+     * know about the conversion. `vec3 * 2` becomes `vec3 * 2.0`; `ivec2 == vec3` widens and is
+     * still a width mismatch, which is what it should be. */
+    if (s && s->version >= 120) {
+        const glsl_type_t lb = base_of(l), rb = base_of(r);
+        if (lb == GLSL_TYPE_FLOAT && rb == GLSL_TYPE_INT) r = widen_to_float(r);
+        else if (rb == GLSL_TYPE_FLOAT && lb == GLSL_TYPE_INT) l = widen_to_float(l);
+    }
+
     switch (op) {
         case GLSL_TOK_AND_AND: case GLSL_TOK_OR_OR: case GLSL_TOK_XOR_XOR:
             if (l != GLSL_TYPE_BOOL || r != GLSL_TYPE_BOOL) {
@@ -397,7 +469,12 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
              * type when it is called, which the CALL arm below handles. */
             const glsl_symbol_t *sym = lookup(s, n->text, n->length);
             if (!sym) {
-                sema_fail(s, "use of an undeclared name", node);
+                /* **A `gl_` name this implementation does not provide is named, not guessed
+                 * at.** `gl_LightSource[0]` and `gl_PointCoord` are real GLSL and are missing
+                 * here for reasons an author can act on - no struct type, no point sprites -
+                 * where "undeclared name" invites them to check their spelling instead. */
+                const char *why = glsl_builtin_refusal(n->text, n->length);
+                sema_fail(s, why ? why : "use of an undeclared name", node);
                 return GLSL_TYPE_ERROR;
             }
             return sym->type;
@@ -407,6 +484,35 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
             return swizzle_type(s, glsl_type_of(s, n->a), n->text, n->length, node);
 
         case GLSL_NODE_INDEX: {
+            /* **An array name is resolved before its type is**, because a name declared
+             * `vec4 v[4]` has element type `vec4` in the table - there is no array type - and
+             * typing the operand first would report a vec4 and then hand back a float as though
+             * a component had been asked for. GLSL 1.10 has no array-valued expressions, so an
+             * array can only ever be indexed through its own name and this is the whole rule. */
+            {
+                const glsl_node_t *base_n = &s->ast->nodes[n->a];
+                if (base_n->kind == GLSL_NODE_IDENTIFIER) {
+                    const glsl_symbol_t *sym = lookup(s, base_n->text, base_n->length);
+                    if (sym && sym->array_size > 0 && !sym->is_function) {
+                        glsl_type_t idx_t = glsl_type_of(s, n->b);
+                        if (idx_t == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
+                        if (idx_t != GLSL_TYPE_INT) {
+                            sema_fail(s, "an index must be an int", node);
+                            return GLSL_TYPE_ERROR;
+                        }
+                        /* A constant index past the end is a compile error in GLSL, not a
+                         * runtime read of whatever follows (1.10, 4.1.9). A variable one is
+                         * checked when it runs. */
+                        const glsl_node_t *idx_n = &s->ast->nodes[n->b];
+                        if (idx_n->kind == GLSL_NODE_INTCONST &&
+                            ((int)idx_n->value < 0 || (int)idx_n->value >= sym->array_size)) {
+                            sema_fail(s, "array index out of range", node);
+                            return GLSL_TYPE_ERROR;
+                        }
+                        return sym->type;
+                    }
+                }
+            }
             glsl_type_t base = glsl_type_of(s, n->a);
             glsl_type_t idx = glsl_type_of(s, n->b);
             if (base == GLSL_TYPE_ERROR || idx == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
@@ -450,6 +556,37 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
             }
             if (ctor != GLSL_TYPE_ERROR) return constructor_type(s, ctor, n->b, node);
 
+            /* **The built-in library, before the symbol table.** `sin`, `dot` and `texture2D`
+             * are not declared anywhere - they are overloaded over genType, which one signature
+             * per name cannot express - so they are resolved by rule, like the constructors
+             * above. A shader may still declare a function of its own with a built-in's name,
+             * which GLSL 1.10 allows; this finds the built-in first, which is wrong in that one
+             * case and right in every other, and the case is rare enough that the alternative -
+             * searching the table first and so paying a lookup on every `sin` - is the worse
+             * trade. */
+            {
+                glsl_type_t bargs[GLSL_MAX_PARAMS];
+                int bargc = 0;
+                GLboolean too_many = GL_FALSE;
+                for (int32_t a = n->b; a != GLSL_NO_NODE; a = s->ast->nodes[a].sibling) {
+                    glsl_type_t at = glsl_type_of(s, a);
+                    if (at == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
+                    if (bargc >= GLSL_MAX_PARAMS) { too_many = GL_TRUE; break; }
+                    /* **Every integer argument widens under 1.20**, before the built-in's own
+                     * rule looks at it - so `mod(x, 2)` and `clamp(v, 0, 1)` resolve, which is
+                     * how shader authors write them. Nothing is lost by widening everything:
+                     * neither 1.10 nor 1.20 has a built-in that takes an integer and means it,
+                     * so there is no overload this could pick wrongly. */
+                    bargs[bargc++] = (s->version >= 120) ? widen_to_float(at) : at;
+                }
+                if (!too_many) {
+                    GLboolean found = GL_FALSE;
+                    glsl_type_t bt = glsl_builtin_call_type(s, callee->text, callee->length,
+                                                            bargs, bargc, node, &found);
+                    if (found) return bt;
+                }
+            }
+
             const glsl_symbol_t *sym = lookup(s, callee->text, callee->length);
             if (!sym) {
                 sema_fail(s, "call to an undeclared function", node);
@@ -465,7 +602,7 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
             for (int32_t a = n->b; a != GLSL_NO_NODE; a = s->ast->nodes[a].sibling) {
                 glsl_type_t at = glsl_type_of(s, a);
                 if (at == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
-                if (given < sym->param_count && at != sym->params[given]) {
+                if (given < sym->param_count && !glsl_type_accepts(s, sym->params[given], at)) {
                     sema_fail(s, "argument of the wrong type", a);
                     return GLSL_TYPE_ERROR;
                 }
@@ -521,7 +658,9 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
                 r = binary_type(s, arith, l, r, node);
                 if (r == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
             }
-            if (l != r) {
+            /* **The conversion goes one way**, into the variable's type: `float f; f = 1;` is
+             * legal in 1.20 and `int i; i = 1.0;` is not, in either version. */
+            if (!glsl_type_accepts(s, l, r)) {
                 sema_fail(s, "assigning a value of a different type", node);
                 return GLSL_TYPE_ERROR;
             }
@@ -539,11 +678,12 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
                 sema_fail(s, "the condition of ?: must be a bool", node);
                 return GLSL_TYPE_ERROR;
             }
-            if (y != no) {
-                sema_fail(s, "the two branches of ?: have different types", node);
-                return GLSL_TYPE_ERROR;
-            }
-            return y;
+            /* Either branch may widen to the other's type, so `b ? 1 : 1.0` is a float in 1.20
+             * and an error in 1.10. */
+            if (glsl_type_accepts(s, y, no)) return y;
+            if (glsl_type_accepts(s, no, y)) return no;
+            sema_fail(s, "the two branches of ?: have different types", node);
+            return GLSL_TYPE_ERROR;
         }
 
         case GLSL_NODE_SEQUENCE: {
@@ -687,13 +827,28 @@ static GLboolean check_declarator(glsl_sema_t *s, int32_t d) {
     if (n->a != GLSL_NO_NODE) {
         glsl_type_t init = glsl_type_of(s, n->a);
         if (init == GLSL_TYPE_ERROR) return GL_FALSE;
-        if (init != t) {
+        if (!glsl_type_accepts(s, t, init)) {
             sema_fail(s, "initialiser of a different type from the variable", d);
             return GL_FALSE;
         }
     }
+    /* **An array's length has to be a constant**, and in GLSL 1.10 that means a literal or a
+     * `const` initialised from one (4.1.9). A literal is what shaders write and is all that is
+     * accepted here: anything else is refused by name rather than assumed to be 1, which would
+     * turn `vec4 v[n]` into a scalar and index it out of bounds at run time. An unsized
+     * declaration - `varying vec4 v[];` - is refused for the same reason. */
+    int elements = 0;
+    if (n->array_size != GLSL_NO_NODE) {
+        const glsl_node_t *sz = &s->ast->nodes[n->array_size];
+        if (sz->kind != GLSL_NODE_INTCONST || (int)sz->value <= 0) {
+            sema_fail(s, "an array length must be a positive integer literal", d);
+            return GL_FALSE;
+        }
+        elements = (int)sz->value;
+    }
     if (!glsl_declare(s, n->text, n->length, t, GL_FALSE)) return GL_FALSE;
     s->symbols[s->count - 1].qualifier = n->qualifier;
+    s->symbols[s->count - 1].array_size = elements;
     return GL_TRUE;
 }
 
@@ -763,7 +918,7 @@ static GLboolean check_statement(glsl_sema_t *s, int32_t node) {
             }
             glsl_type_t t = glsl_type_of(s, n->a);
             if (t == GLSL_TYPE_ERROR) return GL_FALSE;
-            if (t != s->current_return) {
+            if (!glsl_type_accepts(s, s->current_return, t)) {
                 sema_fail(s, "return of a different type from the function's", node);
                 return GL_FALSE;
             }

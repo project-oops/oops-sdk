@@ -38,6 +38,7 @@ void glsl_gen_init(glsl_gen_t *g, glsl_ast_t *ast, glsl_sema_t *sema, glsl_code_
     g->next_vgpr = 0u;
     g->high_water = 0u;
     g->var_count = 0;
+    g->exec_depth = 0;
     g->error = (const char *)0;
     g->error_line = 0;
     g->error_column = 0;
@@ -142,11 +143,47 @@ static GLboolean is_matrix(glsl_type_t t) {
     return (t == GLSL_TYPE_MAT2 || t == GLSL_TYPE_MAT3 || t == GLSL_TYPE_MAT4) ? GL_TRUE : GL_FALSE;
 }
 
-/* The bits of a float literal, without punning through a pointer. */
+/*
+ * **A bool is a float that is 0.0 or 1.0, in a register of its own.**
+ *
+ * The hardware's own answer to a comparison is a *lane mask* in an SGPR, which is the right
+ * representation for a condition and the wrong one for a value: `bool b = x < y;` has to live
+ * somewhere a variable lives, and every variable here is VGPRs. So a comparison writes the mask
+ * to `vcc` and immediately selects 1.0 or 0.0 out of it, and everything downstream - `&&`, the
+ * `?:`, an `if`'s condition - works on that.
+ *
+ * It costs an instruction and a register over carrying the mask around. What it buys is that
+ * there is exactly **one** register class in this back end, which is the thing that makes the
+ * allocator, the swizzles and the places all as simple as they are.
+ *
+ * Because the values are exactly 0.0 and 1.0: `a && b` is `min`, `a || b` is `max`, and `!a` is
+ * `1 - a`. No comparison is needed for any of them.
+ */
+static GLboolean is_bool_family(glsl_type_t t) {
+    return (t == GLSL_TYPE_BOOL) ? GL_TRUE : GL_FALSE;
+}
+
+/* Everything this stage has a register for. */
+static GLboolean is_generated(glsl_type_t t) {
+    return (is_float_family(t) || is_bool_family(t)) ? GL_TRUE : GL_FALSE;
+}
+
+/* The bits of a float literal, without punning through a pointer.
+ *
+ * **Every constant this file needs is written as a decimal and converted here**, never as the
+ * hexadecimal it comes out as. A wrong bit pattern is a number nobody can read back, and the
+ * lowerings below turn on constants that are easy to get subtly wrong - `1/2pi`, `log2 e`,
+ * `ln 2`. Written as decimals they are checkable against a table; written as hex they are not. */
 static uint32_t float_bits(double d) {
     union { float f; uint32_t u; } cvt;
     cvt.f = (float)d;
     return cvt.u;
+}
+
+/* Component `i` of a value, broadcasting a scalar. GLSL's mixed-width rules - `v * 2.0`,
+ * `min(v, 0.0)`, `mix(a, b, t)` with a float `t` - are all this one rule. */
+static uint32_t comp_of(glsl_value_t v, int i) {
+    return v.base + (v.count == 1 ? 0u : (uint32_t)i);
 }
 
 /* -------------------------------------------------------------------------
@@ -154,6 +191,14 @@ static uint32_t float_bits(double d) {
  * ------------------------------------------------------------------------- */
 
 static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node);
+
+/* A float constant in a register of its own. */
+static glsl_value_t gen_const(glsl_gen_t *g, double k, int32_t node) {
+    glsl_value_t v = gen_alloc(g, 1, node);
+    if (is_bad(v)) return v;
+    glsl_emit_mov_imm(g->code, v.base, float_bits(k));
+    return v;
+}
 
 /* Copy `src` into `dst`, component for component. */
 static void gen_move(glsl_gen_t *g, glsl_value_t dst, glsl_value_t src) {
@@ -186,14 +231,163 @@ static void gen_binop_component(glsl_gen_t *g, glsl_token_type_t op, uint32_t d,
  *   - `mat4 * vec4`: a transform, not sixteen component-wise multiplies. Handled before the
  *     widths are compared, because the widths do not match and the natural reading of that is
  *     wrong rather than merely unsupported.
+ *
+ * **`/` is a reciprocal and a multiply**, which is the only division this instruction set has:
+ * `v_rcp_f32` and then `v_mul_f32`. That is what ACO emits for a GLSL divide that is not marked
+ * `precise` (mesa/src/amd/compiler/aco_instruction_selection.cpp, `nir_op_fdiv`), and the
+ * reciprocal is accurate to 1 ULP, so the quotient is within about 2. GLSL 1.10 requires no
+ * better - section 4.5.1 leaves division's precision to the implementation - and the software
+ * rasteriser in `glsl_exec.c` divides exactly, so the two paths can differ in the last bit.
+ * That is the one divergence between them, and it is recorded here rather than discovered.
  */
+/* Does this subtree write to anything? What decides whether `&&` and `||` can be evaluated on
+ * both sides - see `gen_logical`. */
+static GLboolean has_side_effect(const glsl_ast_t *ast, int32_t node) {
+    if (node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &ast->nodes[node];
+    if (n->kind == GLSL_NODE_ASSIGN || n->kind == GLSL_NODE_POSTFIX) return GL_TRUE;
+    if (n->kind == GLSL_NODE_UNARY &&
+        (n->op == GLSL_TOK_INC || n->op == GLSL_TOK_DEC)) {
+        return GL_TRUE;
+    }
+    if (has_side_effect(ast, n->a) || has_side_effect(ast, n->b) ||
+        has_side_effect(ast, n->c)) {
+        return GL_TRUE;
+    }
+    /* A call's arguments are a sibling chain from `b`, so the second one and after are not
+     * reachable through the three links above. Only walked for a call: elsewhere a sibling is
+     * the *next statement*, and following it would make every expression in a block look like
+     * every other one. */
+    if (n->kind == GLSL_NODE_CALL) {
+        for (int32_t s = n->b; s != GLSL_NO_NODE; s = ast->nodes[s].sibling) {
+            if (has_side_effect(ast, s)) return GL_TRUE;
+        }
+    }
+    return GL_FALSE;
+}
+
+/*
+ * A comparison. `a < b` and the rest, on scalars; `==` and `!=` additionally on vectors, where
+ * GLSL's answer is a single bool that is true only if **every** component agrees.
+ *
+ * The per-component answers are 0.0 or 1.0, so combining them needs no comparison of its own:
+ * `==` over a vector is the `min` of the component equalities, and `!=` is the `max` of the
+ * component inequalities. Which of those two it is matters - taking the min for both would make
+ * `a != b` mean "every component differs", which is true of far fewer pairs and is wrong in the
+ * direction that draws.
+ */
+static glsl_value_t gen_compare(glsl_gen_t *g, glsl_token_type_t op, glsl_value_t a,
+                                glsl_value_t b, int32_t node) {
+    uint32_t vopc;
+    switch (op) {
+        case GLSL_TOK_LT: vopc = GLSL_VOPC_LT_F32; break;
+        case GLSL_TOK_GT: vopc = GLSL_VOPC_GT_F32; break;
+        case GLSL_TOK_LE: vopc = GLSL_VOPC_LE_F32; break;
+        case GLSL_TOK_GE: vopc = GLSL_VOPC_GE_F32; break;
+        case GLSL_TOK_EQ: vopc = GLSL_VOPC_EQ_F32; break;
+        case GLSL_TOK_NE: vopc = GLSL_VOPC_NEQ_F32; break;
+        default: return gen_fail(g, "not a comparison", node);
+    }
+    const int w = a.count > b.count ? a.count : b.count;
+    if (w > 1 && op != GLSL_TOK_EQ && op != GLSL_TOK_NE) {
+        return gen_fail(g, "the ordering comparisons take scalars; lessThan and its family "
+                           "compare vectors, and they return a bvec this has no register for",
+                        node);
+    }
+
+    glsl_value_t zero = gen_const(g, 0.0, node);
+    if (is_bad(zero)) return zero;
+    glsl_value_t one = gen_const(g, 1.0, node);
+    if (is_bad(one)) return one;
+    glsl_value_t d = gen_alloc(g, 1, node);
+    if (is_bad(d)) return d;
+    glsl_value_t t = gen_alloc(g, 1, node);
+    if (is_bad(t)) return t;
+
+    for (int i = 0; i < w; i++) {
+        glsl_emit_cmp(g->code, vopc, comp_of(a, i), comp_of(b, i));
+        glsl_emit_cndmask(g->code, (i == 0 ? d.base : t.base), zero.base, one.base);
+        if (i > 0) {
+            /* `==` needs every component true, `!=` needs any. */
+            glsl_emit_vop2_op(g->code,
+                              op == GLSL_TOK_EQ ? GLSL_VOP2_MIN_F32 : GLSL_VOP2_MAX_F32,
+                              d.base, d.base, t.base);
+        }
+    }
+    return d;
+}
+
+/* `&&`, `||` and `^^` over values that are exactly 0.0 or 1.0: `min`, `max`, and the absolute
+ * difference. No comparison, and no branch.
+ *
+ * **GLSL short-circuits `&&` and `||`, and this does not** - both sides are evaluated. That is
+ * indistinguishable as long as the right-hand side does nothing, which for a fragment shader
+ * means it does not assign; so a right-hand side that assigns is refused rather than quietly
+ * evaluated when the language says it would not be. Division by zero on the dead side is not a
+ * reason to refuse: it produces an infinity that is then discarded, exactly as on any other
+ * implementation that vectorises this. */
+static glsl_value_t gen_logical(glsl_gen_t *g, int32_t node) {
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (has_side_effect(g->ast, n->b)) {
+        return gen_fail(g, "the right of a && or || assigns, and this evaluates both sides - "
+                           "so it would run when the language says it does not", node);
+    }
+    glsl_value_t a = gen_expr(g, n->a);
+    if (is_bad(a)) return a;
+    glsl_value_t b = gen_expr(g, n->b);
+    if (is_bad(b)) return b;
+    if (a.count != 1 || b.count != 1) {
+        return gen_fail(g, "&& and || take single bools", node);
+    }
+    glsl_value_t d = gen_alloc(g, 1, node);
+    if (is_bad(d)) return d;
+    if (n->op == GLSL_TOK_AND_AND) {
+        glsl_emit_vop2_op(g->code, GLSL_VOP2_MIN_F32, d.base, a.base, b.base);
+        return d;
+    }
+    if (n->op == GLSL_TOK_OR_OR) {
+        glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, d.base, a.base, b.base);
+        return d;
+    }
+    /* `^^`, the exclusive or: |a - b| over two values that are 0 or 1. */
+    glsl_value_t t = gen_alloc(g, 1, node);
+    if (is_bad(t)) return t;
+    glsl_emit_sub_f32(g->code, d.base, a.base, b.base);
+    glsl_emit_neg_f32(g->code, t.base, d.base);
+    glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, d.base, d.base, t.base);
+    return d;
+}
+
 static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
     const glsl_node_t *n = &g->ast->nodes[node];
     const glsl_token_type_t op = n->op;
 
-    if (op != GLSL_TOK_PLUS && op != GLSL_TOK_MINUS && op != GLSL_TOK_STAR) {
-        return gen_fail(g, "this operator has no verified instruction yet: only + - * are "
-                           "generated, and / is refused rather than approximated", node);
+    if (op == GLSL_TOK_AND_AND || op == GLSL_TOK_OR_OR || op == GLSL_TOK_XOR_XOR) {
+        return gen_logical(g, node);
+    }
+
+    if (op == GLSL_TOK_LT || op == GLSL_TOK_GT || op == GLSL_TOK_LE || op == GLSL_TOK_GE ||
+        op == GLSL_TOK_EQ || op == GLSL_TOK_NE) {
+        const glsl_type_t clt = glsl_type_of(g->sema, n->a);
+        const glsl_type_t crt = glsl_type_of(g->sema, n->b);
+        if ((!is_float_family(clt) && !is_bool_family(clt)) ||
+            (!is_float_family(crt) && !is_bool_family(crt)) ||
+            is_matrix(clt) || is_matrix(crt)) {
+            return gen_fail(g, "only float, vector and bool comparisons are generated; the "
+                                "integer ones have no verified instruction here", node);
+        }
+        glsl_value_t ca = gen_expr(g, n->a);
+        if (is_bad(ca)) return ca;
+        glsl_value_t cb = gen_expr(g, n->b);
+        if (is_bad(cb)) return cb;
+        return gen_compare(g, op, ca, cb, node);
+    }
+
+    if (op != GLSL_TOK_PLUS && op != GLSL_TOK_MINUS && op != GLSL_TOK_STAR &&
+        op != GLSL_TOK_SLASH) {
+        return gen_fail(g, "this operator has no verified instruction yet: the arithmetic, the "
+                           "comparisons and the logical operators are generated, and the rest "
+                           "are refused rather than approximated", node);
     }
 
     const glsl_type_t lt = glsl_type_of(g->sema, n->a);
@@ -224,12 +418,28 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
         return gen_fail(g, "these operand widths do not combine", node);
     }
 
+    if (op == GLSL_TOK_SLASH) {
+        /* One reciprocal **per divisor component**, not per result component: `v / s` with a
+         * scalar divisor is one reciprocal and `width` multiplies, which is the shape this is
+         * written for and is also the common case. */
+        glsl_value_t r = gen_alloc(g, b.count, node);
+        if (is_bad(r)) return r;
+        for (int i = 0; i < b.count; i++) {
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, r.base + (uint32_t)i,
+                              b.base + (uint32_t)i);
+        }
+        glsl_value_t out = gen_alloc(g, width, node);
+        if (is_bad(out)) return out;
+        for (int i = 0; i < width; i++) {
+            glsl_emit_mul_f32(g->code, out.base + (uint32_t)i, comp_of(a, i), comp_of(r, i));
+        }
+        return out;
+    }
+
     glsl_value_t out = gen_alloc(g, width, node);
     if (is_bad(out)) return out;
     for (int i = 0; i < width; i++) {
-        const uint32_t ai = a.base + (a.count == 1 ? 0u : (uint32_t)i);
-        const uint32_t bi = b.base + (b.count == 1 ? 0u : (uint32_t)i);
-        gen_binop_component(g, op, out.base + (uint32_t)i, ai, bi);
+        gen_binop_component(g, op, out.base + (uint32_t)i, comp_of(a, i), comp_of(b, i));
     }
     return out;
 }
@@ -348,6 +558,643 @@ static glsl_value_t gen_construct(glsl_gen_t *g, glsl_type_t target, int32_t fir
     return out;
 }
 
+/* -------------------------------------------------------------------------
+ * Places: what an assignment writes into
+ *
+ * A value here is one VGPR a component with no packing, so **writing through a swizzle is not a
+ * masked move** - it is a move into each of the registers the swizzle names. `c.rgb = v` is
+ * three moves into the first three of `c`'s registers, `c.a = 1.0` is one into the fourth, and
+ * `c.zyx = v` is three moves that cross over. It is only this simple because of the
+ * representation: a back end that packed four floats into one register would need a write mask,
+ * and there is no measured one here.
+ *
+ * The semantic stage has already refused everything that is not a place - a repeated component
+ * (`v.xx = ...`), a uniform, an attribute, a `const` - so this maps letters to indices and
+ * nothing more.
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+    uint32_t reg[4];   /* the registers this place names, in the order it names them */
+    int count;
+} gen_place_t;
+
+static GLboolean gen_place_of(glsl_gen_t *g, int32_t node, gen_place_t *out) {
+    if (node == GLSL_NO_NODE) {
+        (void)gen_fail(g, "an assignment with no destination", node);
+        return GL_FALSE;
+    }
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (n->kind == GLSL_NODE_IDENTIFIER) {
+        glsl_gen_var_t *v = gen_find(g, n->text, n->length);
+        if (!v) {
+            (void)gen_fail(g, "assigning to a name with no register: only locals declared in "
+                              "this body and the shader's own inputs are generated so far",
+                           node);
+            return GL_FALSE;
+        }
+        if (v->value.count > 4) {
+            (void)gen_fail(g, "a matrix is not assignable here", node);
+            return GL_FALSE;
+        }
+        out->count = v->value.count;
+        for (int i = 0; i < out->count; i++) out->reg[i] = v->value.base + (uint32_t)i;
+        return GL_TRUE;
+    }
+    if (n->kind == GLSL_NODE_FIELD) {
+        gen_place_t base;
+        if (!gen_place_of(g, n->a, &base)) return GL_FALSE;
+        const int len = (int)n->length;
+        if (len < 1 || len > 4) {
+            (void)gen_fail(g, "a swizzle names one to four components", node);
+            return GL_FALSE;
+        }
+        out->count = len;
+        for (int i = 0; i < len; i++) {
+            int idx;
+            switch (n->text[i]) {
+                case 'x': case 'r': case 's': idx = 0; break;
+                case 'y': case 'g': case 't': idx = 1; break;
+                case 'z': case 'b': case 'p': idx = 2; break;
+                case 'w': case 'a': case 'q': idx = 3; break;
+                default:
+                    (void)gen_fail(g, "not a component name", node);
+                    return GL_FALSE;
+            }
+            if (idx >= base.count) {
+                (void)gen_fail(g, "a component past the end of the value", node);
+                return GL_FALSE;
+            }
+            out->reg[i] = base.reg[idx];
+        }
+        return GL_TRUE;
+    }
+    (void)gen_fail(g, "this is not something with a register to write into; an array element "
+                      "has no instruction selection yet", node);
+    return GL_FALSE;
+}
+
+/* -------------------------------------------------------------------------
+ * The built-in library
+ *
+ * GLSL section 8, lowered onto the instructions in `tools/shader/gl2-fragment.s`. Three groups,
+ * and the boundary between them is what has a verified encoding rather than what is easy:
+ *
+ *   - **One instruction.** `sqrt`, `inversesqrt`, `floor`, `ceil`, `fract`, `min`, `max` -
+ *     VOP1 or VOP2 a component and nothing else.
+ *   - **A short sequence.** `abs`, `sign`, `clamp`, `mix`, `step`, `smoothstep`, `mod`, `pow`,
+ *     `exp`, `log`, `dot`, `length`, `distance`, `normalize`, `cross`, `reflect`,
+ *     `faceforward`, `radians`, `degrees`, `sin`, `cos`, `tan` - each built from those, with
+ *     the identity it uses written beside it.
+ *   - **Refused.** `asin`, `acos`, `atan`, `refract`, the matrix functions and the vector
+ *     relational ones. There is no instruction for them and no lowering that is not a
+ *     polynomial somebody chose; approximating a transcendental to an unmeasured accuracy is
+ *     exactly the failure this back end is arranged around (D009), so the shader does not
+ *     compile and the message says which function stopped it.
+ *
+ * # The two traps in here
+ *
+ * **`v_sin_f32` does not take radians.** It computes `sin(2*pi*x)`, so GLSL's `sin` is a
+ * multiply by `1/2pi` and then the instruction - which is what ACO emits
+ * (mesa/src/amd/compiler/aco_instruction_selection.cpp, `nir_op_fsin`, the 0x3e22f983 it
+ * multiplies by). Feeding radians straight in gives a smooth periodic function of the right
+ * shape and the wrong period, which looks like a shader that works until something has to line
+ * up with it.
+ *
+ * **`v_exp_f32` and `v_log_f32` are base two.** `exp` is `exp2(x * log2 e)` and `log` is
+ * `log2(x) * ln 2`. Taking them for the natural pair is wrong by a factor of 1.44 - a number
+ * small enough to look like a tuning problem rather than a compiler bug.
+ * ------------------------------------------------------------------------- */
+
+static GLboolean nm_is(const char *text, size_t len, const char *lit) {
+    size_t n = 0;
+    while (lit[n] != '\0') n++;
+    if (n != len) return GL_FALSE;
+    for (size_t i = 0; i < n; i++) {
+        if (text[i] != lit[i]) return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* `text` is not NUL-terminated - it points into the shader source - so the length is checked
+ * before any character is, and never after. */
+static GLboolean nm_prefix(const char *text, size_t len, const char *lit) {
+    size_t n = 0;
+    while (lit[n] != '\0') n++;
+    if (len < n) return GL_FALSE;
+    for (size_t i = 0; i < n; i++) {
+        if (text[i] != lit[i]) return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* `d[i] = op(s[i])`, one VOP1 a component. */
+static void gen_map1(glsl_gen_t *g, uint32_t opcode, glsl_value_t d, glsl_value_t s) {
+    for (int i = 0; i < d.count; i++) {
+        glsl_emit_vop1_op(g->code, opcode, d.base + (uint32_t)i, comp_of(s, i));
+    }
+}
+
+/* `d[i] = op(a[i], b[i])`, one VOP2 a component, either operand broadcastable. */
+static void gen_map2(glsl_gen_t *g, uint32_t opcode, glsl_value_t d, glsl_value_t a,
+                     glsl_value_t b) {
+    for (int i = 0; i < d.count; i++) {
+        glsl_emit_vop2_op(g->code, opcode, d.base + (uint32_t)i, comp_of(a, i), comp_of(b, i));
+    }
+}
+
+/* `dot(a, b)` into one register: a multiply and then a fused multiply-add a component, which is
+ * the shortest form this instruction set has for it. The destination is freshly allocated and so
+ * sits above both operands - the accumulate reads `d` and would otherwise need to. */
+static glsl_value_t gen_dot(glsl_gen_t *g, glsl_value_t a, glsl_value_t b, int32_t node) {
+    const int w = a.count > b.count ? a.count : b.count;
+    glsl_value_t d = gen_alloc(g, 1, node);
+    if (is_bad(d)) return d;
+    glsl_emit_mul_f32(g->code, d.base, comp_of(a, 0), comp_of(b, 0));
+    for (int i = 1; i < w; i++) {
+        glsl_emit_fmac_f32(g->code, d.base, comp_of(a, i), comp_of(b, i));
+    }
+    return d;
+}
+
+/* `1 / sqrt(dot(v, v))`, the scale `normalize` and `length` are both built on. */
+static glsl_value_t gen_inv_length(glsl_gen_t *g, glsl_value_t v, int32_t node) {
+    glsl_value_t d2 = gen_dot(g, v, v, node);
+    if (is_bad(d2)) return d2;
+    glsl_value_t r = gen_alloc(g, 1, node);
+    if (is_bad(r)) return r;
+    glsl_emit_vop1_op(g->code, GLSL_VOP1_RSQ_F32, r.base, d2.base);
+    return r;
+}
+
+/* `d = (x cmp 0) ? one : zero`, component-wise, with the two constants materialised once.
+ * `v_cndmask` takes its **false** value in src0, which is why `zero` is passed there. */
+static glsl_value_t gen_select_on_sign(glsl_gen_t *g, glsl_value_t x, uint32_t vopc,
+                                       double if_true, double if_false, int32_t node) {
+    glsl_value_t z = gen_const(g, 0.0, node);
+    if (is_bad(z)) return z;
+    glsl_value_t t = gen_const(g, if_true, node);
+    if (is_bad(t)) return t;
+    glsl_value_t f = gen_const(g, if_false, node);
+    if (is_bad(f)) return f;
+    glsl_value_t d = gen_alloc(g, x.count, node);
+    if (is_bad(d)) return d;
+    for (int i = 0; i < x.count; i++) {
+        glsl_emit_cmp(g->code, vopc, comp_of(x, i), z.base);
+        glsl_emit_cndmask(g->code, d.base + (uint32_t)i, f.base, t.base);
+    }
+    return d;
+}
+
+#define GEN_MAX_ARGS 4
+
+static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_t first_arg,
+                                int32_t node) {
+    const char *const nm = callee->text;
+    const size_t len = callee->length;
+
+    /* The names that are real GLSL and have no instruction here. Named one at a time, because
+     * "this built-in has no instruction selection" over a call to `atan` reads as a gap in the
+     * compiler, which is what it is - and the alternative, a polynomial of somebody's choosing,
+     * would read as working. */
+    if (nm_is(nm, len, "asin") || nm_is(nm, len, "acos") || nm_is(nm, len, "atan")) {
+        return gen_fail(g, "the inverse trigonometric functions have no instruction on this "
+                           "part, and a polynomial of unmeasured accuracy is not generated in "
+                           "their place", node);
+    }
+    if (nm_is(nm, len, "refract")) {
+        return gen_fail(g, "refract needs a square root of a value that may be negative and a "
+                           "select on it, which this has no lowering for yet", node);
+    }
+    if (nm_is(nm, len, "matrixCompMult") || nm_is(nm, len, "transpose") ||
+        nm_is(nm, len, "outerProduct")) {
+        return gen_fail(g, "the matrix built-ins are not generated; only mat4 * vec4 is", node);
+    }
+    if (nm_is(nm, len, "lessThan") || nm_is(nm, len, "lessThanEqual") ||
+        nm_is(nm, len, "greaterThan") || nm_is(nm, len, "greaterThanEqual") ||
+        nm_is(nm, len, "equal") || nm_is(nm, len, "notEqual") || nm_is(nm, len, "any") ||
+        nm_is(nm, len, "all") || nm_is(nm, len, "not")) {
+        return gen_fail(g, "the vector relational functions return a bvec, which this back end "
+                           "has no representation for yet", node);
+    }
+    /* Every lookup in section 8.7 begins with one of these two, so the whole family is caught by
+     * its prefix rather than by eleven names - and the message is about the wiring, which is
+     * what is actually missing, rather than about the name. */
+    if (nm_prefix(nm, len, "texture") || nm_prefix(nm, len, "shadow")) {
+        return gen_fail(g, "a texture lookup needs the image and sampler descriptors handed to "
+                           "the shader, which the compiled path does not wire up yet", node);
+    }
+
+    /* The arguments, left to right. Evaluated once each and into registers that outlive the
+     * lowering below - a built-in that used an argument twice (`normalize`, `dot(v, v)`) must
+     * not evaluate its expression twice. */
+    glsl_value_t arg[GEN_MAX_ARGS];
+    int argc = 0;
+    for (int32_t a = first_arg; a != GLSL_NO_NODE; a = g->ast->nodes[a].sibling) {
+        if (argc == GEN_MAX_ARGS) {
+            return gen_fail(g, "more arguments than any built-in generated here takes", node);
+        }
+        const glsl_type_t at = glsl_type_of(g->sema, a);
+        if (!is_float_family(at) || is_matrix(at)) {
+            return gen_fail(g, "this built-in is generated for float and vector arguments only",
+                            node);
+        }
+        arg[argc] = gen_expr(g, a);
+        if (is_bad(arg[argc])) return arg[argc];
+        argc++;
+    }
+    if (argc == 0) {
+        return gen_fail(g, "a built-in with no arguments is not one this generates", node);
+    }
+
+    /* The widest argument: every component-wise built-in here returns that width, and the rules
+     * above let a scalar stand in for any of them. */
+    int w = arg[0].count;
+    for (int i = 1; i < argc; i++) {
+        if (arg[i].count > w) w = arg[i].count;
+    }
+
+    /* --- one instruction a component ------------------------------------ */
+    struct { const char *name; uint32_t op; int args; } const MAP[] = {
+        {"sqrt",        GLSL_VOP1_SQRT_F32,  1},
+        {"inversesqrt", GLSL_VOP1_RSQ_F32,   1},
+        {"floor",       GLSL_VOP1_FLOOR_F32, 1},
+        {"ceil",        GLSL_VOP1_CEIL_F32,  1},
+        {"fract",       GLSL_VOP1_FRACT_F32, 1},
+        {"exp2",        GLSL_VOP1_EXP_F32,   1},
+        {"log2",        GLSL_VOP1_LOG_F32,   1},
+        {"min",         GLSL_VOP2_MIN_F32,   2},
+        {"max",         GLSL_VOP2_MAX_F32,   2},
+    };
+    for (size_t i = 0; i < sizeof(MAP) / sizeof(MAP[0]); i++) {
+        if (!nm_is(nm, len, MAP[i].name)) continue;
+        if (argc != MAP[i].args) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        if (MAP[i].args == 1) {
+            gen_map1(g, MAP[i].op, d, arg[0]);
+        } else {
+            gen_map2(g, MAP[i].op, d, arg[0], arg[1]);
+        }
+        return d;
+    }
+
+    /* --- a multiply by a constant --------------------------------------- */
+    struct { const char *name; double k; } const SCALE[] = {
+        {"radians", 3.14159265358979323846 / 180.0},
+        {"degrees", 180.0 / 3.14159265358979323846},
+    };
+    for (size_t i = 0; i < sizeof(SCALE) / sizeof(SCALE[0]); i++) {
+        if (!nm_is(nm, len, SCALE[i].name)) continue;
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t k = gen_const(g, SCALE[i].k, node);
+        if (is_bad(k)) return k;
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, comp_of(arg[0], c), k.base);
+        }
+        return d;
+    }
+
+    /* --- the trigonometric pair, in revolutions ------------------------- */
+    if (nm_is(nm, len, "sin") || nm_is(nm, len, "cos") || nm_is(nm, len, "tan")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t k = gen_const(g, 1.0 / (2.0 * 3.14159265358979323846), node);
+        if (is_bad(k)) return k;
+        glsl_value_t rev = gen_alloc(g, w, node);
+        if (is_bad(rev)) return rev;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_mul_f32(g->code, rev.base + (uint32_t)c, comp_of(arg[0], c), k.base);
+        }
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        if (nm_is(nm, len, "sin")) {
+            gen_map1(g, GLSL_VOP1_SIN_F32, d, rev);
+            return d;
+        }
+        if (nm_is(nm, len, "cos")) {
+            gen_map1(g, GLSL_VOP1_COS_F32, d, rev);
+            return d;
+        }
+        /* `tan` is the quotient, so it is a sine, a cosine, a reciprocal and a multiply. */
+        glsl_value_t co = gen_alloc(g, w, node);
+        if (is_bad(co)) return co;
+        gen_map1(g, GLSL_VOP1_SIN_F32, d, rev);
+        gen_map1(g, GLSL_VOP1_COS_F32, co, rev);
+        for (int c = 0; c < w; c++) {
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, co.base + (uint32_t)c,
+                              co.base + (uint32_t)c);
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, d.base + (uint32_t)c,
+                              co.base + (uint32_t)c);
+        }
+        return d;
+    }
+
+    /* --- the base-e pair, which the hardware has in base two ------------ */
+    if (nm_is(nm, len, "exp") || nm_is(nm, len, "log")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        const GLboolean is_exp = nm_is(nm, len, "exp") ? GL_TRUE : GL_FALSE;
+        glsl_value_t k = gen_const(g, is_exp ? 1.4426950408889634 : 0.6931471805599453, node);
+        if (is_bad(k)) return k;
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        if (is_exp) {
+            /* exp(x) = 2^(x * log2 e) */
+            for (int c = 0; c < w; c++) {
+                glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, comp_of(arg[0], c), k.base);
+            }
+            gen_map1(g, GLSL_VOP1_EXP_F32, d, d);
+        } else {
+            /* log(x) = log2(x) * ln 2 */
+            gen_map1(g, GLSL_VOP1_LOG_F32, d, arg[0]);
+            for (int c = 0; c < w; c++) {
+                glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, d.base + (uint32_t)c, k.base);
+            }
+        }
+        return d;
+    }
+
+    /* `pow(x, y) = 2^(y * log2 x)`, which is what the hardware's pair composes to. Undefined in
+     * GLSL for a negative `x`, and `v_log_f32` of a negative is a NaN, so the two agree. */
+    if (nm_is(nm, len, "pow")) {
+        if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        gen_map1(g, GLSL_VOP1_LOG_F32, d, arg[0]);
+        for (int c = 0; c < w; c++) {
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, d.base + (uint32_t)c,
+                              comp_of(arg[1], c));
+        }
+        gen_map1(g, GLSL_VOP1_EXP_F32, d, d);
+        return d;
+    }
+
+    /* `abs(x) = max(x, -x)`. Two instructions a component and no constant, rather than the
+     * sign-bit clear - which would need `v_and_b32` and a literal mask, neither of which is in
+     * the pinned table. */
+    if (nm_is(nm, len, "abs")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_neg_f32(g->code, d.base + (uint32_t)c, comp_of(arg[0], c));
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, d.base + (uint32_t)c,
+                              d.base + (uint32_t)c, comp_of(arg[0], c));
+        }
+        return d;
+    }
+
+    /* `sign(x)` is -1, 0 or 1, and zero is its own case - so it is two selects and a subtract
+     * rather than one select, which would give 1 for x == 0. */
+    if (nm_is(nm, len, "sign")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t pos = gen_select_on_sign(g, arg[0], GLSL_VOPC_GT_F32, 1.0, 0.0, node);
+        if (is_bad(pos)) return pos;
+        glsl_value_t neg = gen_select_on_sign(g, arg[0], GLSL_VOPC_LT_F32, 1.0, 0.0, node);
+        if (is_bad(neg)) return neg;
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_sub_f32(g->code, d.base + (uint32_t)c, pos.base + (uint32_t)c,
+                              neg.base + (uint32_t)c);
+        }
+        return d;
+    }
+
+    /* `clamp(x, lo, hi) = min(max(x, lo), hi)`, in that order: the other order gives `lo` for a
+     * NaN where this gives `hi`, and GLSL says nothing about either, but `min(max(...))` is what
+     * every other implementation does. */
+    if (nm_is(nm, len, "clamp")) {
+        if (argc != 3) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        gen_map2(g, GLSL_VOP2_MAX_F32, d, arg[0], arg[1]);
+        gen_map2(g, GLSL_VOP2_MIN_F32, d, d, arg[2]);
+        return d;
+    }
+
+    /* `mix(a, b, t) = a + (b - a) * t`. Three instructions a component with the fused
+     * multiply-add, and exactly `a` when t is 0 and exactly `b` when it is 1 - which the other
+     * form, `a*(1-t) + b*t`, is not. */
+    if (nm_is(nm, len, "mix")) {
+        if (argc != 3) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        glsl_value_t diff = gen_alloc(g, w, node);
+        if (is_bad(diff)) return diff;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_sub_f32(g->code, diff.base + (uint32_t)c, comp_of(arg[1], c),
+                              comp_of(arg[0], c));
+            glsl_emit_mov(g->code, d.base + (uint32_t)c, comp_of(arg[0], c));
+            glsl_emit_fmac_f32(g->code, d.base + (uint32_t)c, diff.base + (uint32_t)c,
+                               comp_of(arg[2], c));
+        }
+        return d;
+    }
+
+    /* `mod(x, y) = x - y * floor(x / y)`, which is GLSL's definition verbatim. */
+    if (nm_is(nm, len, "mod")) {
+        if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t r = gen_alloc(g, arg[1].count, node);
+        if (is_bad(r)) return r;
+        gen_map1(g, GLSL_VOP1_RCP_F32, r, arg[1]);
+        glsl_value_t q = gen_alloc(g, w, node);
+        if (is_bad(q)) return q;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_mul_f32(g->code, q.base + (uint32_t)c, comp_of(arg[0], c), comp_of(r, c));
+        }
+        gen_map1(g, GLSL_VOP1_FLOOR_F32, q, q);
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, q.base + (uint32_t)c,
+                              comp_of(arg[1], c));
+            glsl_emit_sub_f32(g->code, d.base + (uint32_t)c, comp_of(arg[0], c),
+                              d.base + (uint32_t)c);
+        }
+        return d;
+    }
+
+    /* `step(edge, x)` is 0 below the edge and 1 at or above it - so the comparison is `x < edge`
+     * and the **false** arm is the 1, which is the arm `v_cndmask` takes from `vsrc1`. */
+    if (nm_is(nm, len, "step")) {
+        if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero)) return zero;
+        glsl_value_t one = gen_const(g, 1.0, node);
+        if (is_bad(one)) return one;
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_cmp(g->code, GLSL_VOPC_LT_F32, comp_of(arg[1], c), comp_of(arg[0], c));
+            glsl_emit_cndmask(g->code, d.base + (uint32_t)c, one.base, zero.base);
+        }
+        return d;
+    }
+
+    /* `smoothstep(e0, e1, x)`: `t = clamp((x - e0) / (e1 - e0), 0, 1)`, then `t*t*(3 - 2t)`.
+     * GLSL 1.10 section 8.3 gives this expansion, so it is transcribed rather than chosen. */
+    if (nm_is(nm, len, "smoothstep")) {
+        if (argc != 3) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero)) return zero;
+        glsl_value_t one = gen_const(g, 1.0, node);
+        if (is_bad(one)) return one;
+        glsl_value_t three = gen_const(g, 3.0, node);
+        if (is_bad(three)) return three;
+        glsl_value_t two = gen_const(g, 2.0, node);
+        if (is_bad(two)) return two;
+        glsl_value_t t = gen_alloc(g, w, node);
+        if (is_bad(t)) return t;
+        glsl_value_t den = gen_alloc(g, w, node);
+        if (is_bad(den)) return den;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_sub_f32(g->code, t.base + (uint32_t)c, comp_of(arg[2], c),
+                              comp_of(arg[0], c));
+            glsl_emit_sub_f32(g->code, den.base + (uint32_t)c, comp_of(arg[1], c),
+                              comp_of(arg[0], c));
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, den.base + (uint32_t)c,
+                              den.base + (uint32_t)c);
+            glsl_emit_mul_f32(g->code, t.base + (uint32_t)c, t.base + (uint32_t)c,
+                              den.base + (uint32_t)c);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, t.base + (uint32_t)c,
+                              t.base + (uint32_t)c, zero.base);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MIN_F32, t.base + (uint32_t)c,
+                              t.base + (uint32_t)c, one.base);
+        }
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        for (int c = 0; c < w; c++) {
+            /* 3 - 2t, then t*t times it. */
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, t.base + (uint32_t)c, two.base);
+            glsl_emit_sub_f32(g->code, d.base + (uint32_t)c, three.base, d.base + (uint32_t)c);
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, d.base + (uint32_t)c,
+                              t.base + (uint32_t)c);
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, d.base + (uint32_t)c,
+                              t.base + (uint32_t)c);
+        }
+        return d;
+    }
+
+    /* --- the geometric ones --------------------------------------------- */
+
+    if (nm_is(nm, len, "dot")) {
+        if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
+        return gen_dot(g, arg[0], arg[1], node);
+    }
+
+    if (nm_is(nm, len, "length")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t d2 = gen_dot(g, arg[0], arg[0], node);
+        if (is_bad(d2)) return d2;
+        glsl_value_t d = gen_alloc(g, 1, node);
+        if (is_bad(d)) return d;
+        glsl_emit_vop1_op(g->code, GLSL_VOP1_SQRT_F32, d.base, d2.base);
+        return d;
+    }
+
+    if (nm_is(nm, len, "distance")) {
+        if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t diff = gen_alloc(g, w, node);
+        if (is_bad(diff)) return diff;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_sub_f32(g->code, diff.base + (uint32_t)c, comp_of(arg[0], c),
+                              comp_of(arg[1], c));
+        }
+        glsl_value_t d2 = gen_dot(g, diff, diff, node);
+        if (is_bad(d2)) return d2;
+        glsl_value_t d = gen_alloc(g, 1, node);
+        if (is_bad(d)) return d;
+        glsl_emit_vop1_op(g->code, GLSL_VOP1_SQRT_F32, d.base, d2.base);
+        return d;
+    }
+
+    /* `normalize(v) = v * inversesqrt(dot(v, v))`, which is the hardware's `v_rsq_f32` and a
+     * multiply rather than a square root and a divide. The reciprocal square root is accurate to
+     * 1 ULP, so a normalised vector's length is within a couple of ULP of one - not exactly one,
+     * which is true of every implementation and is why nothing should compare it to one. */
+    if (nm_is(nm, len, "normalize")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t s = gen_inv_length(g, arg[0], node);
+        if (is_bad(s)) return s;
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, comp_of(arg[0], c), s.base);
+        }
+        return d;
+    }
+
+    /* `cross(a, b)`, three components and six multiplies. Written out rather than looped,
+     * because the index pattern is the thing to get right and a loop hides it. */
+    if (nm_is(nm, len, "cross")) {
+        if (argc != 2 || arg[0].count != 3 || arg[1].count != 3) {
+            return gen_fail(g, "cross takes two vec3", node);
+        }
+        glsl_value_t d = gen_alloc(g, 3, node);
+        if (is_bad(d)) return d;
+        glsl_value_t t = gen_alloc(g, 3, node);
+        if (is_bad(t)) return t;
+        static const int L[3] = {1, 2, 0};
+        static const int R[3] = {2, 0, 1};
+        for (int c = 0; c < 3; c++) {
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, arg[0].base + (uint32_t)L[c],
+                              arg[1].base + (uint32_t)R[c]);
+            glsl_emit_mul_f32(g->code, t.base + (uint32_t)c, arg[0].base + (uint32_t)R[c],
+                              arg[1].base + (uint32_t)L[c]);
+            glsl_emit_sub_f32(g->code, d.base + (uint32_t)c, d.base + (uint32_t)c,
+                              t.base + (uint32_t)c);
+        }
+        return d;
+    }
+
+    /* `reflect(I, N) = I - 2 * dot(N, I) * N`, GLSL 1.10 section 8.4 verbatim - and `N` is
+     * assumed normalised there, which is the caller's business and not this one's. */
+    if (nm_is(nm, len, "reflect")) {
+        if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t dp = gen_dot(g, arg[1], arg[0], node);
+        if (is_bad(dp)) return dp;
+        glsl_value_t two = gen_const(g, 2.0, node);
+        if (is_bad(two)) return two;
+        glsl_emit_mul_f32(g->code, dp.base, dp.base, two.base);
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)c, comp_of(arg[1], c), dp.base);
+            glsl_emit_sub_f32(g->code, d.base + (uint32_t)c, comp_of(arg[0], c),
+                              d.base + (uint32_t)c);
+        }
+        return d;
+    }
+
+    /* `faceforward(N, I, Nref)` is `N` when `dot(Nref, I)` is negative and `-N` otherwise. One
+     * comparison for the whole vector, then a select a component. */
+    if (nm_is(nm, len, "faceforward")) {
+        if (argc != 3) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t dp = gen_dot(g, arg[2], arg[1], node);
+        if (is_bad(dp)) return dp;
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero)) return zero;
+        glsl_value_t neg = gen_alloc(g, w, node);
+        if (is_bad(neg)) return neg;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_neg_f32(g->code, neg.base + (uint32_t)c, comp_of(arg[0], c));
+        }
+        glsl_value_t d = gen_alloc(g, w, node);
+        if (is_bad(d)) return d;
+        for (int c = 0; c < w; c++) {
+            glsl_emit_cmp(g->code, GLSL_VOPC_LT_F32, dp.base, zero.base);
+            glsl_emit_cndmask(g->code, d.base + (uint32_t)c, neg.base + (uint32_t)c,
+                              comp_of(arg[0], c));
+        }
+        return d;
+    }
+
+    return gen_fail(g, "only constructors and the built-ins with verified instructions are "
+                       "generated; there is no call mechanism yet, so a function call is "
+                       "refused rather than inlined", node);
+}
+
 static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
     if (g->error) {
         glsl_value_t none; none.base = 0u; none.count = 0; return none;
@@ -386,8 +1233,56 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
             return gen_field(g, node);
         case GLSL_NODE_BINARY:
             return gen_binary(g, node);
+        case GLSL_NODE_BOOLCONST: {
+            glsl_value_t out = gen_alloc(g, 1, node);
+            if (is_bad(out)) return out;
+            glsl_emit_mov_imm(g->code, out.base, float_bits(n->value != 0.0 ? 1.0 : 0.0));
+            return out;
+        }
+        case GLSL_NODE_CONDITIONAL: {
+            /* `c ? a : b`, both arms evaluated and one selected - which is what the hardware
+             * does anyway with a mask, and is why the operands must not assign. */
+            if (has_side_effect(g->ast, n->b) || has_side_effect(g->ast, n->c)) {
+                return gen_fail(g, "an arm of this ?: assigns, and both arms are evaluated - so "
+                                   "it would run when the language says it does not", node);
+            }
+            glsl_value_t c = gen_expr(g, n->a);
+            if (is_bad(c)) return c;
+            if (c.count != 1) return gen_fail(g, "a ?: takes a single condition", node);
+            glsl_value_t t = gen_expr(g, n->b);
+            if (is_bad(t)) return t;
+            glsl_value_t f = gen_expr(g, n->c);
+            if (is_bad(f)) return f;
+            if (t.count != f.count) {
+                return gen_fail(g, "the two arms of this ?: are different widths", node);
+            }
+            glsl_value_t zero = gen_const(g, 0.0, node);
+            if (is_bad(zero)) return zero;
+            glsl_value_t out = gen_alloc(g, t.count, node);
+            if (is_bad(out)) return out;
+            for (int i = 0; i < t.count; i++) {
+                glsl_emit_cmp(g->code, GLSL_VOPC_NEQ_F32, c.base, zero.base);
+                /* **The false arm is `src0`.** The other way round compiles every `?:` in every
+                 * shader to the opposite branch, and nothing anywhere complains. */
+                glsl_emit_cndmask(g->code, out.base + (uint32_t)i, f.base + (uint32_t)i,
+                                  t.base + (uint32_t)i);
+            }
+            return out;
+        }
         case GLSL_NODE_UNARY: {
             if (n->op == GLSL_TOK_PLUS) return gen_expr(g, n->a);
+            if (n->op == GLSL_TOK_BANG) {
+                /* `!b` over a value that is 0.0 or 1.0 is `1 - b`. */
+                glsl_value_t s = gen_expr(g, n->a);
+                if (is_bad(s)) return s;
+                if (s.count != 1) return gen_fail(g, "! takes a single bool", node);
+                glsl_value_t one = gen_const(g, 1.0, node);
+                if (is_bad(one)) return one;
+                glsl_value_t out = gen_alloc(g, 1, node);
+                if (is_bad(out)) return out;
+                glsl_emit_sub_f32(g->code, out.base, one.base, s.base);
+                return out;
+            }
             if (n->op != GLSL_TOK_MINUS) {
                 return gen_fail(g, "this unary operator has no verified instruction yet", node);
             }
@@ -410,32 +1305,81 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
                 return gen_fail(g, "calling something that is not a name", node);
             }
             const glsl_type_t target = constructor_target(callee);
-            if (target == GLSL_TYPE_ERROR) {
-                return gen_fail(g, "only constructors are generated; there is no call mechanism "
-                                   "yet, so a function call is refused rather than inlined",
-                                node);
-            }
-            return gen_construct(g, target, n->b, node);
+            if (target != GLSL_TYPE_ERROR) return gen_construct(g, target, n->b, node);
+            /* Not a type name, so a function - which here means a built-in or a refusal. */
+            return gen_builtin(g, callee, n->b, node);
         }
         case GLSL_NODE_ASSIGN: {
-            if (n->op != GLSL_TOK_ASSIGN) {
-                return gen_fail(g, "only plain assignment is generated; the compound forms "
-                                   "would need a read of the destination first", node);
+            gen_place_t place;
+            if (!gen_place_of(g, n->a, &place)) {
+                glsl_value_t none; none.base = 0u; none.count = 0; return none;
             }
-            const glsl_node_t *lhs = &g->ast->nodes[n->a];
-            if (lhs->kind != GLSL_NODE_IDENTIFIER) {
-                return gen_fail(g, "only a whole variable is assignable here; writing through a "
-                                   "swizzle needs a masked move this has not measured", node);
-            }
-            glsl_gen_var_t *v = gen_find(g, lhs->text, lhs->length);
-            if (!v) return gen_fail(g, "assigning to a name with no register", node);
             glsl_value_t r = gen_expr(g, n->b);
             if (is_bad(r)) return r;
-            if (r.count != v->value.count) {
+            /* GLSL takes a scalar on the right of any of these - `c.rgb *= 0.5` - and nothing
+             * else of a different width. */
+            if (r.count != place.count && r.count != 1) {
                 return gen_fail(g, "the two sides of this assignment are different widths", node);
             }
-            gen_move(g, v->value, r);
-            return v->value;
+
+            switch (n->op) {
+                case GLSL_TOK_ASSIGN:
+                    for (int i = 0; i < place.count; i++) {
+                        glsl_emit_mov(g->code, place.reg[i], comp_of(r, i));
+                    }
+                    break;
+                case GLSL_TOK_ADD_ASSIGN:
+                case GLSL_TOK_SUB_ASSIGN:
+                case GLSL_TOK_MUL_ASSIGN: {
+                    /* The destination is its own first operand, which is what makes these one
+                     * instruction a component rather than a read, an operate and a write. */
+                    const glsl_token_type_t op = n->op == GLSL_TOK_ADD_ASSIGN ? GLSL_TOK_PLUS
+                                                 : n->op == GLSL_TOK_SUB_ASSIGN ? GLSL_TOK_MINUS
+                                                                                : GLSL_TOK_STAR;
+                    for (int i = 0; i < place.count; i++) {
+                        gen_binop_component(g, op, place.reg[i], place.reg[i], comp_of(r, i));
+                    }
+                    break;
+                }
+                case GLSL_TOK_DIV_ASSIGN: {
+                    /* One reciprocal a divisor component, as `/` does - and into a temporary,
+                     * because the divisor may be one of the destination's own registers. */
+                    glsl_value_t inv = gen_alloc(g, r.count, node);
+                    if (is_bad(inv)) return inv;
+                    for (int i = 0; i < r.count; i++) {
+                        glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, inv.base + (uint32_t)i,
+                                          r.base + (uint32_t)i);
+                    }
+                    for (int i = 0; i < place.count; i++) {
+                        glsl_emit_mul_f32(g->code, place.reg[i], place.reg[i], comp_of(inv, i));
+                    }
+                    break;
+                }
+                default:
+                    return gen_fail(g, "this assignment operator has no instruction selection "
+                                       "yet", node);
+            }
+
+            /* The value of an assignment is what was assigned. A place whose registers run
+             * consecutively - which every whole variable and every leading swizzle does - is
+             * already a value; anything else (`v.zyx = ...` used for its result) is copied into
+             * one, rather than a `glsl_value_t` being made to mean something it does not. */
+            GLboolean consecutive = GL_TRUE;
+            for (int i = 1; i < place.count; i++) {
+                if (place.reg[i] != place.reg[i - 1] + 1u) { consecutive = GL_FALSE; break; }
+            }
+            if (consecutive) {
+                glsl_value_t out;
+                out.base = place.reg[0];
+                out.count = place.count;
+                return out;
+            }
+            glsl_value_t out = gen_alloc(g, place.count, node);
+            if (is_bad(out)) return out;
+            for (int i = 0; i < place.count; i++) {
+                glsl_emit_mov(g->code, out.base + (uint32_t)i, place.reg[i]);
+            }
+            return out;
         }
         default:
             return gen_fail(g, "this expression has no instruction selection yet", node);
@@ -477,8 +1421,8 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
             /* Every declarator in `float a, b = 1.0;` is its own node on the sibling chain, so
              * this arm sees one name at a time and the chain is walked by the caller. */
             const glsl_type_t t = glsl_type_from_token(n->type_tok);
-            if (!is_float_family(t)) {
-                (void)gen_fail(g, "only float, vec and mat locals are generated", node);
+            if (!is_generated(t)) {
+                (void)gen_fail(g, "only float, vec, mat and bool locals are generated", node);
                 return GL_FALSE;
             }
             if (n->array_size != GLSL_NO_NODE) {
@@ -517,15 +1461,95 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
             gen_release(g, mark);
             return GL_TRUE;
         }
+        /*
+         * **`if` is the exec mask, and there is no branch in it.**
+         *
+         * Every lane runs every instruction; which lanes *write* is what `exec` says. So the
+         * then arm runs with `exec` narrowed to the lanes the condition holds for, the else arm
+         * with the complement, and then `exec` goes back to what came in. A body that no lane
+         * is running still executes and writes nothing, which is why `s_cbranch_execz` is a
+         * saving rather than a requirement - and leaving it out is what lets this emit straight
+         * through with no labels and no offsets to backpatch.
+         *
+         * Scalar instructions inside a body are **not** exec-masked, and a nested `if` emits
+         * some. They stay correct because what they compute is `exec & mask`, and `0 & mask` is
+         * zero: an inner `if` inside a dead outer one narrows nothing and restores nothing.
+         */
+        case GLSL_NODE_IF: {
+            if (g->exec_depth >= GLSL_GEN_MAX_EXEC_DEPTH) {
+                (void)gen_fail(g, "the conditionals in this shader nest deeper than the scalar "
+                                  "registers set aside for them", node);
+                return GL_FALSE;
+            }
+            const uint32_t saved = GLSL_GEN_EXEC_SGPR_BASE + (uint32_t)g->exec_depth;
+            const uint32_t mark = gen_mark(g);
+            glsl_value_t cond = gen_expr(g, n->a);
+            if (is_bad(cond)) return GL_FALSE;
+            if (cond.count != 1) {
+                (void)gen_fail(g, "an if takes a single condition", node);
+                return GL_FALSE;
+            }
+            glsl_value_t zero = gen_const(g, 0.0, node);
+            if (is_bad(zero)) return GL_FALSE;
+            glsl_emit_cmp(g->code, GLSL_VOPC_NEQ_F32, cond.base, zero.base);
+            glsl_emit_exec_save_and_vcc(g->code, saved);
+            /* The condition's registers are dead the moment the mask is taken. */
+            gen_release(g, mark);
+
+            g->exec_depth++;
+            GLboolean ok = glsl_gen_stmt(g, n->b);
+            if (ok && n->c != GLSL_NO_NODE) {
+                glsl_emit_exec_else(g->code, saved);
+                ok = glsl_gen_stmt(g, n->c);
+            }
+            g->exec_depth--;
+            glsl_emit_exec_restore(g->code, saved);
+            return ok;
+        }
+        /*
+         * **`discard` has to outlive the `if` it sits in.**
+         *
+         * Clearing `exec` kills the running lanes, and the enclosing `if`'s restore would hand
+         * every one of them straight back - so the lanes come out of each enclosing saved mask
+         * first, and only then is `exec` cleared. At the outermost level there is nothing to
+         * take them out of and it is the one instruction.
+         *
+         * Everything after this in the same arm runs with `exec` zero and writes nothing, which
+         * is what the specification asks for. The export at the end of the shader still runs,
+         * and still carries `done`: a wave that discarded every lane must still retire.
+         */
+        case GLSL_NODE_DISCARD: {
+            for (int d = 0; d < g->exec_depth; d++) {
+                glsl_emit_exec_drop_live(g->code, GLSL_GEN_EXEC_SGPR_BASE + (uint32_t)d);
+            }
+            glsl_emit_exec_clear(g->code);
+            return GL_TRUE;
+        }
         default:
             (void)gen_fail(g, "this statement has no instruction selection yet: the generator "
-                              "handles declarations, expressions and blocks", node);
+                              "handles declarations, expressions, blocks, if and discard - a "
+                              "loop would need a branch and a label mechanism it has not got",
+                           node);
             return GL_FALSE;
     }
 }
 
 glsl_value_t glsl_gen_expression(glsl_gen_t *g, int32_t node) {
     return gen_expr(g, node);
+}
+
+void glsl_gen_reserve(glsl_gen_t *g, uint32_t first) {
+    if (!g) return;
+    if (first > g->next_vgpr) g->next_vgpr = first;
+    if (g->next_vgpr > g->high_water) g->high_water = g->next_vgpr;
+}
+
+GLboolean glsl_gen_lookup(glsl_gen_t *g, const char *name, size_t len, glsl_value_t *out) {
+    if (!g) return GL_FALSE;
+    const glsl_gen_var_t *v = gen_find(g, name, len);
+    if (!v) return GL_FALSE;
+    if (out) *out = v->value;
+    return GL_TRUE;
 }
 
 glsl_value_t glsl_gen_declare_input(glsl_gen_t *g, const char *name, size_t len,

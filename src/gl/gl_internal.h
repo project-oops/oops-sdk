@@ -49,6 +49,11 @@
 #define OOPS_GL_MAX_TEXTURE_OBJECTS 32
 #define OOPS_GL_MAX_BUFFER_OBJECTS 64
 #define OOPS_GL_MAX_QUERY_OBJECTS 64
+/* GL 2.0's generic vertex attribute slots. 16 is the specification's minimum for
+ * GL_MAX_VERTEX_ATTRIBS, so a program that asks the limit and packs to it gets what it asked
+ * for. Up here with the other capacities rather than beside the shader objects because a vertex
+ * carries one value per slot - see gl_vertex_t. */
+#define OOPS_GL_MAX_VERTEX_ATTRIBS 16
 #define OOPS_GL_LIGHT_COUNT 8
 /* Six, which is the specification's minimum and exactly what the hardware clipper has:
  * PA_CL_CLIP_CNTL carries UCP_ENA_0..5 and there is no seventh bit. */
@@ -426,6 +431,19 @@ typedef struct {
     /* The fog coordinate (GL 1.4) - glFogCoord's, or the fog coordinate array's. What fog reads
      * in place of the eye distance when GL_FOG_COORD_SRC is GL_FOG_COORD. */
     float fogc;
+    /* **GL 2.0's generic vertex attributes, one four-component value per slot.** Filled by the
+     * vertex fetch from each enabled array, or from `glVertexAttrib`'s current value where the
+     * array is off.
+     *
+     * Carried on the vertex rather than read from the context when the shader runs, because a
+     * draw fetches every vertex into a buffer *before* any of them is shaded - so the context's
+     * current values would be the last vertex's for all of them. That mistake draws a mesh
+     * every one of whose vertices has the final vertex's attributes, which looks like a
+     * degenerate primitive rather than like a bug in the fetch.
+     *
+     * It is the largest thing on a vertex by some way. That is the price of the reference path
+     * being able to shade a vertex it buffered earlier. */
+    float attrib[OOPS_GL_MAX_VERTEX_ATTRIBS][4];
 } gl_vertex_t;
 
 typedef struct {
@@ -446,6 +464,11 @@ typedef struct {
     /* The secondary colour - the lit specular term under GL_SEPARATE_SPECULAR_COLOR, zero
      * otherwise - interpolated and added after texturing, before fog. */
     float sr, sg, sb;
+    /* **What a vertex shader wrote**, GL_SHADER_VARY_FLOATS of it, or NULL when the
+     * fixed-function pipeline produced this vertex. A pointer rather than the block itself:
+     * the fixed-function path is the hot one and would otherwise carry fifty floats per vertex
+     * it never reads. The block lives in the caller's frame and outlives the rasterise. */
+    const float *vary;
 } gl_screen_vertex_t;
 
 /* GL_COMBINE's state (GL 1.3): the colour and alpha functions, each argument's source and
@@ -578,6 +601,7 @@ typedef struct {
 
     /* GL_COLOR_BUFFER_BIT */
     GLenum blend_src, blend_dst, blend_src_alpha, blend_dst_alpha, blend_equation;
+    GLenum blend_equation_alpha;
     float blend_color[4];
     GLboolean cap_color_logic_op; /* also GL_ENABLE_BIT */
     GLenum logic_op;
@@ -638,7 +662,9 @@ typedef struct {
     GLenum fog_coord_src;
     float fog_index;
     GLboolean cap_color_sum; /* also GL_ENABLE_BIT */
-    /* GL_STENCIL_BUFFER_BIT */
+    /* GL_STENCIL_BUFFER_BIT. **Both faces**: GL 2.0 puts the back-face state in this same
+     * attribute group, so a push that saved only the front would silently drop half of it on
+     * the pop. */
     GLboolean cap_stencil_test;
     GLenum stencil_func;
     GLint stencil_ref;
@@ -647,6 +673,13 @@ typedef struct {
     GLenum stencil_fail;
     GLenum stencil_zfail;
     GLenum stencil_zpass;
+    GLenum stencil_back_func;
+    GLint stencil_back_ref;
+    GLuint stencil_back_value_mask;
+    GLuint stencil_back_writemask;
+    GLenum stencil_back_fail;
+    GLenum stencil_back_zfail;
+    GLenum stencil_back_zpass;
     GLint clear_stencil;
 
     /* GL_VIEWPORT_BIT */
@@ -702,6 +735,178 @@ typedef struct {
     GLboolean used, ever_bound, active;
     uint64_t result;
 } gl_query_object_t;
+
+/* -------------------------------------------------------------------------
+ * GL 2.0: shader objects, program objects and generic vertex attributes
+ *
+ * The objects `glCreateShader` and `glCreateProgram` hand out. Their bulky parts - the source
+ * text, the compiled tree, the uniform values - are allocated, like a buffer object's store and
+ * a texture's pixels, so the slot tables stay small enough to live in the context.
+ * ------------------------------------------------------------------------- */
+
+/* A compiled translation unit, **shared and counted** rather than copied.
+ *
+ * The specification lets a shader be deleted and detached the moment a program has linked it,
+ * and the program keeps working (GL 2.0, 2.15.2). Copying the tree into the program at link
+ * would satisfy that and cost a hundred and fifty kilobytes a stage; a reference count costs a
+ * word. The count is the shader object that compiled it plus every program that linked it.
+ *
+ * Opaque here: its definition needs `glsl_ast_t`, and `glsl_internal.h` includes this file
+ * rather than the other way round. `gl_glsl_unit_release` is the only thing anything outside the
+ * front end does to one. */
+typedef struct glsl_unit glsl_unit_t;
+void gl_glsl_unit_retain(glsl_unit_t *u);
+void gl_glsl_unit_release(glsl_unit_t *u);
+
+/* This build's heap: the C library's on a host test build, the SDK's on the target. Defined
+ * once in gl_state.c so nothing else has to carry the `#if`. */
+void *gl_heap_alloc(size_t bytes);
+void gl_heap_free(void *p);
+
+/* The longest name a uniform, attribute or varying may have, with its terminator. The
+ * specification sets no minimum; Mesa's is 256 and every shader anyone writes is far under it.
+ * A longer name is refused at link with a diagnostic rather than silently truncated to collide
+ * with another. */
+#define OOPS_GL_MAX_GLSL_NAME 64
+/* One object's info log. A diagnostic here is one line - the front end reports the first problem
+ * and stops - so this is the length of the longest such line plus its line and column. */
+#define OOPS_GL_INFO_LOG_SIZE 256
+
+#define OOPS_GL_MAX_SHADER_OBJECTS 64
+#define OOPS_GL_MAX_PROGRAM_OBJECTS 32
+/* GL 2.0 allows several shaders of one type on a program; nothing anyone ports uses more than a
+ * handful, and the linker refuses past this rather than losing one quietly. */
+#define OOPS_GL_MAX_ATTACHED_SHADERS 8
+#define OOPS_GL_MAX_PROGRAM_UNIFORMS 64
+/* `OOPS_GL_MAX_VERTEX_ATTRIBS` is with the other capacities at the top of this file, because
+ * `gl_vertex_t` carries one value per slot and is declared long before this section. */
+/* Varyings between the stages: eight four-component slots, so GL_MAX_VARYING_FLOATS is 32 - the
+ * specification's minimum, and what the interpolator carries per fragment. */
+#define OOPS_GL_MAX_PROGRAM_VARYINGS 8
+#define OOPS_GL_MAX_VARYING_FLOATS (OOPS_GL_MAX_PROGRAM_VARYINGS * 4)
+
+/* One entry of a linked program's uniform table.
+ *
+ * `type` is the GL enumerant `glGetActiveUniform` reports - GL_FLOAT_VEC4, GL_FLOAT_MAT4,
+ * GL_SAMPLER_2D - rather than the front end's own type, because this table is read by the API
+ * and by the back end, and only the front end has the other.
+ *
+ * **The value is always floats**, even for an `int`, a `bool` and a sampler. GLSL 1.10 has no
+ * integer arithmetic worth the name, the shading hardware has one register file, and
+ * `glGetUniformiv` converts on the way out - so one representation is simpler than two and
+ * cannot disagree with itself. A sampler's value is its texture unit number, which is what
+ * `glUniform1i` on a sampler means. */
+typedef struct {
+    char name[OOPS_GL_MAX_GLSL_NAME];
+    GLenum type;
+    GLint size;       /* array elements; 1 for a scalar declaration */
+    GLint location;   /* what glGetUniformLocation answers, and what glUniform takes */
+    int offset;       /* into the program's value pool */
+    int floats;       /* how many floats one element occupies: 1, 2, 3, 4, 4, 9 or 16 */
+} gl_uniform_t;
+
+/* One attribute the linker bound, or one binding `glBindAttribLocation` asked for and the next
+ * link will honour. The two are the same shape and are kept in separate tables, because a
+ * binding that names no attribute in the shader is not an error and must not appear in
+ * `glGetActiveAttrib`'s list. */
+typedef struct {
+    char name[OOPS_GL_MAX_GLSL_NAME];
+    GLenum type;
+    GLint size;
+    GLint location;
+} gl_attrib_binding_t;
+
+/* One varying, as the linker matched it between the two stages: where it starts in the
+ * interpolated block and how wide it is. */
+typedef struct {
+    char name[OOPS_GL_MAX_GLSL_NAME];
+    GLenum type;
+    int offset;   /* into the fragment's float block */
+    int floats;
+} gl_varying_t;
+
+typedef struct {
+    GLuint name;          /* 0 when the slot is free */
+    GLenum type;          /* GL_VERTEX_SHADER or GL_FRAGMENT_SHADER */
+    GLboolean compiled;
+    /* `glDeleteShader` was called while something still referred to this object. It stops being
+     * a shader to `glIsShader` at that moment and keeps working until the last program detaches
+     * it - which is the observable half of deferred deletion. */
+    GLboolean flagged;
+    char *source;         /* the glShaderSource strings joined, NUL-terminated; NULL if never given */
+    size_t source_len;    /* without the terminator, which is what GL_SHADER_SOURCE_LENGTH is +1 of */
+    glsl_unit_t *unit;    /* the compiled tree, a reference held; NULL until a compile succeeds */
+    char info_log[OOPS_GL_INFO_LOG_SIZE];
+} gl_shader_object_t;
+
+typedef struct {
+    GLuint name;
+    GLboolean linked;
+    GLboolean flagged;
+    GLboolean validated;   /* glValidateProgram's last answer */
+    GLboolean valid_run;   /* whether glValidateProgram has ever been called on it */
+    GLuint attached[OOPS_GL_MAX_ATTACHED_SHADERS];
+    int attached_count;
+
+    /* The two stages the last successful link took references to. They survive their shader
+     * objects being detached and deleted, which is the whole reason they are counted. */
+    glsl_unit_t *vs;
+    glsl_unit_t *fs;
+
+    gl_uniform_t uniforms[OOPS_GL_MAX_PROGRAM_UNIFORMS];
+    int uniform_count;
+    float *values;         /* the value pool the uniforms' offsets index */
+    int value_floats;
+
+    /* Attributes the link found in the vertex shader, and the bindings requested for the next
+     * one - see glBindAttribLocation's note in GL/gl.h. */
+    gl_attrib_binding_t attribs[OOPS_GL_MAX_VERTEX_ATTRIBS];
+    int attrib_count;
+    gl_attrib_binding_t bindings[OOPS_GL_MAX_VERTEX_ATTRIBS];
+    int binding_count;
+
+    gl_varying_t varyings[OOPS_GL_MAX_PROGRAM_VARYINGS];
+    int varying_count;
+    int varying_floats;
+
+    /* **The console's half**, filled at link time by `gl_program_compile_fragment`.
+     *
+     * A compiled pixel shader, or nothing. **`hw_ps_words` of zero is not a link failure**: a
+     * program with no fragment stage has nothing to compile, and a program the back end will not
+     * generate for still links and still draws on the software path. What it does not do is draw
+     * on a console, and `hw_ps_log` is what the draw path says once when it refuses.
+     *
+     * Kept per program rather than compiled on demand, because compiling needs a symbol table
+     * and a generator - a quarter of a megabyte of scratch - and a draw is the wrong place to
+     * ask for that. */
+    uint32_t *hw_ps;
+    uint32_t hw_ps_words;
+    uint32_t hw_ps_vgprs;
+    /* How many four-component parameters this program's varyings occupy, which is what the
+     * vertex stage exports and the pixel shader interpolates. Two at minimum, because the
+     * pipeline's smallest configuration exports two. */
+    uint32_t hw_params;
+    char hw_ps_log[OOPS_GL_INFO_LOG_SIZE];
+
+    char info_log[OOPS_GL_INFO_LOG_SIZE];
+} gl_program_object_t;
+
+/* One generic vertex attribute array, and the current value used when it is disabled.
+ *
+ * The same shape as `gl_client_array_t` with `normalized` added, rather than that structure
+ * reused: a generic array normalises on the caller's word and a named one normalises by its
+ * type's own rule, and folding the two would make `glVertexAttribPointer(.., GL_FLOAT,
+ * GL_TRUE, ..)` mean something. */
+typedef struct {
+    GLint size;
+    GLenum type;
+    GLsizei stride;
+    const void *pointer;
+    GLuint buffer;        /* GL_ARRAY_BUFFER at the time it was specified, 0 for client memory */
+    GLboolean enabled;
+    GLboolean normalized;
+    float current[4];     /* glVertexAttrib's value; (0, 0, 0, 1) at first */
+} gl_vertex_attrib_t;
 
 /* One frame of the *client* attribute stack. Separate from gl_attrib_entry_t because the
  * specification keeps the two stacks separate: a push of client state must not pop server
@@ -763,11 +968,14 @@ typedef struct gl_context {
      * rectangle written by the CPU and read back by the CPU, with no fence between, can return
      * what was there before, and the same is true of the CP's DMA copy into `readback`.
      *
-     * That is what gl1-probe measured on 2026-09-20: `raster-ops`, `pixel-transfer`,
-     * `pixel-fragments`, `index-pixels`, `accumulation` and `array-types` all failed on the
-     * console and passed on the host, and every one of them is the CPU putting colour into the
-     * render target. `stencil-pixels` passed beside them, because the stencil buffer is ordinary
-     * memory the CPU owns at both ends.
+     * **This is not what gl1-probe's six pixel-rectangle failures were**, though it was written
+     * believing so. Draining the span changed none of the eight failing pixels on 2026-09-21 -
+     * byte for byte the same run - and that is what ruled the store ordering out and sent the
+     * search to `glGetFrameReadbackSampled`, which was reading a copy taken at the last submit.
+     *
+     * It stays because the hazard it addresses is real even though it was not that one: the CP's
+     * DMA in `gl_hw_flush` reads this buffer, and a WC store that has not drained is not there
+     * to be read. What it is not is a fix for anything measured.
      *
      * gl_color_cpu_drain makes the span real. See gl_rx.h.
      */
@@ -808,6 +1016,8 @@ typedef struct gl_context {
     GLenum blend_src_alpha;
     GLenum blend_dst_alpha;
     GLenum blend_equation;
+    /* GL 2.0's second equation, for the alpha channel. `glBlendEquation` sets both. */
+    GLenum blend_equation_alpha;
     /* glBlendColor, clamped on the way in (Mesa main/blend.c:788-791). The unclamped copy
      * Mesa also keeps only matters with a floating-point colour buffer, and this one is
      * 8-bit fixed point, so it is the clamped value glGetFloatv answers with (get.c:1173-1177). */
@@ -999,6 +1209,11 @@ typedef struct gl_context {
     GLboolean hw_cube_logged; /* and a cube-mapped one */
     GLboolean hw_env_logged; /* and one for an environment the pixel shader cannot combine */
     GLboolean hw_unit_logged; /* and one for a texture unit above 0, which the console leaves out */
+    GLboolean hw_prog_logged; /* and one for a GL 2.0 program the back end would not compile */
+    /* Which program's compiled pixel shader is in the payload's one GL 2.0 slot, 0 for none. A
+     * frame that draws with one program uploads it once; one that alternates pays an upload and
+     * a cache flush per switch, which is what this measures rather than assumes. */
+    GLuint hw_ps_program;
     /* The depth and stencil surfaces are the GPU's, 64KB_Z_X tiled (see gl_zs_depth_ptr): true
      * once the hardware path is up on the console, never on a host build. */
     GLboolean zs_tiled;
@@ -1019,6 +1234,31 @@ typedef struct gl_context {
     GLboolean hw_query_logged;
     GLuint bound_array_buffer;
     GLuint bound_element_array_buffer;
+
+    /* GL 2.0's programmable pipeline - gl_shader.c.
+     *
+     * **One counter for both tables**, because the specification gives shader and program
+     * objects a single name space (GL 2.0, 2.15.1). It only ever goes up: a name is never
+     * reused within a context, so a stale name held by a program is an error rather than a
+     * silent hit on whatever took the slot. */
+    gl_shader_object_t shaders[OOPS_GL_MAX_SHADER_OBJECTS];
+    gl_program_object_t programs[OOPS_GL_MAX_PROGRAM_OBJECTS];
+    GLuint gl2_next_name;
+    /* **Whether this context has ever made a shader or a program.**
+     *
+     * A GL 1.x program should pay nothing for GL 2.0 being in the library. The one place it
+     * otherwise would is the vertex fetch: every vertex carries sixteen generic attribute slots
+     * and filling them is real work per vertex, for values a fixed-function draw never reads.
+     * This is false until `glCreateShader` or `glCreateProgram` is called, and the fetch skips
+     * the whole block while it is - so the cost arrives with the first shader and not before.
+     *
+     * It is never cleared. A context that made a program and deleted it keeps filling the
+     * slots, which is conservative in the direction that cannot be wrong. */
+    GLboolean gl2_used;
+    /* glUseProgram's, and 0 for the fixed-function pipeline. A program flagged for deletion
+     * while in use stays here and keeps drawing until another is made current. */
+    GLuint program_current;
+    gl_vertex_attrib_t vertex_attribs[OOPS_GL_MAX_VERTEX_ATTRIBS];
 
     /* Error tracking */
     GLenum last_error;
@@ -1054,6 +1294,11 @@ typedef struct gl_context {
      * distance from. Set and cleared around one primitive, like `aa_kind`. (`aa_hw` above is the
      * software path's line half-width and is a different thing entirely.) */
     GLboolean aa_hw_on;
+    /* Whether the smoothing draw is textured, which decides both the interpolant the offset
+     * rides in and the shader whose slot carries the coverage: the second texture unit's
+     * parameter and the textured shader when it is, the texture coordinate's parameter and the
+     * untextured shader when it is not. */
+    GLboolean aa_hw_tex;
     float aa_hw_half;
     float aa_hw_r;
     GLboolean hw_stencil_bound; /* and the stencil surface, live, for a frame that tests it */
@@ -1105,6 +1350,22 @@ typedef struct gl_context {
     GLenum stencil_fail;
     GLenum stencil_zfail;
     GLenum stencil_zpass;
+    /* **GL 2.0's back face.** One stencil state served both faces through GL 1.x; 2.0 splits
+     * them, which is what a single-pass stencil shadow volume needs - increment on the front
+     * faces and decrement on the back, in one draw rather than two.
+     *
+     * `glStencilFunc`, `glStencilOp` and `glStencilMask` set **both**, which is how the
+     * specification defines them from 2.0 onwards - so a GL 1.x program is unaffected and these
+     * fields simply track the front ones. The face is a property of the primitive rather than of
+     * the fragment, so the choice between the two sets is made once per triangle; see
+     * `gl_frag_ops_init`. */
+    GLenum stencil_back_func;
+    GLint stencil_back_ref;
+    GLuint stencil_back_value_mask;
+    GLuint stencil_back_writemask;
+    GLenum stencil_back_fail;
+    GLenum stencil_back_zfail;
+    GLenum stencil_back_zpass;
     GLint clear_stencil;
 
     /* User clip planes, in **eye** coordinates - stored through the inverse modelview of the
@@ -1126,6 +1387,14 @@ typedef struct gl_context {
     GLboolean hw_blend_color_dirty;
     /* Which texture's descriptors are in this frame's one descriptor slot, 0 for none. */
     GLuint hw_frame_tex;
+    /* Which descriptor slot the textures of this frame have reached. 0 is the original table,
+     * and a frame that never changes texture stays there - see the ring's note above. */
+    uint32_t hw_desc_slot;
+    /* Which uniform slot this frame's GL 2.0 draws have reached, and whose values are in it.
+     * The program name is part of the question: two programs' pools are different lengths, so
+     * comparing the bytes alone could call one unchanged from the other. 0 is "nothing yet". */
+    uint32_t hw_gl2_uniform_slot;
+    GLuint hw_gl2_uniform_program;
     size_t depth_px;      /* floats in depth_buffer: the 64KB_Z_X tiled extent, both axes padded to 128 px */
     GLboolean use_hardware;
     uint32_t canary_vs;
@@ -1269,6 +1538,63 @@ static inline void gl_record_error(gl_context_t *ctx, GLenum error) {
     }
 }
 
+/* -------------------------------------------------------------------------
+ * The version an app claimed, and what it gets for claiming it
+ *
+ * **A context has the entry points its version defines and no others** (2026-09-21). Until then
+ * `glContextSetVersion` changed the string `glGetString` answers and nothing else, and every
+ * call in the library was reachable from every context - so a program written for GL 1.1 could
+ * call `glCreateShader`, and a GL 2.0 bug could reach a GL 1.x program that had never asked for
+ * the programmable pipeline.
+ *
+ * On a desktop driver the same discipline comes from the linker: an entry point a context does
+ * not have is not exported, and a program calling it fails to load. Everything here is compiled
+ * into one archive, so the equivalent has to be a runtime check - and the answer is the one the
+ * specification gives for a call that is not in the context: **GL_INVALID_OPERATION, and the
+ * call does nothing**. A function that returns a value returns the value it returns on failure,
+ * which is 0 for a name, -1 for a location and GL_FALSE for a predicate.
+ *
+ * # Where the gate is, and where it deliberately is not
+ *
+ * **On GL 2.0's entry points, completely. Not within GL 1.x.**
+ *
+ * That is not a shortcut, and it is worth being exact about. Every GL 1.2 through 1.5 feature in
+ * this library is *also* advertised in `glGetString(GL_EXTENSIONS)` - `GL_ARB_multitexture`,
+ * `GL_ARB_vertex_buffer_object`, `GL_ARB_occlusion_query`, `GL_EXT_fog_coord`,
+ * `GL_EXT_secondary_color`, `GL_ARB_window_pos`, `GL_EXT_texture3D` and the rest. **An extension
+ * is available to a context whatever its core version**; that is what an extension is. So a GL
+ * 1.1 context here genuinely has buffer objects, through `glBindBufferARB`, and refusing
+ * `glBindBuffer` beside it would be a rule about spelling rather than about capability.
+ *
+ * GL 2.0 is the opposite case and that is why the gate is there: nothing advertises the
+ * programmable pipeline as an extension - no `GL_ARB_shader_objects`, no `GL_ARB_vertex_shader` -
+ * so the claim is the only door to it, and a context that has not claimed 2.0 does not have it
+ * by any spelling.
+ * ------------------------------------------------------------------------- */
+
+static inline GLboolean gl_version_at_least(const gl_context_t *ctx, GLuint major, GLuint minor) {
+    if (!ctx) return GL_FALSE;
+    return (GLboolean)(ctx->version_major > major ||
+                       (ctx->version_major == major && ctx->version_minor >= minor));
+}
+
+/* The gate every entry point a version *added* begins with. False means the call must do
+ * nothing; the error is already recorded. */
+static inline GLboolean gl_require_version(gl_context_t *ctx, GLuint major, GLuint minor) {
+    if (gl_version_at_least(ctx, major, minor)) return GL_TRUE;
+    gl_record_error(ctx, GL_INVALID_OPERATION);
+    return GL_FALSE;
+}
+
+/* The same for a `glGet` enumerant a later version added. **An enum a context does not know is
+ * GL_INVALID_ENUM**, not GL_INVALID_OPERATION - the distinction is the specification's and it
+ * is what tells a caller "I have never heard of this" apart from "not from here". */
+static inline GLboolean gl_require_version_enum(gl_context_t *ctx, GLuint major, GLuint minor) {
+    if (gl_version_at_least(ctx, major, minor)) return GL_TRUE;
+    gl_record_error(ctx, GL_INVALID_ENUM);
+    return GL_FALSE;
+}
+
 /* A float's bits, for the registers and shader literals that take one. */
 static inline uint32_t gl_f32_bits(float f) {
     union { float f; uint32_t u; } v;
@@ -1284,8 +1610,8 @@ static inline uint32_t gl_f32_bits(float f) {
  * at context creation and a rebuild would have to redo the descriptors and the cache flush with
  * them. The instruction encodings were produced by assembling for gfx1030 rather than written
  * from memory - see the table in `gl_ps_patch_alpha_test`. */
-#define GL_PS_ALPHA_SLOT_UNTEX 68u
-#define GL_PS_ALPHA_SLOT_TEX   258u /* +16 stipple, +28 the sample slot, +20 unit 1, +64 combine 2 */
+#define GL_PS_ALPHA_SLOT_UNTEX 80u
+#define GL_PS_ALPHA_SLOT_TEX   286u /* +16 stipple, +28 the sample slot, +20 unit 1, +64 combine 2, +28 coverage */
 /* The texture combine: the instructions combining the sampled texel with the interpolated colour.
  * Four words until 2026-09-19, which held GL_MODULATE, GL_REPLACE, GL_ADD and GL_DECAL of RGB;
  * sixty-four since, for the general form GL_BLEND, GL_DECAL of RGBA and GL_COMBINE need. A program
@@ -1341,7 +1667,7 @@ static inline uint32_t gl_f32_bits(float f) {
  * sixteen for it. */
 #define GL_PS_STIPPLE_SLOT     16u
 #define GL_PS_STIPPLE_WORDS    16u
-#define GL_PS_EXPORT_TEX       262u
+#define GL_PS_EXPORT_TEX       290u
 /* The export and the end of the program, patched together by `gl_ps_patch_export` (since
  * 2026-09-20). One colour target is `exp mrt0 ... done vm`, `s_endpgm`, and two nops; both
  * buffers is `exp mrt0 ... vm`, `exp mrt1 ... done vm`, `s_endpgm` - `done` belongs to the last
@@ -1349,7 +1675,7 @@ static inline uint32_t gl_f32_bits(float f) {
  * (tools/shader/mrt1-export.s). Five words either way, in both shaders; the untextured one's
  * slot is where its export has always been. */
 #define GL_PS_EXPORT_WORDS     5u
-#define GL_PS_EXPORT_UNTEX     72u
+#define GL_PS_EXPORT_UNTEX     84u
 /*
  * **Antialiasing's coverage** in the untextured pixel shader (since 2026-09-20): sixteen words
  * between fog and the alpha test, which is where GL applies it (1.x, 3.12) and where the
@@ -1363,11 +1689,29 @@ static inline uint32_t gl_f32_bits(float f) {
  * makes one form serve both.
  *
  * The parameter it rides in is the texture coordinate's, which is free **because this is the
- * untextured shader**. A textured smooth primitive has no spare interpolant and is still drawn
- * aliased. The alpha test's slot and the export moved up to make room, as they did for fog.
+ * untextured shader**. The alpha test's slot and the export moved up to make room, as they did
+ * for fog.
+ *
+ * **The textured shader has the same slot since 2026-09-21**, in the same place relative to fog
+ * and the alpha test, with the same fifteen words reading `attr3` instead of `attr1`
+ * (`tools/shader/coverage-tex.s`). A textured draw reads all four components of `attr1` - s and
+ * t, fog's factor, q - so the offset goes in the second texture unit's parameter, which a draw
+ * with **one** unit does not read. Such a draw escalates to four parameters for it: eighty
+ * bytes a vertex and the four-parameter vertex shader, both of which ran on a console on
+ * 2026-09-21. A draw using two units has only `attr3.z` spare, which is one float where three
+ * are needed, so that case is still aliased and still says so in the log.
+ *
+ * **GL_POLYGON_SMOOTH lives in the same slot since 2026-09-21**, which is why it is
+ * twenty-eight words rather than sixteen: its coverage is the product of three edge fades
+ * instead of one distance, and the three distances arrive as `d*w` with `w` beside them, to be
+ * divided per fragment the way a projected texture coordinate is. See
+ * `tools/shader/coverage-poly.s`. It always reads `attr3`, textured or not, so one program
+ * serves both shaders - a smooth polygon escalates to four parameters for it and, like a smooth
+ * textured point, is refused when the second texture unit wants that parameter.
  */
 #define GL_PS_COVERAGE_SLOT_UNTEX 52u
-#define GL_PS_COVERAGE_WORDS      16u
+#define GL_PS_COVERAGE_SLOT_TEX   258u
+#define GL_PS_COVERAGE_WORDS      28u
 /* Where the pixel shaders sit in the GPU payload. The textured one moved from 0x200 to 0x400 on
  * 2026-09-19, when the longer combine took it past the 64 words it had there, and from 0x400 to
  * **0x1000 on 2026-09-20**, where it has 320 words (to 0x1500) with nothing above it: a second
@@ -1401,6 +1745,103 @@ static inline uint32_t gl_f32_bits(float f) {
  * from. Only the first pair is filled today. */
 #define OOPS_GL_DESC_TABLE_OFFSET 0x900u
 #define OOPS_GL_DESC_UNIT_STRIDE  0x40u
+
+/*
+ * **A ring of descriptor slots** (since 2026-09-21), so a frame that draws several textures
+ * submits once instead of once per texture.
+ *
+ * There was one slot. Every textured draw handed the shader the same address, so a second
+ * texture bound later in the frame would have overwritten the first and every built draw would
+ * have sampled whichever was bound last - and the way that was kept correct was to **submit the
+ * frame** whenever a draw's descriptors differed from the slot's. One texture a frame costs
+ * nothing; a scene with twenty materials submitted twenty times a frame and waited on a fence
+ * each time. glut-demo flips in ten to twelve milliseconds with one texture, so that is the
+ * difference between a port that runs and one that does not, and it is the first thing a real
+ * port meets.
+ *
+ * **The shader needs no change.** The descriptor table's address is already per-draw user data
+ * (`SPI_SHADER_USER_DATA_PS_0`/`_1`), and `tex-prolog.s` and `tex-prolog2.s` load their pairs at
+ * `s[0:1]+0x00` and `s[0:1]+0x40` - offsets *relative* to that base. Pointing the base at a
+ * different slot is the whole mechanism.
+ *
+ * **Slot 0 is the original table at 0x900**, and a frame that never changes texture emits the
+ * stream it always emitted - which is what keeps the gl-cube oracle record (D007) exact. Slots
+ * 1 and up live in their own region, clear of everything else in the payload: the textured
+ * pixel shader ends at 0x1500 and the allocation is 0x8000.
+ *
+ * The ring wraps into a flush, as the vertex ring does. A **border colour** still flushes on a
+ * change whatever the ring says, because `TA_BC_BASE_ADDR` is a frame register rather than
+ * something the slot carries.
+ */
+/* **Where a compiled GL 2.0 pixel shader sits** (2026-09-21): 512 words at 0x3800, running to
+ * 0x4000. It is above the descriptor ring - 63 slots of 0x80 from 0x1800 ends at 0x3780 - and
+ * below the GL 2.0 uniform ring, which is what the payload grew from 0x4000 to 0x8000 to hold.
+ *
+ * **One slot, not one per program.** A compiled shader lives in the program object and is copied
+ * here when a draw needs it, the way a texture's descriptors are copied into their slot. Most
+ * frames use one program; a frame that switches between two pays an upload and a cache flush per
+ * switch, which is what `hw_ps_program` measures rather than assumes. */
+#define OOPS_GL_PS_GL2_OFFSET 0x3800u
+#define OOPS_GL_PS_GL2_WORDS  512u
+
+/*
+ * **A ring of uniform blocks for GL 2.0 draws** (2026-09-21), at 0x4000 - which is where the
+ * payload used to end, and is why the allocation grew to 0x8000.
+ *
+ * A uniform is the same value in every lane and every fragment, so it belongs in an SGPR; an
+ * SGPR is loaded from memory, so the values need an address. The block is `p->values` copied
+ * verbatim - the linker already lays the uniforms out as a flat pool of floats and every
+ * `glUniform*` writes into it, so what the shader loads and what `glGetUniformfv` reads back
+ * are the same bytes rather than two layouts to keep in step.
+ *
+ * **A ring and not a slot, for the reason the descriptors needed one.** Uniforms change between
+ * draws - that is what they are for - and one slot would mean every draw in a frame reading
+ * whatever the last one set. The alternative is submitting the frame on every uniform change,
+ * which is a submit per object in any real scene.
+ *
+ * **Its own ring, and not a wider descriptor slot.** The two will want to be one block when a
+ * compiled shader can sample - the shader would take a single base and find descriptors at one
+ * offset and uniforms at another - but merging them now would change the stride of a ring the
+ * GL 1.x console path runs through, and that path is measured (D007's oracle record is a frame
+ * byte for byte). This region is reached only by a GL 2.0 draw, which has never run on
+ * hardware, so nothing measured moves.
+ *
+ * Thirty-two floats a slot: two `s_load_dwordx16`s into s16..s47, which is eight mat4s' worth
+ * of scalars or two mat4s. A program past it is refused by the compiler with the number.
+ */
+#define OOPS_GL_GL2_UNIFORM_OFFSET 0x4000u
+#define OOPS_GL_GL2_UNIFORM_STRIDE 0x80u  /* 32 floats */
+#define OOPS_GL_GL2_UNIFORM_SLOTS  32u    /* 0x4000 .. 0x5000 */
+#define OOPS_GL_GL2_UNIFORM_FLOATS 32
+
+static inline uint32_t gl_hw_gl2_uniform_slot_offset(uint32_t slot) {
+    return OOPS_GL_GL2_UNIFORM_OFFSET + slot * OOPS_GL_GL2_UNIFORM_STRIDE;
+}
+
+#define OOPS_GL_PAYLOAD_BYTES 0x8000u
+
+#define OOPS_GL_DESC_RING_OFFSET  0x1800u
+#define OOPS_GL_DESC_SLOT_STRIDE  0x80u /* two units, 0x40 each */
+#define OOPS_GL_DESC_RING_SLOTS   63u   /* plus slot 0 at the table above: 64 textures a frame */
+
+/* Where slot `n` of the ring begins, as a byte offset into the GPU payload. Slot 0 is the
+ * original table, so that a frame with one texture is byte for byte the frame it was. */
+static inline uint32_t gl_hw_desc_slot_offset(uint32_t slot) {
+    return slot == 0u ? OOPS_GL_DESC_TABLE_OFFSET
+                      : OOPS_GL_DESC_RING_OFFSET + (slot - 1u) * OOPS_GL_DESC_SLOT_STRIDE;
+}
+
+/* **The compiler checks the map closes.** The regions above are separate constants, so one of
+ * them growing past the next is an edit away - and the result is a shader writing over a
+ * descriptor, or a uniform block over a shader, neither of which faults. It draws something
+ * instead, on hardware, from a build that said nothing. */
+typedef char oops_gl_payload_map_closes[
+    (OOPS_GL_DESC_RING_OFFSET + OOPS_GL_DESC_RING_SLOTS * OOPS_GL_DESC_SLOT_STRIDE <=
+             OOPS_GL_PS_GL2_OFFSET &&
+     OOPS_GL_PS_GL2_OFFSET + OOPS_GL_PS_GL2_WORDS * 4u <= OOPS_GL_GL2_UNIFORM_OFFSET &&
+     OOPS_GL_GL2_UNIFORM_OFFSET + OOPS_GL_GL2_UNIFORM_SLOTS * OOPS_GL_GL2_UNIFORM_STRIDE <=
+             OOPS_GL_PAYLOAD_BYTES)
+        ? 1 : -1];
 
 /* The general combine's encoder: the three instruction formats it emits, laid out field by field
  * as the RDNA2 ISA lays them out and checked, one line per form and operand kind, against the
@@ -1515,7 +1956,20 @@ typedef enum {
 void gl_ps_patch_sample(gl_context_t *ctx, gl_ps_sample_kind_t kind, GLenum depth_mode);
 /* Antialiasing's coverage in the untextured pixel shader, on or off. Asked on every untextured
  * hardware draw; writes only on a change. */
+/* Which of the two pixel shaders smooths. The arithmetic is the same program either way; only
+ * the interpolant it reads differs - `attr1` where there is no texture to want it, `attr3`,
+ * the second unit's coordinate, where there is. */
+typedef enum {
+    GL_COVERAGE_OFF = 0,
+    GL_COVERAGE_UNTEXTURED,
+    GL_COVERAGE_TEXTURED,
+    /* A smooth polygon, in whichever shader the draw uses: its three edge distances always ride
+     * in `attr3`, so one program serves both and the kind does not name a shader. */
+    GL_COVERAGE_POLYGON_UNTEX,
+    GL_COVERAGE_POLYGON_TEX
+} gl_coverage_kind_t;
 void gl_ps_patch_coverage(gl_context_t *ctx, GLboolean on);
+void gl_ps_patch_coverage_where(gl_context_t *ctx, gl_coverage_kind_t kind);
 /* Whether this draw is stippled: GL applies the polygon stipple to filled polygons only - not to
  * a polygon's outline, nor to the lines and points a primitive becomes (3.5.2). The software
  * rasteriser asks the same question in gl_raster_triangle. */
@@ -1528,9 +1982,17 @@ void gl_vs_build_param3(uint32_t *vs, uint64_t vbo_gpu, uint64_t canary_gpu);
 void gl_vs_build_param4(uint32_t *vs, uint64_t vbo_gpu, uint64_t canary_gpu);
 /* The version string rebuilt from the context's major and minor (gl_state.c). */
 void gl_version_string(gl_context_t *ctx);
-/* The minor version a context reports before the program states its own. A build serving ports
- * that all expect a later 1.x can move it rather than patching each of them; 1.1 is the default
- * because it is the honest class of what is implemented everywhere. */
+/* The version a context has before the program states its own. 1.1 is the honest class of what
+ * is implemented everywhere, and a build serving ports that all expect a later one can move it
+ * rather than patching each of them.
+ *
+ * **2.0 is not the default and will not become one.** The version gates the API, and the
+ * programmable pipeline is a different thing rather than more of the same one - so the opt-in
+ * is what keeps a GL 1.x program from reaching it by accident, which is the whole point. A GL
+ * 2.0 program calls `glContextSetVersion(2, 0)` and gets it. */
+#ifndef OOPS_GL_DEFAULT_VERSION_MAJOR
+#define OOPS_GL_DEFAULT_VERSION_MAJOR 1u
+#endif
 #ifndef OOPS_GL_DEFAULT_VERSION_MINOR
 #define OOPS_GL_DEFAULT_VERSION_MINOR 1u
 #endif
@@ -2097,21 +2559,40 @@ void gl_tex_repack(gl_texture_object_t *tex);
 void gl_tex_hw_prepare(gl_context_t *ctx, gl_texture_object_t *tex);
 
 /* The linear GFX10 mip layout, addrlib's (gfx10addrlib.cpp:5082-5104, GetMipSize at
- * gfx10addrlib.h:367-383): level i is ceil(w / 2^i) by ceil(h / 2^i), its rows padded to 64
- * RGBA8 texels (256 bytes), and the levels placed smallest first. Fills each level's byte offset
- * and row pitch in texels, and answers the whole chain's size in bytes. */
-static inline size_t gl_tex_chain_layout(GLsizei w, GLsizei h, int levels, size_t offsets[],
-                                         uint32_t pitches[]) {
+ * gfx10addrlib.h:367-383): level i is ceil(w / 2^i) by ceil(h / 2^i) by ceil(d / 2^i), its rows
+ * padded to 64 RGBA8 texels (256 bytes), its slices one after another at `pitch * height`, and
+ * the levels placed smallest first. Fills each level's byte offset and row pitch in texels, and
+ * answers the whole chain's size in bytes.
+ *
+ * **`d` is 1 for a 2D texture**, which reduces this to the two-dimensional form it had until
+ * 2026-09-21 - the same arithmetic with the depth term constant, so the chains a 2D texture
+ * lays out are byte for byte the ones it laid out before.
+ *
+ * **A volume's depth halves with its width and height**, which is the whole reason a volume had
+ * no chain here: this function laid out a 2D one, so a minifying filter read the base level on
+ * the console while the software rasteriser read the chain. Both halves of the three-dimensional
+ * case are measured rather than reasoned: the slice stride by gl1-probe's `texture-3d`, which
+ * samples slice 1 of a 2x2x2 volume at `pitch * height` from slice 0 and passes on hardware, and
+ * the level placement by `mipmap-levels`, which passes there on this same smallest-first
+ * arrangement. */
+static inline size_t gl_tex_chain_layout_3d(GLsizei w, GLsizei h, GLsizei d, int levels,
+                                            size_t offsets[], uint32_t pitches[]) {
     size_t total = 0;
     for (int i = levels - 1; i >= 0; i--) {
         const uint32_t mw = ((uint32_t)w + (1u << i) - 1u) >> i;
         const uint32_t mh = ((uint32_t)h + (1u << i) - 1u) >> i;
+        const uint32_t md = ((uint32_t)d + (1u << i) - 1u) >> i;
         const uint32_t pitch = ((mw ? mw : 1u) + 63u) & ~63u;
         offsets[i] = total;
         pitches[i] = pitch;
-        total += (size_t)pitch * (size_t)(mh ? mh : 1u) * 4u;
+        total += (size_t)pitch * (size_t)(mh ? mh : 1u) * (size_t)(md ? md : 1u) * 4u;
     }
     return total;
+}
+
+static inline size_t gl_tex_chain_layout(GLsizei w, GLsizei h, int levels, size_t offsets[],
+                                         uint32_t pitches[]) {
+    return gl_tex_chain_layout_3d(w, h, 1, levels, offsets, pitches);
 }
 
 static inline const gl_texture_object_t *gl_lookup_texture(const gl_context_t *ctx, GLuint id) {
@@ -2281,7 +2762,7 @@ static inline uint32_t gl_compute_db_depth_control(const gl_context_t *ctx) {
     int z_write = (z_enable && ctx->depth_mask) ? 1 : 0;
     uint32_t zfunc = gl_depth_func_to_zfunc(ctx->depth_func);
     uint32_t v = z_enable ? OOPS_AGC_DB_DEPTH_CONTROL(1, z_write, zfunc) : 0u;
-    /* **The stencil test** (since 2026-09-19; written, not yet seen): STENCIL_ENABLE (bit 0) and
+    /* **The stencil test** (since 2026-09-19; seen on hardware 2026-09-20): STENCIL_ENABLE (bit 0) and
      * STENCILFUNC (bits 8-10), gfx103.json's DB_DEPTH_CONTROL fields, radeonsi's programming
      * (si_state.c:1418-1428). The compare functions are CompareFrag's, in GL's own order, so the
      * depth function's mapping serves. BACKFACE_ENABLE stays clear: GL 1.x has one stencil state,
@@ -2458,11 +2939,18 @@ static inline GLboolean gl_blend_factor_is_constant(GLenum factor) {
  * logic op, and one of the four factors a constant one. */
 static inline GLboolean gl_blend_reads_constant(const gl_context_t *ctx) {
     if (!ctx->cap_blend || ctx->cap_color_logic_op) return GL_FALSE;
-    if (ctx->blend_equation == GL_MIN || ctx->blend_equation == GL_MAX) return GL_FALSE;
-    return (gl_blend_factor_is_constant(ctx->blend_src) ||
-            gl_blend_factor_is_constant(ctx->blend_dst) ||
-            gl_blend_factor_is_constant(ctx->blend_src_alpha) ||
-            gl_blend_factor_is_constant(ctx->blend_dst_alpha))
+    /* **Both** equations have to ignore the factors for the constant to go unread. With
+     * separate equations (GL 2.0) a GL_MIN colour and a GL_FUNC_ADD alpha still reads it for the
+     * alpha, and testing only the colour's equation would leave the register unwritten. */
+    const GLboolean c_minmax =
+        (GLboolean)(ctx->blend_equation == GL_MIN || ctx->blend_equation == GL_MAX);
+    const GLboolean a_minmax = (GLboolean)(ctx->blend_equation_alpha == GL_MIN ||
+                                           ctx->blend_equation_alpha == GL_MAX);
+    if (c_minmax && a_minmax) return GL_FALSE;
+    return ((!c_minmax && (gl_blend_factor_is_constant(ctx->blend_src) ||
+                           gl_blend_factor_is_constant(ctx->blend_dst))) ||
+            (!a_minmax && (gl_blend_factor_is_constant(ctx->blend_src_alpha) ||
+                           gl_blend_factor_is_constant(ctx->blend_dst_alpha))))
                ? GL_TRUE : GL_FALSE;
 }
 
@@ -2570,17 +3058,25 @@ static inline uint32_t gl_compute_cb_blend_control(const gl_context_t *ctx) {
     /* A logic op replaces blending, so the blender is left off and CB_COLOR_CONTROL's ROP3
      * does the work (see gl_compute_cb_color_control). */
     if (ctx->cap_color_logic_op) return 0u;
+    /* **Each channel group's own equation** (GL 2.0, `glBlendEquationSeparate`). The register
+     * has always had `COLOR_COMB_FCN` and `ALPHA_COMB_FCN` in separate fields; this wrote the
+     * same value into both because GL 1.x had only one to write. */
     const uint32_t comb = gl_blend_comb(ctx->blend_equation);
+    const uint32_t acomb = gl_blend_comb(ctx->blend_equation_alpha);
     /* GL_MIN and GL_MAX ignore the factors entirely - the hardware takes them from the operands,
-     * so the factor fields are set to ONE to keep them from contributing. */
+     * so the factor fields are set to ONE to keep them from contributing. Per group, because the
+     * two equations may differ. */
     const GLboolean minmax = (ctx->blend_equation == GL_MIN || ctx->blend_equation == GL_MAX)
                                  ? GL_TRUE : GL_FALSE;
+    const GLboolean aminmax =
+        (ctx->blend_equation_alpha == GL_MIN || ctx->blend_equation_alpha == GL_MAX) ? GL_TRUE
+                                                                                    : GL_FALSE;
     const uint32_t csrc = minmax ? 1u : gl_blend_op(ctx->blend_src, 4u);
     const uint32_t cdst = minmax ? 1u : gl_blend_op(ctx->blend_dst, 5u);
-    const uint32_t asrc = minmax ? 1u : gl_blend_op(ctx->blend_src_alpha, 4u);
-    const uint32_t adst = minmax ? 1u : gl_blend_op(ctx->blend_dst_alpha, 5u);
+    const uint32_t asrc = aminmax ? 1u : gl_blend_op(ctx->blend_src_alpha, 4u);
+    const uint32_t adst = aminmax ? 1u : gl_blend_op(ctx->blend_dst_alpha, 5u);
     return (csrc & 0x1fu) | ((comb & 0x7u) << 5) | ((cdst & 0x1fu) << 8) |
-           ((asrc & 0x1fu) << 16) | ((comb & 0x7u) << 21) | ((adst & 0x1fu) << 24) |
+           ((asrc & 0x1fu) << 16) | ((acomb & 0x7u) << 21) | ((adst & 0x1fu) << 24) |
            (1u << 29) | /* SEPARATE_ALPHA_BLEND */
            (1u << 30);  /* ENABLE - the bit the constant never set */
 }
@@ -2689,5 +3185,134 @@ void gl_hw_emit_dma_copy(uint32_t **dw_ptr, uint64_t src, uint64_t dst, uint32_t
 void gl_hw_clear(gl_context_t *ctx, GLbitfield mask, uint32_t colour, float depth);
 void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
                                 const gl_vertex_t *v1, const gl_vertex_t *v2);
+
+/* -------------------------------------------------------------------------
+ * GL 2.0's object model (gl_shader.c, glsl_link.c)
+ * ------------------------------------------------------------------------- */
+
+/* Links a program from two compiled stages, either of which may be NULL - a program with only a
+ * vertex shader leaves the fragment stage fixed-function, and the reverse. False with
+ * `info_log` written is a link failure and the caller sets GL_LINK_STATUS from it. References
+ * to the units are taken on success; the previous link's are dropped either way, so a failed
+ * relink leaves a program that is not linked rather than one still running the old code. */
+GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t *vs,
+                          glsl_unit_t *fs);
+/* The slot a name occupies, or NULL. Names are never reused within a context, so a name from a
+ * destroyed object finds nothing rather than whatever took its place. */
+gl_shader_object_t *gl_find_shader(gl_context_t *ctx, GLuint name);
+gl_program_object_t *gl_find_program(gl_context_t *ctx, GLuint name);
+/* The program `glUseProgram` made current and that has linked, or NULL - which is the one
+ * question the draw path asks. A current program that failed its last relink draws nothing and
+ * is an error at draw time, not a silent fall back to fixed function. */
+gl_program_object_t *gl_active_program(gl_context_t *ctx);
+/* Frees every shader and program a context owns, at glContextDestroy. */
+void gl_free_all_shaders(gl_context_t *ctx);
+
+/* -------------------------------------------------------------------------
+ * The console back end (glsl_ps.c)
+ *
+ * **Only the fragment stage is compiled.** oops-gl's hardware vertex shader is a passthrough -
+ * the CPU builds each vertex already in clip space and the shader loads and exports it - so a
+ * GL 2.0 vertex shader runs on the CPU in `glsl_exec.c`, writing the same vertex the
+ * fixed-function path writes. The fragment stage has no CPU standing in for it on the console,
+ * which is why it is the half that needs a compiler.
+ * ------------------------------------------------------------------------- */
+
+/* Compiles a linked program's fragment stage into a complete gfx1030 pixel shader: the varyings
+ * interpolated, the body, and the colour exported. `out_count` is how many words it wrote and
+ * `out_vgprs` how much of the register file it needs, for the shader's resource register.
+ *
+ * **A program with no fragment stage succeeds with `out_count` zero** - the fixed-function
+ * pixel shader in the payload is what runs for it, and there is nothing to compile. False is a
+ * real failure, with `log` saying what the compiler would not generate. */
+GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *words,
+                                      uint32_t capacity, uint32_t *out_count,
+                                      uint32_t *out_vgprs, char *log, size_t log_size);
+
+/* **Submit before editing a shader the GPU may not have read yet.** The draws already in the
+ * stream were built against the words that are there now; changing them first would have the
+ * GPU run the new program for the old draws, which is gl1-probe's `alpha-test` failing on
+ * hardware while passing on the host. Only when the words actually change. */
+void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst, const uint32_t *words,
+                             size_t n);
+/* Every pixel shader out of this core's caches after an edit: the payload is write-combined and
+ * the command processor reads what has left the core. */
+void gl_ps_flush_shaders(gl_context_t *ctx);
+
+/* -------------------------------------------------------------------------
+ * The interpolated block between the two programmable stages (glsl_exec.c)
+ *
+ * A vertex invocation writes it, the rasteriser interpolates it, a fragment invocation reads
+ * it. **It carries the fixed-function interpolants as well as the program's own varyings**,
+ * laid out after them at fixed offsets - `gl_Color`, `gl_TexCoord[]` and the rest.
+ *
+ * Keeping them in the same block is what makes a half-programmable pipeline work: a program
+ * with only a vertex shader writes `gl_FrontColor` and `gl_TexCoord[0]` and the fixed-function
+ * fragment stage reads them, and a program with only a fragment shader reads what the
+ * fixed-function vertex stage wrote. It is also what makes the derivatives uniform - one block
+ * is interpolated at the pixel, one pixel right and one pixel down, so `dFdx` of anything that
+ * came through here is exact rather than approximated.
+ * ------------------------------------------------------------------------- */
+#define GL_SHADER_VARY_FF_BASE    OOPS_GL_MAX_VARYING_FLOATS
+#define GL_SHADER_VARY_COLOR      (GL_SHADER_VARY_FF_BASE + 0)
+#define GL_SHADER_VARY_SECONDARY  (GL_SHADER_VARY_FF_BASE + 4)
+#define GL_SHADER_VARY_TEXCOORD   (GL_SHADER_VARY_FF_BASE + 8)
+#define GL_SHADER_VARY_FOG        (GL_SHADER_VARY_TEXCOORD + 4 * OOPS_GL_MAX_TEXTURE_UNITS)
+#define GL_SHADER_VARY_FLOATS     (GL_SHADER_VARY_FOG + 1)
+
+/* What one vertex invocation produces. */
+typedef struct {
+    float position[4];                     /* gl_Position, in clip coordinates */
+    float point_size;                      /* gl_PointSize, or the context's glPointSize */
+    float clip_vertex[4];                  /* gl_ClipVertex, for the user clip planes */
+    GLboolean wrote_clip_vertex;
+    float vary[GL_SHADER_VARY_FLOATS];
+} gl_shader_vertex_out_t;
+
+/* Runs a program's vertex shader for one vertex. `ff` supplies the fixed-function attributes -
+ * `gl_Vertex`, `gl_Normal`, `gl_Color`, `gl_MultiTexCoord*` - which a shader may read alongside
+ * its own generic ones. False with nothing written when the shader could not be run, which is
+ * an error at the draw rather than a frame that quietly loses its geometry. */
+GLboolean gl_shader_run_vertex(gl_context_t *ctx, gl_program_object_t *p, const gl_vertex_t *ff,
+                               gl_shader_vertex_out_t *out);
+
+/* What one fragment invocation reads and writes. The three interpolated blocks are the pixel,
+ * one pixel right and one pixel down - which is how a derivative is taken. */
+typedef struct {
+    const float *vary;      /* GL_SHADER_VARY_FLOATS, at the pixel */
+    const float *vary_dx;   /* the same, one pixel right; NULL when nothing needs a derivative */
+    const float *vary_dy;
+    float frag_coord[4];    /* gl_FragCoord: window x, y, depth, and 1/w */
+    float frag_coord_dx[4];
+    float frag_coord_dy[4];
+    GLboolean front_facing;
+} gl_shader_fragment_in_t;
+
+typedef struct {
+    float colour[4];        /* gl_FragColor */
+    float depth;            /* gl_FragDepth, when the shader wrote one */
+    GLboolean wrote_depth;
+    GLboolean discarded;
+} gl_shader_fragment_out_t;
+
+GLboolean gl_shader_run_fragment(gl_context_t *ctx, gl_program_object_t *p,
+                                 const gl_shader_fragment_in_t *in,
+                                 gl_shader_fragment_out_t *out);
+
+/* Whether a program's fragment stage reads anything whose value depends on a neighbouring
+ * pixel - a mipmapped texture lookup, `dFdx`, `dFdy` or `fwidth`. A fragment that needs none of
+ * them is evaluated once instead of three times, which is most of them. */
+GLboolean gl_shader_needs_derivatives(const gl_program_object_t *p);
+
+/* One texel for a GLSL texture lookup: the texture `target` names on `unit`, sampled at
+ * `coord` with `bias` added to the level of detail. `lod` is the level the derivatives gave, or
+ * -1000 for "the base level" when nothing needed one.
+ *
+ * **The texture enables do not apply.** With a program in use the sampler's declared type names
+ * the target and `glEnable(GL_TEXTURE_2D)` means nothing (GL 2.0, 3.8.15) - which is why this
+ * is not `gl_unit_texture_id`. False when nothing complete is bound, in which case the
+ * specification leaves the result undefined and this writes opaque black. */
+GLboolean gl_shader_sample(const gl_context_t *ctx, GLuint unit, GLenum sampler_type,
+                           const float coord[4], float lod, float out[4]);
 
 #endif /* __GL_INTERNAL_H__ */

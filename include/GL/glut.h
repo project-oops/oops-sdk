@@ -206,8 +206,13 @@ void glutOopsPadKeys(int on);
 
 /*
  * The solids, over the GLU quadrics: `glutSolidSphere` and its wire twin, the cube, the cone and
- * the torus. **No teapot** - it is a table of 306 control points and 32 patches, which this does
- * not carry; a program that wants one fails to link rather than drawing a sphere and hoping.
+ * the torus.
+ *
+ * **And the teapot**, which is none of those. It is 129 control points in ten Bezier patches,
+ * mirrored into thirty-two, evaluated through `glMap2f`/`glEvalMesh2` - the data is transcribed
+ * from freeglut (MIT) and carries its provenance in `src/gl/glut_teapot_data.h`. It is here
+ * because it is part of the GLUT API rather than a nicety: every GLUT ships one, and a program
+ * ported to this platform that calls `glutSolidTeapot` should link.
  */
 void glutSolidSphere(GLdouble radius, GLint slices, GLint stacks);
 void glutWireSphere(GLdouble radius, GLint slices, GLint stacks);
@@ -217,6 +222,8 @@ void glutSolidCone(GLdouble base, GLdouble height, GLint slices, GLint stacks);
 void glutWireCone(GLdouble base, GLdouble height, GLint slices, GLint stacks);
 void glutSolidTorus(GLdouble inner, GLdouble outer, GLint sides, GLint rings);
 void glutWireTorus(GLdouble inner, GLdouble outer, GLint sides, GLint rings);
+void glutSolidTeapot(GLdouble size);
+void glutWireTeapot(GLdouble size);
 
 /*
  * **The Platonic solids**, at the radii GLUT's own manual states: 1 for the octahedron and the

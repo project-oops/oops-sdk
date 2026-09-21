@@ -325,10 +325,10 @@ static void gl_raster_sync(gl_context_t *ctx) {
  * anything reads them back.
  *
  * On the scanout path the colour buffer is write-combined display memory, and a WC store is not
- * ordered against a later load - so without this the pixels can be read back, by this CPU or by
- * the CP's DMA, as whatever was there before. `gl_hw_flush` drains as well, which covers a read
- * that flushes first; this covers one that does not, and costs a fence per pixel operation
- * rather than per fragment.
+ * ordered against a later load, so the CP's DMA in `gl_hw_flush` can read a store that has not
+ * drained. **That is a real hazard and it was not the one that made six of these checks fail** -
+ * the console returned the same eight pixels with this in place and without it. The reason was
+ * `glGetFrameReadbackSampled` handing back a copy taken at the last submit; see gl_context.c.
  *
  * Every path in this file that wrote a fragment ends here. That is six places rather than four,
  * because glDrawPixels and glCopyPixels each have a depth-or-stencil arm that returns early.

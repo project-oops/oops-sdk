@@ -198,10 +198,14 @@ static inline __attribute__((unused)) void gl_hw_dump_stream(const gl_context_t 
  * glBitmap glyph is a hundred bytes, so flushing the whole buffer would make a HUD cost more
  * than the frame under it.
  *
- * **This is what gl1-probe's six pixel-rectangle failures were** - see `cpu_color_lo` in
- * gl_internal.h for the measurement, and gl_rx.h for the path. It lives outside this file's
- * target-only section because the host build calls it too, where it is the bookkeeping and no
- * barrier: the host's framebuffer is ordinary memory.
+ * **It is not what gl1-probe's six pixel-rectangle failures were.** This was written believing
+ * it was, and the console said otherwise: the run of 2026-09-21 returned all eight failing
+ * pixels byte for byte unchanged, which ruled the store ordering out and sent the search to
+ * `glGetFrameReadbackSampled` above. The hazard is still real - the CP's DMA in `gl_hw_flush`
+ * reads this buffer - so the drain stays; it is just not a fix for anything that was measured.
+ *
+ * It lives outside this file's target-only section because the host build calls it too, where
+ * it is the bookkeeping and no barrier: the host's framebuffer is ordinary memory.
  */
 void gl_color_cpu_drain(gl_context_t *ctx) {
     if (!ctx) return;
@@ -497,6 +501,15 @@ void gl_ps_build_textured(uint32_t *ps_tex, uint64_t canary_gpu) {
     }
     /* 120..131: fog, after the combine and the sum - see gl_ps_patch_fog. */
     for (size_t p = GL_PS_FOG_SLOT_TEX; p < GL_PS_FOG_SLOT_TEX + GL_PS_FOG_WORDS; p++) {
+        ps_tex[p] = 0xbf800000u; /* s_nop 0 */
+    }
+    /* 258..273: antialiasing's coverage, between fog and the alpha test - the same place the
+     * untextured shader keeps it, and the order GL specifies (1.x, 3.12). A branch over the slot
+     * is no smoothing, which is what every frame that does not smooth carries, so the program a
+     * frame like gl-cube's executes is the one it always was. `gl_ps_patch_coverage` writes it. */
+    ps_tex[GL_PS_COVERAGE_SLOT_TEX] = gl_ps_s_branch(GL_PS_COVERAGE_WORDS - 1u);
+    for (size_t p = GL_PS_COVERAGE_SLOT_TEX + 1u;
+         p < GL_PS_COVERAGE_SLOT_TEX + GL_PS_COVERAGE_WORDS; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
     /* 132..135: the alpha test, as in the untextured shader. It goes *after* the texture multiply,
@@ -836,6 +849,15 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->stencil_fail = GL_KEEP;
     ctx->stencil_zfail = GL_KEEP;
     ctx->stencil_zpass = GL_KEEP;
+    /* GL 2.0's back face starts as the front one does, which is also what `glStencilFunc` and
+     * its relatives leave it as - so a GL 1.x program never sees the split exists. */
+    ctx->stencil_back_func = GL_ALWAYS;
+    ctx->stencil_back_ref = 0;
+    ctx->stencil_back_value_mask = 0xffffffffu;
+    ctx->stencil_back_writemask = 0xffffffffu;
+    ctx->stencil_back_fail = GL_KEEP;
+    ctx->stencil_back_zfail = GL_KEEP;
+    ctx->stencil_back_zpass = GL_KEEP;
     ctx->clear_stencil = 0;
 
     /* Viewport & Scissor defaults */
@@ -878,6 +900,7 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->blend_src_alpha = GL_ONE;
     ctx->blend_dst_alpha = GL_ZERO;
     ctx->blend_equation = GL_FUNC_ADD;
+    ctx->blend_equation_alpha = GL_FUNC_ADD;
     ctx->blend_color[0] = 0.0f; /* main/blend.c:1155 */
     ctx->blend_color[1] = 0.0f;
     ctx->blend_color[2] = 0.0f;
@@ -962,11 +985,32 @@ void *glContextCreate(struct oops_display *disp) {
 
     ctx->last_error = GL_NO_ERROR;
 
-    /* The version this context reports until the program states its own (glContextSetVersion).
-     * 1.1 is the honest class of what is implemented everywhere; a build targeting a set of
-     * ports that all expect a later 1.x can move the default rather than patching each of
-     * them. */
-    ctx->version_major = 1u;
+    /* GL 2.0's generic vertex attributes. **Every one's current value is (0, 0, 0, 1)** - not
+     * all zeros - so an attribute whose array is disabled and which nothing has set reads as a
+     * point rather than a direction, and `gl_Position = mvp * attr` of an unset attribute lands
+     * at the origin instead of being degenerate. Array state starts as four floats and disabled,
+     * matching the named arrays beside it. The name counter starts at 1: 0 is not an object. */
+    for (int i = 0; i < OOPS_GL_MAX_VERTEX_ATTRIBS; i++) {
+        gl_vertex_attrib_t *a = &ctx->vertex_attribs[i];
+        a->size = 4;
+        a->type = GL_FLOAT;
+        a->stride = 0;
+        a->pointer = (const void *)0;
+        a->buffer = 0u;
+        a->enabled = GL_FALSE;
+        a->normalized = GL_FALSE;
+        a->current[0] = 0.0f;
+        a->current[1] = 0.0f;
+        a->current[2] = 0.0f;
+        a->current[3] = 1.0f;
+    }
+    ctx->gl2_next_name = 1u;
+    ctx->program_current = 0u;
+
+    /* The version this context has until the program states its own (glContextSetVersion).
+     * **It gates the API as well as the badge** - see OOPS_GL_DEFAULT_VERSION_MINOR for why the
+     * default is 1.5 and why it is not 2.0. */
+    ctx->version_major = OOPS_GL_DEFAULT_VERSION_MAJOR;
     ctx->version_minor = OOPS_GL_DEFAULT_VERSION_MINOR;
     gl_version_string(ctx);
 
@@ -1034,7 +1078,9 @@ void *glContextCreate(struct oops_display *disp) {
     gl_klog_val("sceAgcDriverCreateQueue rc", (uint64_t)(uint32_t)rc_q);
     if (rc_q == 0 && queue != NULL) {
         ctx->agc_queue = queue;
-        ctx->gpu_payload = oops_mem_alloc(0x4000, 256, OOPS_MEM_WB_ONION);
+        /* 0x8000 since 2026-09-21, when the GL 2.0 uniform ring went in at 0x4000 - which is
+         * where the payload used to end. gl_internal.h holds the map. */
+        ctx->gpu_payload = oops_mem_alloc(OOPS_GL_PAYLOAD_BYTES, 256, OOPS_MEM_WB_ONION);
         ctx->vbo_mem = oops_mem_alloc(65536, 256, OOPS_MEM_WB_ONION);
         ctx->fence = oops_mem_alloc(0x1000, 0x1000, OOPS_MEM_WB_ONION);
         ctx->canary = oops_mem_alloc(0x1000, 0x1000, OOPS_MEM_WB_ONION);
@@ -1276,6 +1322,7 @@ void glContextDestroy(void *ctx_handle) {
     /* Before the branch below, because the target arm frees `ctx` itself at the end of it and
      * the buffer storage has to go first. The display lists' storage is heap memory now too. */
     gl_free_all_buffers(ctx);
+    gl_free_all_shaders(ctx);
     gl_list_free_all(ctx);
     gl_eval_free(ctx);
     gl_accum_free(ctx);
@@ -1408,9 +1455,13 @@ GLboolean gl_front_buffer(gl_context_t *ctx) {
 /* **Where a draw goes** - glDrawBuffer's buffers as the pointers every write goes through. The
  * console's colour target is set when a frame begins (gl_hw_begin_frame's CB_COLOR0_BASE), so a
  * frame open on one buffer is submitted before draws move to the other. A draw into both
- * writes `fb_also` too wherever the CPU writes pixels. The GPU has one colour target, so
- * there the second buffer is left out, with one log line (gl_draw.c). GL_NONE keeps the
- * pointer and writes no colour (gl_color_writes). */
+ * writes `fb_also` too wherever the CPU writes pixels, and on the GPU binds it as MRT1: its
+ * own CB_COLOR1 surface registers, its half of CB_TARGET_MASK, its own CB_BLEND1_CONTROL, and
+ * a pixel shader exporting to both (gl_draw.c). This comment claimed the opposite - that the
+ * hardware had one colour target and dropped the second buffer with a log line - until
+ * 2026-09-21; it had been out of date since the second target was written, and reading it is
+ * what sent a hunt for `front-and-back`'s wrong front to the tiling of MRT1 rather than to its
+ * blending. GL_NONE keeps the pointer and writes no colour (gl_color_writes). */
 void gl_draw_targets(gl_context_t *ctx) {
     const unsigned bits = gl_color_buffer_bits(ctx->draw_buffer);
     uint32_t *primary = ctx->back_fb;
@@ -1532,8 +1583,8 @@ void glGetCanaryEx(GLuint *vs_canary, GLuint *ps_canary, GLuint *vs_s0, GLuint *
  * actually change - an unconditional flush would split a frame on every glPopAttrib, and on the
  * glDisable that follows a test which was never enabled.
  */
-static void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst,
-                                    const uint32_t *words, size_t n) {
+void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst,
+                             const uint32_t *words, size_t n) {
 #ifndef OOPS_HOST_BUILD
     if (!ctx->use_hardware || !ctx->hw_frame_active) return;
     for (size_t i = 0; i < n; i++) {
@@ -1550,15 +1601,19 @@ static void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst,
 /* Both pixel shaders out of this core's caches after a patch: the payload is write-combined and
  * the command processor reads what has left the core. The untextured shader sits just below the
  * textured one, so one range covers both. */
-static void gl_ps_flush_shaders(gl_context_t *ctx) {
+void gl_ps_flush_shaders(gl_context_t *ctx) {
 #if !defined(OOPS_HOST_BUILD) && defined(__x86_64__)
     /* Two ranges since 2026-09-20: the textured shader moved to 0x1000 to have room to grow, so
-     * one range over both would flush a kilobyte of payload that neither occupies. */
-    const size_t ranges[2][2] = {
+     * one range over both would flush a kilobyte of payload that neither occupies. **Three since
+     * 2026-09-21**, the third being the slot a compiled GL 2.0 pixel shader is copied into - a
+     * payload edit the GPU has not seen flushed is the previous shader running against this
+     * draw's parameters, which is the same hazard the other two are flushed for. */
+    const size_t ranges[3][2] = {
         {OOPS_GL_PS_UNTEX_OFFSET, OOPS_GL_PS_UNTEX_OFFSET + OOPS_GL_PS_UNTEX_WORDS * 4u},
         {OOPS_GL_PS_TEX_OFFSET, OOPS_GL_PS_TEX_OFFSET + OOPS_GL_PS_TEX_WORDS * 4u},
+        {OOPS_GL_PS_GL2_OFFSET, OOPS_GL_PS_GL2_OFFSET + OOPS_GL_PS_GL2_WORDS * 4u},
     };
-    for (int r = 0; r < 2; r++) {
+    for (int r = 0; r < 3; r++) {
         for (size_t p = ranges[r][0]; p < ranges[r][1]; p += 64) {
             __builtin_ia32_clflush((const void *)((const char *)ctx->gpu_payload + p));
         }
@@ -2054,33 +2109,120 @@ void gl_ps_patch_sum(gl_context_t *ctx, GLboolean on) {
  * the stream the gl-cube oracle record pins is untouched.
  */
 void gl_ps_patch_coverage(gl_context_t *ctx, GLboolean on) {
+    gl_ps_patch_coverage_where(ctx, on ? GL_COVERAGE_UNTEXTURED : GL_COVERAGE_OFF);
+}
+
+/*
+ * **Which shader smooths, and from which interpolant.**
+ *
+ * The arithmetic is one program; only the parameter it reads differs, and only in the ATTR
+ * field of its six interpolations. `tools/shader/coverage-tex.s` assembles both forms and its
+ * seven cross-check lines came back as words already in the tree - `coverage.s`'s own six
+ * interpolations and the lane kill the alpha test ends with - so the claim that the two
+ * programs differ by nothing else is checked rather than asserted.
+ *
+ * Both slots are written on every call, so a draw that stops smoothing, or moves between
+ * textured and not, leaves the other shader branching over its slot rather than weighting an
+ * alpha by an offset nothing wrote.
+ */
+void gl_ps_patch_coverage_where(gl_context_t *ctx, gl_coverage_kind_t kind) {
     if (!ctx || !ctx->gpu_payload) return;
-    uint32_t words[GL_PS_COVERAGE_WORDS];
-    if (!on) {
-        words[0] = gl_ps_s_branch(GL_PS_COVERAGE_WORDS - 1u);
-        for (size_t i = 1; i < GL_PS_COVERAGE_WORDS; i++) words[i] = 0xbf800000u; /* s_nop 0 */
-    } else {
-        static const uint32_t code[15] = {
-            0xc8300400u, 0xc8310401u, /* v_interp_p1/p2_f32 v12, attr1.x - the offset across */
-            0xc8340500u, 0xc8350501u, /* v_interp_p1/p2_f32 v13, attr1.y - and along */
-            0xc8380700u, 0xc8390701u, /* v_interp_p1/p2_f32 v14, attr1.w - the radius plus a half */
-            0x1018190cu,              /* v_mul_f32_e32 v12, v12, v12 */
-            0xd54b000cu, 0x04321b0du, /* v_fma_f32 v12, v13, v13, v12 */
-            0x7e18670cu,              /* v_sqrt_f32_e32 v12, v12 */
-            0x0818190eu,              /* v_sub_f32_e32 v12, v14, v12 */
-            0x1e1818f2u,              /* v_min_f32_e32 v12, 1.0, v12 */
-            0x7c021880u,              /* v_cmp_lt_f32_e32 vcc_lo, 0, v12 */
-            0x877e6a7eu,              /* s_and_b32 exec_lo, exec_lo, vcc_lo */
-            0x100e1907u,              /* v_mul_f32_e32 v7, v7, v12 */
-        };
-        memcpy(words, code, sizeof(code));
-        words[15] = 0xbf800000u; /* s_nop 0 */
+    /* The fifteen words, twice: `attr1` for the untextured shader, `attr3` for the textured
+     * one. Every word but the six interpolations is identical, and each interpolation differs
+     * by 0x800 - the ATTR field is bits [15:10], so attr1 to attr3 is +2 there. */
+    static const uint32_t code_untex[15] = {
+        0xc8300400u, 0xc8310401u, /* v_interp_p1/p2_f32 v12, attr1.x - the offset across */
+        0xc8340500u, 0xc8350501u, /* v_interp_p1/p2_f32 v13, attr1.y - and along */
+        0xc8380700u, 0xc8390701u, /* v_interp_p1/p2_f32 v14, attr1.w - the radius plus a half */
+        0x1018190cu,              /* v_mul_f32_e32 v12, v12, v12 */
+        0xd54b000cu, 0x04321b0du, /* v_fma_f32 v12, v13, v13, v12 */
+        0x7e18670cu,              /* v_sqrt_f32_e32 v12, v12 */
+        0x0818190eu,              /* v_sub_f32_e32 v12, v14, v12 */
+        0x1e1818f2u,              /* v_min_f32_e32 v12, 1.0, v12 */
+        0x7c021880u,              /* v_cmp_lt_f32_e32 vcc_lo, 0, v12 */
+        0x877e6a7eu,              /* s_and_b32 exec_lo, exec_lo, vcc_lo */
+        0x100e1907u,              /* v_mul_f32_e32 v7, v7, v12 */
+    };
+    static const uint32_t code_tex[15] = {
+        0xc8300c00u, 0xc8310c01u, /* v_interp_p1/p2_f32 v12, attr3.x - the offset across */
+        0xc8340d00u, 0xc8350d01u, /* v_interp_p1/p2_f32 v13, attr3.y - and along */
+        0xc8380f00u, 0xc8390f01u, /* v_interp_p1/p2_f32 v14, attr3.w - the radius plus a half */
+        0x1018190cu,              /* v_mul_f32_e32 v12, v12, v12 */
+        0xd54b000cu, 0x04321b0du, /* v_fma_f32 v12, v13, v13, v12 */
+        0x7e18670cu,              /* v_sqrt_f32_e32 v12, v12 */
+        0x0818190eu,              /* v_sub_f32_e32 v12, v14, v12 */
+        0x1e1818f2u,              /* v_min_f32_e32 v12, 1.0, v12 */
+        0x7c021880u,              /* v_cmp_lt_f32_e32 vcc_lo, 0, v12 */
+        0x877e6a7eu,              /* s_and_b32 exec_lo, exec_lo, vcc_lo */
+        0x100e1907u,              /* v_mul_f32_e32 v7, v7, v12 */
+    };
+
+    /*
+     * **A smooth polygon's coverage**, `tools/shader/coverage-poly.s`: the product of three edge
+     * fades rather than one distance. The three signed distances arrive as `d*w` in `attr3`'s x,
+     * y and z with `w` in its own w, and the reciprocal below turns them into the screen-linear
+     * distances the fade needs - the identity the textured prolog already uses for `q`, because
+     * `v_interp` is perspective-correct and a distance to a line is not.
+     *
+     * Twenty-six words, and the same program in both shaders: it reads `attr3` either way, so
+     * where a point or a line needs one form per shader a polygon needs one at all. Its four
+     * cross-check lines came back as words already in the tree - `coverage.s`'s alpha weighting
+     * and lane kill, and `coverage-tex.s`'s interpolation of `attr3.x`.
+     */
+    static const uint32_t code_poly[26] = {
+        0xc8300c00u, 0xc8310c01u, /* v_interp_p1/p2_f32 v12, attr3.x - d0 * w */
+        0xc8340d00u, 0xc8350d01u, /* v_interp_p1/p2_f32 v13, attr3.y - d1 * w */
+        0xc8380e00u, 0xc8390e01u, /* v_interp_p1/p2_f32 v14, attr3.z - d2 * w */
+        0xc83c0f00u, 0xc83d0f01u, /* v_interp_p1/p2_f32 v15, attr3.w - w */
+        0x7e1e550fu,              /* v_rcp_f32 v15, v15 */
+        0x10181f0cu,              /* v_mul_f32 v12, v12, v15 - d0 */
+        0x101a1f0du,              /* v_mul_f32 v13, v13, v15 - d1 */
+        0x101c1f0eu,              /* v_mul_f32 v14, v14, v15 - d2 */
+        0x061818f0u,              /* v_add_f32 v12, 0.5, v12 */
+        0x061a1af0u,              /* v_add_f32 v13, 0.5, v13 */
+        0x061c1cf0u,              /* v_add_f32 v14, 0.5, v14 */
+        0xd557000cu, 0x03c9010cu, /* v_med3_f32 v12, v12, 0, 1.0 - the clamp */
+        0xd557000du, 0x03c9010du, /* v_med3_f32 v13, v13, 0, 1.0 */
+        0xd557000eu, 0x03c9010eu, /* v_med3_f32 v14, v14, 0, 1.0 */
+        0x10181b0cu,              /* v_mul_f32 v12, v12, v13 */
+        0x10181d0cu,              /* v_mul_f32 v12, v12, v14 - the three fades multiplied */
+        0x7c021880u,              /* v_cmp_lt_f32_e32 vcc_lo, 0, v12 */
+        0x877e6a7eu,              /* s_and_b32 exec_lo, exec_lo, vcc_lo */
+        0x100e1907u,              /* v_mul_f32_e32 v7, v7, v12 */
+    };
+
+    uint32_t off_words[GL_PS_COVERAGE_WORDS];
+    off_words[0] = gl_ps_s_branch(GL_PS_COVERAGE_WORDS - 1u);
+    for (size_t i = 1; i < GL_PS_COVERAGE_WORDS; i++) off_words[i] = 0xbf800000u; /* s_nop 0 */
+
+    uint32_t untex_words[GL_PS_COVERAGE_WORDS], tex_words[GL_PS_COVERAGE_WORDS];
+    memcpy(untex_words, off_words, sizeof(off_words));
+    memcpy(tex_words, off_words, sizeof(off_words));
+    if (kind == GL_COVERAGE_UNTEXTURED) {
+        memcpy(untex_words, code_untex, sizeof(code_untex));
+    } else if (kind == GL_COVERAGE_TEXTURED) {
+        memcpy(tex_words, code_tex, sizeof(code_tex));
+    } else if (kind == GL_COVERAGE_POLYGON_UNTEX) {
+        memcpy(untex_words, code_poly, sizeof(code_poly));
+    } else if (kind == GL_COVERAGE_POLYGON_TEX) {
+        memcpy(tex_words, code_poly, sizeof(code_poly));
     }
+
     uint32_t *const ps_untex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_UNTEX_OFFSET);
-    uint32_t *const slot = ps_untex + GL_PS_COVERAGE_SLOT_UNTEX;
-    if (memcmp(slot, words, sizeof(words)) == 0) return;
-    gl_ps_sync_payload_edit(ctx, slot, words, GL_PS_COVERAGE_WORDS);
-    memcpy(slot, words, sizeof(words));
+    uint32_t *const ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
+    uint32_t *const slot_u = ps_untex + GL_PS_COVERAGE_SLOT_UNTEX;
+    uint32_t *const slot_t = ps_tex + GL_PS_COVERAGE_SLOT_TEX;
+    const GLboolean u_same = (GLboolean)(memcmp(slot_u, untex_words, sizeof(untex_words)) == 0);
+    const GLboolean t_same = (GLboolean)(memcmp(slot_t, tex_words, sizeof(tex_words)) == 0);
+    if (u_same && t_same) return;
+    if (!u_same) {
+        gl_ps_sync_payload_edit(ctx, slot_u, untex_words, GL_PS_COVERAGE_WORDS);
+        memcpy(slot_u, untex_words, sizeof(untex_words));
+    }
+    if (!t_same) {
+        gl_ps_sync_payload_edit(ctx, slot_t, tex_words, GL_PS_COVERAGE_WORDS);
+        memcpy(slot_t, tex_words, sizeof(tex_words));
+    }
     gl_ps_flush_shaders(ctx);
 }
 
@@ -2469,13 +2611,55 @@ const GLuint *glGetFrameReadbackSampled(GLuint line_stride) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !ctx->readback || ctx->hw_frames_confirmed == 0u) return NULL;
     if (line_stride == 0u) line_stride = 1u;
+    /*
+     * **Which buffer holds the current pixels** - `gl_color_read_source`, the same question
+     * glReadPixels asks. This read `ctx->readback` unconditionally, and that is the CP's copy
+     * **as of the last submit**: a `glDrawPixels`, `glBitmap`, `glCopyPixels` or `glAccum`
+     * writes the colour buffer with the CPU and builds no command stream, so no submit follows
+     * and no DMA re-copies it. The caller then got the frame as it was *before* its own pixels.
+     *
+     * That is what gl1-probe's six pixel-rectangle failures were, measured on 2026-09-20 and
+     * unchanged by a CPU store fence on 2026-09-21 - which is what finally ruled the memory
+     * ordering out and pointed here. Their passing neighbours are the tell: `read-pixels`
+     * passes because glReadPixels already goes through `gl_color_read_source`, and
+     * `stencil-pixels` and the depth and stencil readbacks pass because those buffers are the
+     * CPU's own and never travel through `readback` at all.
+     *
+     * `gl_raster_sync` drops `readback_of` the moment the CPU is about to write, so the choice
+     * below is already made for us: the copy while it is current, the buffer itself once it is
+     * not. Both are in the same layout, so the detiling loop is indifferent to which arrived.
+     */
+    const uint32_t *src = gl_color_read_source(ctx, ctx->framebuffer);
+    if (!src) return NULL;
+    /*
+     * **The invalidation belongs to the copy, not to the buffer.**
+     *
+     * `clflush` writes a dirty line back and then invalidates it. That is what the CP's copy
+     * wants - it is written by a DMA the CPU knows nothing about, and the CPU must drop what it
+     * has cached of it. Doing the same to the *live* colour buffer is the opposite of harmless:
+     * any line of it the CPU still holds dirty is written back **over what the GPU just drew**.
+     *
+     * **The signature is intermittency, and that is how it was nearly misread.** On 2026-09-21
+     * `depth-range-in-frame` - two quads in one frame, the red one underneath coming back on
+     * top - failed on the first run that read from the live buffer and passed on the next, from
+     * the *same* binary. Whether the write-back corrupts anything depends on what the CPU
+     * happens to be holding dirty, so a run that passes proves nothing either way. The first
+     * failure was written up here as a deterministic regression; it is not, and the correction
+     * matters more than the original note, because a hazard that only sometimes fires is the
+     * kind a green run talks you out of.
+     */
+    const GLboolean invalidate = (GLboolean)(src == ctx->readback);
     if (!ctx->color_tiled) {
 #if defined(__x86_64__)
-        size_t bytes = (size_t)ctx->width * (size_t)ctx->height * 4u;
-        size_t step = (size_t)line_stride * 64u;
-        for (size_t p = 0; p < bytes; p += step) __builtin_ia32_clflush((const void *)((const char *)ctx->readback + p));
+        if (invalidate) {
+            size_t bytes = (size_t)ctx->width * (size_t)ctx->height * 4u;
+            size_t step = (size_t)line_stride * 64u;
+            for (size_t p = 0; p < bytes; p += step) {
+                __builtin_ia32_clflush((const void *)((const char *)src + p));
+            }
+        }
 #endif
-        return ctx->readback;
+        return src;
     }
 
     /* **On the scanout path the copy is tiled**, like the scanout buffer it is of, and callers
@@ -2493,16 +2677,18 @@ const GLuint *glGetFrameReadbackSampled(GLuint line_stride) {
         if (!ctx->readback_lin) return NULL;
     }
 #if defined(__x86_64__)
-    const size_t tiled_bytes = gl_color_words(ctx) * 4u;
-    for (size_t p = 0; p < tiled_bytes; p += 64u) {
-        __builtin_ia32_clflush((const void *)((const char *)ctx->readback + p));
+    if (invalidate) {
+        const size_t tiled_bytes = gl_color_words(ctx) * 4u;
+        for (size_t p = 0; p < tiled_bytes; p += 64u) {
+            __builtin_ia32_clflush((const void *)((const char *)src + p));
+        }
     }
 #endif
     const size_t step = line_stride == 1u ? 1u : (size_t)line_stride * 16u;
     for (size_t i = 0; i < n; i += step) {
         const int x = (int)(i % ctx->width);
         const int y = (int)(ctx->height - 1u - (uint32_t)(i / ctx->width));
-        ctx->readback_lin[i] = ctx->readback[gl_color_index(ctx, x, y)];
+        ctx->readback_lin[i] = src[gl_color_index(ctx, x, y)];
     }
     return ctx->readback_lin;
 }

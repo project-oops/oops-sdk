@@ -12,19 +12,41 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Fixed
 
-- **A pixel rectangle the CPU wrote could be read back as what was there before** (2026-09-20).
-  On the scanout path the colour buffer is the display's own memory, mapped **write-combined**,
-  and on x86 a WC store is not ordered against a later load - so `glDrawPixels`, `glBitmap`,
-  `glCopyPixels` and `glAccum` wrote pixels that the next read, by this CPU or by the CP's DMA
-  into `readback`, could miss entirely. Six of gl1-probe's eight hardware failures were this one
-  thing, and `stencil-pixels` passed beside them because the stencil buffer is memory the CPU
-  owns at both ends.
-  `gl_color_cpu_drain` makes those writes real: a `clflush` over the span written and an
-  `sfence`, at the end of every CPU pixel operation and at every flush. Only the span, because a
-  full-screen buffer is eight megabytes and a `glBitmap` glyph is a hundred bytes.
-  **This is reasoned from the architecture rather than measured**, so `REQ-20260920T2230Z-7c31`
-  stands; its control arm is what would confirm the cause is the store ordering and not
-  something the fence happens to hide.
+- **The second colour target had no blend control** (2026-09-21). Blending on this part is per
+  MRT - `CB_BLEND1_CONTROL` is `0x028784` (Mesa `src/amd/common/amdgfxregs.h:12802`), context
+  offset `0x1e1`, and radeonsi writes the whole run as `R_028780_CB_BLEND0_CONTROL + i * 4`
+  (`si_state.c:420`) - and only `0x1e0` was ever emitted. A draw under
+  `glDrawBuffer(GL_FRONT_AND_BACK)` therefore blended into the back and **replaced** in the
+  front. That is exactly what gl1-probe's `front-and-back` measured on hardware twice: `saw`
+  `0xff00ffff`, the cyan GL asks for, from the back, and the wrong colour from the front. Both
+  controls now go out in one two-dword packet, MRT1 carrying the same state when it is bound and
+  zero when it is not; `test_pm4_gl_front_buffer_targets` pins both directions. Fixed in code,
+  **not yet confirmed on a console**.
+  The hour before finding it went into the tiling of the second target, because
+  `gl_draw_targets`' comment still said the hardware had one colour target and left the second
+  buffer out with a log line - untrue since MRT1 landed the day before. That comment now
+  describes what the function does and says what it used to claim.
+
+- **A pixel rectangle the CPU wrote was read back as what was there before** (2026-09-21).
+  `glGetFrameReadbackSampled` handed out `ctx->readback` - the CP's copy **as of the last
+  submit** - without asking whether it was still current. `glDrawPixels`, `glBitmap`,
+  `glCopyPixels` and `glAccum` write the colour buffer with the CPU and build no command stream,
+  so no submit follows and nothing re-copies the buffer; the caller got the frame as it was
+  before its own pixels. Six of gl1-probe's eight hardware failures were this one thing.
+  The accessor now asks `gl_color_read_source`, the same question glReadPixels already asked -
+  which is why `read-pixels` passed beside the six the whole time, and the tell that should have
+  been read as a discriminator rather than as corroboration.
+
+- **A drain for the CPU's colour writes** (2026-09-20), `gl_color_cpu_drain`: a `clflush` over
+  the span written and an `sfence`, at the end of every CPU pixel operation and at every flush.
+  On the scanout path the colour buffer is write-combined display memory, and a WC store is not
+  ordered against a later load, so the CP's DMA in `gl_hw_flush` can read one that has not
+  drained.
+  **This was written believing it was the fix for the six above, and it was not**: the console
+  returned all eight failing pixels byte for byte unchanged with it in place, which is what
+  ruled the memory ordering out and sent the search to the accessor. It stays because the hazard
+  is real; the comments around it say plainly that it fixed nothing that was measured, and
+  `REQ-20260920T2230Z-7c31` is withdrawn.
 
 - **The four-parameter vertex shader was never written into the payload** (2026-09-20).
   `gl_vs_build_param4` was written, unit-tested against a scratch buffer, and wired into the
@@ -40,6 +62,268 @@ Nothing has shipped yet - this is the initial commit.
   `tex-prolog2.s` and unit 1's combine stage, none of which had ever executed on the part.
 
 ### Added
+
+- **A GL 2.0 fragment shader compiles to gfx1030** (2026-09-21), and the draw path binds it.
+  `src/gl/glsl_ps.c`: the varyings interpolated, the body from `glsl_gen.c`, the colour exported.
+  **No console has executed one** - obSCEne's `REQ-20260921T1615Z-4e77` is the gating
+  measurement, and nothing downstream of it is worth building until it answers.
+
+  **Only the fragment stage is compiled, and that is the architecture rather than a shortcut.**
+  oops-gl's hardware vertex shader is a passthrough: the CPU builds each vertex already in clip
+  space and the shader loads it and exports it - `exp pos0 v2, v3, v4, v5` on values it did not
+  touch. So a GL 2.0 vertex shader runs where every other vertex computation here runs, on the
+  CPU in `glsl_exec.c`, writing the same vertex the fixed-function path writes. The fragment
+  stage is the one with no CPU standing in for it on the console, which is why it is the half
+  that needs a compiler.
+
+  **Every encoding came out of clang.** `tools/shader/gl2-fragment.s` is a *table* rather than a
+  program - what has to be pinned is each instruction's encoding, because the words a compiler
+  emits depend on the GLSL it was given - and `test_gl2_pixel_shader_encodings_match_the_assembler`
+  asserts the encoder reproduces it. A wrong encoding in a hand-written shader is wrong once; in
+  a compiler it is wrong in every shader it ever emits. The interpolation fields were pinned
+  across four channels and a high attribute rather than inferred from one example, which would
+  not have separated the attribute from its channel. The cross-check that the pipeline is right
+  rather than self-consistent is `s_and_b32 exec_lo, exec_lo, vcc_lo`: the same word is already
+  in the tree behind `glAlphaFunc` and the polygon stipple.
+
+  What is deliberately *not* generated: uniforms, texture sampling, control flow. Each is
+  refused with a sentence naming it, rather than emitted as something plausible.
+
+  Two hardware facts the wiring leans on rather than changes. **RSRC1 is untouched** - the
+  frame's stage table already reserves 136 VGPRs for the pixel stage, and the compiler refuses a
+  shader needing more, so the register that says how much of the file to allocate stays at its
+  measured value. And the parameter registers are `gl_hw_emit_param_count`'s, which obSCEne
+  already measured for two, three and four: a program's varyings are counted into that same
+  configuration rather than a new one.
+
+- **A context has the entry points its version defines and no others** (2026-09-21).
+  `glContextSetVersion` changed the string `glGetString` answers and nothing else - it said so in
+  its own log line - so every call in the library was reachable from every context, and a program
+  written for GL 1.1 could call `glCreateShader`.
+
+  On a desktop driver that discipline comes from the linker: an entry point a context does not
+  have is not exported, and a program calling it fails to load. Everything here is compiled into
+  one archive, so the equivalent is a runtime check, and the answer is the specification's for a
+  call that is not in the context: **GL_INVALID_OPERATION, and the call does nothing**. A
+  function returning a value returns its failure value - 0 for a name, -1 for a location,
+  GL_FALSE for a predicate. An **enumerant** a later version added is GL_INVALID_ENUM instead,
+  which is the different thing it is: "I have never heard of this" rather than "not from here",
+  and the query leaves its destination alone.
+
+  **The gate is on GL 2.0's entry points, completely, and not within GL 1.x** - and that second
+  half is a decision rather than a shortcut. Every 1.2 through 1.5 feature here is *also*
+  advertised in `glGetString(GL_EXTENSIONS)`: `GL_ARB_multitexture`,
+  `GL_ARB_vertex_buffer_object`, `GL_EXT_fog_coord`, `GL_ARB_window_pos` and the rest. An
+  extension is available to a context whatever its core version - that is what an extension is -
+  so a GL 1.1 context here genuinely has buffer objects through `glBindBufferARB`, and refusing
+  `glBindBuffer` beside it would be a rule about spelling rather than about capability. GL 2.0
+  is the opposite case: nothing advertises the programmable pipeline as an extension, so the
+  claim is the only door to it.
+
+  The default stays 1.1, so no GL 1.x program changes. **2.0 will not become the default**: the
+  opt-in is what keeps a GL 1.x program out of a pipeline it never asked for, which is the whole
+  point. `gl2-cube`, `gl2-probe` and the unit suite each gained the line that claims it, and
+  `gl2-probe`'s `version-gating` narrows the context mid-run to check the refusal still bites -
+  and widens it again, because a claim is a property of the context and not a one-way switch.
+
+- **GLSL 1.20, which is what a `#version 120` shader needs** (2026-09-21). The front end took
+  1.10 and refused everything else by number; Craft and most shaders written after about 2006
+  declare 1.20, and hit that refusal on line one.
+
+  **The rule that matters is implicit conversion**: 1.20 converts `int` to `float` and `ivecN`
+  to `vecN`, and 1.10 converts nothing. So `pos * 2` and `clamp(v, 0, 1)` are shaders in one and
+  errors in the other - which is how shader authors write, and is the whole of why a 1.20 shader
+  compiled as 1.10 stops at its first line of arithmetic.
+
+  It goes **one way only**: `float f = 1;` is legal in 1.20 and `int i = 1.0;` is not, in
+  either. The rule lives in `glsl_type_accepts`, which every assignment, initialiser, argument
+  and return goes through, so none of them can disagree about it; binary operators widen once at
+  the top of `binary_type` so every rule below sees a pair that already agrees.
+
+  **The conversion has to arrive at the value too.** The interpreter took a binary expression's
+  type from its left operand, so `2 * 0.25` would have been an integer expression and the answer
+  truncated to 0 - a black channel where a half-lit one was meant. A float operand now widens an
+  integer result, guarded on the result being integer-based so a matrix and a transform's vector
+  are untouched.
+
+  With it: `invariant` and `centroid`, consumed and recorded nowhere because neither has
+  anything to change here - there is one code path per stage so invariance already holds, and
+  there is no multisample buffer so every sample is already at the pixel centre. `invariant
+  gl_Position;` on its own parses as the restatement it is and produces no node. `transpose` and
+  `outerProduct`, over square matrices; 1.20's non-square `mat2x3` and its relatives are not
+  implemented and there is no shape for a non-square transpose to return.
+
+  `glGetString(GL_SHADING_LANGUAGE_VERSION)` answers **1.20**, the highest dialect the front end
+  takes - a ceiling, not a mode: a shader saying `#version 110` is still held to 1.10's rules.
+  `glContextSetVersion` takes 2.1 for the same reason, having refused it for exactly as long as
+  that was untrue.
+
+- **A `gl_` name that is real GLSL and is missing here is named, with the reason**
+  (2026-09-21). `gl_PointCoord` needs point sprites, which are not drawn; `gl_LightSource[]`,
+  `gl_Fog`, `gl_FrontMaterial` and `gl_DepthRange` are structs, and there is no struct type.
+  They used to be "use of an undeclared name", which reads as a typo and sends an author to
+  check their spelling instead of their expectations. `gl_VertexID` and `gl_ClipDistance` are
+  named too, with the version that brought them.
+
+- **A GL 1.x program pays nothing for GL 2.0 being in the library** (2026-09-21). Every vertex
+  carries sixteen generic attribute slots and filling them is real work per vertex, for values a
+  fixed-function draw never reads. The fetch and the immediate-mode latch now skip the whole
+  block until the context has made a shader or a program, so the cost arrives with the first
+  shader and not before.
+
+- **OpenGL 2.0 runs on the software reference** (2026-09-21). `glUseProgram` draws: the entry
+  points exist, `glLinkProgram` builds a program's interface, and the software path runs the
+  vertex shader per vertex and the fragment shader per fragment. `gl2-probe` measures 41 checks
+  against it and `gl2-cube` draws a cube through the two shaders it has been carrying since it
+  could only preprocess them.
+
+  Five files and about ninety entry points. `gl_shader.c` is the object model - shaders and
+  programs in **one name space**, as the specification requires, and deferred deletion with both
+  of its observable halves: `glIsShader` answers false from the moment the flag is set while
+  `glGetShaderiv(GL_DELETE_STATUS)` still answers, and an implementation with only one of them
+  passes half the tests that exist for this. `glsl_builtin.c` resolves GLSL 1.10's built-in
+  functions **by rule** rather than by symbol, because every one of them is overloaded over
+  genType and a symbol table holds one signature per name; the asymmetries are kept rather than
+  tidied, so `min(genType, float)` is legal and `min(float, genType)` is not. `glsl_link.c`
+  compiles and links, taking **references** to the compiled units rather than copying them - the
+  specification lets a shader be deleted the moment a program has linked it, and a copy would
+  cost the whole node arena per stage. `glsl_exec.c` is the reference execution.
+
+  **A derivative is the expression re-evaluated against the neighbouring pixel's interpolants.**
+  `dFdx`, `fwidth` and a mipmapped lookup's level of detail all need to know how a value changes
+  across the screen; hardware takes that from the other pixels of a quad, and the rasteriser
+  hands the fragment stage the interpolated block three times - at the pixel, one right and one
+  down. It is exact for anything linear in the varyings and is the same finite difference the
+  hardware takes for anything else, and a program whose fragment shader needs none of it is
+  still evaluated once.
+
+  **The console refuses a draw with a program bound**, and logs once. There is no GL 2.0 back
+  end; running the fixed-function instruments in its place would put a picture on screen that no
+  part of the program asked for, from a call that reported success. `gl2-cube` and `gl2-probe`
+  are `check-only` for the same reason and say so in their Makefiles.
+
+- **The rest of GL 2.0, which is not about shaders** (2026-09-21): separate stencil state for
+  the two faces (`glStencilFuncSeparate`, `glStencilOpSeparate`, `glStencilMaskSeparate`), a
+  blend equation per channel group (`glBlendEquationSeparate`), and `glDrawBuffers`.
+
+  **The three GL 1.x calls are now the `GL_FRONT_AND_BACK` case of the separate ones**, which is
+  how the specification defines them from 2.0 onwards - one implementation rather than two that
+  have to agree, and a GL 1.x program keeps working because setting both faces to the same thing
+  is what it always did. The face is resolved once per triangle, not per fragment, because that
+  is what it is a property of. Which face a triangle is comes from its own winding - the same
+  sign culling reads - so the single-pass stencil shadow volume works: increment where a front
+  face passes and decrement where a back one does, in one draw rather than two.
+
+  `CB_BLEND0_CONTROL` has always carried `ALPHA_COMB_FCN` in its own field and this wrote the
+  colour's equation into both, because GL 1.x had only one to write. `gl_blend_reads_constant`
+  needed the same correction: with separate equations a GL_MIN colour and a GL_FUNC_ADD alpha
+  still reads the constant, and testing only the colour's equation would have left the register
+  unwritten.
+
+  `glDrawBuffers` on a window-system framebuffer means **the same fragment colour to each named
+  buffer**, not a different one per buffer - true multiple render targets are framebuffer objects
+  and GL 3.0. A name covering more than one buffer, and a buffer named twice, are both
+  GL_INVALID_OPERATION rather than a silent union.
+
+- **`gl_FrontFacing` comes from the triangle's own winding** (2026-09-21). It was taking its
+  value from `prim_polygon_back`, which is two-sided *lighting*'s flag and is set only while
+  GL_LIGHTING and GL_LIGHT_MODEL_TWO_SIDE are both on - so every GL 2.0 fragment, which is every
+  fragment with lighting off, was told it faced forward. Found by `gl2-probe`'s `front-facing`
+  on its first run.
+
+- **GLSL arrays** (2026-09-21): `uniform vec4 palette[4]`, `gl_TexCoord[]` and `gl_FragData[]`.
+  A symbol carries a length, and **an element keeps the array's element type** - indexing a
+  `vec4` array used to read as indexing a vec4 and produce a float, which then failed several
+  lines away with a message about the wrong thing. A constant index past the end is a compile
+  error, as the specification says, rather than a read of whatever follows.
+
+- **The parser reads through the preprocessor** (2026-09-21). They were two passes over the same
+  text, so `#version 110` reached the grammar as a stray `#` and a `#define` was an undeclared
+  identifier several lines from where it was written. `glsl_parser_init_pp` puts the
+  preprocessor in front of the lexer at the one place a token enters the parser, and consumes the
+  directives before the first real token - so a caller knows the version before parsing a line
+  of the shader, and refuses a language it does not implement rather than compiling it as 1.10.
+
+- **`GL_POLYGON_SMOOTH` on the console** (2026-09-21), the last feature the roadmap listed as
+  needing a shader change. It gave two reasons this could not be done - a coverage of three edge
+  fades is a different shape of slot from one distance, and the outer half of every fade falls on
+  pixels the hardware rasteriser never raises - and both were true and neither was structural.
+  The coverage slot holds either form now, twenty-eight words rather than sixteen, with the alpha
+  test and export moved up in both shaders. And the CPU **widens the triangle** by a pixel about
+  its incenter, which moves every edge outward by the same distance - the trick that already
+  turns a point and a line into a quad - so the fragments exist and the shader's kill removes
+  what the widening added beyond the fade.
+  The three distances need no per-vertex geometry: the distance to edge *i* is `λ_i·h_i`, so
+  vertex *j* carries its own height in component *j* and zero in the others. An edge that is not
+  antialiased - a diagonal the polygon was triangulated along - carries 1.0 at every vertex and
+  fades nothing. Each rides as `d*w` with `w` beside it and is divided per fragment, because
+  `v_interp` is perspective-correct and a distance to a line is not; that is the identity the
+  textured prolog already uses for `q`. `tools/shader/coverage-poly.s`, whose four cross-check
+  lines assembled to words already in the tree.
+  **Two texture units is now the only primitive case still aliased**, for points, lines and
+  polygons alike. gl1-probe's `polygon-smooth` **passed on hardware the first time it ran**,
+  82/85.
+
+- **A ring of texture descriptor slots, so a frame with many textures submits once**
+  (2026-09-21). There was one slot, and every textured draw handed the shader its address - so a
+  second texture bound later in the frame would have overwritten the first, and the way that was
+  kept correct was to **submit the frame** on any descriptor change. One texture a frame cost
+  nothing. A scene with twenty materials submitted twenty times and waited on a fence each time,
+  and glut-demo flips in ten to twelve milliseconds with one texture, so that is the difference
+  between a port that runs and one that does not. It is the first thing a real port meets, which
+  is why it went ahead of the remaining conformance work.
+  **No shader changed.** The descriptor table's address was already per-draw user data, and both
+  texture prologs load their pairs at offsets *relative* to it, so pointing the base at a
+  different slot is the whole mechanism. Slot 0 is the original table at `0x900`, so a frame that
+  never changes texture emits the stream it always did and the gl-cube oracle record is
+  untouched; slots 1-63 live at `0x1800`, clear of the textured pixel shader that ends at
+  `0x1500`. The ring wraps into a submission, as the vertex ring does, and a **border colour**
+  still submits on a change whatever the ring has room for - `TA_BC_BASE_ADDR` is a frame
+  register rather than something a slot carries.
+  Three existing tests changed the behaviour they pin, which is the honest measure of the
+  change: a mip-chain test that submitted four times now takes four slots in one stream and
+  still finds slot 0 holding what the first draw was given, and a volume-and-cube test that
+  counted one triangle after a texture change now counts three.
+  `test_pm4_gl_descriptor_ring_wraps_into_a_submission` covers the boundary and asserts the last
+  slot lands inside the payload.
+  **gl1-probe cannot measure this and the attempt is recorded rather than dropped**: the suite
+  submitted 193 times before the ring and 194 after, for one more check, and identically per
+  check. 83 of its 85 checks read a pixel back and a readback submits, so what it counts is its
+  own measuring rather than its texture changes. The mechanism is host-measured; the benefit
+  needs a program that draws many textures a frame and reads nothing back.
+
+- **A volume's mip chain: the layout is written, the console still reads the base level**
+  (2026-09-21). `gl_tex_chain_levels` refused a volume because the chain layout was
+  two-dimensional. `gl_tex_chain_layout_3d` halves all three axes and the copy walks slices at
+  `pitch * height`, so that reason is gone - and gl1-probe's new `volume-mipmap` **failed on
+  hardware**, `saw 0xffff0000`, red, level 0, with the descriptor carrying `LAST_LEVEL` 1 and
+  `MAX_MIP` 1. So a volume still samples its base level there and still says so in the log; the
+  refusal in `gl_tex_chain_levels` is now a measured one rather than a structural one, with the
+  layout and its test kept for when the answer arrives.
+  **I wrote that both halves of the layout were "measured, not reasoned" before running it, and
+  that was wrong.** `texture-3d` measures the slice stride *within* level 0 and `mipmap-levels`
+  measures the level placement of a *2D* chain; neither measures where a *level* of a *volume*
+  begins, which is the extrapolation the part rejected. `REQ-20260921T1300Z-9b73` asks for it.
+  The host reference did catch the first version of the check, which scaled the coordinate by 8
+  and magnified instead of minifying.
+
+- **A textured smooth point or line is antialiased on the console** (2026-09-21). It was drawn
+  aliased because the offset from the primitive's centre rides in the texture-coordinate
+  parameter and a textured draw reads all four of its components. It now rides in the **second
+  texture unit's** parameter, which a one-unit draw has spare, and such a draw escalates to four
+  parameters for it - eighty bytes a vertex and the four-parameter vertex shader, both of which a
+  two-unit draw already uses. **This was unblocked by a bug fix rather than by a design:** the
+  four-parameter shader had never executed until `gl_vs_build_param4`'s missing call was found
+  the same morning.
+  The textured pixel shader gained a coverage slot at 258, between fog and the alpha test, where
+  the untextured one keeps its own; the alpha test and the export moved up sixteen. A branch over
+  the slot is no smoothing, so a frame that never smooths runs the program it always ran.
+  `tools/shader/coverage-tex.s` is `coverage.s` with the six interpolations' ATTR field moved
+  from 1 to 3 - `+0x800` each - and its seven cross-check lines assembled to words already in the
+  tree, which is what makes "only the ATTR field moved" checked rather than asserted.
+  gl1-probe's new **`smooth-textured` passed on hardware the first time it ran**, 80/83. Two
+  texture units is now the only primitive case still aliased: the fourth parameter is the second
+  texture's coordinate then, and only its `z` is spare.
 
 - **The GPU payload's address is logged** (2026-09-20). A GPU fault reports a program counter
   and nothing else - `PC=0x0000000201390B04 ILLEGAL_INST`, one line per wave - and every shader

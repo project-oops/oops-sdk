@@ -158,6 +158,7 @@ void glPushAttrib(GLbitfield mask) {
     e->blend_src_alpha = ctx->blend_src_alpha;
     e->blend_dst_alpha = ctx->blend_dst_alpha;
     e->blend_equation = ctx->blend_equation;
+    e->blend_equation_alpha = ctx->blend_equation_alpha;
     for (int i = 0; i < 4; i++) e->blend_color[i] = ctx->blend_color[i];
     e->cap_color_logic_op = ctx->cap_color_logic_op;
     e->logic_op = ctx->logic_op;
@@ -249,6 +250,13 @@ void glPushAttrib(GLbitfield mask) {
     e->stencil_fail = ctx->stencil_fail;
     e->stencil_zfail = ctx->stencil_zfail;
     e->stencil_zpass = ctx->stencil_zpass;
+    e->stencil_back_func = ctx->stencil_back_func;
+    e->stencil_back_ref = ctx->stencil_back_ref;
+    e->stencil_back_value_mask = ctx->stencil_back_value_mask;
+    e->stencil_back_writemask = ctx->stencil_back_writemask;
+    e->stencil_back_fail = ctx->stencil_back_fail;
+    e->stencil_back_zfail = ctx->stencil_back_zfail;
+    e->stencil_back_zpass = ctx->stencil_back_zpass;
     e->clear_stencil = ctx->clear_stencil;
 
     e->matrix_mode = ctx->matrix_mode;
@@ -420,6 +428,13 @@ void glPopAttrib(void) {
         ctx->stencil_fail = e->stencil_fail;
         ctx->stencil_zfail = e->stencil_zfail;
         ctx->stencil_zpass = e->stencil_zpass;
+        ctx->stencil_back_func = e->stencil_back_func;
+        ctx->stencil_back_ref = e->stencil_back_ref;
+        ctx->stencil_back_value_mask = e->stencil_back_value_mask;
+        ctx->stencil_back_writemask = e->stencil_back_writemask;
+        ctx->stencil_back_fail = e->stencil_back_fail;
+        ctx->stencil_back_zfail = e->stencil_back_zfail;
+        ctx->stencil_back_zpass = e->stencil_back_zpass;
         ctx->clear_stencil = e->clear_stencil;
     }
     if (all_enables || (mask & GL_LIGHTING_BIT)) {
@@ -465,6 +480,7 @@ void glPopAttrib(void) {
         ctx->blend_src_alpha = e->blend_src_alpha;
         ctx->blend_dst_alpha = e->blend_dst_alpha;
         ctx->blend_equation = e->blend_equation;
+        ctx->blend_equation_alpha = e->blend_equation_alpha;
         for (int i = 0; i < 4; i++) ctx->blend_color[i] = e->blend_color[i];
         ctx->hw_blend_color_dirty = GL_TRUE;
         ctx->logic_op = e->logic_op;

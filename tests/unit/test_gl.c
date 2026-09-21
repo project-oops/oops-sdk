@@ -862,8 +862,26 @@ static void test_gl_strings_are_honest_and_parseable(void) {
     ASSERT_EQ(min, 4u);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* Not above 1.x, and a refusal leaves the version alone rather than half-setting it. */
-    ASSERT_EQ(glContextSetVersion(2, 0), GL_FALSE);
+    /* **2.0 is claimable since 2026-09-21**, because the programmable pipeline runs - and its
+     * badge says `programmable` rather than `fixed-function`, which is the wrong word for the
+     * one thing 2.0 adds. It still says `subset`. */
+    ASSERT_EQ(glContextSetVersion(2, 0), GL_TRUE);
+    version = glGetString(GL_VERSION);
+    ASSERT_TRUE(strncmp((const char *)version, "2.0", 3) == 0);
+    ASSERT_TRUE(strstr((const char *)version, "programmable") != NULL);
+    ASSERT_TRUE(strstr((const char *)version, "subset") != NULL);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    /* **2.1 is the GLSL 1.20 one** and is claimable because the front end takes that dialect. */
+    ASSERT_EQ(glContextSetVersion(2, 1), GL_TRUE);
+    version = glGetString(GL_VERSION);
+    ASSERT_TRUE(strncmp((const char *)version, "2.1", 3) == 0);
+
+    /* Not above that, and a refusal leaves the version alone rather than half-setting it. */
+    ASSERT_EQ(glContextSetVersion(1, 4), GL_TRUE);
+    ASSERT_EQ(glContextSetVersion(2, 2), GL_FALSE);
+    ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+    ASSERT_EQ(glContextSetVersion(3, 0), GL_FALSE);
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
     ASSERT_EQ(glContextSetVersion(1, 6), GL_FALSE);
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
@@ -6694,22 +6712,21 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
  * **Every CPU pixel operation leaves nothing outstanding.**
  *
  * On the scanout path the colour buffer is the display's own memory, mapped write-combined, and
- * a WC store is not ordered against a later load - so a pixel rectangle the CPU wrote can be
- * read back, by this CPU or by the CP's DMA into `readback`, as whatever was there before. That
- * is what six of gl1-probe's eight hardware failures were on 2026-09-20: `raster-ops`,
- * `pixel-transfer`, `pixel-fragments`, `index-pixels`, `accumulation` and `array-types`, every
- * one of them the CPU putting colour into the render target, every one of them passing on the
- * host. `stencil-pixels` passed beside them because the stencil buffer is memory the CPU owns
- * at both ends.
+ * a WC store is not ordered against a later load - so the CP's DMA in `gl_hw_flush` can read a
+ * store that has not drained. `gl_color_cpu_drain` is the barrier.
  *
- * `gl_color_cpu_drain` is the barrier and this test cannot see it: the host build compiles the
- * `sfence` out, because a host framebuffer is ordinary memory. **What it can see is the
- * bookkeeping that decides when the barrier runs**, which is the half that would rot silently -
- * a new pixel operation that forgets `gl_raster_wrote`, or a fragment path that stops calling
- * `gl_color_cpu_touched`, would leave the span behind and cost another console run to find.
+ * **It is not why six of gl1-probe's eight hardware failures failed**, though this test was
+ * written believing it was. The console returned all eight pixels byte for byte unchanged with
+ * the barrier in place, and that is what ruled the ordering out; the cause was
+ * `glGetFrameReadbackSampled` handing back the CP's copy as of the last submit, which a CPU
+ * pixel operation never produces. The barrier stays because the hazard is real, and this test
+ * stays because the bookkeeping under it is the half that rots silently - a new pixel operation
+ * that forgets `gl_raster_wrote`, or a fragment path that stops calling `gl_color_cpu_touched`,
+ * would leave the span behind and nothing else here would notice.
  *
  * So: the span grows when a fragment is written, and every public operation that writes one
- * ends with it empty.
+ * ends with it empty. The host build compiles the `sfence` out - a host framebuffer is ordinary
+ * memory - so the bookkeeping is all this can check, and it is checked deliberately.
  */
 static void test_gl_cpu_pixel_ops_drain_what_they_wrote(void) {
   const int W = 16, H = 16;
@@ -12837,6 +12854,81 @@ static void test_glsl_emit_matches_the_assembler(void) {
    * is a shader that runs and computes rubbish rather than one that faults. */
   ASSERT_EQ(glsl_vgpr(0), 256u);
   ASSERT_EQ(glsl_vgpr(8), 264u);
+  /* And an SGPR is its own number, at the bottom of the same nine-bit space. */
+  ASSERT_EQ(glsl_sgpr(4), 4u);
+
+  /* **Scalar memory, which is how a uniform reaches a compiled shader.** All five widths, three
+   * destinations and three offsets: the width *is* the opcode and the five are consecutive, so
+   * one example would not have separated that field from anything beside it. Words from
+   * `tools/shader/gl2-fragment.s`. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORD, 4u, 0u, 0x0u);
+  glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORD, 4u, 0u, 0x10u);
+  glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORD, 12u, 0u, 0x40u);
+  glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORDX2, 4u, 0u, 0x0u);
+  glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORDX4, 4u, 0u, 0x0u);
+  glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORDX8, 4u, 0u, 0x0u);
+  glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORDX8, 12u, 0u, 0x20u);
+  glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORDX16, 16u, 0u, 0x0u);
+  glsl_emit_s_waitcnt_lgkm(&c);
+  ASSERT_EQ(words[0], 0xf4000100u);  /* s_load_dword s4, s[0:1], 0x0 */
+  ASSERT_EQ(words[1], 0xfa000000u);  /* **soffset is SGPR_NULL and not s0**, which would be the
+                                      * address's own low half added to itself */
+  ASSERT_EQ(words[2], 0xf4000100u);
+  ASSERT_EQ(words[3], 0xfa000010u);  /* the offset, and only the offset, in the second dword */
+  ASSERT_EQ(words[4], 0xf4000300u);  /* s12 - the destination is bits 12:6 */
+  ASSERT_EQ(words[5], 0xfa000040u);
+  ASSERT_EQ(words[6], 0xf4040100u);  /* x2 */
+  ASSERT_EQ(words[8], 0xf4080100u);  /* x4 */
+  ASSERT_EQ(words[10], 0xf40c0100u); /* x8 */
+  ASSERT_EQ(words[12], 0xf40c0300u); /* x8 into s[12:19] ... */
+  ASSERT_EQ(words[13], 0xfa000020u); /* ... at +0x20 */
+  ASSERT_EQ(words[14], 0xf4100400u); /* x16 */
+  /* **0xc07f, not zero**: the counters this does not wait on are held at their maximum, and a
+   * zero there would wait for every outstanding memory and export operation as well. */
+  ASSERT_EQ(words[16], 0xbf8cc07fu); /* s_waitcnt lgkmcnt(0) */
+
+  /* An SGPR as a VOP source costs no register and no move - but only in `src0`, because `vsrc1`
+   * is eight bits and always a VGPR. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_vop1(&c, GLSL_VOP1_MOV_B32, 4u, glsl_sgpr(4u));
+  glsl_emit_vop2(&c, GLSL_VOP2_MUL_F32, 4u, glsl_sgpr(4u), 5u);
+  glsl_emit_vop2(&c, GLSL_VOP2_ADD_F32, 4u, glsl_sgpr(12u), 5u);
+  ASSERT_EQ(words[0], 0x7e080204u); /* v_mov_b32_e32 v4, s4 */
+  ASSERT_EQ(words[1], 0x10080a04u); /* v_mul_f32_e32 v4, s4, v5 */
+  ASSERT_EQ(words[2], 0x06080a0cu); /* v_add_f32_e32 v4, s12, v5 */
+
+  /* **Control flow, which on this machine is the exec mask and not a branch.** Two destinations
+   * for each form, because the register number sits in a different field in SOP1 than in SOP2
+   * and one example would not have told them apart. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_exec_save_and_vcc(&c, 4u);
+  glsl_emit_exec_save_and_vcc(&c, 15u);
+  glsl_emit_exec_else(&c, 4u);
+  glsl_emit_exec_else(&c, 15u);
+  glsl_emit_exec_drop_live(&c, 4u);
+  glsl_emit_exec_drop_live(&c, 15u);
+  glsl_emit_exec_restore(&c, 4u);
+  glsl_emit_exec_restore(&c, 15u);
+  glsl_emit_exec_clear(&c);
+  ASSERT_EQ(words[0], 0xbe843c6au); /* s_and_saveexec_b32 s4, vcc_lo */
+  ASSERT_EQ(words[1], 0xbe8f3c6au); /* s_and_saveexec_b32 s15, vcc_lo */
+  /* `s_andn2_b32 d, a, b` is `a & ~b`, so the **saved** mask is ssrc0 and the one to remove is
+   * ssrc1. The other way round computes lanes that were never running. */
+  ASSERT_EQ(words[2], 0x8a7e7e04u); /* s_andn2_b32 exec_lo, s4, exec_lo */
+  ASSERT_EQ(words[3], 0x8a7e7e0fu); /* s_andn2_b32 exec_lo, s15, exec_lo */
+  ASSERT_EQ(words[4], 0x8a047e04u); /* s_andn2_b32 s4, s4, exec_lo - what makes a discard stick */
+  ASSERT_EQ(words[5], 0x8a0f7e0fu); /* s_andn2_b32 s15, s15, exec_lo */
+  ASSERT_EQ(words[6], 0xbefe0304u); /* s_mov_b32 exec_lo, s4 */
+  ASSERT_EQ(words[7], 0xbefe030fu); /* s_mov_b32 exec_lo, s15 */
+  ASSERT_EQ(words[8], 0xbefe0380u); /* s_mov_b32 exec_lo, 0 */
+
+  /* **The cross-check that the SOP2 fields are right rather than merely self-consistent**: this
+   * exact word is already in the tree behind glAlphaFunc and the polygon stipple, and it comes
+   * out of the same encoder as the four above. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_sop2(&c, GLSL_SOP2_AND_B32, GLSL_SREG_EXEC_LO, GLSL_SREG_EXEC_LO, GLSL_SREG_VCC_LO);
+  ASSERT_EQ(words[0], 0x877e6a7eu); /* s_and_b32 exec_lo, exec_lo, vcc_lo */
 
   /* **Overflow is recorded, not wrapped.** A truncated shader is a valid instruction stream
    * that stops in the middle, which the GPU will happily execute. */
@@ -13145,33 +13237,82 @@ static void test_glsl_gen_selects_swizzles_and_constructors(void) {
  * instruction whose encoding has not been read out of an assembler does not get guessed.
  */
 static void test_glsl_gen_refuses_what_it_cannot_encode(void) {
-  /* Division: there is no verified opcode, and reciprocal-then-multiply is a precision claim
-   * nobody here has measured. */
-  glsl_gen_of("v3/f");
-  ASSERT_TRUE(g_glsl_gen.error != NULL);
-
   /* Integer arithmetic through the float instructions would be silently wrong. */
   glsl_gen_of("iv3+iv3");
   ASSERT_TRUE(g_glsl_gen.error != NULL);
 
-  /* Comparison and logic have no instruction here yet. */
-  glsl_gen_of("f<f");
-  ASSERT_TRUE(g_glsl_gen.error != NULL);
-
-  /* No call mechanism, so a call is refused rather than quietly inlined. */
-  glsl_gen_of("sin(f)");
+  /* An **ordering** comparison of two vectors: GLSL spells that `lessThan`, and the answer is a
+   * bvec, which is a per-component bool and not the single one this has a register shape for. */
+  glsl_gen_of("v3<v3");
   ASSERT_TRUE(g_glsl_gen.error != NULL);
 
   /* Matrix arithmetic beyond mat4 * vec4. */
   glsl_gen_of("m4*m4");
   ASSERT_TRUE(g_glsl_gen.error != NULL);
 
-  /* Writing through a swizzle needs a masked move that has not been measured. */
-  glsl_gen_of("v4.xy = v4.zw");
+  /* **A built-in with no instruction is refused by name.** `sin` is generated - a multiply and
+   * `v_sin_f32` - and `atan` is not, because there is no instruction for it and the only
+   * lowering is a polynomial whose accuracy nobody here has measured. A generator that split
+   * that difference would be one whose output is wrong on hardware and right on the host. */
+  glsl_gen_of("atan(f)");
   ASSERT_TRUE(g_glsl_gen.error != NULL);
 
-  /* A compound assignment would need a read of the destination first. */
+  /* A texture lookup needs descriptors handed to the shader, which the compiled path has not
+   * wired up. Refused on the name before the arguments are looked at, which is why this needs
+   * no sampler in the fixture. */
+  glsl_gen_of("texture2D(v3, v3)");
+  ASSERT_TRUE(g_glsl_gen.error != NULL);
+
+  /* There is still no call mechanism, so a user-defined function is refused rather than
+   * quietly inlined - and the message says so rather than naming a built-in. */
+  glsl_gen_of("notAFunction(f)");
+  ASSERT_TRUE(g_glsl_gen.error != NULL);
+}
+
+/*
+ * **What it now generates that it used to refuse**, each with the reason the refusal lifted.
+ *
+ * A refusal is evidence of discipline only while the thing is genuinely unencodable; once the
+ * opcode is pinned, leaving the refusal in place is just a shader that will not compile. These
+ * are the four that moved, and the test is here so the boundary between the two lists is
+ * written down rather than remembered.
+ */
+static void test_glsl_gen_selects_what_the_opcodes_now_allow(void) {
+  /* `/` is `v_rcp_f32` and `v_mul_f32`, both in `tools/shader/gl2-fragment.s`. */
+  glsl_gen_of("v3/f");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+
+  /* A built-in whose lowering is one instruction a component. */
+  glsl_gen_of("sqrt(f)");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+
+  /* A swizzle write is a move into each register the swizzle names - not a masked move, because
+   * a value here is one VGPR a component with no packing. */
+  glsl_gen_of("v4.xy = v4.zw");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+
+  /* And a compound assignment is one instruction a component, the destination being its own
+   * first operand. */
   glsl_gen_of("v3 *= f");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+
+  /* **A bool is a float that is 0.0 or 1.0**, so a comparison is `v_cmp` into `vcc` and a
+   * `v_cndmask` straight back out of it - and `&&`, `||` and `!` are then `min`, `max` and
+   * `1 - x` with no comparison at all. */
+  glsl_gen_of("f<f");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+  glsl_gen_of("v3==v3");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+  glsl_gen_of("(f<f)&&(f>f)");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+  glsl_gen_of("!(f<f)");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+  glsl_gen_of("f<f ? v3 : v3");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+
+  /* **Except when the right-hand side assigns.** GLSL short-circuits `&&`, this evaluates both
+   * sides, and the two are the same thing only while the right side does nothing. */
+  glsl_gen_of("(f<f)&&((v3.x=f)<f)");
   ASSERT_TRUE(g_glsl_gen.error != NULL);
 }
 
@@ -13357,5 +13498,6 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_glsl_gen_selects_arithmetic);
     RUN_TEST(test_glsl_gen_selects_swizzles_and_constructors);
     RUN_TEST(test_glsl_gen_refuses_what_it_cannot_encode);
+    RUN_TEST(test_glsl_gen_selects_what_the_opcodes_now_allow);
     RUN_TEST(test_glsl_gen_allocates_registers_for_statements);
 }

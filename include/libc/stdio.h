@@ -16,6 +16,11 @@
 #ifndef OOPS_LIBC_STDIO_H
 #define OOPS_LIBC_STDIO_H
 
+/* C linkage for a C++ includer; `stdlib.h` carries the reasoning. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdarg.h>
 #include <stddef.h>
 
@@ -79,5 +84,9 @@ int vsprintf(char *buf, const char *fmt, va_list args);
  */
 int sscanf(const char *s, const char *fmt, ...) __attribute__((format(scanf, 2, 3)));
 int vsscanf(const char *s, const char *fmt, va_list args);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* OOPS_LIBC_STDIO_H */

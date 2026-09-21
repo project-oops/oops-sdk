@@ -30,10 +30,20 @@
  *
  * # What is still one unit
  *
- * Units above GL_TEXTURE1 are the software rasteriser's alone, and a draw that names one says so
- * in the log. GL 1.4's crossbar - `GL_TEXTURE0` named as a source from unit 1's environment -
- * reads zero, because unit 0's combine stage has already overwritten v4..v7 with its result;
- * that is the rule a unit applying no texture follows here and in Mesa.
+ * **There are no units above GL_TEXTURE1 anywhere**, and this said they were "the software
+ * rasteriser's alone" until 2026-09-21. `OOPS_GL_MAX_TEXTURE_UNITS` is 2, every per-unit array
+ * in the library is that size, `GL_MAX_TEXTURE_UNITS` reports 2, and
+ * `glActiveTexture(GL_TEXTURE2)` is refused with `GL_INVALID_ENUM` by `gl_mt_unit` - in the
+ * software rasteriser exactly as here. GL 1.3's minimum is two, so that is conformant. The log
+ * line `gl_draw.c` emits is about **unit 1 when unit 0 has no texture**, which this path cannot
+ * apply because its second stage combines against the first's result and there is no first.
+ *
+ * A third unit is a whole-library change, and its console half needs a fifth parameter export,
+ * which has never been measured on this part (`REQ-20260921T1210Z-4f16`).
+ *
+ * GL 1.4's crossbar - `GL_TEXTURE0` named as a source from unit 1's environment - reads zero,
+ * because unit 0's combine stage has already overwritten v4..v7 with its result; that is the
+ * rule a unit applying no texture follows here and in Mesa.
  */
 #ifndef OOPS_GL_MULTITEX_H
 #define OOPS_GL_MULTITEX_H

@@ -14,7 +14,11 @@ except its entry point, built for the target. Read it alongside this.
 2. Include what you already include: `<GL/gl.h>`, `<GL/glu.h>`, `<GL/glut.h>`, `<math.h>`,
    `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<assert.h>`, `<time.h>`.
 3. Copy a Makefile from an app under `oops-apps/src/oops-gl` and put your sources in it.
-4. **Check the symbol table**, not just the build - see *The one that will get you* below.
+4. **If you use shaders, call `glContextSetVersion(2, 0)` after making the context.** A context
+   has the entry points its version defines and no others, and the default is 1.1 - so without
+   it `glCreateShader` returns 0 and records GL_INVALID_OPERATION. A GL 1.x port needs no such
+   line.
+5. **Check the symbol table**, not just the build - see *The one that will get you* below.
 
 ## What is here
 
@@ -23,6 +27,45 @@ matrices, lighting, materials, texturing with mipmaps and the texture environmen
 alpha test, depth and stencil, display lists, vertex arrays, buffer objects, evaluators, selection
 and feedback, the accumulation buffer, pixel rectangles. `docs/GL_ROADMAP.md` is the detailed
 account, including which features the console path draws differently from the software one.
+
+**The version you claim is the version you get.** `glContextSetVersion(1, 1)` gives a GL 1.1
+context and `glCreateShader` on it is GL_INVALID_OPERATION; `glContextSetVersion(2, 0)` gives
+the programmable pipeline. On a real driver the linker enforces that; here it is a runtime
+check, so a port meets the same refusals it will meet on a driver that really is the version it
+claims. The default is 1.1, and **2.0 is never a default** - a GL 1.x program should not be able
+to reach a pipeline it never asked for.
+
+**The gate is on GL 2.0's entry points and not within GL 1.x**, and that is deliberate. Every
+1.2 through 1.5 feature here is also advertised in `glGetString(GL_EXTENSIONS)` -
+`GL_ARB_multitexture`, `GL_ARB_vertex_buffer_object`, `GL_EXT_fog_coord` and the rest - and an
+extension is available to a context whatever its core version. So a GL 1.1 context genuinely has
+buffer objects, and refusing `glBindBuffer` while `glBindBufferARB` beside it worked would be a
+rule about spelling rather than about capability. Nothing advertises the programmable pipeline
+as an extension, which is why the claim is the only door to that one.
+
+**OpenGL 2.0's programmable pipeline.** `glCreateShader` through `glUseProgram`, uniforms,
+generic vertex attributes, separate stencil and blend state, and **GLSL 1.10 and 1.20** behind
+them: a shader compiles, a program links, and both stages run.
+
+**On a build machine it all works. On a console it has never run.** The fragment stage compiles
+to real gfx1030 instructions and the draw path binds them, but no console has executed one -
+obSCEne's `REQ-20260921T1615Z-4e77` is the measurement that says whether a generated shader
+retires at all. And the back end generates arithmetic, swizzles and constructors only: a shader
+with a uniform, a texture lookup or an `if` is **refused** for the console with a sentence
+naming what is missing, and still runs on the software path. So a GL 2.0 port is a thing you can
+develop here today and cannot ship yet, which is worth knowing before you start rather than
+after. A GL 1.x port is unaffected: it never binds a program.
+
+**`#version 120` is a different language from `#version 110`, and the number decides which you
+get.** 1.20 converts `int` to `float` implicitly, so `pos * 2` and `clamp(v, 0, 1)` are shaders;
+1.10 converts nothing and both are errors. If your shaders were written against 1.20 - which is
+most shaders written after about 2006 - say so on the first line, because a 1.10 shader held to
+1.10's rules is the wall you will otherwise hit on your first line of arithmetic.
+
+A program with only *one* stage is legal and is the useful halfway house: a vertex shader that
+writes `gl_FrontColor` and `gl_TexCoord[]` leaves the fixed-function fragment stage to run, and
+a fragment shader with no vertex shader reads what the fixed-function transform produced. That
+is how a port replaces one half of its pipeline at a time.
 
 **GLU**: `gluPerspective`, `gluLookAt`, `gluOrtho2D`, `gluPickMatrix`, `gluErrorString`,
 `gluBuild2DMipmaps`, `gluBuild1DMipmaps`, `gluScaleImage`, `gluProject`, `gluUnProject`,
@@ -66,6 +109,12 @@ error is one you find on your desk.
 | GLU tessellator, NURBS | |
 | `localtime`, `gmtime`, `mktime`, `strftime` | There is no calendar - see `<libc/time.h>`. Whether one can be read at all is asked on the obSCEne bus (`REQ-20260920T1415Z-3f8a`); the arithmetic is the easy part |
 | `fscanf`, `scanf` | Both need to put a character back when a conversion reads one too many, and this SDK's file handles have no pushback. **`sscanf` is here**: read the line with `fgets` and scan the line, which is what the code being ported does anyway |
+| GLSL `struct`, and the built-in uniform structures | `gl_LightSource[]`, `gl_Fog`, `gl_FrontMaterial` and `gl_DepthRange` are **refused by name** at compile, so you are told what is missing rather than doubting your spelling. The matrices, `gl_Vertex`, `gl_Color`, `gl_MultiTexCoord*`, `gl_TexCoord[]` and the rest of the non-struct built-ins **are** here |
+| GLSL 1.30 and later | `#version 130` is refused **by number** rather than compiled as 1.20. A 1.30 shader takes `in`/`out` in place of `attribute`/`varying` and means its integer arithmetic; compiling it as an earlier dialect is a wrong picture with no diagnostic attached to it. **1.10 and 1.20 are both here** |
+| GLSL non-square matrices | `mat2x3` and its relatives are 1.20's and are not implemented. `mat2`, `mat3` and `mat4` are, and so are 1.20's `transpose` and `outerProduct` over them |
+| `gl_PointCoord`, point sprites | GL 2.0's point sprite is not drawn, so `gl_PointCoord` is refused by name rather than being a `vec2` that always reads (0, 0) |
+| `noise1` through `noise4` | Named in the refusal, for the same reason. The specification permits them to return zero, and nothing should rely on that |
+| Framebuffer objects, `glDrawBuffers` to colour attachments | GL 3.0. `glDrawBuffers` on the window-system framebuffer is here and means what the specification says it means there: the same fragment colour to several buffers |
 | C++ runtime, exceptions, the standard library | This is a C SDK. A C++ port is a much larger job |
 | Colour-index visuals | `glutGet(GLUT_DISPLAY_MODE_POSSIBLE)` answers 0 for them |
 
@@ -174,23 +223,37 @@ console path is hardware, and this is no longer a list of suspicions - as of 202
 gl1-probe runs its whole suite on a console and reports **74 of 82 checks passing there**. What
 follows is what the other eight are.
 
-**The one most likely to reach your port: a pixel rectangle the CPU writes into the colour
-buffer does not appear.** That is `glDrawPixels`, `glBitmap`, `glCopyPixels` and `glAccum` -
-six of the eight failures, one cause, `REQ-20260920T2230Z-7c31` on the obSCEne bus. If your
-program draws a HUD, a loading bar, a font through `glutBitmapCharacter`, or anything else by
-putting pixels straight into the framebuffer, **that is the part that will be missing** while
-the geometry around it is correct. Two things it is *not*: `glReadPixels` of colour, depth or
-stencil all work, and so does `glDrawPixels` of a **stencil** rectangle.
+Six of those eight were one bug and it is fixed: `glGetFrameReadbackSampled` handed back the
+frame as of the last GPU submit, so a pixel rectangle the CPU had written since - `glDrawPixels`,
+`glBitmap`, `glCopyPixels`, `glAccum` - was missing from what a program read back. **If you are
+reading this against a build from before 2026-09-21, a HUD or a `glutBitmapCharacter` font will
+seem to vanish; it is the readback, not the draw.**
 
-The other two failures are narrower. `glBlendColor`'s green channel comes back as the constant's
-alpha on the console (`REQ-20260920T2320Z-4b8d`), so `GL_CONSTANT_COLOR` blending is off in one
-channel; and `glDrawBuffer(GL_FRONT_AND_BACK)` reaches the back buffer correctly and the front
-one incorrectly.
+The two that remain are narrower, and one of them has a fix waiting for its console run.
+`glBlendColor`'s green channel comes back as the constant's alpha on the console
+(`REQ-20260920T2320Z-4b8d`), so `GL_CONSTANT_COLOR` blending is off in one channel. And
+`glDrawBuffer(GL_FRONT_AND_BACK)` reached the back buffer correctly and the front one
+incorrectly: blending is per colour target on this part, and only the first target's control
+register was written, so the front *replaced* where the back blended. **If you draw into both
+buffers with blending on, against a build from before 2026-09-21, the front is wrong and the
+back is right.**
 
-Then the features that are drawn differently rather than wrongly: a smooth *textured* point or
-line and `GL_POLYGON_SMOOTH` (plain smooth points and lines are drawn there and pass on
-hardware), texture units above the second, a volume's mip chain, and an occlusion query whose
-draws never test depth. Each of those logs a line saying so the first time it matters.
+Then the features that are drawn differently rather than wrongly: a smooth point or line using
+**two** texture units, a volume's mip chain, and an occlusion query whose
+draws never test depth. Each of those logs a line saying so the first time it matters. A
+minifying filter on a 3D texture reads the base level there while the software rasteriser reads
+the chain: the layout for a three-dimensional chain was written on 2026-09-21 and the hardware
+read the base level regardless, so where a level sits inside a 3D image is an open measurement
+(`REQ-20260921T1300Z-9b73`) rather than missing code. Smooth
+points and lines are drawn there, textured or not, and both pass on hardware - the textured one
+since 2026-09-21, when its coverage moved into the second texture unit's interpolant.
+
+This list said "texture units above the second" until 2026-09-21, which was wrong and would have
+sent a port looking for a console bug that is not there. **There are two texture units and no
+more**, in the software rasteriser as much as on hardware: `GL_MAX_TEXTURE_UNITS` reports 2 and
+`glActiveTexture(GL_TEXTURE2)` is refused with `GL_INVALID_ENUM`. GL 1.3 requires at least two,
+so that is conformant; a program wanting more will find out at the `glActiveTexture` rather than
+in a wrong pixel.
 
 `docs/GL_ROADMAP.md` lists every one with the pixel it produced and what it is waiting on. A
 port that looks right on the host and wrong on the console should read the log first; it will

@@ -137,6 +137,14 @@ static glsl_token_type_t keyword_of(const char *text, size_t n) {
         {"samplerCube", GLSL_TOK_KW_SAMPLERCUBE},
         {"sampler1DShadow", GLSL_TOK_KW_SAMPLER1DSHADOW},
         {"sampler2DShadow", GLSL_TOK_KW_SAMPLER2DSHADOW},
+        /* **GLSL 1.20's two new qualifiers**, recognised whatever the shader's version.
+         *
+         * They are not 1.10 keywords, so a 1.10 shader could in principle use one as a variable
+         * name - and every implementation anyone would port against reserves them anyway, so a
+         * shader that did would already be unportable. Recognising them always is one table
+         * rather than a version-dependent one, and the parser refuses them by name in a 1.10
+         * shader, which is a better diagnostic than "syntax error" either way. */
+        {"invariant", GLSL_TOK_KW_INVARIANT}, {"centroid", GLSL_TOK_KW_CENTROID},
         /* Reserved by GLSL 1.10. Named so a program using one is told *which* word it may not
          * use, instead of meeting a syntax error somewhere downstream. */
         {"asm", GLSL_TOK_KW_RESERVED},      {"class", GLSL_TOK_KW_RESERVED},

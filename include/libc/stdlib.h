@@ -11,6 +11,23 @@
 #ifndef OOPS_LIBC_STDLIB_H
 #define OOPS_LIBC_STDLIB_H
 
+/*
+ * **C linkage when a C++ translation unit includes this** (2026-09-21), and the same block is on
+ * every header in this directory.
+ *
+ * These are C functions. Without this, a C++ caller mangles every name here - `strtod` becomes
+ * `strtod(char const*, char**)` - and links against nothing. A payload link passes
+ * `--unresolved-symbols=ignore-all`, so that failure does not stop the build; it reaches the
+ * console.
+ *
+ * It arrives now because the first C++ consumer arrived: libc++ compiled cleanly against these
+ * headers and then asked the linker for ten mangled C names. Nothing was wrong with the
+ * declarations, only with what language they were declared in.
+ */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 
 #define RAND_MAX 0x7fffffff
@@ -57,11 +74,52 @@ void *bsearch(const void *key, const void *base, size_t count, size_t size,
 
 unsigned long strtoul(const char *s, char **end, int base);
 float strtof(const char *s, char **end);
+
+/*
+ * **The `long long` and `long double` conversions** (2026-09-21). C99 requires them beside the
+ * `long` forms above, and until now a program that wrote `strtoll` got a compile error - which
+ * is how libc++ found them: `std::stoll`, `std::stoull` and `std::stold` are defined in terms of
+ * exactly these three, so a standard library compiled against this header failed on them.
+ *
+ * On this target `long` is 64 bits, so `strtoll` and `strtoull` are the same conversion under
+ * their C99 names rather than new code. `strtold` is **not** exact: `long double` is wider than
+ * `double` here, and the value is parsed at double precision and widened. That loses the extra
+ * mantissa bits an 80-bit parse would keep, and it is said here rather than discovered by a
+ * program that needed them.
+ */
+long long strtoll(const char *s, char **end, int base);
+unsigned long long strtoull(const char *s, char **end, int base);
+long double strtold(const char *s, char **end);
+
+/*
+ * **`getenv` always answers NULL, and that is the truth rather than a stub** (2026-09-21).
+ *
+ * A payload is launched by the system, not spawned from a shell: there is no environment block
+ * to read, so every variable is unset - which is exactly what NULL means and exactly what a
+ * desktop returns for a name nobody exported. A caller branching on it takes its default path,
+ * which is the behaviour it would get from a clean shell.
+ *
+ * FreeType asked for it first (`ftinit.c` reads `FREETYPE_PROPERTIES`), and sdl12-compat's
+ * `SDL12COMPAT_getenv_unsafe` had already had to patch around its absence - the same two-shim
+ * pattern that moved `errno` down here.
+ */
+char *getenv(const char *name);
+
+/*
+ * `alloca`, which is the compiler's and never a library's (2026-09-21). It has to unwind with
+ * the frame, so it cannot be a function call - every C library defines it as this builtin, and
+ * so does this one. Extreme Tux Racer asked for it in nine of its sources.
+ */
+#define alloca(n) __builtin_alloca(n)
 long long llabs(long long x);
 
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;
 div_t div(int num, int den);
 ldiv_t ldiv(long num, long den);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* OOPS_LIBC_STDLIB_H */

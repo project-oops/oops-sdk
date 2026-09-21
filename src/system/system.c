@@ -776,6 +776,23 @@ __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
 
 void oops_system_park_until_closed(void) {
 #ifndef OOPS_HOST_BUILD
+  /*
+   * **One line before the idling starts, so a harness knows the work is over.**
+   *
+   * A payload cannot exit. `exit`, `_Exit` and `sceKernelExit` are absent, `_exit` raises
+   * `SIGSYS` because a big-app container's credentials do not permit FreeBSD syscall 1, and
+   * returning from the entry point faults at zero because the dynamic linker gives it no caller
+   * frame - all measured, `REQ-20260917T1450Z-2e71`. Parking is the conforming ending, and the
+   * cost of it is that nothing outside can tell "finished and idling" from "still working": a
+   * watcher following the title has to wait out its own timeout either way, which is a two
+   * minute wait after a run that took forty seconds.
+   *
+   * So the payload says so. This is the last line any payload prints, it is printed exactly
+   * once, and its text is fixed - a watcher greps for `park: work done` and stops following.
+   * It is not a substitute for a result: whatever the payload measured is already in the log
+   * above, because every caller of this function prints its own verdict first.
+   */
+  oops_klog("park", "work done");
   for (;;) {
     if (sceKernelUsleep) {
       (void)sceKernelUsleep(1000000u);

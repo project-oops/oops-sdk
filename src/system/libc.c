@@ -15,6 +15,7 @@
 #ifndef OOPS_HOST_BUILD
 
 #include "libc/assert.h"
+#include "libc/errno.h"
 #include "libc/math.h"
 #include "libc/stdio.h"
 #include "libc/stdlib.h"
@@ -329,6 +330,36 @@ unsigned long strtoul(const char *s, char **end, int base) {
 
 float strtof(const char *s, char **end) { return (float)strtod(s, end); }
 
+/*
+ * The C99 names beside the `long` forms above. `long` is 64 bits on this target, so the integer
+ * pair is the same conversion under a different spelling and not a second parser to keep
+ * correct.
+ *
+ * `strtold` widens a double, which is lossy - `long double` is 80-bit here and this parses at 53
+ * bits of mantissa. It is the honest cheap answer: a real 80-bit parser is a different piece of
+ * work, and no caller in the collection needs that precision. `include/libc/stdlib.h` says so
+ * where a caller reads it.
+ */
+long long strtoll(const char *s, char **end, int base) {
+  return (long long)strtol(s, end, base);
+}
+
+unsigned long long strtoull(const char *s, char **end, int base) {
+  return (unsigned long long)strtoul(s, end, base);
+}
+
+long double strtold(const char *s, char **end) { return (long double)strtod(s, end); }
+
+/*
+ * No environment block, so every name is unset. See `include/libc/stdlib.h` for why that is the
+ * honest answer and not a placeholder - a payload is launched rather than spawned, and NULL is
+ * what a caller would get from a shell that exported nothing.
+ */
+char *getenv(const char *name) {
+  (void)name;
+  return (char *)0;
+}
+
 long long llabs(long long x) { return (x < 0) ? -x : x; }
 
 div_t div(int num, int den) {
@@ -386,6 +417,30 @@ void exit(int status) {
 }
 
 void abort(void) { exit(1); }
+
+/* ---------------------------------------------------------------------------
+ * errno
+ *
+ * The platform carries the FreeBSD-derived POSIX exports, and errno lives behind `__error()`
+ * there as it does on FreeBSD - `src/net/net.c` has read it that way since the socket work, and
+ * obSCEne measured the import callable on firmware 12.40 (sweep 20260909-083918).
+ *
+ * The import is weak, like every platform call here, so it is checked before it is used. The
+ * fallback is one process-wide slot rather than a failure: `errno` is read far more often than
+ * it is set, and a caller doing `if (errno == ENOENT)` after a failed call must not fault on a
+ * console where the import did not bind. A single slot is wrong only for a program reading
+ * errno set by another thread, which is already a race on any system.
+ */
+__attribute__((weak)) int *__error(void);
+
+static int s_errno_fallback;
+
+int *oops_errno_location(void) {
+  if (__error) {
+    return __error();
+  }
+  return &s_errno_fallback;
+}
 
 /* ---------------------------------------------------------------------------
  * stdio

@@ -46,6 +46,11 @@
 
 uint32_t glsl_vgpr(uint32_t n) { return 256u + n; }
 
+/* An SGPR's operand value is its own number - the low end of the same nine-bit space. Identity,
+ * and written out anyway: a call site that passes a bare number is one where nobody can tell
+ * whether the 256 was forgotten, and this is the file where that mistake is silent. */
+uint32_t glsl_sgpr(uint32_t n) { return n; }
+
 /* The inline constant for 1.0f, read back from `v_mov_b32 v12, 1.0` which assembled with
  * src0 = 0xf2. The inline constants are a small closed table; anything outside it needs a
  * literal, and `glsl_emit_mov_imm` decides which. */
@@ -56,6 +61,8 @@ uint32_t glsl_vgpr(uint32_t n) { return 256u + n; }
 #define GLSL_INLINE_ZERO 128u
 /* src0 = 255 means "the next dword is the operand". */
 #define GLSL_SRC_LITERAL 255u
+/* The same inline zero as a scalar operand, where the field is eight bits rather than nine. */
+#define GLSL_SRC_INLINE_ZERO 128u
 
 /* -------------------------------------------------------------------------
  * The code buffer
@@ -159,6 +166,166 @@ void glsl_emit_mov_imm(glsl_code_t *c, uint32_t d, uint32_t bits) {
     }
     glsl_emit_vop1(c, GLSL_VOP1_MOV_B32, d, GLSL_SRC_LITERAL);
     put(c, bits);
+}
+
+void glsl_emit_vop1_op(glsl_code_t *c, uint32_t opcode, uint32_t d, uint32_t s) {
+    glsl_emit_vop1(c, opcode, d, glsl_vgpr(s));
+}
+
+void glsl_emit_vop2_op(glsl_code_t *c, uint32_t opcode, uint32_t d, uint32_t s0, uint32_t s1) {
+    glsl_emit_vop2(c, opcode, d, glsl_vgpr(s0), s1);
+}
+
+/* `d = vcc_lo ? s1 : s0`. **The false value is `src0` and the true one is `vsrc1`**, which is the
+ * opposite of how the C conditional reads left to right - and an implementation that swapped
+ * them would compile every `?:` in every shader to the other branch. Verified from
+ * `v_cndmask_b32_e32 v4, v5, v6, vcc_lo` = 0x02080d05: src0 is v5 and vsrc1 is v6. */
+void glsl_emit_cndmask(glsl_code_t *c, uint32_t d, uint32_t s0, uint32_t s1) {
+    glsl_emit_vop2(c, GLSL_VOP2_CNDMASK, d, glsl_vgpr(s0), s1);
+}
+
+/* VOPC: `0111110 opcode[24:17] vsrc1[16:9] src0[8:0]`, the result into `vcc_lo`. Wave32, so it
+ * is `vcc_lo` and not `vcc`; the encodings differ and assembling for the wrong width is the
+ * mistake `tools/shader/README.md` exists to prevent. Verified from
+ * `v_cmp_lt_f32_e32 vcc_lo, v4, v5` = 0x7c020b04. */
+void glsl_emit_cmp(glsl_code_t *c, uint32_t opcode, uint32_t s0, uint32_t s1) {
+    put(c, (0x3eu << 25) | ((opcode & 0xffu) << 17) | ((s1 & 0xffu) << 9) |
+              (glsl_vgpr(s0) & 0x1ffu));
+}
+
+/* `s_and_b32 exec_lo, exec_lo, vcc_lo` - the lane kill. Not computed: this exact word is
+ * already in the tree behind `glAlphaFunc` and the polygon stipple, which is the cross-check
+ * that the comparison above lands where those two land. */
+void glsl_emit_kill_from_vcc(glsl_code_t *c) {
+    put(c, 0x877e6a7eu);
+}
+
+/* VINTRP: `110010 vdst[25:18] opcode[17:16] attr[15:10] chan[9:8] vsrc[7:0]`, opcode 0 for
+ * `p1` and 1 for `p2`.
+ *
+ * **The two halves are a pair and the second reads what the first wrote.** `p1` takes the i
+ * barycentric from v0 and `p2` the j from v1, and putting anything between them that touches
+ * `vdst` produces a value that is neither. Field positions verified across four channels and a
+ * high attribute - `tools/shader/gl2-fragment.s` - rather than inferred from one example, which
+ * would not have separated the attribute from its channel. */
+void glsl_emit_interp(glsl_code_t *c, uint32_t vdst, uint32_t attr, uint32_t chan,
+                      GLboolean p2) {
+    put(c, (0x32u << 26) | ((vdst & 0xffu) << 18) | ((p2 ? 1u : 0u) << 16) |
+              ((attr & 0x3fu) << 10) | ((chan & 0x3u) << 8) | (p2 ? 1u : 0u));
+}
+
+void glsl_emit_interp_pair(glsl_code_t *c, uint32_t vdst, uint32_t attr, uint32_t chan) {
+    glsl_emit_interp(c, vdst, attr, chan, GL_FALSE);
+    glsl_emit_interp(c, vdst, attr, chan, GL_TRUE);
+}
+
+/* EXP: `111110 ... | en[3:0] | target[9:4] | compr[10] | done[11] | vm[12]`, then a second dword
+ * holding the four source registers as four bytes.
+ *
+ * `done` says this is the shader's last export and `vm` that the exec mask is valid - both are
+ * what every pixel shader in this repository sets, and a shader that exports without `done`
+ * does not retire. Verified from `exp mrt0 v4, v5, v6, v7 done vm` = 0xf800180f, 0x07060504. */
+void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base) {
+    const uint32_t en = 0xfu;      /* all four channels */
+    const uint32_t target = 0u;    /* MRT0 */
+    put(c, (0x3eu << 26) | en | (target << 4) | (1u << 11) | (1u << 12));
+    put(c, ((base + 0u) & 0xffu) | (((base + 1u) & 0xffu) << 8) |
+              (((base + 2u) & 0xffu) << 16) | (((base + 3u) & 0xffu) << 24));
+}
+
+/* -------------------------------------------------------------------------
+ * Scalar memory: how a uniform reaches a compiled shader
+ * ------------------------------------------------------------------------- */
+
+/* SMEM: `111101 op[25:18] . glc[16] . sdata[12:6] sbase[5:0]`, then a second dword
+ * `soffset[31:25] . offset[20:0]`.
+ *
+ * Three things here are not what they look like:
+ *
+ *   - **`sbase` is a *pair* index**, so the address in `s[0:1]` is `sbase` 0 and the one in
+ *     `s[2:3]` is 1. An SGPR number written here names the pair at twice it.
+ *   - **`soffset` is 0x7d - SGPR_NULL - and not zero.** Zero would name `s0` as a second,
+ *     register-held offset, which is the address's own low half: the load would come from an
+ *     address plus itself.
+ *   - **The width is the opcode**, and the five are consecutive - so an off-by-one loads twice
+ *     or half as many SGPRs as the shader then reads, which faults nothing and reads whatever
+ *     those registers held.
+ *
+ * Verified from `tools/shader/gl2-fragment.s` across three destinations, three offsets and all
+ * five widths, so the fields are pinned rather than inferred from one example. */
+void glsl_emit_s_load(glsl_code_t *c, uint32_t op, uint32_t sdata, uint32_t sbase_pair,
+                      uint32_t offset) {
+    put(c, (0x3du << 26) | ((op & 0xffu) << 18) | ((sdata & 0x7fu) << 6) | (sbase_pair & 0x3fu));
+    put(c, (0x7du << 25) | (offset & 0x1fffffu));
+}
+
+/* `s_waitcnt lgkmcnt(0)` - the wait a scalar load needs before anything reads what it loaded.
+ *
+ * **The counters not being waited on are held at their maximum**, which is what makes the
+ * immediate 0xc07f rather than 0: vmcnt is 63 across its two fields (bits 15:14 and 3:0) and
+ * expcnt is 7 (bits 6:4). Writing zero there would wait for every outstanding memory and export
+ * operation as well - correct, slower, and not what the shader asked for. */
+void glsl_emit_s_waitcnt_lgkm(glsl_code_t *c) {
+    put(c, 0xbf8cc07fu);
+}
+
+/* -------------------------------------------------------------------------
+ * Control flow, which on this machine is the exec mask
+ * ------------------------------------------------------------------------- */
+
+/* SOP1: `101111101 sdst[22:16] op[15:8] ssrc0[7:0]`. Verified from
+ * `s_mov_b32 exec_lo, s4` = 0xbefe0304 and `s_and_saveexec_b32 s4, vcc_lo` = 0xbe843c6a. */
+void glsl_emit_sop1(glsl_code_t *c, uint32_t op, uint32_t sdst, uint32_t ssrc0) {
+    put(c, (0x17du << 23) | ((sdst & 0x7fu) << 16) | ((op & 0xffu) << 8) | (ssrc0 & 0xffu));
+}
+
+/* SOP2: `10 op[29:23] sdst[22:16] ssrc1[15:8] ssrc0[7:0]`. Verified from
+ * `s_andn2_b32 exec_lo, s4, exec_lo` = 0x8a7e7e04 - and the cross-check that the fields are
+ * right rather than merely consistent is `s_and_b32 exec_lo, exec_lo, vcc_lo` = 0x877e6a7e,
+ * which is the word already in the tree behind glAlphaFunc and the polygon stipple.
+ *
+ * **`ssrc0` is the one that is not negated.** `s_andn2_b32 d, a, b` is `a & ~b`, so the saved
+ * mask goes in `ssrc0` and the mask to remove in `ssrc1`; the other way round computes
+ * `~saved & mask`, which is a set of lanes that were not running in the first place. */
+void glsl_emit_sop2(glsl_code_t *c, uint32_t op, uint32_t sdst, uint32_t ssrc0, uint32_t ssrc1) {
+    put(c, (0x2u << 30) | ((op & 0x7fu) << 23) | ((sdst & 0x7fu) << 16) |
+              ((ssrc1 & 0xffu) << 8) | (ssrc0 & 0xffu));
+}
+
+/* `s_and_saveexec_b32 sN, vcc_lo` - the whole of an `if`'s entry in one instruction: `sN` takes
+ * the exec mask as it was, and exec becomes the lanes that were running **and** satisfy the
+ * comparison just made. */
+void glsl_emit_exec_save_and_vcc(glsl_code_t *c, uint32_t saved) {
+    glsl_emit_sop1(c, GLSL_SOP1_AND_SAVEEXEC_B32, saved, GLSL_SREG_VCC_LO);
+}
+
+/* The `else`: `exec = saved & ~exec`, the lanes that were running and did *not* take the then
+ * arm. Reading the current exec, so it has to come after the then arm and before the else one. */
+void glsl_emit_exec_else(glsl_code_t *c, uint32_t saved) {
+    glsl_emit_sop2(c, GLSL_SOP2_ANDN2_B32, GLSL_SREG_EXEC_LO, saved, GLSL_SREG_EXEC_LO);
+}
+
+void glsl_emit_exec_restore(glsl_code_t *c, uint32_t saved) {
+    glsl_emit_sop1(c, GLSL_SOP1_MOV_B32, GLSL_SREG_EXEC_LO, saved);
+}
+
+/* `saved &= ~exec` - **what makes a discard permanent.** A discarded lane taken only out of
+ * `exec` comes back the moment the enclosing `if` restores; taking it out of the saved mask as
+ * well is what stops that, and it has to happen at every enclosing level. */
+void glsl_emit_exec_drop_live(glsl_code_t *c, uint32_t saved) {
+    glsl_emit_sop2(c, GLSL_SOP2_ANDN2_B32, saved, saved, GLSL_SREG_EXEC_LO);
+}
+
+/* `s_mov_b32 exec_lo, 0` - no lane writes anything after this. The export still runs and still
+ * carries `done`, which is what retires the wave; a shader that discarded every lane and then
+ * skipped its export would not. */
+void glsl_emit_exec_clear(glsl_code_t *c) {
+    glsl_emit_sop1(c, GLSL_SOP1_MOV_B32, GLSL_SREG_EXEC_LO, GLSL_SRC_INLINE_ZERO);
+}
+
+void glsl_emit_nop(glsl_code_t *c) {
+    /* 0xbf800000, which is what every unused patch slot in the payload already holds. */
+    put(c, 0xbf800000u);
 }
 
 void glsl_emit_endpgm(glsl_code_t *c) {

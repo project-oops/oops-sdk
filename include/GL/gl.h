@@ -1854,6 +1854,284 @@ void glDrawBuffer(GLenum buf);
 void glReadBuffer(GLenum src);
 GLboolean glIsTexture(GLuint texture);
 
+/* -------------------------------------------------------------------------
+ * OpenGL 2.0: the programmable pipeline
+ *
+ * GL 2.0 replaces the fixed-function transform-and-light stage and the texture combiner with two
+ * programs written in GLSL. Everything from here to the end of this section is that - the objects
+ * a program is built from, the uniforms and generic attributes it reads - plus the three parts of
+ * GL 2.0 that are not about shaders at all: separate stencil state for the two faces, a blend
+ * equation per channel group, and the point sprite.
+ *
+ * Enumerant values are Mesa's `include/GL/glext.h`, `GL_VERSION_2_0`, rather than written from
+ * memory. A wrong enumerant here is not a compile error anywhere: it is a call that silently
+ * means something else.
+ *
+ * # Shader objects and program objects share one name space
+ *
+ * `glCreateShader` and `glCreateProgram` hand out names from the same counter, which the
+ * specification requires (GL 2.0, 2.15.1). So a shader name can never equal a program name, and
+ * `glGetShaderiv` on a program name is GL_INVALID_OPERATION rather than a read of the wrong
+ * object. Two independent counters would serve almost every program correctly and then fail the
+ * one that deletes a shader and creates a program expecting a distinct name.
+ *
+ * # Deletion is deferred, not immediate
+ *
+ * `glDeleteShader` on a shader still attached to a program, and `glDeleteProgram` on the program
+ * in use, both only **flag** the object: it keeps working and disappears when the last reference
+ * goes. `glIsShader` answers false from the moment it is flagged, while `glGetShaderiv` with
+ * GL_DELETE_STATUS still answers on it - which is the pair of behaviours that makes the deferral
+ * observable, and the reason both are implemented rather than one.
+ *
+ * # GLSL 1.10 is the language
+ *
+ * That is what GL 2.0 defines, and it is the whole of what the front end accepts. `#version 120`
+ * and later are refused by name rather than compiled as 1.10, because a 1.20 shader whose
+ * `varying` array or implicit int-to-float conversion quietly did something else is a wrong
+ * picture with no diagnostic attached to it.
+ * ------------------------------------------------------------------------- */
+
+/* The character type the shader-object calls take. `char`, as the specification says - not
+ * `GLbyte`, which is signed char and a different type to a C compiler even where it is the same
+ * width. Declaring it wrongly conflicts the moment this header meets a real `GL/glext.h`. */
+typedef char GLchar;
+
+#define GL_FRAGMENT_SHADER                      0x8B30
+#define GL_VERTEX_SHADER                        0x8B31
+#define GL_SHADER_TYPE                          0x8B4F
+#define GL_DELETE_STATUS                        0x8B80
+#define GL_COMPILE_STATUS                       0x8B81
+#define GL_LINK_STATUS                          0x8B82
+#define GL_VALIDATE_STATUS                      0x8B83
+#define GL_INFO_LOG_LENGTH                      0x8B84
+#define GL_ATTACHED_SHADERS                     0x8B85
+#define GL_ACTIVE_UNIFORMS                      0x8B86
+#define GL_ACTIVE_UNIFORM_MAX_LENGTH            0x8B87
+#define GL_SHADER_SOURCE_LENGTH                 0x8B88
+#define GL_ACTIVE_ATTRIBUTES                    0x8B89
+#define GL_ACTIVE_ATTRIBUTE_MAX_LENGTH          0x8B8A
+#define GL_CURRENT_PROGRAM                      0x8B8D
+
+/* **The shading language's own version string**, which `glGetString` answers separately from
+ * GL_VERSION. A program that reads GL_VERSION and finds 2.0 still asks this before deciding
+ * which dialect to hand over. */
+#define GL_SHADING_LANGUAGE_VERSION             0x8B8C
+
+/* The types `glGetActiveUniform` and `glGetActiveAttrib` report. GL_BOOL is a type enumerant
+ * here and not a boolean value; the two never meet, since nothing takes both. */
+#define GL_FLOAT_VEC2                           0x8B50
+#define GL_FLOAT_VEC3                           0x8B51
+#define GL_FLOAT_VEC4                           0x8B52
+#define GL_INT_VEC2                             0x8B53
+#define GL_INT_VEC3                             0x8B54
+#define GL_INT_VEC4                             0x8B55
+#define GL_BOOL                                 0x8B56
+#define GL_BOOL_VEC2                            0x8B57
+#define GL_BOOL_VEC3                            0x8B58
+#define GL_BOOL_VEC4                            0x8B59
+#define GL_FLOAT_MAT2                           0x8B5A
+#define GL_FLOAT_MAT3                           0x8B5B
+#define GL_FLOAT_MAT4                           0x8B5C
+#define GL_SAMPLER_1D                           0x8B5D
+#define GL_SAMPLER_2D                           0x8B5E
+#define GL_SAMPLER_3D                           0x8B5F
+#define GL_SAMPLER_CUBE                         0x8B60
+#define GL_SAMPLER_1D_SHADOW                    0x8B61
+#define GL_SAMPLER_2D_SHADOW                    0x8B62
+
+/* The programmable pipeline's limits, every one of them a glGet. Their values are this
+ * implementation's and are stated where they are answered, in gl_state.c. */
+#define GL_MAX_VERTEX_ATTRIBS                   0x8869
+#define GL_MAX_VERTEX_UNIFORM_COMPONENTS        0x8B4A
+#define GL_MAX_FRAGMENT_UNIFORM_COMPONENTS      0x8B49
+#define GL_MAX_VARYING_FLOATS                   0x8B4B
+#define GL_MAX_TEXTURE_IMAGE_UNITS              0x8872
+#define GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS       0x8B4C
+#define GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS     0x8B4D
+#define GL_MAX_TEXTURE_COORDS                   0x8871
+
+/* Shader objects: created, given source, compiled, and queried for whether that worked. */
+GLuint glCreateShader(GLenum type);
+void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
+                    const GLint *length);
+void glCompileShader(GLuint shader);
+void glDeleteShader(GLuint shader);
+GLboolean glIsShader(GLuint shader);
+void glGetShaderiv(GLuint shader, GLenum pname, GLint *params);
+void glGetShaderInfoLog(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
+void glGetShaderSource(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *source);
+
+/* Program objects: shaders attached, linked, and made current. */
+GLuint glCreateProgram(void);
+void glAttachShader(GLuint program, GLuint shader);
+void glDetachShader(GLuint program, GLuint shader);
+void glLinkProgram(GLuint program);
+void glUseProgram(GLuint program);
+void glValidateProgram(GLuint program);
+void glDeleteProgram(GLuint program);
+GLboolean glIsProgram(GLuint program);
+void glGetProgramiv(GLuint program, GLenum pname, GLint *params);
+void glGetProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
+void glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei *count, GLuint *shaders);
+
+/* Uniforms.
+ *
+ * **A location is a property of the linked program, not of the name**, so it is fetched after
+ * `glLinkProgram` and again after every relink. A location of -1 means the name is not an active
+ * uniform - including a uniform the linker removed because nothing read it - and `glUniform` on
+ * -1 is defined to do nothing rather than to fail. A program that treats -1 as an error would
+ * refuse to run against an implementation that optimised better than it expected.
+ *
+ * Every `glUniform` acts on the program in use, which is why none of them names one. */
+GLint glGetUniformLocation(GLuint program, const GLchar *name);
+void glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length,
+                        GLint *size, GLenum *type, GLchar *name);
+void glGetUniformfv(GLuint program, GLint location, GLfloat *params);
+void glGetUniformiv(GLuint program, GLint location, GLint *params);
+void glUniform1f(GLint location, GLfloat v0);
+void glUniform2f(GLint location, GLfloat v0, GLfloat v1);
+void glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
+void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+void glUniform1i(GLint location, GLint v0);
+void glUniform2i(GLint location, GLint v0, GLint v1);
+void glUniform3i(GLint location, GLint v0, GLint v1, GLint v2);
+void glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
+void glUniform1fv(GLint location, GLsizei count, const GLfloat *value);
+void glUniform2fv(GLint location, GLsizei count, const GLfloat *value);
+void glUniform3fv(GLint location, GLsizei count, const GLfloat *value);
+void glUniform4fv(GLint location, GLsizei count, const GLfloat *value);
+void glUniform1iv(GLint location, GLsizei count, const GLint *value);
+void glUniform2iv(GLint location, GLsizei count, const GLint *value);
+void glUniform3iv(GLint location, GLsizei count, const GLint *value);
+void glUniform4iv(GLint location, GLsizei count, const GLint *value);
+/* **`transpose` is GL_FALSE for a column-major matrix**, which is how GL has always stored one
+ * and how `glLoadMatrixf` takes it. A caller passing a row-major matrix and GL_FALSE gets the
+ * transpose of what it meant, which still draws - just wrongly, and a screenshot of a symmetric
+ * scene will not show it. */
+void glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+
+/* Generic vertex attributes.
+ *
+ * The programmable pipeline's replacement for glVertexPointer and its relatives: numbered slots
+ * rather than named ones, bound to a shader's `attribute` variables by the linker or by
+ * `glBindAttribLocation` before it.
+ *
+ * `glBindAttribLocation` takes effect at the **next** link, not immediately - so a program that
+ * binds after linking and then draws is using the locations the previous link chose. The
+ * specification says so (GL 2.0, 2.15.3) and it is the mistake this API most invites. */
+#define GL_VERTEX_ATTRIB_ARRAY_ENABLED          0x8622
+#define GL_VERTEX_ATTRIB_ARRAY_SIZE             0x8623
+#define GL_VERTEX_ATTRIB_ARRAY_STRIDE           0x8624
+#define GL_VERTEX_ATTRIB_ARRAY_TYPE             0x8625
+#define GL_CURRENT_VERTEX_ATTRIB                0x8626
+#define GL_VERTEX_ATTRIB_ARRAY_POINTER          0x8645
+#define GL_VERTEX_ATTRIB_ARRAY_NORMALIZED       0x886A
+void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized,
+                           GLsizei stride, const GLvoid *pointer);
+void glEnableVertexAttribArray(GLuint index);
+void glDisableVertexAttribArray(GLuint index);
+void glBindAttribLocation(GLuint program, GLuint index, const GLchar *name);
+GLint glGetAttribLocation(GLuint program, const GLchar *name);
+void glGetActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length,
+                       GLint *size, GLenum *type, GLchar *name);
+void glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat *params);
+void glGetVertexAttribiv(GLuint index, GLenum pname, GLint *params);
+void glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble *params);
+void glGetVertexAttribPointerv(GLuint index, GLenum pname, GLvoid **pointer);
+
+/* The current value of an attribute whose array is disabled - the generic pipeline's glColor.
+ * Every form reaches `glVertexAttrib4f`; the `N` forms normalise an integer to [0, 1] or
+ * [-1, 1] first, and the plain integer forms convert without scaling, which is the whole
+ * difference between `glVertexAttrib4Nubv` and `glVertexAttrib4ubv`. */
+void glVertexAttrib1f(GLuint index, GLfloat x);
+void glVertexAttrib2f(GLuint index, GLfloat x, GLfloat y);
+void glVertexAttrib3f(GLuint index, GLfloat x, GLfloat y, GLfloat z);
+void glVertexAttrib4f(GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+void glVertexAttrib1fv(GLuint index, const GLfloat *v);
+void glVertexAttrib2fv(GLuint index, const GLfloat *v);
+void glVertexAttrib3fv(GLuint index, const GLfloat *v);
+void glVertexAttrib4fv(GLuint index, const GLfloat *v);
+void glVertexAttrib1d(GLuint index, GLdouble x);
+void glVertexAttrib2d(GLuint index, GLdouble x, GLdouble y);
+void glVertexAttrib3d(GLuint index, GLdouble x, GLdouble y, GLdouble z);
+void glVertexAttrib4d(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+void glVertexAttrib1dv(GLuint index, const GLdouble *v);
+void glVertexAttrib2dv(GLuint index, const GLdouble *v);
+void glVertexAttrib3dv(GLuint index, const GLdouble *v);
+void glVertexAttrib4dv(GLuint index, const GLdouble *v);
+void glVertexAttrib1s(GLuint index, GLshort x);
+void glVertexAttrib2s(GLuint index, GLshort x, GLshort y);
+void glVertexAttrib3s(GLuint index, GLshort x, GLshort y, GLshort z);
+void glVertexAttrib4s(GLuint index, GLshort x, GLshort y, GLshort z, GLshort w);
+void glVertexAttrib1sv(GLuint index, const GLshort *v);
+void glVertexAttrib2sv(GLuint index, const GLshort *v);
+void glVertexAttrib3sv(GLuint index, const GLshort *v);
+void glVertexAttrib4sv(GLuint index, const GLshort *v);
+void glVertexAttrib4bv(GLuint index, const GLbyte *v);
+void glVertexAttrib4iv(GLuint index, const GLint *v);
+void glVertexAttrib4ubv(GLuint index, const GLubyte *v);
+void glVertexAttrib4uiv(GLuint index, const GLuint *v);
+void glVertexAttrib4usv(GLuint index, const GLushort *v);
+void glVertexAttrib4Nub(GLuint index, GLubyte x, GLubyte y, GLubyte z, GLubyte w);
+void glVertexAttrib4Nbv(GLuint index, const GLbyte *v);
+void glVertexAttrib4Nsv(GLuint index, const GLshort *v);
+void glVertexAttrib4Niv(GLuint index, const GLint *v);
+void glVertexAttrib4Nubv(GLuint index, const GLubyte *v);
+void glVertexAttrib4Nusv(GLuint index, const GLushort *v);
+void glVertexAttrib4Nuiv(GLuint index, const GLuint *v);
+
+/* -------------------------------------------------------------------------
+ * The rest of GL 2.0, which is not about shaders
+ * ------------------------------------------------------------------------- */
+
+/* **Separate stencil state for the two faces.** GL 1.x has one stencil function and one set of
+ * operations whichever way a polygon faces; 2.0 splits them, which is what a single-pass stencil
+ * shadow volume needs. `glStencilFunc` and `glStencilOp` keep working and set both faces, which
+ * is how the specification defines them from 2.0 onwards. */
+#define GL_STENCIL_BACK_FUNC                    0x8800
+#define GL_STENCIL_BACK_FAIL                    0x8801
+#define GL_STENCIL_BACK_PASS_DEPTH_FAIL         0x8802
+#define GL_STENCIL_BACK_PASS_DEPTH_PASS         0x8803
+#define GL_STENCIL_BACK_REF                     0x8CA3
+#define GL_STENCIL_BACK_VALUE_MASK              0x8CA4
+#define GL_STENCIL_BACK_WRITEMASK               0x8CA5
+void glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask);
+void glStencilOpSeparate(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass);
+void glStencilMaskSeparate(GLenum face, GLuint mask);
+
+/* A blend equation per channel group - GL_FUNC_ADD for the colour and GL_FUNC_SUBTRACT for the
+ * alpha, say. `glBlendEquation` sets both. */
+#define GL_BLEND_EQUATION_RGB                   0x8009 /* the same value as GL_BLEND_EQUATION */
+#define GL_BLEND_EQUATION_ALPHA                 0x883D
+void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha);
+
+/* `glDrawBuffers`: several colour buffers named at once, each receiving the **same** fragment
+ * colour, which is what the call means for a window-system framebuffer. True multiple render
+ * targets - a different colour per buffer - belong to framebuffer objects and their
+ * GL_COLOR_ATTACHMENT names, which are GL 3.0 and are not here. */
+#define GL_MAX_DRAW_BUFFERS                     0x8824
+#define GL_DRAW_BUFFER0                         0x8825
+#define GL_DRAW_BUFFER1                         0x8826
+void glDrawBuffers(GLsizei n, const GLenum *bufs);
+
+/* The point sprite: a point rasterised with texture coordinates generated across it rather than
+ * interpolated from its one vertex, and `gl_PointSize` written by the vertex shader.
+ * GL_POINT_SPRITE_COORD_ORIGIN says which corner s, t start from - GL_UPPER_LEFT by default,
+ * which is the opposite of everything else in GL and is the specification's own choice. */
+#define GL_POINT_SPRITE                         0x8861
+#define GL_COORD_REPLACE                        0x8862
+#define GL_POINT_SPRITE_COORD_ORIGIN            0x8CA0
+#define GL_LOWER_LEFT                           0x8CA1
+#define GL_UPPER_LEFT                           0x8CA2
+#define GL_VERTEX_PROGRAM_POINT_SIZE            0x8642
+#define GL_VERTEX_PROGRAM_TWO_SIDE              0x8643
+
+/* GL 2.0's hint for the precision of `dFdx`, `dFdy` and `fwidth`. Advisory, like every other
+ * hint here: recorded, reported, and changing no pixel. */
+#define GL_FRAGMENT_SHADER_DERIVATIVE_HINT      0x8B8B
+
 /* Pipeline Synchronization & Presentation */
 void glFlush(void);
 void glFinish(void);
@@ -1912,27 +2190,41 @@ void *glGetCurrentContext(void);
 void  glSwapBuffers(void);
 
 /*
- * **What version this context reports** (2026-09-20).
+ * **What version this context is** (2026-09-20; it began gating the API on 2026-09-21).
  *
- * `glGetString(GL_VERSION)` answers "1.1 oops-gl fixed-function subset" by default, because 1.1
- * is the honest class of what is implemented everywhere. But a port is often written against a
- * later 1.x and checks the badge before using something this library does have - the texture
- * objects and `glDrawArrays` of 1.1, the 3D textures and `glDrawRangeElements` of 1.2, the
- * multitexture and compressed formats of 1.3, the secondary colour and fog coordinate of 1.4,
- * the buffer objects and occlusion queries of 1.5 - and refuses to run against a badge that
- * reads lower than the feature it is about to call.
+ * A context has **the entry points its version defines and no others**. `glContextSetVersion(1,
+ * 1)` gives a GL 1.1 context, and `glBindBuffer` on it is GL_INVALID_OPERATION and does
+ * nothing - because buffer objects are GL 1.5's and a GL 1.1 context does not have them.
+ * `glContextSetVersion(2, 0)` gives the programmable pipeline.
  *
- * So the version is the caller's to state: `glContextSetVersion(1, 4)` makes the string begin
- * "1.4", and `glGetString` reports it from then on. **This changes no behaviour at all** - it
- * changes what the library says it is. The suffix stays, so a caller reading past the number
- * still learns this is a subset, and every call that was unimplemented before is unimplemented
- * after.
+ * On a desktop driver that discipline comes from the linker: an entry point a context does not
+ * have is not exported, and a program calling it fails to load. Everything here is compiled
+ * into one archive, so the equivalent is a runtime check - and the answer is the specification's
+ * for a call that is not in the context: GL_INVALID_OPERATION, and the call does nothing. A
+ * function returning a value returns its failure value: 0 for a name, -1 for a location,
+ * GL_FALSE for a predicate. An enumerant a later version added is GL_INVALID_ENUM, which is the
+ * different thing it is: "I have never heard of this" rather than "not from here".
  *
- * `major` must be 1 and `minor` at most 5; anything else is GL_INVALID_VALUE and the version is
- * left as it was. A line goes to the log each time, naming what was asked for, so a frame that
- * misbehaves can be read against the badge the program set.
+ * **Why this is worth the friction.** It used to change the reported string and nothing else,
+ * so a GL 1.1 program could call `glCreateShader` and a GL 2.0 defect could reach a program
+ * that had never asked for the programmable pipeline. It also means a port developed here meets
+ * the same refusals it will meet on a driver that really is the version it claims, instead of
+ * finding out later.
  *
- * The default is the build's: `OOPS_GL_DEFAULT_VERSION_MINOR`, 1 unless the build says otherwise.
+ * **The default is 1.5** - the highest version that is complete here, so a program that states
+ * nothing gets a complete fixed-function context and no GL 1.x port needs to say anything.
+ * **2.0 is never the default**: its pipeline is a different thing rather than more of the same
+ * one, and the opt-in is what keeps a GL 1.x program out of it.
+ *
+ * `major`.`minor` must be one this library implements - 1.0 through 1.5, 2.0 or 2.1. Anything
+ * else is GL_INVALID_VALUE and the version is left as it was, rather than half-set. A line goes
+ * to the log each time, naming what was asked for.
+ *
+ * **The extension spellings are not gated.** `glActiveTextureARB` is `GL_ARB_multitexture`'s
+ * entry point, and an extension is a separate promise from the core version - which is the whole
+ * reason those names exist. `glGetString(GL_EXTENSIONS)` is what promises them.
+ *
+ * The default is the build's: `OOPS_GL_DEFAULT_VERSION_MAJOR` and `_MINOR`.
  */
 GLboolean glContextSetVersion(GLuint major, GLuint minor);
 void glContextGetVersion(GLuint *major, GLuint *minor);

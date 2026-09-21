@@ -27,12 +27,32 @@
  * rows of blocks moves image rows without splitting any of them, so "one run a row" cannot see
  * it. That is why the rule is there.
  *
- * # What is *not* settled
+ * # Across the whole frame, settled 2026-09-21
  *
- * Both tiled arms matched, so these rows cannot separate `0x08c6c000` from `0x0dc6c000`: the
- * bits arm 2 adds (RESOURCE_TYPE, CMASK_PIPE_ALIGNED) change no pixel in this picture. Arm 1's
- * value is taken because it is the smaller change from the linear value oops-gl already draws
- * with, not because the other was refused.
+ * The two rows above leave a gap, and it is worth saying what it was, because the shape of it is
+ * the shape of a test that cannot fail:
+ *
+ *   - `-2d7f` is pixel-exact over **one** 64 KiB block - and inside one block an `_X` mode's
+ *     pipe rotation is constant, so it could not have appeared there at all.
+ *   - `-4b19` is **shape** agreement over four, which settles the order blocks run in and says
+ *     nothing about the layout inside one.
+ *
+ * So the across-block half rested on evidence that could not have shown the thing it was being
+ * read as showing. obSCEne's `-8b52` then drew a whole 1920 x 1080 target and matched all 135
+ * blocks - but with **Mesa's** `0x0dc6c000`, not this file's value, and the bits between them
+ * (RESOURCE_TYPE, CMASK_PIPE_ALIGNED) are exactly the ones a single block cannot separate.
+ *
+ * `REQ-20260921T1640Z-1d5e` asked for the one arm that closes it, and **run 18 answered**:
+ * `166-agc/primitive-draw`, `arm1-rx-1080p`, `cb0-attrib3 0x8c6c000`, 1920 x 1080 against a
+ * linear control - `detile-matches 0x1fa400`, which is 2,073,600 and so every pixel of the
+ * frame, with `detile-mismatches`, `block0-mismatches` and `multiblock-mismatches` all zero
+ * (`obscene/reports/hardware/20260921-run18-eboot.obs.log:5417-5442`). The same sweep ran
+ * Mesa's value beside it and got the same numbers.
+ *
+ * **So the constant below is measured at display size, across every block, and neither of the
+ * bits that differ between the two candidates moves a pixel.** Arm 1 was taken originally
+ * because it was the smaller change from the linear value oops-gl already drew with; it is kept
+ * now because it was measured.
  */
 #ifndef OOPS_GL_RX_H
 #define OOPS_GL_RX_H
@@ -43,7 +63,10 @@
 
 /* oops-gl's working linear CB_COLOR0_ATTRIB3, 0x08c00000, with COLOR_SW_MODE (bits 18:14, Mesa
  * src/amd/registers/gfx103.json) set to ADDR_SW_64KB_R_X, 27
- * (src/amd/addrlib/inc/addrtypes.h:254) - `-7e21`'s arm1, which tools/rx-check names. */
+ * (src/amd/addrlib/inc/addrtypes.h:254) - `-7e21`'s arm1, which tools/rx-check names.
+ *
+ * **Measured over a whole 1920 x 1080 frame** - `REQ-20260921T1640Z-1d5e`, run 18, all 135
+ * blocks and zero mismatches. See "Across the whole frame" above. */
 #define OOPS_GL_RX_ATTRIB3 0x08c6c000u
 
 #endif

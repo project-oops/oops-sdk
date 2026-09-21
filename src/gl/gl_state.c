@@ -636,18 +636,46 @@ void glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlp
     ctx->blend_dst_alpha = dfactorAlpha;
 }
 
+/* The five simple equations (Mesa main/blend.c:435-447, legal_simple_blend_equation). Anything
+ * else used to be stored and then blended as GL_FUNC_ADD by gl_blend_comb's default. */
+static GLboolean gl_blend_equation_ok(GLenum mode) {
+    return (GLboolean)(mode == GL_FUNC_ADD || mode == GL_FUNC_SUBTRACT ||
+                       mode == GL_FUNC_REVERSE_SUBTRACT || mode == GL_MIN || mode == GL_MAX);
+}
+
+/* The work, shared by the GL 1.4 call and the GL 2.0 one - `glBlendEquation` sets both groups
+ * and must not reach through the 2.0 entry point, which is gated on 2.0 having been claimed. */
+static void blend_equation_set(gl_context_t *ctx, GLenum modeRGB, GLenum modeAlpha) {
+    if (!gl_blend_equation_ok(modeRGB) || !gl_blend_equation_ok(modeAlpha)) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    ctx->blend_equation = modeRGB;
+    ctx->blend_equation_alpha = modeAlpha;
+}
+
+/* **Not gated on 1.4**, although that is the version that took it into the core:
+ * `GL_EXT_blend_minmax` and `GL_EXT_blend_subtract` are both advertised, and an extension is
+ * available whatever the core version. See the note on `gl_require_version`. */
 void glBlendEquation(GLenum mode) {
     if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_BLEND_EQUATION, gl_la_e(mode))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
-    /* The five simple equations (Mesa main/blend.c:435-447, legal_simple_blend_equation). Anything else
-     * used to be stored and then blended as GL_FUNC_ADD by gl_blend_comb's default. */
-    if (mode != GL_FUNC_ADD && mode != GL_FUNC_SUBTRACT && mode != GL_FUNC_REVERSE_SUBTRACT &&
-        mode != GL_MIN && mode != GL_MAX) {
-        gl_record_error(ctx, GL_INVALID_ENUM);
-        return;
-    }
-    ctx->blend_equation = mode;
+    blend_equation_set(ctx, mode, mode);
+}
+
+/* GL 2.0: an equation per channel group - GL_FUNC_ADD for the colour and GL_FUNC_SUBTRACT for
+ * the alpha, say. `glBlendEquation` above is the both-the-same case of this, exactly as the
+ * specification defines it from 2.0 onwards.
+ *
+ * **GL_MIN and GL_MAX ignore the blend factors**, so an equation that is one of them on one
+ * group and not the other is two different treatments in one blend. The software path below and
+ * the console's `CB_BLEND0_CONTROL` both already carry `ALPHA_COMB_FCN` separately from
+ * `COLOR_COMB_FCN`, which is why this costs nothing beyond the second field. */
+void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !gl_require_version(ctx, 2u, 0u)) return;
+    blend_equation_set(ctx, modeRGB, modeAlpha);
 }
 
 void glBlendColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
@@ -896,18 +924,21 @@ void glLineStipple(GLint factor, GLushort pattern) {
     ctx->line_stipple_pattern = pattern;
 }
 
+/* The GL 1.0 calls. Each sets **both faces** - which is how the specification defines them from
+ * 2.0 onwards - by going to the shared body below, not through the 2.0 entry point: that one
+ * is gated on the context having claimed 2.0, and these have been here since 1.0. */
+static void stencil_func_set(gl_context_t *ctx, GLenum face, GLenum func, GLint ref,
+                             GLuint mask);
+static void stencil_op_set(gl_context_t *ctx, GLenum face, GLenum sfail, GLenum dpfail,
+                           GLenum dppass);
+static void stencil_mask_set(gl_context_t *ctx, GLenum face, GLuint mask);
+
 void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
     if (gl_list_recording() &&
         GL_LIST_REC(GL_LIST_OP_STENCIL_FUNC, gl_la_e(func), gl_la_i(ref), gl_la_u(mask))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
-    if (!gl_stencil_func_ok(func)) { gl_record_error(ctx, GL_INVALID_ENUM); return; }
-    ctx->stencil_func = func;
-    /* The reference is clamped to the buffer's range, which the specification requires and which
-     * also keeps the comparison honest: an unclamped 300 would never equal anything an 8-bit
-     * buffer can hold, so GL_EQUAL would silently never pass. */
-    ctx->stencil_ref = (ref < 0) ? 0 : (ref > 255 ? 255 : ref);
-    ctx->stencil_value_mask = mask;
+    stencil_func_set(ctx, GL_FRONT_AND_BACK, func, ref, mask);
 }
 
 void glStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass) {
@@ -917,20 +948,108 @@ void glStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass) {
     }
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
-    if (!gl_stencil_op_ok(sfail) || !gl_stencil_op_ok(dpfail) || !gl_stencil_op_ok(dppass)) {
-        gl_record_error(ctx, GL_INVALID_ENUM);
-        return;
-    }
-    ctx->stencil_fail = sfail;
-    ctx->stencil_zfail = dpfail;
-    ctx->stencil_zpass = dppass;
+    stencil_op_set(ctx, GL_FRONT_AND_BACK, sfail, dpfail, dppass);
 }
 
 void glStencilMask(GLuint mask) {
     if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_STENCIL_MASK, gl_la_u(mask))) return;
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
-    ctx->stencil_writemask = mask;
+    stencil_mask_set(ctx, GL_FRONT_AND_BACK, mask);
+}
+
+/* -------------------------------------------------------------------------
+ * GL 2.0's separate stencil state
+ *
+ * **The three GL 1.x calls above are the `GL_FRONT_AND_BACK` case of these**, which is exactly
+ * how the specification defines them from 2.0 onwards - so there is one implementation rather
+ * than two that have to agree, and a GL 1.x program keeps working because setting both faces to
+ * the same thing is what it always did.
+ *
+ * `face` is GL_FRONT, GL_BACK or GL_FRONT_AND_BACK; anything else is GL_INVALID_ENUM.
+ * ------------------------------------------------------------------------- */
+
+static GLboolean gl_stencil_face_ok(GLenum face) {
+    return (GLboolean)(face == GL_FRONT || face == GL_BACK || face == GL_FRONT_AND_BACK);
+}
+
+/* **The work, shared by the GL 1.x call and the GL 2.0 one.**
+ *
+ * `glStencilFunc` is the `GL_FRONT_AND_BACK` case of `glStencilFuncSeparate` and is implemented
+ * as one - but the 2.0 entry point is gated on the context having claimed 2.0, and the 1.0 one
+ * must not be. So the body lives here and each entry point brings its own gate, rather than the
+ * older call reaching through the newer one and being refused by it. */
+static void stencil_func_set(gl_context_t *ctx, GLenum face, GLenum func, GLint ref,
+                             GLuint mask) {
+    if (!gl_stencil_face_ok(face) || !gl_stencil_func_ok(func)) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    /* The reference is clamped to the buffer's range, which the specification requires and which
+     * also keeps the comparison honest: an unclamped 300 would never equal anything an 8-bit
+     * buffer can hold, so GL_EQUAL would silently never pass. */
+    const GLint clamped = (ref < 0) ? 0 : (ref > 255 ? 255 : ref);
+    if (face != GL_BACK) {
+        ctx->stencil_func = func;
+        ctx->stencil_ref = clamped;
+        ctx->stencil_value_mask = mask;
+    }
+    if (face != GL_FRONT) {
+        ctx->stencil_back_func = func;
+        ctx->stencil_back_ref = clamped;
+        ctx->stencil_back_value_mask = mask;
+    }
+}
+
+static void stencil_op_set(gl_context_t *ctx, GLenum face, GLenum sfail, GLenum dpfail,
+                           GLenum dppass) {
+    if (!gl_stencil_face_ok(face)) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (!gl_stencil_op_ok(sfail) || !gl_stencil_op_ok(dpfail) || !gl_stencil_op_ok(dppass)) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (face != GL_BACK) {
+        ctx->stencil_fail = sfail;
+        ctx->stencil_zfail = dpfail;
+        ctx->stencil_zpass = dppass;
+    }
+    if (face != GL_FRONT) {
+        ctx->stencil_back_fail = sfail;
+        ctx->stencil_back_zfail = dpfail;
+        ctx->stencil_back_zpass = dppass;
+    }
+}
+
+static void stencil_mask_set(gl_context_t *ctx, GLenum face, GLuint mask) {
+    if (!gl_stencil_face_ok(face)) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (face != GL_BACK) ctx->stencil_writemask = mask;
+    if (face != GL_FRONT) ctx->stencil_back_writemask = mask;
+}
+
+/* The GL 2.0 entry points. Each is the shared body above plus the one thing that makes it 2.0's
+ * rather than 1.0's: a context that has not claimed 2.0 does not have it. */
+void glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !gl_require_version(ctx, 2u, 0u)) return;
+    stencil_func_set(ctx, face, func, ref, mask);
+}
+
+void glStencilOpSeparate(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !gl_require_version(ctx, 2u, 0u)) return;
+    stencil_op_set(ctx, face, sfail, dpfail, dppass);
+}
+
+void glStencilMaskSeparate(GLenum face, GLuint mask) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !gl_require_version(ctx, 2u, 0u)) return;
+    stencil_mask_set(ctx, face, mask);
 }
 
 void glClearStencil(GLint s) {
@@ -1460,6 +1579,62 @@ void glDrawBuffer(GLenum buf) {
     gl_draw_targets(ctx);
 }
 
+/*
+ * GL 2.0's `glDrawBuffers`: several colour buffers named at once.
+ *
+ * **On a window-system framebuffer this means the same fragment colour to each of them**, not a
+ * different one per buffer - true multiple render targets are framebuffer objects and their
+ * GL_COLOR_ATTACHMENT names, which are GL 3.0 and are not here. So this is `glDrawBuffer` of the
+ * union, which is what the two existing colour targets already do under GL_FRONT_AND_BACK.
+ *
+ * The specification's three errors, and each is a mistake worth naming rather than accepting:
+ * `n` outside [0, GL_MAX_DRAW_BUFFERS] is GL_INVALID_VALUE; GL_FRONT, GL_BACK,
+ * GL_FRONT_AND_BACK and GL_LEFT name more than one buffer each and may not appear in a list at
+ * all (2.0, 4.2.1), which is GL_INVALID_OPERATION; and a buffer named twice is the same error.
+ */
+void glDrawBuffers(GLsizei n, const GLenum *bufs) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !gl_require_version(ctx, 2u, 0u)) return;
+    GLint limit = 0;
+    glGetIntegerv(GL_MAX_DRAW_BUFFERS, &limit);
+    if (n < 0 || n > limit) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    if (n > 0 && !bufs) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+
+    unsigned union_bits = 0u;
+    for (GLsizei i = 0; i < n; i++) {
+        if (bufs[i] == GL_NONE) continue;
+        const unsigned bits = gl_color_buffer_bits(bufs[i]);
+        if (bits == 0u) {
+            gl_record_error(ctx, GL_INVALID_ENUM);
+            return;
+        }
+        if (bits & GL_OCB_ABSENT) {
+            gl_record_error(ctx, GL_INVALID_OPERATION);
+            return;
+        }
+        /* A name covering more than one buffer, or one already named. */
+        if ((bits & (bits - 1u)) != 0u || (union_bits & bits) != 0u) {
+            gl_record_error(ctx, GL_INVALID_OPERATION);
+            return;
+        }
+        union_bits |= bits;
+    }
+
+    /* Back through `glDrawBuffer`, so the union goes through the one place that checks a front
+     * buffer can be allocated and re-derives the console's target mask. */
+    GLenum single = GL_NONE;
+    if (union_bits == (GL_OCB_FRONT | GL_OCB_BACK)) single = GL_FRONT_AND_BACK;
+    else if (union_bits == GL_OCB_FRONT) single = GL_FRONT;
+    else if (union_bits == GL_OCB_BACK) single = GL_BACK;
+    glDrawBuffer(single);
+}
+
 void glReadBuffer(GLenum src) {
     if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_READ_BUFFER, gl_la_e(src))) return;
     gl_context_t *ctx = gl_get_ctx();
@@ -1536,8 +1711,14 @@ void gl_version_string(gl_context_t *ctx) {
     *p++ = (char)('0' + (ctx->version_major % 10u));
     *p++ = '.';
     *p++ = (char)('0' + (ctx->version_minor % 10u));
-    static const char tail[] = " oops-gl fixed-function subset";
-    for (size_t i = 0; i < sizeof(tail); i++) p[i] = tail[i];
+    /* **The suffix follows the number**, because "fixed-function" is the wrong word for a badge
+     * that says 2.0 - the whole of what 2.0 adds is the pipeline that is not fixed-function.
+     * Both still say `subset`, which is the part that must never come off. */
+    static const char tail_1x[] = " oops-gl fixed-function subset";
+    static const char tail_2x[] = " oops-gl programmable subset";
+    const char *tail = (ctx->version_major >= 2u) ? tail_2x : tail_1x;
+    const size_t n = (ctx->version_major >= 2u) ? sizeof(tail_2x) : sizeof(tail_1x);
+    for (size_t i = 0; i < n; i++) p[i] = tail[i];
 }
 
 /*
@@ -1558,9 +1739,25 @@ void gl_version_string(gl_context_t *ctx) {
 GLboolean glContextSetVersion(GLuint major, GLuint minor) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return GL_FALSE;
-    /* 1.x only. Nothing above it is implemented at all, and a badge reading 2.0 would be the
-     * old mistake in a new place. */
-    if (major != 1u || minor > 5u) {
+    /* **1.0 through 1.5, and 2.0 and 2.1** (2026-09-21). This refused anything but 1.x, and
+     * said "nothing above it is implemented at all" - which stopped being true the day the
+     * programmable pipeline ran: `glCreateShader` through `glUseProgram` exist, both stages
+     * run, and `gl2-probe` measures forty-odd checks against them.
+     *
+     * **2.1 is the GLSL 1.20 one**, and is claimable because the front end takes that dialect:
+     * implicit int-to-float conversion, `invariant` and `centroid`, `transpose` and
+     * `outerProduct`. It was refused for exactly as long as that was untrue.
+     *
+     * 3.x and above are refused because none of them is implemented, which is the reason this
+     * gate exists at all.
+     *
+     * A badge is still only a badge: what it changes is what `glGetString` answers, not what
+     * any call does. An app that claims 1.1 and then calls `glCreateShader` gets a shader,
+     * exactly as a desktop driver would - a context exposes what it exposes, and the number is
+     * the program stating what it targets. */
+    const GLboolean ok = (GLboolean)((major == 1u && minor <= 5u) ||
+                                     (major == 2u && minor <= 1u));
+    if (!ok) {
         gl_record_error(ctx, GL_INVALID_VALUE);
         return GL_FALSE;
     }
@@ -1589,6 +1786,16 @@ const GLubyte *glGetString(GLenum name) {
                 return (const GLubyte *)"1.1 oops-gl fixed-function subset";
             }
             return (const GLubyte *)ctx->version_string;
+        /* **The shading language has its own version and its own string**, and it answers the
+         * *highest* dialect the front end takes rather than the one the GL badge pairs with -
+         * which is what the specification asks for and is why the two numbers are allowed to
+         * differ. A shader may still say `#version 110`, and it is then held to 1.10's rules:
+         * the number here is a ceiling, not a mode. Anything above 1.20 is refused by number at
+         * compile rather than taken as one of them. */
+        case GL_SHADING_LANGUAGE_VERSION:
+            /* GL 2.0's enumerant, so a context that has not claimed 2.0 has never heard of it. */
+            if (!ctx || !gl_require_version_enum(ctx, 2u, 0u)) return (const GLubyte *)0;
+            return (const GLubyte *)"1.20 oops-gl";
         /* **Empty, and that is the honest answer.**
          *
          * This used to say `GL_EXT_vertex_array`. The arrays are here - but an extension string
@@ -1909,6 +2116,54 @@ void glGetIntegerv(GLenum pname, GLint *params) {
         case GL_MAX_CLIP_PLANES:
             params[0] = OOPS_GL_CLIP_PLANE_COUNT;
             break;
+
+        /* -----------------------------------------------------------------
+         * GL 2.0's limits
+         *
+         * Every one is this implementation's own number and every one meets the
+         * specification's minimum. **None of them is rounded up to look generous**: a program
+         * that asks GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS and is told 4 will take a path that then
+         * samples nothing, where being told 0 sends it down the one that works.
+         * ----------------------------------------------------------------- */
+        case GL_MAX_VERTEX_ATTRIBS:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = OOPS_GL_MAX_VERTEX_ATTRIBS;   /* 16, GL 2.0's minimum */
+            break;
+        case GL_MAX_VARYING_FLOATS:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = OOPS_GL_MAX_VARYING_FLOATS;   /* 32, the minimum: eight vec4 slots */
+            break;
+        /* The samplers a fragment shader may use, which is the texture units that exist. */
+        case GL_MAX_TEXTURE_IMAGE_UNITS:
+        case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
+        case GL_MAX_TEXTURE_COORDS:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = OOPS_GL_MAX_TEXTURE_UNITS;
+            break;
+        /* **Zero, which is legal and is true.** GL 2.0's minimum is 0 and a vertex shader here
+         * has no sampler - the vertex stage on this hardware is not wired to the texture
+         * pipe. */
+        case GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = 0;
+            break;
+        /* The uniform storage a stage may declare, in floats. A mat4 is sixteen of them. */
+        case GL_MAX_VERTEX_UNIFORM_COMPONENTS:
+        case GL_MAX_FRAGMENT_UNIFORM_COMPONENTS:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = OOPS_GL_MAX_PROGRAM_UNIFORMS * 4;
+            break;
+        /* One colour buffer per `glDrawBuffers` entry. Two exist - the front surface and the
+         * back one - and both receive the same fragment colour, which is what the call means
+         * for a window-system framebuffer. */
+        case GL_MAX_DRAW_BUFFERS:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = 2;
+            break;
+        case GL_CURRENT_PROGRAM:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = (GLint)ctx->program_current;
+            break;
         /* **Zero, and the list that follows it is empty.** The specification allows the set of
          * compressed formats to be empty and expects a program to ask; answering honestly is
          * what sends it down its uncompressed path instead of into a refusal it did not plan
@@ -1939,6 +2194,43 @@ void glGetIntegerv(GLenum pname, GLint *params) {
         case GL_STENCIL_FAIL:        params[0] = (GLint)ctx->stencil_fail; break;
         case GL_STENCIL_PASS_DEPTH_FAIL: params[0] = (GLint)ctx->stencil_zfail; break;
         case GL_STENCIL_PASS_DEPTH_PASS: params[0] = (GLint)ctx->stencil_zpass; break;
+        /* GL 2.0's back face. Answered even by a context nothing has split, where they read the
+         * same as the front ones - which is what makes them safe to query unconditionally. */
+        case GL_STENCIL_BACK_FUNC:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = (GLint)ctx->stencil_back_func;
+            break;
+        case GL_STENCIL_BACK_REF:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = ctx->stencil_back_ref;
+            break;
+        case GL_STENCIL_BACK_VALUE_MASK:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = (GLint)ctx->stencil_back_value_mask;
+            break;
+        case GL_STENCIL_BACK_WRITEMASK:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = (GLint)ctx->stencil_back_writemask;
+            break;
+        case GL_STENCIL_BACK_FAIL:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = (GLint)ctx->stencil_back_fail;
+            break;
+        case GL_STENCIL_BACK_PASS_DEPTH_FAIL:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = (GLint)ctx->stencil_back_zfail;
+            break;
+        case GL_STENCIL_BACK_PASS_DEPTH_PASS:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = (GLint)ctx->stencil_back_zpass;
+            break;
+        /* **GL_BLEND_EQUATION_RGB has the same value as GL_BLEND_EQUATION**, which is why there
+         * is no case for it: the 2.0 name is the 1.4 name, renamed rather than added, so it is
+         * answered by the 1.4 one and is gated with it. */
+        case GL_BLEND_EQUATION_ALPHA:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = (GLint)ctx->blend_equation_alpha;
+            break;
         case GL_STENCIL_CLEAR_VALUE: params[0] = ctx->clear_stencil; break;
         case GL_ACTIVE_TEXTURE:
             params[0] = (GLint)(GL_TEXTURE0 + ctx->active_texture);
@@ -2995,9 +3287,15 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
          * the slice count less one, which is what `-6c80` set: `0x1` for its two-slice volume
          * and `0x5` for the cube's six faces. The pitch reading below is the 2D one, and writing
          * it here would describe a volume one row wide. */
-        const uint32_t slices = (tex->target == GL_TEXTURE_CUBE_MAP)
-                                    ? 6u
-                                    : (uint32_t)(tex->depth > 0 ? tex->depth : 1);
+        /* A chain's depth is the **base level's**, as its width and height above are: the
+         * descriptor's level 0 is GL's base level, and the hardware halves all three from
+         * there. `tex->depth` is level 0's, which is the same number whenever the base level is
+         * 0 and the wrong one when it is not. */
+        uint32_t volume_slices = (uint32_t)(tex->depth > 0 ? tex->depth : 1);
+        if (chain && tex->target == GL_TEXTURE_3D && cb.depth > 0) {
+            volume_slices = (uint32_t)cb.depth;
+        }
+        const uint32_t slices = (tex->target == GL_TEXTURE_CUBE_MAP) ? 6u : volume_slices;
         tex->img_desc[4] = (slices - 1u) & 0x1fffu;
     } else if (pitch > w && !chain) {
         const uint32_t p1 = pitch - 1u;
@@ -3389,15 +3687,37 @@ void gl_tex_free_mips(gl_texture_object_t *tex) {
  * otherwise samples is level 0's; the descriptor's level 0 is then GL's base level, which is also
  * where GL measures the level of detail from. */
 static int gl_tex_chain_levels(const gl_texture_object_t *tex) {
-    /* A volume is sampled from level 0 only: its levels halve depth as well as width and height,
-     * and gl_tex_chain_layout lays out a 2D chain. The descriptor's LAST_LEVEL stays 0 and the
-     * sampler clamps there (gl.h, GL_TEXTURE_3D). */
-    if (tex->target == GL_TEXTURE_3D || !gl_texture_complete(tex)) return 0;
+    /* **A volume is sampled from level 0 only, and the reason is now measured rather than
+     * structural.** The layout was two-dimensional until 2026-09-21, which was reason enough;
+     * `gl_tex_chain_layout_3d` halves depth with width and height and the copy walks slices, so
+     * that reason is gone. The hardware still reads the base level: gl1-probe's `volume-mipmap`
+     * minifies a 4x4x4 red volume whose level 1 is green, and the console answered
+     * `saw 0xffff0000` - red - with the descriptor carrying `LAST_LEVEL` 1 and `MAX_MIP` 1, which
+     * `test_pm4_gl_volume_and_cube_sample_on_hardware` pins.
+     *
+     * So **where a 3D image's mip levels sit is not the 2D rule with a depth term**, and this
+     * library does not know what it is. `texture-3d` measures the slice stride *within* level 0
+     * and `mipmap-levels` measures the level placement of a *2D* chain; neither measures the
+     * placement of a level in a volume, which is what was extrapolated and what the part
+     * rejected. `REQ-20260921T1300Z-9b73` asks for it. Until it answers, a volume keeps the
+     * behaviour it has always had here and says so in the log, rather than pointing the
+     * descriptor at a chain the hardware reads the wrong end of. */
+    if (tex->target == GL_TEXTURE_3D) return 0;
+    if (!gl_texture_complete(tex)) return 0;
     const int b = tex->base_level;
     gl_tex_view_t bv;
     if (!gl_tex_level_view(tex, b, &bv)) return 0;
     int levels = gl_filter_uses_mipmaps(tex->min_filter) ? gl_tex_top_level(tex) - b + 1 : 1;
+    /* **A volume's depth is a third axis to round**, and it goes through the same test as the
+     * other two: the two halving rules agree only on a power of two, so a 2-deep volume chains
+     * and a 3-deep one samples its base level alone. This read `target == GL_TEXTURE_3D` and
+     * returned 0 until 2026-09-21 - no chain at all for a volume, because the layout was two
+     * dimensional. It is three now (`gl_tex_chain_layout_3d`). */
     if (levels > 1 && ((bv.width & (bv.width - 1)) != 0 || (bv.height & (bv.height - 1)) != 0)) {
+        levels = 1;
+    }
+    if (levels > 1 && tex->target == GL_TEXTURE_3D &&
+        (bv.depth <= 0 || (bv.depth & (bv.depth - 1)) != 0)) {
         levels = 1;
     }
     return (levels == 1 && b == 0) ? 0 : levels;
@@ -3502,7 +3822,9 @@ void gl_tex_hw_prepare(gl_context_t *ctx, gl_texture_object_t *tex) {
         (void)gl_tex_level_view(tex, b, &bv);
         size_t offsets[OOPS_GL_MAX_TEXTURE_LEVELS];
         uint32_t pitches[OOPS_GL_MAX_TEXTURE_LEVELS];
-        const size_t total = gl_tex_chain_layout(bv.width, bv.height, levels, offsets, pitches);
+        const GLsizei bdepth = (tex->target == GL_TEXTURE_3D && bv.depth > 0) ? bv.depth : 1;
+        const size_t total =
+            gl_tex_chain_layout_3d(bv.width, bv.height, bdepth, levels, offsets, pitches);
         uint8_t *chain = (uint8_t *)gl_chain_alloc(total);
         if (!chain) {
             gl_record_error(ctx, GL_OUT_OF_MEMORY);
@@ -3514,9 +3836,21 @@ void gl_tex_hw_prepare(gl_context_t *ctx, gl_texture_object_t *tex) {
         for (int i = 0; i < levels; i++) {
             gl_tex_view_t lv;
             if (!gl_tex_level_view(tex, b + i, &lv)) continue; /* complete, so never */
-            for (GLsizei y = 0; y < lv.height; y++) {
-                memcpy(chain + offsets[i] + (size_t)y * pitches[i] * 4u,
-                       lv.pixels + (size_t)y * lv.pitch * 4u, (size_t)lv.width * 4u);
+            /* **Slice by slice, and a 2D texture is one slice.** The source is tight-packed at
+             * `width * height` a slice, which is how every level is stored here; the destination
+             * pads each row to the level's pitch and puts the slices one after another at
+             * `pitch * height`, which is where `texture-3d` measured the hardware reading
+             * slice 1. A 2D level runs this loop once and copies exactly the rows it always
+             * did. */
+            const GLsizei slices = (tex->target == GL_TEXTURE_3D && lv.depth > 0) ? lv.depth : 1;
+            const size_t dst_slice = (size_t)pitches[i] * (size_t)lv.height * 4u;
+            const size_t src_slice = (size_t)lv.pitch * (size_t)lv.height * 4u;
+            for (GLsizei z = 0; z < slices; z++) {
+                for (GLsizei y = 0; y < lv.height; y++) {
+                    memcpy(chain + offsets[i] + (size_t)z * dst_slice + (size_t)y * pitches[i] * 4u,
+                           lv.pixels + (size_t)z * src_slice + (size_t)y * lv.pitch * 4u,
+                           (size_t)lv.width * 4u);
+                }
             }
         }
 #if !defined(OOPS_HOST_BUILD) && defined(__x86_64__)
@@ -3938,7 +4272,7 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
 /* The allocator differs by build: a freestanding target has the SDK's own heap, and the host
  * test build has the C library's. Wrapped here so the five call sites below do not each carry
  * the #if. */
-static void *gl_buffer_alloc(size_t bytes) {
+void *gl_heap_alloc(size_t bytes) {
 #ifdef OOPS_HOST_BUILD
     return malloc(bytes);
 #else
@@ -3946,7 +4280,7 @@ static void *gl_buffer_alloc(size_t bytes) {
 #endif
 }
 
-static void gl_buffer_release(void *p) {
+void gl_heap_free(void *p) {
     if (!p) return;
 #ifdef OOPS_HOST_BUILD
     free(p);
@@ -3954,6 +4288,11 @@ static void gl_buffer_release(void *p) {
     oops_free(p);
 #endif
 }
+
+/* The buffer objects' own names for the pair, kept so the call sites below read as they did and
+ * so there is one place that knows which heap this build has. */
+static void *gl_buffer_alloc(size_t bytes) { return gl_heap_alloc(bytes); }
+static void gl_buffer_release(void *p) { gl_heap_free(p); }
 
 gl_buffer_object_t *gl_find_buffer(gl_context_t *ctx, GLuint name) {
     if (!ctx || name == 0u) return NULL;
@@ -5702,10 +6041,14 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
  * the caller's image starts GL_UNPACK_IMAGE_HEIGHT rows after slice z - 1 (or the image's own
  * height, when that is 0). Its binding, enable and default texture are its own, as 1D's are.
  *
- * **Sampled by the software rasteriser only, so far.** The hardware path needs a 3D image
- * descriptor, the r coordinate carried to the pixel shader, and a shader that samples with three
- * coordinates; a 3D-textured draw on the console is drawn untextured, with one line in the log
- * saying why. gl1-probe's `texture-3d` is expected to fail there until that lands.
+ * **Sampled on the console too since 2026-09-20**, and this said it was the software
+ * rasteriser's alone until 2026-09-21: it listed the three things the hardware path needed - a
+ * 3D image descriptor, r carried to the pixel shader, a shader sampling with three coordinates -
+ * and all three landed the day after it was written. `texture-3d` does not fail there; it
+ * passes, and it is what measures the slice stride the mip chain relies on. The chain itself
+ * followed on 2026-09-21 (`gl_tex_chain_layout_3d`); what a volume still lacks there is a chain
+ * when its **depth** is not a power of two, which is the rule a width that is not has always
+ * had.
  * ------------------------------------------------------------------------- */
 
 /* A volume packed tight for a list, through the unpack state of now - the 2D recorder with one

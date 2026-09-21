@@ -82,6 +82,7 @@ void run_unit_tests_inject(void);
 void run_unit_tests_gpu(void);
 void run_unit_tests_pm4(void);
 void run_unit_tests_gl(void);
+void run_unit_tests_gl2(void);
 void run_unit_tests_jit(void);
 void run_unit_tests_fs(void);
 void run_unit_tests_heap(void);
@@ -136,6 +137,7 @@ int main(int argc, char **argv) {
     run_unit_tests_gpu();
     run_unit_tests_pm4();
     run_unit_tests_gl();
+    run_unit_tests_gl2();
     run_unit_tests_jit();
     run_unit_tests_fs();
     run_unit_tests_heap();

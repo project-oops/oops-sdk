@@ -65,6 +65,11 @@ OBJS := \
     $(BUILD)/gl/glsl_sema.o \
     $(BUILD)/gl/glsl_emit.o \
     $(BUILD)/gl/glsl_gen.o \
+    $(BUILD)/gl/glsl_builtin.o \
+    $(BUILD)/gl/glsl_link.o \
+    $(BUILD)/gl/glsl_exec.o \
+    $(BUILD)/gl/glsl_ps.o \
+    $(BUILD)/gl/gl_shader.o \
     $(BUILD)/input/input.o \
     $(BUILD)/input/keyboard.o \
     $(BUILD)/input/mouse.o \
@@ -127,6 +132,7 @@ TEST_SRCS := \
     tests/unit/test_gpu.c \
     tests/unit/test_pm4.c \
     tests/unit/test_gl.c \
+    tests/unit/test_gl2.c \
     tests/unit/test_jit.c \
     tests/unit/test_fs.c \
     tests/unit/test_heap.c \
@@ -190,7 +196,12 @@ TEST_SRCS := \
     src/gl/glsl_pp.c \
     src/gl/glsl_sema.c \
     src/gl/glsl_emit.c \
-    src/gl/glsl_gen.c
+    src/gl/glsl_gen.c \
+    src/gl/glsl_builtin.c \
+    src/gl/glsl_link.c \
+    src/gl/glsl_exec.c \
+    src/gl/glsl_ps.c \
+    src/gl/gl_shader.c
 
 HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -D_GNU_SOURCE -DOOPS_HOST_BUILD $(OOPS_TARGET_FLAGS)
 
