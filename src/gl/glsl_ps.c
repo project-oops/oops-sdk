@@ -145,7 +145,7 @@ static glsl_type_t type_from_gl(GLenum t) {
  * every node once rather than walking the tree - which also means a mention inside a branch the
  * generator will never take still counts, and that is the right answer: the prologue has to be
  * emitted before anything knows which branches there are. */
-static GLboolean unit_mentions(const glsl_unit_t *u, const char *name, size_t len) {
+GLboolean glsl_unit_mentions(const glsl_unit_t *u, const char *name, size_t len) {
     if (!u) return GL_FALSE;
     for (int32_t i = 0; i < u->ast.count; i++) {
         const glsl_node_t *n = &u->ast.nodes[i];
@@ -320,9 +320,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
      * the shader and the register that feeds it cannot come to different conclusions. */
     /* **`gl_FragCoord` needs the block too**, for the viewport height that flips its y - so it
      * joins the two things that already decide whether this shader is handed one. */
-    const GLboolean wants_fragcoord = unit_mentions(fs, "gl_FragCoord", 12u);
+    const GLboolean wants_fragcoord = glsl_unit_mentions(fs, "gl_FragCoord", 12u);
     /* `gl_FrontFacing` needs no block - the SPI hands it over in a register of its own. */
-    const GLboolean wants_frontfacing = unit_mentions(fs, "gl_FrontFacing", 14u);
+    const GLboolean wants_frontfacing = glsl_unit_mentions(fs, "gl_FrontFacing", 14u);
     const GLboolean takes_block =
         (GLboolean)(tex_sets > 0 || p->value_floats > 0 || wants_fragcoord);
     const uint32_t user_sgprs = takes_block ? 2u : 0u;
@@ -503,6 +503,27 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             const int slot = v->offset + c;
             glsl_emit_interp_pair(&code, home.base + (uint32_t)c, (uint32_t)(slot / 4),
                                   (uint32_t)(slot % 4));
+        }
+    }
+
+    /* **`gl_Color`, interpolated from the parameter the linker set aside for it.**
+     *
+     * The fixed-function colour is not a user varying and owns no slot until a fragment shader
+     * asks for one, so `hw_color_param` is where it ended up - the first parameter past the
+     * user's when there is a vertex shader, and parameter 0 when there is not, because the
+     * fixed-function vertex path has always written it there. The two cases differ, which is
+     * why the number comes from the link and is not worked out again here. */
+    if (ok && p->hw_color_param >= 0) {
+        const glsl_value_t home =
+            glsl_gen_declare_input(gen, "gl_Color", 8u, GLSL_TYPE_VEC4);
+        if (home.count != 4) {
+            log_say(log, log_size, gen->error ? gen->error : "gl_Color has no register", 0, 0);
+            ok = GL_FALSE;
+        } else {
+            for (int c = 0; c < 4; c++) {
+                glsl_emit_interp_pair(&code, home.base + (uint32_t)c,
+                                      (uint32_t)p->hw_color_param, (uint32_t)c);
+            }
         }
     }
 

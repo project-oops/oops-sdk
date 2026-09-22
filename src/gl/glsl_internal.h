@@ -405,6 +405,16 @@ GLboolean glsl_declare_builtins(glsl_sema_t *s, GLenum stage);
  * symbol table - the pixel-shader back end does - has to do it too, or a call to a function the
  * shader defines cannot be typed at all. */
 GLboolean glsl_declare_function(glsl_sema_t *s, int32_t node);
+
+/* Whether a unit names this identifier anywhere - in a branch it never takes, in a function it
+ * never calls, anywhere. A built-in is not declared, so there is no declaration list to walk and
+ * the question is about the whole body; the AST is a flat array, so this reads every node once.
+ *
+ * The over-answer is deliberate. Both callers decide *before* generating: the linker sizes the
+ * parameter block, and the back end emits its prologue - and neither can wait to find out which
+ * branches exist. A shader charged for a `gl_Color` it mentions and never reaches costs one
+ * parameter; one not charged for a `gl_Color` it does reach reads a register nothing filled. */
+GLboolean glsl_unit_mentions(const glsl_unit_t *u, const char *name, size_t len);
 /* Why a `gl_` name that is real GLSL is not declared here, or NULL when the name is not one this
  * knows about. What turns "use of an undeclared name" - which reads as a typo - into a sentence
  * naming the feature that is missing. */

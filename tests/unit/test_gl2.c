@@ -2622,6 +2622,69 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
     glContextDestroy(ctx);
 }
 
+static void test_gl2_gl_color_lands_where_the_link_put_it(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+
+    /* **With a vertex shader, the user's varyings own the parameters and the colour follows
+     * them.** `VS_ONE_VARYING` carries one `vec4`, which is parameter 0 - so `gl_Color` is
+     * parameter 1, and the parameter count grows to carry it. */
+    const GLuint withvs = linked_program(
+        VS_ONE_VARYING,
+        "varying vec4 vin;\n"
+        "void main() { gl_FragColor = gl_Color * vin.x; }\n");
+    const gl_program_object_t *pv = gl_find_program(c, withvs);
+    ASSERT_TRUE(pv != NULL);
+    ASSERT_EQ(pv->hw_color_param, 1);
+    ASSERT_TRUE(pv->hw_params >= 2u);
+
+    /* **Without one, the fixed-function vertex path runs and has always written the colour into
+     * parameter 0** - so the slot already exists and nothing is added. A back end that used one
+     * number for both cases would read the user's first varying as the colour in one of them. */
+    const GLuint fsonly = glCreateProgram();
+    {
+        const GLchar *src[1] = {
+            "void main() { gl_FragColor = vec4(gl_Color.rgb * 0.5, 1.0); }\n"};
+        const GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fs, 1, src, NULL);
+        glCompileShader(fs);
+        glAttachShader(fsonly, fs);
+        glLinkProgram(fsonly);
+        GLint linked = 0;
+        glGetProgramiv(fsonly, GL_LINK_STATUS, &linked);
+        ASSERT_EQ(linked, GL_TRUE);
+    }
+    const gl_program_object_t *pn = gl_find_program(c, fsonly);
+    ASSERT_TRUE(pn != NULL);
+    ASSERT_EQ(pn->hw_color_param, 0);
+
+    /* And a shader that never names it is charged nothing. */
+    const GLuint plain = linked_program(VS_ONE_VARYING,
+                                        "varying vec4 vin;\n"
+                                        "void main() { gl_FragColor = vin; }\n");
+    const gl_program_object_t *pp = gl_find_program(c, plain);
+    ASSERT_TRUE(pp != NULL);
+    ASSERT_EQ(pp->hw_color_param, -1);
+
+    /* The interpolation reads the parameter the link chose. `attr[1]` is the colour for the
+     * first program, so a prologue reading parameter 0 would return the varying instead - and
+     * the two are deliberately different values here. */
+    float o[4];
+    const float attr[4][4] = {{0.5f, 0, 0, 0},      /* param0: the user varying */
+                              {0.25f, 0.75f, 1.0f, 1.0f}, /* param1: gl_Color */
+                              {0, 0, 0, 0},
+                              {0, 0, 0, 0}};
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "void main() { gl_FragColor = gl_Color; }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.75f, 1e-6f);
+    ASSERT_NEAR(o[2], 1.0f, 1e-6f);
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_matrix_products_are_two_products(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -3625,6 +3688,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
+    RUN_TEST(test_gl2_gl_color_lands_where_the_link_put_it);
     RUN_TEST(test_gl2_matrix_products_are_two_products);
     RUN_TEST(test_gl2_integers_are_floats_kept_whole);
     RUN_TEST(test_gl2_front_facing_is_a_sign_not_a_flag);

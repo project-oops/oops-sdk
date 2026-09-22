@@ -3338,6 +3338,50 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
         GLuint eff_tex = gl_effective_texture_id(ctx);
         gl_texture_object_t *eff_obj = (gl_texture_object_t *)gl_lookup_texture(ctx, eff_tex);
         /*
+         * **Texturing is on, a texture is bound, and GL says it cannot be sampled.**
+         *
+         * `gl_effective_texture_id` answers zero for that and for texturing being off alike, so
+         * the two are told apart here: a name bound on unit 0 with nothing effective is the
+         * first case. GL requires it to draw untextured (3.8.10) rather than to raise an error,
+         * which is why it is silent - and on screen it is indistinguishable from a port whose
+         * textures never loaded. Neverball's title screen looked exactly like that while
+         * gl1-probe's texture checks passed on hardware and the pinned libpng decoded all 292
+         * of its PNGs: neither suite covers this join.
+         *
+         * The name and the base level's size are what separate the three explanations - the
+         * default texture standing in for an unbound unit, an upload that stored nothing (zero
+         * by zero), and a stored image the completeness rule rejects anyway. Said once.
+         */
+        {
+            static GLboolean told_incomplete = GL_FALSE;
+            const GLuint bound0 = gl_unit_texture_id(ctx, 0u);
+            if (!told_incomplete && eff_tex == 0u && bound0 != 0u) {
+                told_incomplete = GL_TRUE;
+                const gl_texture_object_t *t0 = gl_lookup_texture(ctx, bound0);
+                gl_tex_view_t v;
+                char msg[160];
+                size_t n = 0;
+                const char *head = "unusable texture on unit 0, drawn untextured: name ";
+                while (head[n] && n < sizeof(msg) - 48) { msg[n] = head[n]; n++; }
+                n += obs_format_u64(msg + n, (uint64_t)bound0);
+                if (t0 && gl_tex_level_view(t0, t0->base_level, &v)) {
+                    const char *mid = " base level ";
+                    for (size_t k = 0; mid[k]; k++) msg[n++] = mid[k];
+                    n += obs_format_u64(msg + n, (uint64_t)(uint32_t)v.width);
+                    msg[n++] = 'x';
+                    n += obs_format_u64(msg + n, (uint64_t)(uint32_t)v.height);
+                    const char *tail = " fmt ";
+                    for (size_t k = 0; tail[k]; k++) msg[n++] = tail[k];
+                    n += obs_format_u64(msg + n, (uint64_t)(uint32_t)v.internal_format);
+                } else {
+                    const char *none = " has no base level image";
+                    for (size_t k = 0; none[k]; k++) msg[n++] = none[k];
+                }
+                msg[n] = '\0';
+                gl_log_line(msg);
+            }
+        }
+        /*
          * **Which units this path applies**, and one log line for a texture it leaves out.
          *
          * Unit 0 when it is textured, and unit 1 with it since 2026-09-20 (gl_multitex.h). The
@@ -3750,9 +3794,21 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
                     memcpy(v + 0, pos[k], 16);
                     for (uint32_t pi = 0; pi < params; pi++) {
                         float slot[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                        for (int c = 0; c < 4; c++) {
-                            const int at = (int)(pi * 4u) + c;
-                            if (at < prog->varying_floats) slot[c] = vso[k].vary[at];
+                        /* **The fixed-function colour, when the fragment shader reads it.**
+                         * `gl_FrontColor` is not a user varying and has a slot of its own in
+                         * the vertex stage's output, so it is copied from there into the
+                         * parameter the linker set aside - which is the first one past the
+                         * user's, and exists only for a shader that names `gl_Color`. */
+                        if (prog->hw_color_param >= 0 &&
+                            pi == (uint32_t)prog->hw_color_param) {
+                            for (int c = 0; c < 4; c++) {
+                                slot[c] = vso[k].vary[GL_SHADER_VARY_COLOR + c];
+                            }
+                        } else {
+                            for (int c = 0; c < 4; c++) {
+                                const int at = (int)(pi * 4u) + c;
+                                if (at < prog->varying_floats) slot[c] = vso[k].vary[at];
+                            }
                         }
                         memcpy(v + 16 + pi * 16u, slot, 16);
                     }

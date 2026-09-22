@@ -526,6 +526,7 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
      * below, and the slot uploads again rather than trusting what it holds. */
     p->hw_ps_serial = 0u;
     p->hw_params = 0u;
+    p->hw_color_param = -1;
     p->hw_ps_log[0] = '\0';
     p->hw_tex_sets = 0;
     for (size_t i = 0; i < sizeof(p->hw_tex_uniform) / sizeof(p->hw_tex_uniform[0]); i++) {
@@ -633,6 +634,25 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     }
 
     p->hw_params = (uint32_t)((p->varying_floats + 3) / 4);
+
+    /* **`gl_Color` costs a parameter, and only when a fragment shader reads it.**
+     *
+     * With a vertex shader the user's varyings own the parameters from 0, so the colour takes
+     * the first slot after them and the count grows by one. Without one the fixed-function
+     * vertex path runs, and that path has always written the colour into parameter 0 - so the
+     * slot already exists and nothing needs adding.
+     *
+     * Four floats, because `gl_Color` is a vec4 and a parameter is four. */
+    p->hw_color_param = -1;
+    if (fs && glsl_unit_mentions(fs, "gl_Color", 8u)) {
+        if (vs) {
+            p->hw_color_param = (int)p->hw_params;
+            p->hw_params++;
+        } else {
+            p->hw_color_param = 0;
+        }
+    }
+
     if (p->hw_params < 2u) p->hw_params = 2u;   /* the pipeline's smallest configuration */
     if (fs) {
         p->hw_ps = (uint32_t *)gl_heap_alloc(OOPS_GL_PS_GL2_WORDS * sizeof(uint32_t));

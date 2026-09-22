@@ -922,6 +922,17 @@ typedef struct {
      * names, and written by the draw, which is the same division as `hw_ps_user_sgprs`: a
      * shader reading a register the SPI was not told to supply reads whatever was in it. */
     uint32_t hw_ps_input_ena;
+    /* **Which parameter carries `gl_Color`, or -1 for a shader that does not read it.**
+     *
+     * The fixed-function colour is not a user varying, so it has no slot of its own until a
+     * fragment shader asks for one - and where it lands depends on whether there is a vertex
+     * shader at all. With one, the user's varyings own the parameters from 0 and this is the
+     * first free slot after them. Without one, the fixed-function vertex path runs and has
+     * always written the colour into parameter 0, so that is where it already is.
+     *
+     * Decided at link because the draw sizes the vertex from it and the compiler interpolates
+     * from it, and those two agreeing is the whole point. */
+    int hw_color_param;
     /* **Whether this program's refusal has been said out loud.** Cleared at every link, so a
      * relinked program that is still refused says so again - the source may have changed and
      * the reason with it. On the program rather than the context because program names are
@@ -2725,34 +2736,10 @@ static inline GLuint gl_unit_texture_id(const gl_context_t *ctx, GLuint unit) {
     }
     if (id == 0u) return 0u;
     const gl_texture_object_t *tex = gl_lookup_texture(ctx, id);
-    if (tex && gl_texture_complete(tex)) return id;
-
-    /*
-     * **Texturing is on, a texture is bound, and it is being ignored.**
-     *
-     * GL requires exactly that (3.8.10, and the note above `gl_texture_complete`), so this is
-     * not an error and nothing is recorded. It is also indistinguishable, on screen, from a port
-     * whose textures never loaded at all: every surface draws in its material colour with the
-     * lighting correct and no detail. Neverball's title screen looked precisely like this, and
-     * two test suites that both pass - gl1-probe's texture checks on hardware, and the pinned
-     * libpng decoding all 292 of its PNGs - between them said nothing about it, because neither
-     * covers the join.
-     *
-     * So it is said once. Once per translation unit that inlines this, which is a handful of
-     * lines rather than one per fragment, and enough to turn a silent class of bug into a named
-     * one for the next port as well as this one.
-     */
-    {
-        void gl_log_line(const char *msg); /* declared below; needed here, above its prototype */
-        static GLboolean told = GL_FALSE;
-        if (!told) {
-            told = GL_TRUE;
-            gl_log_line("texturing is enabled and the bound texture is incomplete, so it is "
-                        "ignored and the fragment takes its untextured colour - the usual cause "
-                        "is a base level that was never uploaded");
-        }
-    }
-    return 0u;
+    /* **Zero here means "sampled nothing"**, and that covers two different situations: texturing
+     * off, and texturing on with a texture GL says is unusable. The draw path tells them apart
+     * and reports the second - see the note beside `eff_tex` in gl_draw.c. */
+    return (tex && gl_texture_complete(tex)) ? id : 0u;
 }
 
 /* **Depth and stencil at a window pixel, for the CPU** - `y` counting up from the bottom, as GL's
