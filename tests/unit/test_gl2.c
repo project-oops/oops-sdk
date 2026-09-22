@@ -1863,6 +1863,17 @@ static void test_gl2_pixel_shader_encodings_match_the_assembler(void) {
     ASSERT_EQ(words[0], 0xbefc0300u); /* s_mov_b32 m0, s0 */
     ASSERT_EQ(words[1], 0xbefc0302u); /* s_mov_b32 m0, s2 */
 
+    /* **The depth export.** Target 8, one channel, and **no `done`** - the colour export that
+     * follows is the one that says it, and two exports both claiming to be last is a shader
+     * that does not retire. Compare with `exp mrt0 ... done vm` below, which differs in every
+     * one of those. */
+    glsl_code_init(&c, words, 64);
+    glsl_emit_export_mrtz(&c, 4u);
+    ASSERT_EQ(c.count, 2u);
+    ASSERT_EQ(words[0], 0xf8000081u); /* exp mrtz v4, off, off, off */
+    ASSERT_EQ(words[1], 0x00000004u);
+    ASSERT_EQ((words[0] >> 11) & 1u, 0u); /* done is not set */
+
     /* **A scalar operand in `src0`**, which is how `gl_FragCoord.y` gets flipped: the viewport
      * height is a per-draw constant in the scalar file and the hardware's row is a VGPR. VOP2's
      * `src0` is nine bits and names either; `vsrc1` is eight and names a VGPR - so the order is
@@ -2627,6 +2638,63 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
      * viewport height that flips y lives there. A shader handed no block would have read the
      * flip out of a scalar register nothing loaded. */
     ASSERT_EQ(usg, 2u);
+
+    glContextDestroy(ctx);
+}
+
+static void test_gl2_frag_depth_exports_before_the_colour(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+    uint32_t words[256];
+    uint32_t count = 0u, vgprs = 0u, ena = 0u, usg = 0u;
+    char log[256] = {0};
+
+    const GLuint d = linked_program(
+        VS_ONE_VARYING,
+        "void main() {\n"
+        "  gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);\n"
+        "  gl_FragDepth = 0.99;\n"
+        "}\n");
+    const gl_program_object_t *pd = gl_find_program(c, d);
+    ASSERT_TRUE(pd != NULL);
+    ASSERT_EQ(pd->hw_ps_exports_depth, GL_TRUE);
+    ASSERT_EQ(gl_program_compile_fragment(pd, words, 256u, &count, &vgprs, &usg, &ena, log,
+                                          sizeof(log)),
+              GL_TRUE);
+    /* It asks for the window position, because the depth it starts from is the interpolated z. */
+    ASSERT_EQ(ena & 0x00000f00u, 0x00000f00u);
+
+    /* **Order and `done` are the whole of what can go wrong here.** The depth export comes
+     * first and does not claim to be last; the colour export comes second and does. A shader
+     * with two `done` exports, or with the colour first, does not retire - and nothing on the
+     * host would show it. */
+    {
+        int z_at = -1, c_at = -1;
+        for (uint32_t i = 0; i + 1 < count; i++) {
+            if ((words[i] >> 26) != 0x3eu) continue;
+            const uint32_t target = (words[i] >> 4) & 0x3fu;
+            if (target == 8u) z_at = (int)i;
+            if (target == 0u) c_at = (int)i;
+        }
+        ASSERT_TRUE(z_at >= 0);
+        ASSERT_TRUE(c_at >= 0);
+        ASSERT_TRUE(z_at < c_at);
+        ASSERT_EQ((words[z_at] >> 11) & 1u, 0u); /* the depth does not say done */
+        ASSERT_EQ((words[c_at] >> 11) & 1u, 1u); /* the colour does */
+    }
+
+    /* A shader that never names it exports no depth and is charged no register for one. */
+    const GLuint plain = linked_program(
+        VS_ONE_VARYING, "void main() { gl_FragColor = vec4(1.0); }\n");
+    const gl_program_object_t *pp = gl_find_program(c, plain);
+    ASSERT_TRUE(pp != NULL);
+    ASSERT_EQ(pp->hw_ps_exports_depth, GL_FALSE);
+    ASSERT_EQ(gl_program_compile_fragment(pp, words, 256u, &count, &vgprs, &usg, &ena, log,
+                                          sizeof(log)),
+              GL_TRUE);
+    for (uint32_t i = 0; i < count; i++) {
+        if ((words[i] >> 26) == 0x3eu) ASSERT_TRUE(((words[i] >> 4) & 0x3fu) != 8u);
+    }
 
     glContextDestroy(ctx);
 }
@@ -3757,6 +3825,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
+    RUN_TEST(test_gl2_frag_depth_exports_before_the_colour);
     RUN_TEST(test_gl2_vector_relationals_reduce_a_bvec);
     RUN_TEST(test_gl2_gl_color_lands_where_the_link_put_it);
     RUN_TEST(test_gl2_matrix_products_are_two_products);

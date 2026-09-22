@@ -610,6 +610,9 @@ void glsl_emit_interp(glsl_code_t *c, uint32_t vdst, uint32_t attr, uint32_t cha
 void glsl_emit_interp_pair(glsl_code_t *c, uint32_t vdst, uint32_t attr, uint32_t chan);
 /* `exp mrt0 v[base..base+3] done vm` - the colour, and the end of the shader's exports. */
 void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base);
+/* The depth a shader wrote, exported before the colour - see the definition for why it carries
+ * neither `done` nor `vm`. */
+void glsl_emit_export_mrtz(glsl_code_t *c, uint32_t reg);
 
 /* -------------------------------------------------------------------------
  * Instruction selection: the tree becomes instructions

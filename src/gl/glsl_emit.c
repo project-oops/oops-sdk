@@ -238,6 +238,20 @@ void glsl_emit_interp_pair(glsl_code_t *c, uint32_t vdst, uint32_t attr, uint32_
  * `done` says this is the shader's last export and `vm` that the exec mask is valid - both are
  * what every pixel shader in this repository sets, and a shader that exports without `done`
  * does not retire. Verified from `exp mrt0 v4, v5, v6, v7 done vm` = 0xf800180f, 0x07060504. */
+/* `exp mrtz <reg>, off, off, off` - the depth a shader wrote, on target 8 with only the first
+ * channel enabled. Verified as 0xf8000081 / 0x00000004 for `v4`.
+ *
+ * **No `done` and no `vm`.** `done` marks a shader's *last* export and the colour export that
+ * follows carries it; two exports both claiming to be last is a shader that does not retire.
+ * The depth goes first because that is the order the export order says - and because the colour
+ * export is the one that has to be able to say `done`. */
+void glsl_emit_export_mrtz(glsl_code_t *c, uint32_t reg) {
+    const uint32_t en = 0x1u;      /* the first channel only: Z is one value */
+    const uint32_t target = 8u;    /* MRTZ */
+    put(c, (0x3eu << 26) | en | (target << 4));
+    put(c, reg & 0xffu);
+}
+
 void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base) {
     const uint32_t en = 0xfu;      /* all four channels */
     const uint32_t target = 0u;    /* MRT0 */

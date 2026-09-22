@@ -933,6 +933,11 @@ typedef struct {
      * Decided at link because the draw sizes the vertex from it and the compiler interpolates
      * from it, and those two agreeing is the whole point. */
     int hw_color_param;
+    /* **Whether the compiled shader exports a depth of its own**, which changes two registers
+     * the draw writes: `SPI_SHADER_Z_FORMAT` has to say a Z is coming, and `DB_SHADER_CONTROL`
+     * has to stop testing early - a depth the shader computes is not known until the shader has
+     * run, and early Z would have tested the interpolated one instead. */
+    GLboolean hw_ps_exports_depth;
     /* **Whether this program's refusal has been said out loud.** Cleared at every link, so a
      * relinked program that is still refused says so again - the source may have changed and
      * the reason with it. On the program rather than the context because program names are
@@ -1285,6 +1290,9 @@ typedef struct gl_context {
     /* What `SPI_PS_INPUT_ENA` and `_ADDR` currently hold, so a draw emits them only when it
      * wants something else. Set by `gl_hw_begin_frame` to whatever its table wrote. */
     uint32_t hw_input_ena;
+    /* What `SPI_SHADER_Z_FORMAT` currently holds - 0 for no depth export, 1 for one. The
+     * paired `DB_SHADER_CONTROL` moves with it, so one cache covers both. */
+    uint32_t hw_z_format;
     /* The depth and stencil surfaces are the GPU's, 64KB_Z_X tiled (see gl_zs_depth_ptr): true
      * once the hardware path is up on the console, never on a host build. */
     GLboolean zs_tiled;

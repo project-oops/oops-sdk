@@ -323,18 +323,24 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     const GLboolean wants_fragcoord = glsl_unit_mentions(fs, "gl_FragCoord", 12u);
     /* `gl_FrontFacing` needs no block - the SPI hands it over in a register of its own. */
     const GLboolean wants_frontfacing = glsl_unit_mentions(fs, "gl_FrontFacing", 14u);
+    /* **`gl_FragDepth` needs the window position too**, for the interpolated z it starts at -
+     * so it asks for the same registers `gl_FragCoord` does, and a shader naming either gets
+     * them. */
+    const GLboolean wants_fragdepth = glsl_unit_mentions(fs, "gl_FragDepth", 12u);
     const GLboolean takes_block =
         (GLboolean)(tex_sets > 0 || p->value_floats > 0 || wants_fragcoord);
     const uint32_t user_sgprs = takes_block ? 2u : 0u;
     const uint32_t input_ena = GL_PS_INPUT_PERSP_CENTER |
-                               (wants_fragcoord ? GL_PS_INPUT_POS_XYZW : 0u) |
+                               ((wants_fragcoord || wants_fragdepth) ? GL_PS_INPUT_POS_XYZW
+                                                                     : 0u) |
                                (wants_frontfacing ? GL_PS_INPUT_FRONT_FACE : 0u);
     /* **Where the front-face register lands, which depends on what else was asked for.** The
      * SPI packs the enabled inputs in the order Mesa enumerates them, so the face follows the
      * position when the position is there and sits straight after the barycentrics when it is
      * not. Computed rather than fixed, because pinning it would mean asking for four registers
      * of window position that the shader never reads just to keep this one in place. */
-    const uint32_t frontface_vgpr = GL_PS_FRAGPOS_VGPR + (wants_fragcoord ? 4u : 0u);
+    const uint32_t frontface_vgpr =
+        GL_PS_FRAGPOS_VGPR + ((wants_fragcoord || wants_fragdepth) ? 4u : 0u);
 
     /* **`m0` first, because every interpolation reads it** - and because a shader that skips it
      * still runs, still exports, and draws a surface speckled with another primitive's
@@ -574,6 +580,27 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         }
     }
 
+    /* **`gl_FragDepth` is the same thing for depth**, declared only for a shader that names it
+     * so nothing is charged for a register or an export it never uses.
+     *
+     * Seeded with the interpolated depth rather than left as whatever the allocator held. GLSL
+     * says a shader that writes it on one path and not another leaves the value undefined on
+     * the other, and `glsl_exec.c` carries `gl_FragCoord.z` there - so this reads the same
+     * value, which is the one arrangement where the two paths agree about a shader the language
+     * does not pin down. It needs the window position for that, which is why the mention
+     * enables it. */
+    if (ok && wants_fragdepth) {
+        const glsl_value_t depth =
+            glsl_gen_declare_input(gen, "gl_FragDepth", 12u, GLSL_TYPE_FLOAT);
+        if (depth.count != 1) {
+            log_say(log, log_size, gen->error ? gen->error : "gl_FragDepth has no register", 0,
+                    0);
+            ok = GL_FALSE;
+        } else {
+            glsl_emit_mov(&code, depth.base, GL_PS_FRAGPOS_VGPR + 2u); /* the interpolated z */
+        }
+    }
+
     /* ---------------------------------------------------------------------
      * The body
      * --------------------------------------------------------------------- */
@@ -615,6 +642,17 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                  * the export registers are below everything the allocator hands out - so this
                  * never is one, and the check is left out rather than written and never taken. */
                 glsl_emit_mov(&code, GL_PS_EXPORT_BASE + i, colour.base + i);
+            }
+            /* **The depth goes first, because the colour export is the one that says `done`.**
+             * Two exports both claiming to be the last is a shader that does not retire. */
+            if (wants_fragdepth) {
+                glsl_value_t depth;
+                if (glsl_gen_lookup(gen, "gl_FragDepth", 12u, &depth) && depth.count == 1) {
+                    glsl_emit_export_mrtz(&code, depth.base);
+                } else {
+                    log_say(log, log_size, "gl_FragDepth did not survive to the export", 0, 0);
+                    ok = GL_FALSE;
+                }
             }
             glsl_emit_export_mrt0(&code, GL_PS_EXPORT_BASE);
             glsl_emit_endpgm(&code);

@@ -527,6 +527,7 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     p->hw_ps_serial = 0u;
     p->hw_params = 0u;
     p->hw_color_param = -1;
+    p->hw_ps_exports_depth = GL_FALSE;
     p->hw_ps_log[0] = '\0';
     p->hw_tex_sets = 0;
     for (size_t i = 0; i < sizeof(p->hw_tex_uniform) / sizeof(p->hw_tex_uniform[0]); i++) {
@@ -643,6 +644,14 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
      * slot already exists and nothing needs adding.
      *
      * Four floats, because `gl_Color` is a vec4 and a parameter is four. */
+    /* **Whether this program's fragment stage writes its own depth**, which the draw needs
+     * before it can configure the depth block: `SPI_SHADER_Z_FORMAT` has to expect a Z, and
+     * `DB_SHADER_CONTROL` has to stop testing early, since a depth the shader computes is not
+     * known until the shader has run. Decided here for the same reason `hw_color_param` is -
+     * the draw and the compiler both read it and must not each work it out. */
+    p->hw_ps_exports_depth =
+        (GLboolean)(fs != (glsl_unit_t *)0 && glsl_unit_mentions(fs, "gl_FragDepth", 12u));
+
     p->hw_color_param = -1;
     if (fs && glsl_unit_mentions(fs, "gl_Color", 8u)) {
         if (vs) {

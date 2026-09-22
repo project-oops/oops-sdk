@@ -2524,6 +2524,8 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     /* And what that table wrote into SPI_PS_INPUT_ENA/_ADDR, so a draw needing something else
      * knows it has to say so - and one that does not, does not pay for it. */
     ctx->hw_input_ena = gl_polygon_stipple_on(ctx) ? 0x00000302u : 0x00000002u;
+    /* And the depth block's half: the table above wrote no Z export and an early test. */
+    ctx->hw_z_format = 0u;
     ctx->hw_frame_active = GL_TRUE;
 }
 
@@ -4193,6 +4195,31 @@ vertices_written:
                 *dw++ = 0xc0016900u; *dw++ = 0x1b3u; *dw++ = want;
                 *dw++ = 0xc0016900u; *dw++ = 0x1b4u; *dw++ = want;
                 ctx->hw_input_ena = want;
+            }
+        }
+
+        /* **A shader that writes its own depth changes the depth block, in two registers.**
+         *
+         * `SPI_SHADER_Z_FORMAT` (0x1c4) has to say a Z is coming - `SPI_SHADER_32_R`, one
+         * value - or the export is made and nothing reads it. And `DB_SHADER_CONTROL` (0x203)
+         * has to stop testing early: the frame's value is `EARLY_Z_THEN_LATE_Z`, and a depth
+         * the shader computes is not known until the shader has run, so an early test would
+         * have used the interpolated depth and rejected fragments the shader was going to
+         * move. `LATE_Z` with `Z_EXPORT_ENABLE` is the pair that goes together - bits from
+         * `R_02880C` and `R_028710` for gfx103.
+         *
+         * Emitted only on a change, and put back by `gl_hw_begin_frame` to what the frame's own
+         * table wrote, exactly as the input-enable above. */
+        {
+            const GLboolean depth_ps = (GLboolean)(prog != (gl_program_object_t *)0 &&
+                                                   prog->fs && prog->hw_ps_words > 0u &&
+                                                   prog->hw_ps_exports_depth);
+            const uint32_t want_zfmt = depth_ps ? 1u : 0u;
+            const uint32_t want_dbsc = depth_ps ? 0x00000001u : 0x00000010u;
+            if (want_zfmt != ctx->hw_z_format) {
+                *dw++ = 0xc0016900u; *dw++ = 0x1c4u; *dw++ = want_zfmt;
+                *dw++ = 0xc0016900u; *dw++ = 0x203u; *dw++ = want_dbsc;
+                ctx->hw_z_format = want_zfmt;
             }
         }
 
