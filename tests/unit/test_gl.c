@@ -12924,6 +12924,79 @@ static void test_glsl_emit_matches_the_assembler(void) {
   ASSERT_EQ(words[7], 0xbefe030fu); /* s_mov_b32 exec_lo, s15 */
   ASSERT_EQ(words[8], 0xbefe0380u); /* s_mov_b32 exec_lo, 0 */
 
+  /* **Branches, which only a loop needs.** The layout below is `tools/shader/branch.s`
+   * instruction for instruction, so every word here is one clang produced rather than one this
+   * encoder and this test agree about.
+   *
+   * The offsets are the point. `simm16` counts from the word *after* the branch, so the jump
+   * back over a single instruction is -2 and not -1, and the three forward jumps to the same
+   * label are +4, +3 and +2 rather than all the same. An encoder off by one here emits a loop
+   * that re-enters itself one instruction in - which does not draw wrongly, it hangs. */
+  glsl_code_init(&c, words, 64);
+  {
+    const uint32_t loop_top = glsl_code_here(&c);
+    uint32_t fix_execz, fix_scc1, fix_branch;
+    ASSERT_EQ(loop_top, 0u);
+    glsl_emit_nop(&c);
+    glsl_emit_branch_back(&c, GLSL_SOPP_BRANCH, loop_top);
+    fix_execz  = glsl_emit_branch_fwd(&c, GLSL_SOPP_CBRANCH_EXECZ);
+    fix_scc1   = glsl_emit_branch_fwd(&c, GLSL_SOPP_CBRANCH_SCC1);
+    fix_branch = glsl_emit_branch_fwd(&c, GLSL_SOPP_BRANCH);
+    glsl_emit_nop(&c);
+    glsl_emit_nop(&c);
+    /* All three land on the same word, which is `glsl_code_here` = 7 at this moment. */
+    ASSERT_TRUE(glsl_patch_branch_here(&c, fix_execz));
+    ASSERT_TRUE(glsl_patch_branch_here(&c, fix_scc1));
+    ASSERT_TRUE(glsl_patch_branch_here(&c, fix_branch));
+    ASSERT_EQ(glsl_code_here(&c), 7u);
+  }
+  ASSERT_EQ(words[0], 0xbf800000u); /* s_nop 0 - also the placeholder every patch overwrites */
+  ASSERT_EQ(words[1], 0xbf82fffeu); /* s_branch loop_top, back over one instruction */
+  ASSERT_EQ(words[2], 0xbf880004u); /* s_cbranch_execz loop_exit */
+  ASSERT_EQ(words[3], 0xbf850003u); /* s_cbranch_scc1 loop_exit */
+  ASSERT_EQ(words[4], 0xbf820002u); /* s_branch loop_exit */
+
+  /* **The trip guard**, which is what makes a real backward branch safe to emit at all: a
+   * counter in an SGPR that ends the loop whatever the lanes are doing. A GLSL condition that
+   * never goes false is a bug in the shader; without this it is a wedged GPU. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_sop1(&c, GLSL_SOP1_MOV_B32, 20u, 128u); /* 128 is the scalar inline constant 0 */
+  glsl_emit_s_inc_u32(&c, 20u);
+  glsl_emit_s_cmp_ge_u32_imm(&c, 20u, 0x100u);
+  ASSERT_EQ(words[0], 0xbe940380u); /* s_mov_b32 s20, 0 */
+  ASSERT_EQ(words[1], 0x80148114u); /* s_add_u32 s20, s20, 1 */
+  ASSERT_EQ(words[2], 0xbf09ff14u); /* s_cmp_ge_u32 s20, 0x100 */
+  ASSERT_EQ(words[3], 0x00000100u); /*   ...the literal that rides behind it */
+  ASSERT_EQ(glsl_code_here(&c), 4u);
+
+  /* Both sides of the scalar inline boundary. 0..64 encode as operands 128..192; 65 does not
+   * exist in that table and has to spill to a literal. Taking the inline path for 65 would
+   * compare the counter against operand 193, which is the inline constant **-4.0**. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_s_cmp_ge_u32_imm(&c, 20u, 64u);
+  glsl_emit_s_cmp_ge_u32_imm(&c, 20u, 65u);
+  ASSERT_EQ(words[0], 0xbf09c014u); /* s_cmp_ge_u32 s20, 64 - one word */
+  ASSERT_EQ(words[1], 0xbf09ff14u); /* s_cmp_ge_u32 s20, 65 - two */
+  ASSERT_EQ(words[2], 0x00000041u);
+  ASSERT_EQ(glsl_code_here(&c), 3u);
+
+  /* **A patch into an overflowed buffer reports rather than lies.** `count` stopped advancing
+   * at the capacity, so the distance from the branch to "here" is not the distance the hardware
+   * would see; filling it in anyway would produce a stream that branches into the middle of
+   * something. The caller has a failed compile by this point either way - this is what stops it
+   * being a failed compile that also emits a plausible jump. */
+  glsl_code_init(&c, words, 4);
+  {
+    const uint32_t fix = glsl_emit_branch_fwd(&c, GLSL_SOPP_BRANCH);
+    glsl_emit_nop(&c);
+    glsl_emit_nop(&c);
+    glsl_emit_nop(&c);
+    glsl_emit_nop(&c); /* the one too many */
+    ASSERT_TRUE(c.overflow);
+    ASSERT_TRUE(!glsl_patch_branch_here(&c, fix));
+    ASSERT_EQ(words[0], 0xbf820000u); /* left as emitted, not patched to a wrong offset */
+  }
+
   /* **Sampling a texture.** Two destinations, two coordinate pairs, two descriptor sets and all
    * four dimensions, because each of those is its own field and one example would not have told
    * them apart. Words from `tools/shader/gl2-fragment.s`. */
@@ -13408,10 +13481,32 @@ static void test_glsl_gen_selects_what_the_opcodes_now_allow(void) {
   glsl_gen_of("f<f ? v3 : v3");
   ASSERT_TRUE(g_glsl_gen.error == NULL);
 
-  /* **Except when the right-hand side assigns.** GLSL short-circuits `&&`, this evaluates both
-   * sides, and the two are the same thing only while the right side does nothing. */
-  glsl_gen_of("(f<f)&&((v3.x=f)<f)");
-  ASSERT_TRUE(g_glsl_gen.error != NULL);
+  /* **`min` is only the same as `&&` while the right side does nothing.** When it assigns, the
+   * right side runs under a narrowed `exec` instead - the lanes the left operand has not
+   * already decided for - and the difference is visible in the words: a `s_and_saveexec_b32`
+   * appears where the pure form has none. */
+  {
+    const uint32_t SAVEEXEC = 60u; /* SOP1 op: `s_and_saveexec_b32 sN, vcc_lo` */
+    int saves = 0;
+    glsl_gen_of("(f<f)&&(f>f)");
+    ASSERT_TRUE(g_glsl_gen.error == NULL);
+    for (uint32_t i = 0; i < g_gen_code.count; i++) {
+      if ((g_gen_words[i] >> 23) == 0x17du && ((g_gen_words[i] >> 8) & 0xffu) == SAVEEXEC) {
+        saves++;
+      }
+    }
+    ASSERT_EQ(saves, 0); /* both sides are pure: `min` and no mask */
+
+    saves = 0;
+    glsl_gen_of("(f<f)&&((v3.x=f)<f)");
+    ASSERT_TRUE(g_glsl_gen.error == NULL);
+    for (uint32_t i = 0; i < g_gen_code.count; i++) {
+      if ((g_gen_words[i] >> 23) == 0x17du && ((g_gen_words[i] >> 8) & 0xffu) == SAVEEXEC) {
+        saves++;
+      }
+    }
+    ASSERT_EQ(saves, 1); /* the assigning right side runs masked */
+  }
 }
 
 /* Declarations get a home, initialisers land in it, and a statement's temporaries are reclaimed

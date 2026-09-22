@@ -427,6 +427,91 @@ void glsl_emit_exec_drop_live(glsl_code_t *c, uint32_t saved) {
     glsl_emit_sop2(c, GLSL_SOP2_ANDN2_B32, saved, saved, GLSL_SREG_EXEC_LO);
 }
 
+/* -------------------------------------------------------------------------
+ * Branches, which an `if` does not need and a loop cannot do without
+ *
+ * Everything above this point is branchless on purpose: a body run with `exec` zero writes
+ * nothing, so an `if` is a mask and not a jump. A **loop** is the case where that stops being
+ * enough. Going round again is not something a mask can express, so the tail of a loop is a
+ * real backward branch - and a backward branch is the one construct in this back end that can
+ * fail in a way worse than drawing wrongly. A condition that never goes false does not produce
+ * a bad frame; it does not produce a frame.
+ *
+ * Words from `tools/shader/branch.s`. SOPP is `101111111 op[22:16] simm16[15:0]`, the same
+ * family as `s_nop` (op 0) and `s_endpgm` (op 1) already in this file - which is the
+ * cross-check that the opcode field is where this thinks it is.
+ * ------------------------------------------------------------------------- */
+
+void glsl_emit_sopp(glsl_code_t *c, uint32_t op, uint32_t simm16) {
+    put(c, (0x17fu << 23) | ((op & 0x7fu) << 16) | (simm16 & 0xffffu));
+}
+
+/* The next word's index - a label, taken before or after emitting the instruction it names. */
+uint32_t glsl_code_here(const glsl_code_t *c) {
+    return c ? c->count : 0u;
+}
+
+/* **`simm16` counts from the instruction *after* the branch, not from the branch.** A branch to
+ * itself is -1 and a branch over nothing is 0; assembling `branch.s` gives -2 for a jump back
+ * over one instruction and +4, +3, +2 for the three forward jumps, which is this rule and not
+ * the tempting one. Getting it off by one lands mid-loop, which is a hang rather than a fault.
+ */
+static uint32_t branch_offset(uint32_t from, uint32_t target) {
+    return (uint32_t)((int32_t)target - (int32_t)from - 1) & 0xffffu;
+}
+
+/* A branch whose target is already behind us: the loop tail. */
+void glsl_emit_branch_back(glsl_code_t *c, uint32_t op, uint32_t target) {
+    glsl_emit_sopp(c, op, branch_offset(glsl_code_here(c), target));
+}
+
+/* A branch whose target is not emitted yet. Returns the word to hand to
+ * `glsl_patch_branch_here` once it is; the placeholder is `s_nop`-shaped so that a stream left
+ * unpatched by a bug stops rather than jumping somewhere arbitrary. */
+uint32_t glsl_emit_branch_fwd(glsl_code_t *c, uint32_t op) {
+    const uint32_t at = glsl_code_here(c);
+    glsl_emit_sopp(c, op, 0u);
+    return at;
+}
+
+/* Fills in a forward branch's offset now that its target is the next word.
+ *
+ * **Returns false rather than patching a lie.** If the buffer overflowed, `count` stopped
+ * advancing somewhere in between, so the distance between the branch and here is not the
+ * distance the hardware will see - and `at` may be past the end entirely. The caller treats a
+ * false as a failed compile, which it already is by the time this can happen.
+ */
+GLboolean glsl_patch_branch_here(glsl_code_t *c, uint32_t at) {
+    if (!c || !c->words || c->overflow || at >= c->count) return GL_FALSE;
+    c->words[at] = (c->words[at] & ~0xffffu) | branch_offset(at, c->count);
+    return GL_TRUE;
+}
+
+/* SOPC: `101111110 op[22:16] ssrc1[15:8] ssrc0[7:0]`, the scalar compare that sets SCC.
+ * Verified from `s_cmp_ge_u32 s20, 0x100` = 0xbf09ff14 followed by the literal 0x00000100, and
+ * `s_cmp_lg_u32 s20, 0` = 0xbf078014 where the 0 rides in the operand as inline constant 0x80. */
+void glsl_emit_sopc(glsl_code_t *c, uint32_t op, uint32_t ssrc0, uint32_t ssrc1) {
+    put(c, (0x17eu << 23) | ((op & 0x7fu) << 16) | ((ssrc1 & 0xffu) << 8) | (ssrc0 & 0xffu));
+}
+
+/* `s_cmp_ge_u32 sN, imm`, taking the inline constants when it can and a trailing literal when
+ * it cannot. The scalar inline range is 0..64 in operands 128..192, so a trip ceiling above 64
+ * costs a second word - which is why the ceiling is a constant this file knows rather than
+ * something the shader computes. */
+void glsl_emit_s_cmp_ge_u32_imm(glsl_code_t *c, uint32_t sreg, uint32_t imm) {
+    if (imm <= 64u) {
+        glsl_emit_sopc(c, GLSL_SOPC_CMP_GE_U32, sreg, GLSL_SRC_INLINE_ZERO + imm);
+    } else {
+        glsl_emit_sopc(c, GLSL_SOPC_CMP_GE_U32, sreg, GLSL_SRC_LITERAL);
+        put(c, imm);
+    }
+}
+
+/* `s_add_u32 sN, sN, 1` - the trip counter's step. From `s_add_u32 s20, s20, 1` = 0x80148114. */
+void glsl_emit_s_inc_u32(glsl_code_t *c, uint32_t sreg) {
+    glsl_emit_sop2(c, GLSL_SOP2_ADD_U32, sreg, sreg, GLSL_SRC_INLINE_ZERO + 1u);
+}
+
 /* `s_mov_b32 exec_lo, 0` - no lane writes anything after this. The export still runs and still
  * carries `done`, which is what retires the wave; a shader that discarded every lane and then
  * skipped its export would not. */

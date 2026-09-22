@@ -63,6 +63,74 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **Loops branch, with `break` and `continue`** (2026-09-22) - the first backward jump this back
+  end emits. Everything else in it is straight-line: an `if` narrows the exec mask and runs both
+  arms, which is cheaper than a jump as well as simpler. Going round again is the one thing a
+  mask cannot express.
+
+  A loop is still **unrolled** where the trip count allows, because a constant counter folds and
+  costs nothing. When it does not - more trips than the unroller writes out, or a `break` or
+  `continue` in the body - the loop takes a real backward branch instead, and carries three
+  scalar masks: the lanes still going round, the mask to restore on the way out, and a **trip
+  guard**. `break` takes lanes out of the first, `continue` leaves it alone and lets the top of
+  the next trip reload `exec` from it, and that one difference is the whole of the two
+  statements. `exec` is reloaded before the *step* as well, which is what makes a `continue`
+  mean "skip the rest of the body" rather than "stop counting" - a lane whose counter stopped
+  would sit on the same value for every remaining trip.
+
+  **The guard is the reason this is safe to emit at all.** A backward branch is the only
+  construct here whose failure mode is worse than a wrong pixel: a condition that never goes
+  false does not draw badly, it does not finish, and the part goes with it. So a branched loop
+  carries a counter that ends it after the number of trips the compiler counted, whatever the
+  lanes are doing. Nothing a shader can write makes it fire - the trip count is known when the
+  shader is compiled, a body that moves its own counter is refused, and a loop whose bound is
+  not constant never gets this far - and it is there for a bug in the generator rather than a
+  bug in the shader. `test_gl2_a_branched_loop_carries_its_trip_guard` checks it ships in the
+  words, because no value test can show something that never happens.
+
+  The words come from `tools/shader/branch.s`, assembled: `s_branch` back over one instruction
+  is `0xbf82fffe`, and the three forward jumps to one label are `+4`, `+3`, `+2`. **`simm16`
+  counts from the instruction after the branch**, so a jump back over one is -2 and not -1;
+  off by one lands mid-loop, which is a hang rather than a fault. Both sides of the scalar
+  inline boundary are pinned too - `s_cmp_ge_u32 s20, 64` is one word and 65 is two, and taking
+  the inline path for 65 would compare against the inline constant *-4.0*.
+
+  A `discard` inside a loop now comes out of the loop's masks as well as the enclosing `if`s'.
+  Without that the loop hands the lane straight back at the top of the next trip and it reaches
+  the export alive - the same resurrection an `if` would do, one construct further out.
+
+  The simulator in `test_gl2.c` executes branches, and runs shaders under an instruction budget:
+  a loop that does not terminate is the one failure with no wrong value to assert on, so it is
+  made into a failing test at a line number rather than a test run that never returns.
+
+- **`&&` and `||` stop early when the right side does something** (2026-09-22). With a pure
+  right operand both sides are computed and `min`/`max` combines them, which is two instructions
+  and no mask; the language's guarantee is only observable when the right side assigns. It now
+  runs under a narrowed `exec` - the lanes the left operand has not already decided - and the
+  result, which starts as the left operand, is overwritten under that same mask. A lane that
+  skipped keeps `false` for `&&` and `true` for `||`, which is what those are. No branch and no
+  combine. `^^` is untouched: GLSL gives it no short-circuit, so a right side that assigns is
+  correct there rather than a problem, and it was being refused for a rule that does not apply
+  to it.
+
+- **Integer comparisons** (2026-09-22), which are the float comparisons of the same registers.
+  An `int` in this back end is a float kept whole by a truncation after every operation, so
+  `i > 5` and `float(i) > 5.0` are the same two values in the same two places and
+  `v_cmp_gt_f32` is the instruction for both. `==` is exact for the same reason, and more
+  reliably than for floats: whole numbers up to 2^24 have one representation each. Past 2^24 the
+  representation stops being exact, which is a limit this back end's integers already have
+  everywhere - `i + 1` is a float add there too.
+
+  Together with the loops above, this is what `gl2-probe`'s `control-flow` and `short-circuit`
+  needed: both were compiled refusals (`GL_INVALID_OPERATION`) on hardware while the software
+  reference ran them. `test_gl2_the_probes_control_flow_shaders_compile_and_run` compiles and
+  runs those two sources exactly as the probe writes them.
+
+- **A loop whose body assigns its own counter is refused** (2026-09-22), in both lowerings. The
+  trip count is worked out when the shader is compiled; `i = i + 2` in the body makes that count
+  wrong without failing, and the unrolled path was already silently wrong about it - each copy
+  bakes its own constant, so the assignment is overwritten at the top of the next one.
+
 - **A GL 2.0 fragment shader compiles to gfx1030** (2026-09-21), and the draw path binds it.
   `src/gl/glsl_ps.c`: the varyings interpolated, the body from `glsl_gen.c`, the colour exported.
   **No console has executed one** - obSCEne's `REQ-20260921T1615Z-4e77` is the gating

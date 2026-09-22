@@ -2191,6 +2191,14 @@ typedef struct {
      * `glsl_gen.c` saves exec masks into s4..s15 - and keeping them apart here means a shader
      * that confused the two would read a zero rather than a plausible float. */
     GLboolean smask[128];
+    /* **And a third view of the same file, as unsigned integers.** A branched loop keeps a trip
+     * counter in a scalar register and compares it with `s_cmp_ge_u32`; that register is never
+     * also a mask, and no mask register is ever also a counter, so the views never disagree
+     * about one register - they are separate because a counter of 0 and a mask of "no lanes"
+     * are the same bit pattern and reading one as the other would look like it worked. */
+    uint32_t scount[128];
+    /* The scalar condition code, which is what `s_cbranch_scc1` reads. */
+    GLboolean scc;
     /* **The whole block `s[0:1]` points at**, laid out the way `gl_gl2_build_block` lays it
      * out: two texture units' descriptors, then the uniforms at 0x80. Built here rather than
      * pointed at `p->values` directly, so that a shader loading its uniforms from the wrong
@@ -2295,10 +2303,25 @@ static void sim_set_mask(sim_t *s, uint32_t reg, GLboolean value) {
     s->smask[reg] = value;
 }
 
+/* **How many instructions a shader may run here before this calls it a hang.**
+ *
+ * Every other failure in this simulator is an assertion on a value. A loop whose condition never
+ * goes false has no wrong value to assert on - it simply does not stop, and on the part it takes
+ * the GPU with it. Bounding the run is what turns that into a failing test at a line number.
+ * Generous: the largest loop these tests write is a few thousand trips of a few dozen
+ * instructions, and nothing legitimate comes near this. */
+#define SIM_MAX_STEPS 2000000
+
 static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float attr[4][4]) {
     const double PI = 3.14159265358979323846;
+    long steps = 0;
     for (uint32_t i = 0; i < count; i++) {
         const uint32_t x = w[i];
+        if (++steps > SIM_MAX_STEPS) {
+            printf("\n    the shader ran %ld instructions without ending - a loop that does not "
+                   "terminate\n", steps);
+            ASSERT_TRUE(0);
+        }
 
         if (x == 0xbf810000u) { s->ended = GL_TRUE; break; }
         if (x == 0xbf800000u) continue;          /* s_nop */
@@ -2352,6 +2375,10 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
                 s->m0_set = GL_TRUE;
             } else if (op == 3u) {               /* s_mov_b32 */
                 sim_set_mask(s, sdst, sim_mask(s, ssrc0));
+                /* A loop's trip counter is started with this same instruction, so the integer
+                 * view is zeroed alongside the mask view. Only the inline zero: nothing else
+                 * this generator emits moves an integer between scalar registers. */
+                if (ssrc0 == 128u && sdst < 128u) s->scount[sdst] = 0u;
             } else if (op == 9u) {
                 /* `s_wqm_b32`. One lane is modelled, so the helper lanes it would turn on are
                  * not here to turn on and this is the identity - including for a zero mask,
@@ -2470,11 +2497,54 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
             s->vcc = (GLboolean)(s->exec && r);
             continue;
         }
+        /* **SOPP: the branches, and the only way this simulator's program counter moves.**
+         * Tested before SOP2, whose top two bits it shares - falling through to that arm is how
+         * an unhandled branch would present, which is an assertion rather than a jump.
+         *
+         * `simm16` counts from the word *after* the branch, so the target is `i + 1 + simm` and
+         * the loop's own `i++` is what the -1 accounts for. */
+        if ((x >> 23) == 0x17fu) {
+            const uint32_t op = (x >> 16) & 0x7fu;
+            const int32_t simm = (int32_t)(int16_t)(uint16_t)(x & 0xffffu);
+            GLboolean take;
+            if (op == 2u) take = GL_TRUE;                      /* s_branch */
+            else if (op == 5u) take = s->scc;                  /* s_cbranch_scc1 */
+            else if (op == 8u) take = (GLboolean)!s->exec;     /* s_cbranch_execz */
+            else { ASSERT_TRUE(0); take = GL_FALSE; }
+            if (take) {
+                const int32_t target = (int32_t)i + 1 + simm;
+                ASSERT_TRUE(target >= 0 && (uint32_t)target <= count);
+                i = (uint32_t)target - 1u;   /* the loop's `i++` lands on `target` */
+            }
+            continue;
+        }
+        /* SOPC: the scalar compare that sets SCC. Also before SOP2, for the same reason. */
+        if ((x >> 23) == 0x17eu) {
+            const uint32_t op = (x >> 16) & 0x7fu;
+            const uint32_t ssrc1 = (x >> 8) & 0xffu;
+            const uint32_t ssrc0 = x & 0xffu;
+            uint32_t rhs;
+            ASSERT_EQ(op, 9u);                                 /* s_cmp_ge_u32 */
+            ASSERT_TRUE(ssrc0 < 128u);
+            if (ssrc1 == 255u) rhs = w[++i];                   /* the trailing literal */
+            else { ASSERT_TRUE(ssrc1 >= 128u && ssrc1 <= 192u); rhs = ssrc1 - 128u; }
+            s->scc = (GLboolean)(s->scount[ssrc0] >= rhs);
+            continue;
+        }
         if ((x >> 30) == 0x2u) {                 /* SOP2 */
             const uint32_t op = (x >> 23) & 0x7fu;
             const uint32_t sdst = (x >> 16) & 0x7fu;
             const uint32_t ssrc1 = (x >> 8) & 0xffu;
             const uint32_t ssrc0 = x & 0xffu;
+            /* `s_add_u32` first: its operands are an integer and an inline constant, neither of
+             * which `sim_mask` can read. **Scalar arithmetic is not exec-masked** - it runs
+             * whatever the lanes are doing, which is exactly what makes a trip guard a guard. */
+            if (op == 0u) {
+                ASSERT_TRUE(sdst < 128u && ssrc0 < 128u);
+                ASSERT_TRUE(ssrc1 >= 128u && ssrc1 <= 192u);
+                s->scount[sdst] = s->scount[ssrc0] + (ssrc1 - 128u);
+                continue;
+            }
             const GLboolean a = sim_mask(s, ssrc0);
             const GLboolean b = sim_mask(s, ssrc1);
             if (op == 14u) {                     /* s_and_b32 */
@@ -2743,10 +2813,314 @@ static void test_gl2_loops_are_unrolled_when_the_count_is_known(void) {
     glContextDestroy(ctx);
 }
 
-/* The loops that are refused, each by name. A generator that branched instead of unrolling
- * would take all of these - and would hang the part on the first one whose condition never
- * goes false, which is why they are refusals and not a different lowering. */
-static void test_gl2_the_back_end_refuses_the_loops_it_cannot_unroll(void) {
+/* **The loops that branch**, which is the only backward jump this back end emits.
+ *
+ * Every value below is one the unrolled path cannot produce: either the loop runs more times
+ * than the unroller copies out, or it leaves early. The single lane this simulator runs cannot
+ * show divergence - two lanes leaving a loop on different trips is a hardware question - but it
+ * shows the whole of the per-lane semantics, which is where the trip counts and the masks are.
+ */
+static void test_gl2_loops_that_branch_run_break_and_continue(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* More trips than the unroller writes out. 200 of them, which no copy count reaches. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 0; i < 200; i++) { total += 1.0; }\n"
+                    "  gl_FragColor = vec4(total * 0.001, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.2f, 1e-6f);
+
+    /* `break` leaves on the sixth trip, so the answer is 5 and not 200. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 0; i < 200; i++) { if (total >= 5.0) break; total += 1.0; }\n"
+                    "  gl_FragColor = vec4(total * 0.1, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-6f);
+
+    /* **`continue` skips the rest of the body and still counts the trip**, which is the one
+     * thing about it that can be got wrong silently.
+     *
+     * The step runs under the loop's own mask, not the body's - a `continue` that left `exec`
+     * cleared over the step would stop the counter for that lane while `n` kept going, so the
+     * loop would take three extra trips to reach 100 and `total` would come out at 100 instead
+     * of 97. Both are plausible numbers; only one of them is this loop. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  float n = 0.0;\n"
+                    "  for (int i = 0; i < 100; i++) {\n"
+                    "    n += 1.0;\n"
+                    "    if (n < 3.5) continue;\n"
+                    "    total += 1.0;\n"
+                    "  }\n"
+                    "  gl_FragColor = vec4(total * 0.01, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.97f, 1e-6f); /* 100 trips, three of them skipped */
+
+    /* A `break` two `if`s deep. It has to take the lane out of both saved masks on the way out,
+     * or the inner restore hands it back and the loop carries on to 200. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 0; i < 200; i++) {\n"
+                    "    total += 1.0;\n"
+                    "    if (total > 2.0) { if (total > 4.0) { break; } }\n"
+                    "  }\n"
+                    "  gl_FragColor = vec4(total * 0.1, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-6f);
+
+    /* **The inner `break` belongs to the inner loop and to no other.** Each pass of the outer
+     * loop runs the inner one to its own `break` at j = 91, adding 91; the outer stops once the
+     * total passes 200, which takes three passes. A `break` that reached the outer loop's mask
+     * as well would leave after the first pass with 91 - a plausible number, and not this one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 0; i < 100; i++) {\n"
+                    "    for (int j = 0; j < 100; j++) {\n"
+                    "      if (float(j) > 90.0) break;\n"
+                    "      total += 1.0;\n"
+                    "    }\n"
+                    "    if (total > 200.0) break;\n"
+                    "  }\n"
+                    "  gl_FragColor = vec4(total * 0.001, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.273f, 1e-6f); /* three passes of 91 */
+
+    /* A condition false on arrival runs the body no times - the `s_cbranch_execz` exit, which
+     * is the one path out of the loop that is taken before anything in it has run. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 7.0;\n"
+                    "  for (int i = 0; i < 0; i++) { if (total > 0.0) break; total = 0.0; }\n"
+                    "  gl_FragColor = vec4(total * 0.1, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.7f, 1e-6f);
+
+    /* **A `discard` inside a loop has to survive the next trip.** The loop reloads `exec` from
+     * its active mask at the top of every trip, so a discarded lane left in that mask is handed
+     * straight back and reaches the export alive - the fragment would be written rather than
+     * thrown away, and the colour would be whatever the loop finished with. */
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING,
+                              "void main() {\n"
+                              "  float total = 0.0;\n"
+                              "  for (int i = 0; i < 200; i++) {\n"
+                              "    total += 1.0;\n"
+                              "    if (total > 3.5) discard;\n"
+                              "  }\n"
+                              "  gl_FragColor = vec4(total * 0.1, 0.0, 0.0, 1.0);\n"
+                              "}\n",
+                              attr, o),
+              GL_FALSE);
+
+    glContextDestroy(ctx);
+}
+
+/* **The two shaders gl2-probe runs on the console for `control-flow` and `short-circuit`.**
+ *
+ * Both were refused by the compiled back end until now - the first for its trip count, the
+ * second for its right operand - so the probe reported `0x0502` for each on hardware while the
+ * software reference ran them. These are those exact sources, compiled and run here, so the
+ * host says what the console is about to. */
+static void test_gl2_the_probes_control_flow_shaders_compile_and_run(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* `control-flow`: 99 trips with a `break` at 5 and a `continue` on the way, over integer
+     * comparisons - which are the float comparison of the same two registers, an `int` here
+     * being a float kept whole. 1+2+3+4+5 = 15, and 15 * 0.05 = 0.75. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 1; i < 100; i++) {\n"
+                    "    if (i > 5) break;\n"
+                    "    if (i == 3) { total += float(i); continue; }\n"
+                    "    total += float(i);\n"
+                    "  }\n"
+                    "  gl_FragColor = vec4(total * 0.05, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, 1e-6f);
+
+    /* `short-circuit`: the right operand writes through an `out` parameter, so whether it ran
+     * is visible in the answer rather than only in the timing. `never && mark(a)` must leave
+     * `a` at zero and `always || mark(b)` must leave `b` at zero; an implementation that
+     * evaluated both sides sets each to one and gives a different colour. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "bool mark(out float touched) { touched = 1.0; return true; }\n"
+                    "void main() {\n"
+                    "  float a = 0.0;\n"
+                    "  float b = 0.0;\n"
+                    "  bool never = false;\n"
+                    "  bool always = true;\n"
+                    "  if (never && mark(a)) { a = 1.0; }\n"
+                    "  if (always || mark(b)) { b = 0.0; }\n"
+                    "  gl_FragColor = vec4(a, b, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.0f, 1e-6f);
+
+    /* **And the other way round, so the test is not passed by never running the right side at
+     * all.** Here the left operand does not decide, so the right one must run and its mark must
+     * land. A back end that dropped the right side would give zero for both. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "bool mark(out float touched) { touched = 1.0; return true; }\n"
+                    "void main() {\n"
+                    "  float a = 0.0;\n"
+                    "  float b = 0.0;\n"
+                    "  bool always = true;\n"
+                    "  bool never = false;\n"
+                    "  bool r = always && mark(a);\n"
+                    "  bool s = never || mark(b);\n"
+                    "  gl_FragColor = vec4(a, b, (r && s) ? 1.0 : 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f);
+    ASSERT_NEAR(o[1], 1.0f, 1e-6f);
+    ASSERT_NEAR(o[2], 1.0f, 1e-6f);
+
+    /* `^^` has no short-circuit in the language, so a right side that assigns is correct rather
+     * than a problem - both sides always run and the mark always lands. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "bool mark(out float touched) { touched = 1.0; return true; }\n"
+                    "void main() {\n"
+                    "  float a = 0.0;\n"
+                    "  bool never = false;\n"
+                    "  bool r = never ^^ mark(a);\n"
+                    "  gl_FragColor = vec4(a, r ? 1.0 : 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f);
+    ASSERT_NEAR(o[1], 1.0f, 1e-6f);
+
+    glContextDestroy(ctx);
+}
+
+/* Integer comparisons, which are the float comparison of the same registers. */
+static void test_gl2_integer_comparisons_are_the_float_ones(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* Each channel is a different operator over values that make the wrong answer a different
+     * colour. `==` on integers is exact - whole numbers have one representation each - which is
+     * the thing `==` on floats cannot promise. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  int a = 7;\n"
+                    "  int b = 3;\n"
+                    "  float r = (a > b) ? 1.0 : 0.0;\n"
+                    "  float g = (a - 4 == b) ? 1.0 : 0.0;\n"
+                    "  float bl = (b >= a) ? 1.0 : 0.0;\n"
+                    "  gl_FragColor = vec4(r, g, bl, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f);
+    ASSERT_NEAR(o[1], 1.0f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.0f, 1e-6f);
+
+    /* A negative integer, where truncation towards zero and the comparison have to agree - the
+     * division below is -7/2 = -3, not -4, and -3 > -4. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  int q = -7 / 2;\n"
+                    "  float r = (q == -3) ? 1.0 : 0.0;\n"
+                    "  float g = (q < 0) ? 1.0 : 0.0;\n"
+                    "  gl_FragColor = vec4(r, g, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f);
+    ASSERT_NEAR(o[1], 1.0f, 1e-6f);
+
+    glContextDestroy(ctx);
+}
+
+/* **The trip guard ships in the words**, which no value test can show.
+ *
+ * The guard is unreachable from GLSL by construction: the trip count is known when the shader
+ * is compiled, a body that moves the counter is refused, and a loop whose bound is not constant
+ * never gets here. So nothing a shader can write makes it fire - it is there for a bug in this
+ * generator, and the only way to check it is present is to look. */
+static void test_gl2_a_branched_loop_carries_its_trip_guard(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+    uint32_t words[512];
+    uint32_t count = 0u, vgprs = 0u;
+    char log[256] = {0};
+
+    const GLuint prog = linked_program(VS_ONE_VARYING,
+                                       "void main() {\n"
+                                       "  float total = 0.0;\n"
+                                       "  for (int i = 0; i < 200; i++) { total += 1.0; }\n"
+                                       "  gl_FragColor = vec4(total * 0.001, 0.0, 0.0, 1.0);\n"
+                                       "}\n");
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, prog), words, 512u, &count, &vgprs,
+                                          NULL, NULL, log, sizeof(log)),
+              GL_TRUE);
+
+    int backward = 0, guards = 0, compares = 0;
+    uint32_t back_at = 0u, back_target = 0u;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t x = words[i];
+        if ((x >> 23) == 0x17fu) {
+            const uint32_t op = (x >> 16) & 0x7fu;
+            const int32_t simm = (int32_t)(int16_t)(uint16_t)(x & 0xffffu);
+            if (op == 2u && simm < 0) {
+                backward++;
+                back_at = i;
+                back_target = (uint32_t)((int32_t)i + 1 + simm);
+            }
+            if (op == 5u) guards++;                      /* s_cbranch_scc1 */
+        }
+        if ((x >> 23) == 0x17eu && ((x >> 16) & 0x7fu) == 9u) {
+            compares++;                                  /* s_cmp_ge_u32 */
+            i++;                                         /* its literal: 200 does not inline */
+        }
+    }
+    ASSERT_EQ(backward, 1);   /* one loop, one way round */
+    ASSERT_EQ(compares, 1);
+    ASSERT_EQ(guards, 1);
+    /* The jump goes back into the shader, not past its start, and not forward. */
+    ASSERT_TRUE(back_target < back_at);
+    /* And the ceiling is the trip count this loop was measured to have, not a round number. */
+    ASSERT_EQ(words[count - 1u], 0xbf810000u); /* still ends properly */
+    {
+        GLboolean found = GL_FALSE;
+        for (uint32_t i = 0; i + 1u < count; i++) {
+            if ((words[i] >> 23) == 0x17eu && (words[i] & 0xff00u) == 0xff00u) {
+                ASSERT_EQ(words[i + 1u], 200u);
+                found = GL_TRUE;
+            }
+        }
+        ASSERT_EQ(found, GL_TRUE);
+    }
+
+    glContextDestroy(ctx);
+}
+
+/* The loops that are still refused, each by name.
+ *
+ * The list is shorter than it was: a loop with more trips than the unroller writes out, and one
+ * with a `break` or a `continue`, both used to be here and are now generated as real branches.
+ * What is left are the loops where the refusal is not about the lowering but about the **trip
+ * count not being knowable** - and that number is what the branched loop's guard is made of, so
+ * a loop without one cannot be bounded and is the case that would hang the part. */
+static void test_gl2_the_back_end_refuses_the_loops_it_cannot_bound(void) {
     void *ctx = gl2_context();
     gl_context_t *c = (gl_context_t *)ctx;
     uint32_t words[256];
@@ -2754,14 +3128,8 @@ static void test_gl2_the_back_end_refuses_the_loops_it_cannot_unroll(void) {
     char log[256] = {0};
 
     static const struct { const char *fs; const char *wants; } cases[] = {
-        /* More trips than the unroller writes out - and the count is why, not the shape. */
-        {"void main() {\n"
-         "  float t = 0.0;\n"
-         "  for (int i = 0; i < 1000; i++) { t += 1.0; }\n"
-         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
-         "}\n",
-         "unrolls"},
-        /* A bound that is not known when the shader is compiled. */
+        /* A bound that is not known when the shader is compiled. **This is the one the guard
+         * cannot be built for**, and so the one that would genuinely hang. */
         {"uniform float lim;\n"
          "void main() {\n"
          "  float t = 0.0;\n"
@@ -2769,24 +3137,46 @@ static void test_gl2_the_back_end_refuses_the_loops_it_cannot_unroll(void) {
          "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
          "}\n",
          "constant"},
-        /* `break` needs a mask carried through the rest of the loop. */
+        /* More trips than the generator will put a ceiling on. Branching does not make this one
+         * safe: a guard has to hold a number, and past some size the number stops being a
+         * bound worth having. */
         {"void main() {\n"
          "  float t = 0.0;\n"
-         "  for (int i = 0; i < 4; i++) { if (t > 1.0) break; t += 1.0; }\n"
+         "  for (int i = 0; i < 100000; i++) { t += 1.0; }\n"
          "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
          "}\n",
-         "break"},
-        /* **And the loop that is named is the one with the `break` in it.** The clean loop on
-         * line 3 compiles; the one on line 4 does not, so the message begins "4:". A check that
-         * looked for a `break` anywhere in the shader refuses line 3 first and reports that -
-         * a true sentence about the wrong loop, which is worse than no sentence. */
+         "bound"},
+        /* A body that moves its own counter. The trip count is worked out at compile time and
+         * this makes it wrong - silently, in both lowerings, which is why it is refused in
+         * neither one of them but before the choice between them. */
+        {"void main() {\n"
+         "  float t = 0.0;\n"
+         "  for (int i = 0; i < 4; i++) { t += 1.0; i = i + 2; }\n"
+         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+         "}\n",
+         "assigns its own counter"},
+        /* **And the loop that is named is the one at fault.** The clean loop on line 3
+         * compiles; the one on line 4 does not, so the message begins "4:". A check that swept
+         * the whole shader rather than this loop's own body refuses line 3 first and reports
+         * that - a true sentence about the wrong loop, which is worse than no sentence. */
         {"void main() {\n"
          "  float t = 0.0;\n"
          "  for (int i = 0; i < 2; i++) { t += 1.0; }\n"
-         "  for (int j = 0; j < 2; j++) { if (t > 0.0) break; t += 1.0; }\n"
+         "  for (int j = 0; j < 2; j++) { t += 1.0; j = j - 1; }\n"
          "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
          "}\n",
          "4:"},
+        /* Branched loops nested deeper than the scalar registers set aside for their masks.
+         * Each of these three has a `break`, so each one branches; three loops that unrolled
+         * would cost nothing here at all. */
+        {"void main() {\n"
+         "  float t = 0.0;\n"
+         "  for (int i = 0; i < 2; i++) { if (t > 9.0) break;\n"
+         "    for (int j = 0; j < 2; j++) { if (t > 9.0) break;\n"
+         "      for (int k = 0; k < 2; k++) { if (t > 9.0) break; t += 1.0; } } }\n"
+         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+         "}\n",
+         "nest deeper"},
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -4192,7 +4582,11 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
     RUN_TEST(test_gl2_loops_are_unrolled_when_the_count_is_known);
-    RUN_TEST(test_gl2_the_back_end_refuses_the_loops_it_cannot_unroll);
+    RUN_TEST(test_gl2_loops_that_branch_run_break_and_continue);
+    RUN_TEST(test_gl2_the_probes_control_flow_shaders_compile_and_run);
+    RUN_TEST(test_gl2_integer_comparisons_are_the_float_ones);
+    RUN_TEST(test_gl2_a_branched_loop_carries_its_trip_guard);
+    RUN_TEST(test_gl2_the_back_end_refuses_the_loops_it_cannot_bound);
     RUN_TEST(test_gl2_derivatives_are_quad_reads_under_whole_quad_mode);
     RUN_TEST(test_gl2_frag_depth_exports_before_the_colour);
     RUN_TEST(test_gl2_vector_relationals_reduce_a_bvec);

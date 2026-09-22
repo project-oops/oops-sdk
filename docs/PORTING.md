@@ -52,15 +52,26 @@ instructions, the draw path binds them, and obSCEne's `REQ-20260921T1615Z-4e77` 
 `REQ-20260921T1730Z-6c0d` measured a generated shader retiring, its interpolated parameters
 arriving bit for bit, and its uniform block loading intact.
 
-**What a compiled fragment shader can do** is arithmetic, swizzle reads and writes,
-constructors, the built-in library, file-scope `const`s, uniforms, `texture2D` through up to two
-samplers, comparisons, `?:`, `if`/`else` and `discard`. What it cannot: **loops**, because a mask
-cannot express a per-lane trip count and a real branch is needed; the projective, cube, volume
-and shadow texture lookups; user-defined functions; integer arithmetic; and the inverse
-trigonometric functions, where the only lowering is a polynomial of somebody's choosing. A shader
-the back end will not take is refused with a sentence naming what is missing, and still runs on
-the software path - the draw is what fails, with `GL_INVALID_OPERATION`, rather than quietly
-drawing something else. A GL 1.x port is unaffected: it never binds a program.
+**What a compiled fragment shader can do** is arithmetic on floats and integers, swizzle reads
+and writes, constructors, the built-in library, file-scope `const`s, uniforms, `texture2D`
+through up to two samplers, comparisons, `?:`, `if`/`else`, `discard`, user-defined functions -
+inlined, since there is no call instruction here - and **loops, including `break` and
+`continue`**.
+
+A loop is unrolled where the trip count allows and branched where it does not, and a branched
+one carries a trip guard: a counter that ends it after the number of trips the compiler counted,
+whatever the lanes are doing. That guard is why loops are here at all. A loop whose condition
+never goes false does not draw the wrong colour - it does not finish, and takes the GPU with it -
+so the one thing still refused is a loop whose **bound is not knowable when the shader is
+compiled**, because that is the loop no guard can be built for. `for (int i = 0; i < 8; i++)`
+and `for (int i = 0; i < 5000; i++)` both compile; a bound that is a uniform does not, and says
+so.
+
+What it still cannot: the projective, cube, volume and shadow texture lookups, and the inverse
+trigonometric functions, where the only lowering is a polynomial of somebody's choosing. A
+shader the back end will not take is refused with a sentence naming what is missing, and still
+runs on the software path - the draw is what fails, with `GL_INVALID_OPERATION`, rather than
+quietly drawing something else. A GL 1.x port is unaffected: it never binds a program.
 
 **`#version 120` is a different language from `#version 110`, and the number decides which you
 get.** 1.20 converts `int` to `float` implicitly, so `pos * 2` and `clamp(v, 0, 1)` are shaders;
@@ -164,8 +175,9 @@ part, so the quotient is computed from a reciprocal and then corrected, which is
 
 | Refused | What you get, and what to write instead |
 |---|---|
-| A loop whose trip count is not known at compile time | Loops are **unrolled**, not branched: a loop whose condition never goes false hangs the part rather than drawing the wrong colour, and that is not a failure this SDK will risk on your behalf. `for (int i = 0; i < 8; i++)` unrolls; a bound that is a uniform does not, and says so. The limit is 64 trips, and the message carries that number |
-| `break` and `continue` | Each needs the exec mask carried through the rest of the loop. Write the loop without them - a `if (cond) { ... }` around the rest of the body is the usual shape and unrolls fine |
+| A loop whose trip count is not known when the shader is compiled | A loop that branches is bounded by a **trip guard**, and that guard's ceiling is the trip count counted at compile time. A loop without one - `for (int i = 0; float(i) < someUniform; i++)` - cannot be given a ceiling, and a loop whose condition never goes false hangs the part rather than drawing the wrong colour. Give the loop a constant bound and `break` out of it early instead: that shape compiles and does the same thing |
+| A loop whose body assigns its own counter | The trip count is worked out when the shader is compiled, and `i = i + 2` inside the body makes that count wrong without failing - the loop would silently run a different number of times. Move the counter with the loop's own step, or use a second variable |
+| More than two branched loops nested inside one another | Each keeps three masks in scalar registers. Loops that unroll cost nothing here, so this is only reached by three nested loops that *all* branch |
 | An early `return` from a function | Same reason. A function whose body ends in its `return` is generated; one that returns from inside an `if` is not |
 | A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
 | `asin`, `acos`, `atan`, `refract` | No instruction on this part, and a polynomial of unmeasured accuracy is not written in their place. Each is refused **by name**, so you are told which one |

@@ -515,12 +515,45 @@ void glsl_emit_s_waitcnt_lgkm(glsl_code_t *c);
 #define GLSL_SOP1_AND_SAVEEXEC_B32 60u
 #define GLSL_SOP2_AND_B32          14u
 #define GLSL_SOP2_ANDN2_B32        20u
+/* `s_add_u32 s20, s20, 1` = 0x80148114, from `tools/shader/branch.s` - the trip counter's step. */
+#define GLSL_SOP2_ADD_U32           0u
 
 void glsl_emit_sop1(glsl_code_t *c, uint32_t op, uint32_t sdst, uint32_t ssrc0);
 void glsl_emit_sop2(glsl_code_t *c, uint32_t op, uint32_t sdst, uint32_t ssrc0, uint32_t ssrc1);
 /* An `if`'s four moments. See `glsl_emit.c` - and note that there is no branch among them:
- * a body run with `exec` zero writes nothing, so skipping it is a saving and not a requirement,
- * and not needing a branch is what lets the generator emit straight through with no labels. */
+ * a body run with `exec` zero writes nothing, so skipping it is a saving and not a requirement.
+ * A **loop** is where that stops being enough, and the branches below are for that alone. */
+
+/* -------------------------------------------------------------------------
+ * Branches
+ *
+ * SOPP: `101111111 op[22:16] simm16[15:0]`, the family `s_nop` and `s_endpgm` are already in.
+ * Words from `tools/shader/branch.s`: `s_branch` back over one instruction = 0xbf82fffe,
+ * `s_cbranch_execz` +4 = 0xbf880004, `s_cbranch_scc1` +3 = 0xbf850003.
+ * ------------------------------------------------------------------------- */
+#define GLSL_SOPP_BRANCH         2u
+#define GLSL_SOPP_CBRANCH_SCC1   5u
+/* Taken when every lane has left - what keeps a narrowed loop from running its body for nobody. */
+#define GLSL_SOPP_CBRANCH_EXECZ  8u
+
+/* SOPC: `101111110 op[22:16] ssrc1[15:8] ssrc0[7:0]`, from `s_cmp_ge_u32 s20, 0x100`
+ * = 0xbf09ff14 + literal. Sets SCC, which `s_cbranch_scc1` reads. */
+#define GLSL_SOPC_CMP_GE_U32     9u
+
+void glsl_emit_sopp(glsl_code_t *c, uint32_t op, uint32_t simm16);
+void glsl_emit_sopc(glsl_code_t *c, uint32_t op, uint32_t ssrc0, uint32_t ssrc1);
+/* The index the next emitted word will take - a label. */
+uint32_t glsl_code_here(const glsl_code_t *c);
+/* A branch to a word already emitted. `target` comes from an earlier `glsl_code_here`. */
+void glsl_emit_branch_back(glsl_code_t *c, uint32_t op, uint32_t target);
+/* A branch to a word not emitted yet: returns the index to pass to `glsl_patch_branch_here`. */
+uint32_t glsl_emit_branch_fwd(glsl_code_t *c, uint32_t op);
+/* Points a forward branch at the next word. **False means the offset could not be trusted** -
+ * the buffer overflowed in between - and is a failed compile, never something to ignore. */
+GLboolean glsl_patch_branch_here(glsl_code_t *c, uint32_t at);
+/* The trip guard: a counter that ends a loop whatever the lanes are doing. */
+void glsl_emit_s_inc_u32(glsl_code_t *c, uint32_t sreg);
+void glsl_emit_s_cmp_ge_u32_imm(glsl_code_t *c, uint32_t sreg, uint32_t imm);
 /* MIMG opcodes, from `tools/shader/gl2-fragment.s`: `image_sample` = 0xf0800f08 and
  * `image_sample_lz` = 0xf09c0f08, the opcode being bits 24:18 of the first word.
  *
@@ -655,6 +688,7 @@ void glsl_emit_dpp_sub(glsl_code_t *c, uint32_t dst, uint32_t src0, uint32_t vsr
  *     s16..s27  texture set 1
  *     s28       the live-lane mask, kept across a whole-quad section
  *     s29..s40  an `if`'s saved exec mask, one a nesting level
+ *     s41..s46  a **branched** loop's three masks, one set a nesting level
  *     s48..s79  the uniforms, two `s_load_dwordx16`s
  *
  * **Every group above starts on a multiple of four, and that is the rule** - not the width. A
@@ -673,6 +707,28 @@ void glsl_emit_dpp_sub(glsl_code_t *c, uint32_t dst, uint32_t src0, uint32_t vsr
 #define GLSL_GEN_LIVE_SGPR       28u
 #define GLSL_GEN_EXEC_SGPR_BASE  29u
 #define GLSL_GEN_MAX_EXEC_DEPTH  12
+/*
+ * **A loop that branches needs three masks, where an `if` needs one.**
+ *
+ *   `active`  the lanes still going round. The condition narrows it each trip and `break` takes
+ *             lanes out of it for good. `exec` is reloaded from it at the top of every trip,
+ *             which is also what undoes a `continue`.
+ *   `entry`   the mask the loop was entered with, and what `exec` goes back to on the way out.
+ *             Distinct from `active` because a lane that broke out, or whose condition went
+ *             false, still runs the statements after the loop - and `active` no longer has it.
+ *   `trip`    the trip guard's counter. See `gen_for_branched`.
+ *
+ * Two levels, because these are levels of *branched* loop: one the unroller could not finish.
+ * An unrolled loop nested inside one costs nothing here, so two is deeper than it reads.
+ */
+#define GLSL_GEN_LOOP_SGPR_BASE  41u
+#define GLSL_GEN_LOOP_SGPR_COUNT  3u
+#define GLSL_GEN_MAX_LOOP_DEPTH   2
+/* A branched loop always ends. The ceiling is the trip count this generator counted statically,
+ * so on a shader that does what it says the guard never fires; it is there for the one that does
+ * not. Counting stops here, and a loop asking for more trips than this is refused - an unbounded
+ * ceiling would be a guard that permits the hang it exists to prevent. */
+#define GLSL_GEN_MAX_TRIPS       65536
 /* How deep user-defined calls may nest before the generator refuses. Eight is past anything a
  * fragment shader written by hand does, and short enough that a shader calling itself is a
  * message rather than a hang. */
@@ -701,6 +757,13 @@ typedef struct {
     /* How many enclosing `if`s have saved the exec mask. `discard` reads it: a discarded lane
      * has to come out of every one of those saves, or the innermost restore brings it back. */
     int exec_depth;
+    /* How many **branched** loops enclose this point, and for each one the `exec_depth` it was
+     * entered at. `break` and `continue` need both: the masks they act on come from the depth,
+     * and the enclosing `if`s they have to take the lane out of are the ones from the loop's
+     * entry depth up to here - not from zero, because an `if` *outside* the loop must still
+     * restore the lane once the loop is over. */
+    int loop_depth;
+    int loop_exec_depth[GLSL_GEN_MAX_LOOP_DEPTH];
     /* **How many user-defined calls are being inlined around this point.** A call has no call
      * instruction here - the body is generated where the call appears - so this is the only
      * thing standing between a shader that calls itself and a generator that never returns.

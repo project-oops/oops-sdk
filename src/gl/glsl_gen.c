@@ -39,6 +39,7 @@ void glsl_gen_init(glsl_gen_t *g, glsl_ast_t *ast, glsl_sema_t *sema, glsl_code_
     g->high_water = 0u;
     g->var_count = 0;
     g->exec_depth = 0;
+    g->loop_depth = 0;
     g->inline_depth = 0;
     g->wqm = GL_FALSE;
     g->sampler_count = 0;
@@ -392,12 +393,62 @@ static glsl_value_t gen_compare(glsl_gen_t *g, glsl_token_type_t op, glsl_value_
  * evaluated when the language says it would not be. Division by zero on the dead side is not a
  * reason to refuse: it produces an infinity that is then discarded, exactly as on any other
  * implementation that vectorises this. */
+/*
+ * **`&&` and `||` stop early, and the exec mask is how.**
+ *
+ * With a pure right operand there is nothing to stop: both sides are computed and `min`/`max`
+ * combines them, which is two instructions and no mask. The language's guarantee only becomes
+ * observable when the right side *does* something - assigns, or calls a function that does -
+ * and then evaluating it anyway is a visible difference rather than a wasted multiply.
+ *
+ * So for that case the right side runs under a narrowed `exec`: the lanes where the left
+ * operand has not already decided the answer. The result starts as the left operand and is
+ * overwritten, under that same mask, by the right - so a lane that skipped keeps `false` for
+ * `&&` and `true` for `||`, which is what those are. No branch and no combine: the mask does
+ * the choosing and the move does the rest.
+ *
+ * `^^` is not here. GLSL gives it no short-circuit - both sides always run - so a right side
+ * that assigns is correct rather than a problem, and it takes the ordinary path below.
+ */
 static glsl_value_t gen_logical(glsl_gen_t *g, int32_t node) {
     const glsl_node_t *n = &g->ast->nodes[node];
-    if (has_side_effect(g->ast, n->b)) {
-        return gen_fail(g, "the right of a && or || assigns, and this evaluates both sides - "
-                           "so it would run when the language says it does not", node);
+    const GLboolean shortcut =
+        (GLboolean)(n->op == GLSL_TOK_AND_AND || n->op == GLSL_TOK_OR_OR);
+
+    if (shortcut && has_side_effect(g->ast, n->b)) {
+        if (g->exec_depth >= GLSL_GEN_MAX_EXEC_DEPTH) {
+            return gen_fail(g, "the conditionals in this shader nest deeper than the scalar "
+                               "registers set aside for them", node);
+        }
+        const uint32_t saved = GLSL_GEN_EXEC_SGPR_BASE + (uint32_t)g->exec_depth;
+        glsl_value_t a = gen_expr(g, n->a);
+        if (is_bad(a)) return a;
+        if (a.count != 1) return gen_fail(g, "&& and || take single bools", node);
+        glsl_value_t d = gen_alloc(g, 1, node);
+        if (is_bad(d)) return d;
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero)) return zero;
+        /* The answer if the right side never runs - the left operand itself. */
+        glsl_emit_mov(g->code, d.base, a.base);
+        /* `&&` carries on where the left is true, `||` where it is false. */
+        glsl_emit_cmp(g->code,
+                      (n->op == GLSL_TOK_AND_AND) ? GLSL_VOPC_NEQ_F32 : GLSL_VOPC_EQ_F32,
+                      a.base, zero.base);
+        glsl_emit_exec_save_and_vcc(g->code, saved);
+        g->exec_depth++;
+        glsl_value_t b = gen_expr(g, n->b);
+        g->exec_depth--;
+        if (is_bad(b)) return b;
+        if (b.count != 1) {
+            (void)gen_fail(g, "&& and || take single bools", node);
+            return b;
+        }
+        /* Under the mask, so only the lanes that ran the right side take its answer. */
+        glsl_emit_mov(g->code, d.base, b.base);
+        glsl_emit_exec_restore(g->code, saved);
+        return d;
     }
+
     glsl_value_t a = gen_expr(g, n->a);
     if (is_bad(a)) return a;
     glsl_value_t b = gen_expr(g, n->b);
@@ -434,13 +485,26 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
 
     if (op == GLSL_TOK_LT || op == GLSL_TOK_GT || op == GLSL_TOK_LE || op == GLSL_TOK_GE ||
         op == GLSL_TOK_EQ || op == GLSL_TOK_NE) {
+        /* **An integer comparison is the float comparison, because an integer here is a
+         * float.** `glsl_exec.c` and this generator both hold an `int` as a float kept whole by
+         * a truncation after every operation, so `i > 5` and `float(i) > 5.0` are the same two
+         * values in the same two registers - and `v_cmp_gt_f32` is the instruction for both.
+         * There is no integer compare to verify and nothing to approximate.
+         *
+         * `==` is exact for the same reason, and more reliably than it is for floats: whole
+         * numbers up to 2^24 have one representation each. Past 2^24 the representation itself
+         * stops being exact, which is a limit this back end's integers already have everywhere
+         * - `i + 1` is a float add there too.
+         *
+         * Matrices stay out: GLSL has no relational operator on them, and `==` on one would be
+         * a reduction over every element rather than a comparison. */
         const glsl_type_t clt = glsl_type_of(g->sema, n->a);
         const glsl_type_t crt = glsl_type_of(g->sema, n->b);
-        if ((!is_float_family(clt) && !is_bool_family(clt)) ||
-            (!is_float_family(crt) && !is_bool_family(crt)) ||
+        if ((!is_float_family(clt) && !is_bool_family(clt) && !is_int_family(clt)) ||
+            (!is_float_family(crt) && !is_bool_family(crt) && !is_int_family(crt)) ||
             is_matrix(clt) || is_matrix(crt)) {
-            return gen_fail(g, "only float, vector and bool comparisons are generated; the "
-                                "integer ones have no verified instruction here", node);
+            return gen_fail(g, "only float, int, vector and bool comparisons are generated; a "
+                                "matrix has no comparison here", node);
         }
         glsl_value_t ca = gen_expr(g, n->a);
         if (is_bad(ca)) return ca;
@@ -2080,6 +2144,199 @@ static GLboolean has_loop_flow(const glsl_gen_t *g, int32_t node) {
                        has_loop_flow(g, n->c) || has_loop_flow(g, n->d));
 }
 
+/* Whether anything in this statement assigns to `name` - by `=`, by a compound assignment, or
+ * by `++`/`--`.
+ *
+ * **The trip count is counted here, and a body that moves the counter makes that count a
+ * lie.** Both paths below depend on it: the unrolled one bakes a constant per copy, so an
+ * assignment to the counter is overwritten at the top of the next copy and the loop runs the
+ * wrong number of times; the branched one derives its trip guard's ceiling from it, so the
+ * guard would cut a longer loop short. Neither fails loudly, which is why this refuses instead.
+ *
+ * Siblings are followed in `{ ... }` only, for the reason `has_loop_flow` gives. A missed case
+ * here is a wrong answer rather than a refusal, so it is deliberately blunt: a nested loop
+ * declaring its own `i` is walked into and reported, which refuses a shader that is in fact
+ * fine. That is the direction to be wrong in. */
+static GLboolean assigns_name(const glsl_gen_t *g, int32_t node, const char *name, size_t len) {
+    if (node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (n->kind == GLSL_NODE_ASSIGN && is_name(g, n->a, name, len)) return GL_TRUE;
+    if ((n->kind == GLSL_NODE_POSTFIX || n->kind == GLSL_NODE_UNARY) &&
+        (n->op == GLSL_TOK_INC || n->op == GLSL_TOK_DEC) && is_name(g, n->a, name, len)) {
+        return GL_TRUE;
+    }
+    if (n->kind == GLSL_NODE_COMPOUND) {
+        for (int32_t s = n->a; s != GLSL_NO_NODE; s = g->ast->nodes[s].sibling) {
+            if (assigns_name(g, s, name, len)) return GL_TRUE;
+        }
+        return GL_FALSE;
+    }
+    return (GLboolean)(assigns_name(g, n->a, name, len) || assigns_name(g, n->b, name, len) ||
+                       assigns_name(g, n->c, name, len) || assigns_name(g, n->d, name, len));
+}
+
+/* The three scalar registers a branched loop at nesting level `d` keeps its masks in. */
+static uint32_t loop_active_sgpr(int d) {
+    return GLSL_GEN_LOOP_SGPR_BASE + (uint32_t)d * GLSL_GEN_LOOP_SGPR_COUNT;
+}
+static uint32_t loop_entry_sgpr(int d) { return loop_active_sgpr(d) + 1u; }
+static uint32_t loop_trip_sgpr(int d)  { return loop_active_sgpr(d) + 2u; }
+
+/*
+ * **A loop the unroller could not finish: the one place this back end branches.**
+ *
+ * Everything else here is straight-line - an `if` narrows the exec mask and runs both arms, and
+ * that is cheaper than a jump as well as simpler. Going round again is the one thing a mask
+ * cannot express, so this is a real backward branch, and a real backward branch is the only
+ * construct in the generator whose failure mode is worse than a wrong pixel. A condition that
+ * never goes false does not draw badly; it does not finish, and the part goes with it.
+ *
+ * So the shape is:
+ *
+ *       v_mov_b32  v_i, start          the counter, a register now rather than a constant
+ *       s_mov_b32  s_entry,  exec_lo   what the lanes go back to on the way out
+ *       s_mov_b32  s_active, exec_lo   the lanes still going round
+ *       s_mov_b32  s_trip,   0
+ *   top:
+ *       <condition into vcc_lo>        re-evaluated per trip, per lane
+ *       s_and_b32  s_active, s_active, vcc_lo
+ *       s_mov_b32  exec_lo, s_active
+ *       s_cbranch_execz exit           nobody left: skip the body rather than mask it away
+ *       <body>                         may narrow exec further, may break, may continue
+ *       s_mov_b32  exec_lo, s_active   **undoes a `continue` before the step runs**
+ *       <step>
+ *       s_add_u32  s_trip, s_trip, 1
+ *       s_cmp_ge_u32 s_trip, trips
+ *       s_cbranch_scc1 exit            the guard
+ *       s_branch   top
+ *   exit:
+ *       s_mov_b32  exec_lo, s_entry
+ *
+ * Three details are each the whole difference between this working and not:
+ *
+ * **`exec` is reloaded from `s_active` before the step, not after the condition only.** A
+ * `continue` clears `exec` for the rest of the trip; if the step ran under that mask the lane's
+ * counter would not move, and it would sit on the same value for every remaining trip. The
+ * reload is what makes `continue` mean "skip the rest of the body" rather than "stop counting".
+ *
+ * **`break` comes out of `s_active`, `continue` does not.** That is the entire difference
+ * between them here, and it is why neither needs a branch of its own.
+ *
+ * **The guard's ceiling is the trip count counted statically**, so a shader that does what it
+ * says never reaches it. It is not a safety margin over that number - it is that number, and a
+ * loop that wanted more has already been refused by the caller.
+ */
+static GLboolean gen_for_branched(glsl_gen_t *g, int32_t node, const glsl_node_t *decl,
+                                  glsl_type_t ind_t, double start, double limit, double step,
+                                  int cond_op, int trips) {
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (g->loop_depth >= GLSL_GEN_MAX_LOOP_DEPTH) {
+        (void)gen_fail(g, "the branched loops in this shader nest deeper than the scalar "
+                          "registers set aside for them", node);
+        return GL_FALSE;
+    }
+    const int d = g->loop_depth;
+    const uint32_t s_active = loop_active_sgpr(d);
+    const uint32_t s_entry  = loop_entry_sgpr(d);
+    const uint32_t s_trip   = loop_trip_sgpr(d);
+
+    /* The counter outlives every trip, so it is allocated before the mark the body releases to
+     * - and `gen_release` is a bump-allocator rewind, which would take it back otherwise. */
+    const int vars_before = g->var_count;
+    glsl_scope_push(g->sema);
+    if (!glsl_declare(g->sema, decl->text, decl->length, ind_t, GL_FALSE)) {
+        g->sema->error = (const char *)0;
+    }
+    const uint32_t loop_mark = gen_mark(g);
+    glsl_value_t iv = gen_alloc(g, 1, node);
+    if (is_bad(iv)) { glsl_scope_pop(g->sema); g->var_count = vars_before; return GL_FALSE; }
+    glsl_emit_mov_imm(g->code, iv.base, float_bits((float)start));
+    if (!gen_declare(g, decl->text, decl->length, ind_t, iv, node)) {
+        glsl_scope_pop(g->sema); g->var_count = vars_before; return GL_FALSE;
+    }
+
+    glsl_emit_exec_save(g->code, s_entry);
+    glsl_emit_exec_save(g->code, s_active);
+    glsl_emit_sop1(g->code, GLSL_SOP1_MOV_B32, s_trip, 128u); /* 128: scalar inline zero */
+
+    const uint32_t top = glsl_code_here(g->code);
+
+    /* **The condition is emitted from the shape the caller already checked, not generated from
+     * the expression.** `i < 4` over an `int` counter is an integer comparison, which has no
+     * verified opcode here - but the counter is held as a float that happens to be whole, and
+     * the limit is a constant known now, so the comparison the hardware needs is the float one
+     * between those two values. Running it through `gen_expr` would refuse a loop this can in
+     * fact do, and would cost instructions per trip for a value this already has. */
+    GLboolean ok = GL_TRUE;
+    {
+        uint32_t opc = 0u;
+        switch (cond_op) {
+            case GLSL_TOK_LT: opc = GLSL_VOPC_LT_F32;  break;
+            case GLSL_TOK_LE: opc = GLSL_VOPC_LE_F32;  break;
+            case GLSL_TOK_GT: opc = GLSL_VOPC_GT_F32;  break;
+            case GLSL_TOK_GE: opc = GLSL_VOPC_GE_F32;  break;
+            default:          opc = GLSL_VOPC_NEQ_F32; break; /* the caller allows only these */
+        }
+        const uint32_t mark = gen_mark(g);
+        glsl_value_t k = gen_const(g, limit, node);
+        if (is_bad(k)) ok = GL_FALSE;
+        else glsl_emit_cmp(g->code, opc, iv.base, k.base);
+        gen_release(g, mark);
+    }
+    if (!ok) { glsl_scope_pop(g->sema); g->var_count = vars_before; return GL_FALSE; }
+
+    glsl_emit_sop2(g->code, GLSL_SOP2_AND_B32, s_active, s_active, GLSL_SREG_VCC_LO);
+    glsl_emit_exec_restore(g->code, s_active);
+    const uint32_t fix_empty = glsl_emit_branch_fwd(g->code, GLSL_SOPP_CBRANCH_EXECZ);
+
+    g->loop_exec_depth[d] = g->exec_depth;
+    g->loop_depth++;
+    {
+        const int vars_here = g->var_count;
+        const uint32_t mark = gen_mark(g);
+        ok = glsl_gen_stmt(g, n->d);
+        g->var_count = vars_here;
+        gen_release(g, mark);
+    }
+    g->loop_depth--;
+
+    if (ok) {
+        /* Back to the full loop mask before the step: see the note above about `continue`. */
+        glsl_emit_exec_restore(g->code, s_active);
+        /* And the step from the constant the caller worked out, for the same reason as the
+         * condition: `i++` on an `int` is an integer add, and this is the float one that does
+         * the same thing to the value actually in the register. */
+        const uint32_t mark = gen_mark(g);
+        glsl_value_t k = gen_const(g, step, node);
+        if (is_bad(k)) ok = GL_FALSE;
+        else glsl_emit_add_f32(g->code, iv.base, iv.base, k.base);
+        gen_release(g, mark);
+    }
+
+    if (ok) {
+        glsl_emit_s_inc_u32(g->code, s_trip);
+        glsl_emit_s_cmp_ge_u32_imm(g->code, s_trip, (uint32_t)trips);
+        const uint32_t fix_guard = glsl_emit_branch_fwd(g->code, GLSL_SOPP_CBRANCH_SCC1);
+        glsl_emit_branch_back(g->code, GLSL_SOPP_BRANCH, top);
+        /* **Both exits land here, and an unpatched one would be a jump to nowhere.** A false
+         * from either means the buffer overflowed while the body was generated, which is
+         * already a failed compile - this is what stops it also being a plausible branch. */
+        if (!glsl_patch_branch_here(g->code, fix_guard) ||
+            !glsl_patch_branch_here(g->code, fix_empty)) {
+            (void)gen_fail(g, "this loop's body is longer than the shader buffer, so the "
+                              "branches around it could not be resolved", node);
+            ok = GL_FALSE;
+        } else {
+            glsl_emit_exec_restore(g->code, s_entry);
+        }
+    }
+
+    gen_release(g, loop_mark);
+    glsl_scope_pop(g->sema);
+    g->var_count = vars_before;
+    return (GLboolean)(ok && g->error == (const char *)0);
+}
+
 static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
     const glsl_node_t *n = &g->ast->nodes[node];
 
@@ -2141,7 +2398,7 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
 
     /* **The trip count, counted the way the reference runs it**: test, then body, then step. */
     int trips = 0;
-    for (double v = start; trips <= GLSL_GEN_MAX_UNROLL; v += step) {
+    for (double v = start; trips <= GLSL_GEN_MAX_TRIPS; v += step) {
         GLboolean go;
         switch (cond->op) {
             case GLSL_TOK_LT: go = (GLboolean)(v < limit); break;
@@ -2157,21 +2414,29 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
         if (!go) break;
         trips++;
     }
-    if (trips > GLSL_GEN_MAX_UNROLL) {
-        (void)gen_fail(g, "this loop runs more times than the generator unrolls, and a loop is "
-                          "unrolled rather than branched because a branch that never goes false "
-                          "hangs the part rather than drawing the wrong colour", node);
+    if (trips > GLSL_GEN_MAX_TRIPS) {
+        (void)gen_fail(g, "this loop asks for more trips than the generator will bound, and an "
+                          "unbounded loop on this part is a hang rather than a wrong colour",
+                       node);
         return GL_FALSE;
     }
 
-    /* `break` and `continue` would each need a mask carried through the rest of the loop, which
-     * is the same thing an early `return` needs and is refused for the same reason. Checked
-     * before anything is emitted. */
-    if (has_loop_flow(g, n->d)) {
-        (void)gen_fail(g, "`break` and `continue` are not generated: each needs the exec mask "
-                          "carried through the rest of the loop, which this generator does not "
-                          "do", node);
+    /* **A body that moves the counter makes the count above a lie**, and both paths below rest
+     * on it. Checked before anything is emitted. */
+    if (assigns_name(g, n->d, decl->text, decl->length)) {
+        (void)gen_fail(g, "a loop whose body assigns its own counter is not generated: the trip "
+                          "count is worked out when the shader is compiled, and an assignment "
+                          "inside the body would make that count wrong without failing", node);
         return GL_FALSE;
+    }
+
+    /* **Which of the two shapes this loop takes.** Unrolling is the better one where it fits -
+     * the counter stays a compile-time constant, so indexing and arithmetic on it fold away,
+     * and nothing branches. It stops fitting in two ways: too many trips to copy out, or a
+     * `break`/`continue` that needs a mask carried across the rest of the loop. Either sends it
+     * to the branched path, which costs three scalar registers and a trip guard. */
+    if (trips > GLSL_GEN_MAX_UNROLL || has_loop_flow(g, n->d)) {
+        return gen_for_branched(g, node, decl, ind_t, start, limit, step, (int)cond->op, trips);
     }
 
     /* Out it goes, one copy per trip, with the counter a fresh constant each time. The scope is
@@ -2351,6 +2616,49 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
              * it picks. Sampling and then discarding - which is what craft's block shader does,
              * and the common shape - is unaffected. */
             if (g->wqm) glsl_emit_exec_drop_live(g->code, GLSL_GEN_LIVE_SGPR);
+            /* **And every enclosing branched loop's two masks.** A loop reloads `exec` from its
+             * active mask at the top of each trip, so a discarded lane that stayed in that mask
+             * would be handed straight back on the next trip and reach the export alive - the
+             * same resurrection an `if` would do, one construct further out. The entry mask goes
+             * too, because that is what `exec` becomes once the loop is over. */
+            for (int l = 0; l < g->loop_depth; l++) {
+                glsl_emit_exec_drop_live(g->code, loop_active_sgpr(l));
+                glsl_emit_exec_drop_live(g->code, loop_entry_sgpr(l));
+            }
+            glsl_emit_exec_clear(g->code);
+            return GL_TRUE;
+        }
+        /*
+         * **`break` and `continue` differ by one instruction.**
+         *
+         * Both take the running lanes out of every `if` that encloses them *inside* the loop -
+         * the same thing `discard` does, and for the same reason: the innermost restore would
+         * otherwise hand the lanes back before the body was over. Both then clear `exec`, so the
+         * rest of the body writes nothing for them.
+         *
+         * The difference is what happens at the top of the next trip, where `exec` is reloaded
+         * from the loop's active mask. `continue` leaves that mask alone, so the lane comes
+         * back for the next trip, which is exactly what `continue` means. `break` takes the lane
+         * out of it first, so nothing brings it back.
+         *
+         * The `if`s *outside* the loop are deliberately untouched: a lane that broke out still
+         * runs the statements after the loop, and the loop's own entry mask is what restores it.
+         */
+        case GLSL_NODE_BREAK:
+        case GLSL_NODE_CONTINUE: {
+            if (g->loop_depth <= 0) {
+                (void)gen_fail(g, "`break` and `continue` are generated only inside a loop that "
+                                  "branches - an unrolled loop has no mask for them to act on",
+                               node);
+                return GL_FALSE;
+            }
+            const int d = g->loop_depth - 1;
+            for (int e = g->loop_exec_depth[d]; e < g->exec_depth; e++) {
+                glsl_emit_exec_drop_live(g->code, GLSL_GEN_EXEC_SGPR_BASE + (uint32_t)e);
+            }
+            if (n->kind == GLSL_NODE_BREAK) {
+                glsl_emit_exec_drop_live(g->code, loop_active_sgpr(d));
+            }
             glsl_emit_exec_clear(g->code);
             return GL_TRUE;
         }
