@@ -106,6 +106,18 @@ long double strtold(const char *s, char **end);
 char *getenv(const char *name);
 
 /*
+ * The other half, and the same answer. There is no environment block to write into, so a value
+ * set here is dropped rather than half-kept - and `getenv` will go on reporting the name unset,
+ * which is at least consistent. Both return 0 for "did what was asked", because refusing would
+ * abort callers over a setting that changes nothing either way.
+ *
+ * libjpeg-turbo asked for it: its `PUTENV_S` wrapper is a `static inline` in a header every one
+ * of its sources includes, so it has to compile whether or not anything calls it.
+ */
+int setenv(const char *name, const char *value, int overwrite);
+int unsetenv(const char *name);
+
+/*
  * `alloca`, which is the compiler's and never a library's (2026-09-21). It has to unwind with
  * the frame, so it cannot be a function call - every C library defines it as this builtin, and
  * so does this one. Extreme Tux Racer asked for it in nine of its sources.

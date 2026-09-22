@@ -615,6 +615,16 @@ void glBlendFunc(GLenum sfactor, GLenum dfactor) {
     ctx->blend_dst = dfactor;
     ctx->blend_src_alpha = sfactor;
     ctx->blend_dst_alpha = dfactor;
+    /*
+     * **The constant has to go out again, because which value lands in `0x108` depends on these
+     * factors and not only on `glBlendColor`.** A colour-constant draw puts green there and an
+     * alpha-constant draw puts alpha there - see `gl_draw.c` and
+     * `docs/hardware/agc-blend-and-export-fw1240.md`.
+     *
+     * Without this, switching families between draws reuses whatever the last emission left, and
+     * the second draw blends against the first one's channel. A host test caught exactly that.
+     */
+    ctx->hw_blend_color_dirty = GL_TRUE;
 }
 
 void glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha) {
@@ -634,6 +644,9 @@ void glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlp
     ctx->blend_dst = dfactorRGB;
     ctx->blend_src_alpha = sfactorAlpha;
     ctx->blend_dst_alpha = dfactorAlpha;
+    /* Same reason as `glBlendFunc` above: `0x108` carries green or alpha depending on which
+       constant family these factors name. */
+    ctx->hw_blend_color_dirty = GL_TRUE;
 }
 
 /* The five simple equations (Mesa main/blend.c:435-447, legal_simple_blend_equation). Anything

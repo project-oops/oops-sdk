@@ -3040,7 +3040,30 @@ static void test_pm4_gl_logic_op_and_blend_constant_reach_their_registers(void) 
   ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x105u), 0x3e800000u); /* 0.25 */
   ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x106u), 0x3f000000u); /* 0.5 */
   ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x107u), 0x3f400000u); /* 0.75 */
-  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x108u), 0x3f800000u); /* 1.0 */
+
+  /*
+   * **`0x108` carries green here, not alpha**, and this line used to expect 1.0.
+   *
+   * obSCEne measured (`-2e9f`, sweep 20260921-run17, firmware 12.40) that the green channel of a
+   * `BLEND_CONSTANT_COLOR` blend reads `CB_BLEND_ALPHA` at `0x108` and ignores `CB_BLEND_GREEN`
+   * at `0x106` - four arms, same pixel every time. So `gl_draw.c` writes green into the alpha
+   * slot for any draw that reads the colour constant, which is the only way `glBlendColor` can
+   * mean what GL says.
+   *
+   * `0x106` above is still written with green, and is still ignored by the part. It goes out
+   * because it is the register GL names and because a future part may read it.
+   */
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x108u), 0x3f000000u); /* green, 0.5 */
+
+  /*
+   * **And this pair cannot be served, so it is refused.** The draw above asks for
+   * `GL_CONSTANT_COLOR` as source and `GL_ONE_MINUS_CONSTANT_ALPHA` as destination: the first
+   * needs green in `0x108` and the second needs alpha there. Legal GL, impossible on this part,
+   * and `D009` says a wrong channel is worse than a loud failure.
+   *
+   * The test used to pass because it assumed both halves worked. They never did.
+   */
+  ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
 
   /* Once per value, not once per draw. */
   pm4_draw_one_triangle();
@@ -3059,6 +3082,42 @@ static void test_pm4_gl_logic_op_and_blend_constant_reach_their_registers(void) 
   ctx->hw_frame_active = GL_FALSE;
   pm4_draw_one_triangle();
   ASSERT_EQ(count_context_reg_writes(ctx->dcb_mem, ctx->dcb_words, 0x105u), 1u);
+
+  /*
+   * **One constant family at a time is served, and the choice follows the blend function.**
+   *
+   * With only the alpha constant read, `0x108` carries alpha again rather than green - so the
+   * value in that register depends on `glBlendFunc` and not only on `glBlendColor`, which is why
+   * both setters mark the constant dirty. Without that, this draw would reuse the green the
+   * colour-constant draws above left there, and blend against the wrong channel with nothing to
+   * show for it.
+   */
+  memset(dcb, 0, sizeof(dcb));
+  ctx->dcb_words = 0;
+  ctx->hw_frame_active = GL_FALSE;
+  /* The draws above kept asking for the impossible pair, and a GL error latches until it is
+     read. Drain it, so the assertions below are about these draws and not those. */
+  (void)glGetError();
+  glBlendColor(0.25f, 0.5f, 0.75f, 1.0f);
+  glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
+  pm4_draw_one_triangle();
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x108u), 0x3f800000u); /* 1.0, alpha */
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* And switching family re-sends it, with green in the alpha slot this time. */
+  glBlendFunc(GL_CONSTANT_COLOR, GL_ONE_MINUS_CONSTANT_COLOR);
+  pm4_draw_one_triangle();
+  ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x108u), 0x3f000000u); /* 0.5, green */
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  /* Put the state back for the rest of the test. */
+  memset(dcb, 0, sizeof(dcb));
+  ctx->dcb_words = 0;
+  ctx->hw_frame_active = GL_FALSE;
+  glBlendColor(2.0f, -1.0f, 0.5f, 0.0f);
+  glBlendFunc(GL_CONSTANT_COLOR, GL_ONE_MINUS_CONSTANT_ALPHA);
+  pm4_draw_one_triangle();
+  (void)glGetError(); /* the impossible pair again; asserted where it is introduced */
 
   /* A logic op set before the frame opens goes out in the frame's own table. */
   memset(dcb, 0, sizeof(dcb));

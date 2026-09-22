@@ -1,4 +1,5 @@
 #include "oops/time.h"
+#include "oops/syscall.h"
 
 __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
 __attribute__((weak)) uint64_t sceKernelGetProcessTime(void);
@@ -113,6 +114,40 @@ uint64_t oops_time_get_us(void) {
                  oops_time_get_counter_frequency());
   }
   return scale(oops_time_get_ticks(), 1000000ULL, oops_time_get_frequency());
+}
+
+/*
+ * The wall clock, which every other call in this file is not.
+ *
+ * `clock_gettime(CLOCK_REALTIME, &ts)` through the FreeBSD syscall table, for the same reason
+ * `oops_fs_mkdir` reaches `SYS_mkdir` directly: the kernel here is FreeBSD-derived and its
+ * numbers are the ones `<oops/syscall.h>` already carries.
+ *
+ * `struct timespec` is declared here rather than pulled from a header because this SDK has no
+ * `<time.h>` of the POSIX kind and should not grow one for a two-field struct only this function
+ * writes. The layout is `time_t` then `long`, both 64-bit on this target.
+ *
+ * A failure returns 0, which `<oops/time.h>` defines as "unknown" - not as 1970. There is no
+ * value a real date cannot take, so a caller has to be told to check, and it is.
+ */
+uint64_t oops_time_get_epoch_seconds(void) {
+#ifndef OOPS_HOST_BUILD
+  struct {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+  } ts = {0, 0};
+
+  /* CLOCK_REALTIME is 0 on FreeBSD. */
+  if (sys_call(SYS_clock_gettime, 0, (long)&ts, 0, 0, 0, 0) != 0) {
+    return 0;
+  }
+  if (ts.tv_sec <= 0) {
+    return 0; /* a clock that has not been set says so, rather than reporting the epoch */
+  }
+  return (uint64_t)ts.tv_sec;
+#else
+  return 0;
+#endif
 }
 
 uint64_t oops_time_get_ns(void) {

@@ -43,6 +43,13 @@ extern FILE *stdout;
 extern FILE *stderr;
 extern FILE *stdin;
 
+/*
+ * `rename` (2026-09-22), the partner to the `remove` already declared below. `oops_fs_rename` is
+ * underneath. Neverball wanted it: it writes a config to a temporary path and moves it into
+ * place, which is how a program avoids leaving a half-written file if it is interrupted.
+ */
+int rename(const char *from, const char *to);
+
 FILE *fopen(const char *path, const char *mode);
 int fclose(FILE *f);
 size_t fread(void *ptr, size_t size, size_t count, FILE *f);

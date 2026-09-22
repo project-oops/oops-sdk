@@ -1449,6 +1449,33 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
     }
 }
 
+/*
+ * **The shader's own globals** - `const float pi = 3.14159265;` and the plain ones GLSL 1.10
+ * also allows, which a real shader opens with and which nothing else here binds.
+ *
+ * They are declarations that happen to sit outside `main`, so they run through the same arm
+ * that runs a local, **in source order** - which is what lets one be written in terms of an
+ * earlier one. Run into the global scope, before `main`'s own is pushed, so a local may shadow
+ * one and an assignment inside `main` reaches the global rather than a copy.
+ *
+ * The qualified declarations are skipped because each already has a binding: an attribute from
+ * the vertex array, a varying from the interpolated block, a uniform from the program's value
+ * pool. Running one here would overwrite what was bound with its initialiser, or with zero.
+ */
+static void declare_shader_globals(exec_t *e, const glsl_unit_t *u) {
+    if (!u || u->root == GLSL_NO_NODE) return;
+    const glsl_ast_t *ast = &u->ast;
+    for (int32_t d = ast->nodes[u->root].a; d != GLSL_NO_NODE; d = ast->nodes[d].sibling) {
+        const glsl_node_t *n = &ast->nodes[d];
+        if (n->kind != GLSL_NODE_DECL) continue;
+        if (n->qualifier == GLSL_TOK_KW_UNIFORM || n->qualifier == GLSL_TOK_KW_VARYING ||
+            n->qualifier == GLSL_TOK_KW_ATTRIBUTE) {
+            continue;
+        }
+        if (!exec_stmt(e, d)) return;
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Setting up an invocation
  * ------------------------------------------------------------------------- */
@@ -1677,6 +1704,8 @@ GLboolean gl_shader_run_vertex(gl_context_t *ctx, gl_program_object_t *p, const 
         }
     }
 
+    declare_shader_globals(e, p->vs);
+
     /* Everything global is in scope; `main`'s locals go above it. */
     const int32_t main_fn = find_function(e, "main", 4u);
     if (main_fn == GLSL_NO_NODE) {
@@ -1812,6 +1841,8 @@ GLboolean gl_shader_run_fragment(gl_context_t *ctx, gl_program_object_t *p,
     float *data = declare(e, "gl_FragData", 11u, GLSL_TYPE_VEC4, 1);
     float *depth = declare(e, "gl_FragDepth", 12u, GLSL_TYPE_FLOAT, 0);
     if (depth) depth[0] = in->frag_coord[2];
+
+    declare_shader_globals(e, p->fs);
 
     const int32_t main_fn = find_function(e, "main", 4u);
     if (main_fn == GLSL_NO_NODE) {

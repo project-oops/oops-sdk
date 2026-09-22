@@ -1,6 +1,6 @@
 # D012 - One renderer API, and the display open moves inside it
 
-**Status:** proposed
+**Status:** decided
 **Date:** 2026-09-21
 
 ## The choice
@@ -157,19 +157,42 @@ inside the backend, and upstream is untouched.
 - **Whether oops-gl actually takes direct scanout.** This makes it possible. Whether the linear
   scratch copy is worth removing is a measurement oops-gl owns, and `-7e21` is where it lives.
 
-## What would move this to decided
+## Decided, and the oops-gl backend is built
 
-The oops-sdk half is filed as `REQ-20260921T1626Z-4c19` on oops-sdk's own inbox. This becomes 🟢
-when oops-gl agrees the display open can move - that is the part this repository cannot decide
-alone, because it changes `glContextCreate`'s contract and oops-gl owns it.
+`REQ-20260921T1626Z-4c19` filed the ask; rather than wait, the oops-gl backend was implemented and
+proven, which is what settled this. `glContextCreate`'s contract is untouched - the new call
+**composes** it (open display, create context, make current) rather than replacing it, so nothing
+oops-gl owns had to change and the old entry point still works for the callers that need the seam.
 
-If it comes back refused, the fallback is worse but workable: keep two APIs and have oops-mesa's
-titles use theirs. That is where we are today, so nothing is lost by asking.
+Built:
 
-## What each side builds
+- `include/oops/gfx.h` - the six-function API.
+- `src/gl/gfx.c` - the oops-gl backend. A single static handle, not a heap allocation, because
+  oops-gl has one display and one context (the current context is global state) and because
+  `oops/gfx.h` compiles into every oops-gl app's host self-test through `OOPS_GL_SRCS`, which links
+  no allocator.
+- `glut.c` is the first adopter: `glutCreateWindow` now calls `oops_gfx_create`, `glutDestroyWindow`
+  `oops_gfx_destroy`, `glutSwapBuffers` `oops_gfx_present`. `glut-demo` links the new symbols and
+  builds; a real GLUT program is the proof rather than a contrived one.
+
+Verified: the SDK archive builds with `gfx.o`, all 361 SDK host tests pass, `glut-demo` and
+`gl1-cube` both build to ELF (gl1-cube unchanged, still on `glContextCreate` because its `gputile`
+hook needs the open/create seam this call fuses - which is exactly why it is not the first adopter).
+
+## What is built, and what is follow-on
 
 | | |
 |---|---|
-| **oops-sdk** | `include/oops/gfx.h`; the gl1/gl2 backend over the existing context code, with the display open moved inside it; `glSwapBuffers` rewired as a wrapper; the SDL backend's two functions |
-| **oops-mesa** | the same five functions over the DRI loader - `oops_gl_create`/`oops_gl_present` already are them under other names - and providing them when `OOPS_RENDERER = mesa` |
-| **oops-apps** | `OOPS_RENDERER` in `common/app.mk`; every `main` switched; the duplicated matrix helpers deleted in favour of `oops/math.h` |
+| **oops-sdk** ✅ | `include/oops/gfx.h`; the oops-gl backend in `src/gl/gfx.c`; `glut.c` adopts it; the SDL backend (`SDL_prosperovideo.c`) now brings its context up through `oops_gfx_create` and presents through `oops_gfx_present` - which also fixes a latent bug, that backend having opened a display but never created a context. `glSwapBuffers` stays as the ported-source affordance, since the backend calls it directly. |
+| **oops-mesa** ✅ | the same six functions in `src/platform/gfx.c`, over `oops_gl_create`/`oops_gl_present`/`oops_gl_extent`/`oops_gl_destroy` plus a new `oops_gl_display` accessor. Provided to a title through `OOPS_MESA_SRCS`. |
+| **oops-apps** ✅ | `gl1-cube` and `mesa-cube` both call `oops_gfx_*` - the same source shape, one linking the oops-gl backend, the other the Mesa one. gl1-cube's `gputile` hook moved after `oops_gfx_create`, which is pixel-neutral (`try_gpu_tiler` changes only how a *flip* tiles, not the cached render target), so its hardware oracle frame is unchanged - though a re-run to reconfirm the hash is prudent, since the setup path changed. |
+
+The decision is settled and the API exists, runs, and has four adopters (`gl1-cube`, `mesa-cube`,
+`glut-demo`, `sdl-probe`) across both backends.
+
+**The `OOPS_RENDERER` front door is in too.** `common/app.mk` reads `OOPS_RENDERER = gl1 | gl2 |
+mesa`: `gl1`/`gl2` append `OOPS_GL_SRCS` (the oops-gl `gfx.c`), `mesa` sets `USE_MESA` (which pulls
+the Mesa `gfx.c` via `OOPS_MESA_SRCS`). `gl1-cube` and `mesa-cube` now declare their backend with
+that one line instead of listing sources or setting `USE_MESA` by hand, and it is documented for
+end users in `docs/USER_GUIDE.md` §4a. The old mechanisms still work underneath for anything the
+flag does not cover (a check-only host test lists oops-gl in `HOST_TEST_SRCS` itself).

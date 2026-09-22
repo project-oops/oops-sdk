@@ -216,6 +216,142 @@ int oops_fs_mkdir(const char *path, int mode) {
 #endif
 }
 
+int oops_fs_rename(const char *from, const char *to) {
+  if (from == NULL || to == NULL) {
+    return -1;
+  }
+#ifndef OOPS_HOST_BUILD
+  return (int)sys_call(SYS_rename, (long)from, (long)to, 0, 0, 0, 0);
+#else
+  return rename(from, to);
+#endif
+}
+
+/* ---------------------------------------------------------------------------
+ * Walking a directory
+ *
+ * `getdents` fills a buffer with variable-length records and returns the bytes written, zero at
+ * the end of the directory. Each record carries its own length, so the buffer is walked by
+ * stepping `d_reclen` at a time rather than by a fixed stride - a `d_reclen` of zero would be a
+ * malformed record and an infinite loop, so it is checked.
+ *
+ * The record layout is FreeBSD's `struct dirent`, which is what the kernel here speaks: a 32-bit
+ * inode, a 16-bit record length, an 8-bit type, an 8-bit name length, then the name. It is
+ * declared locally rather than taken from a header because this SDK has no `<dirent.h>` and
+ * should not grow one for a struct only this file reads.
+ *
+ * One buffer is filled per `getdents` call and drained across several `readdir` calls, which is
+ * what makes a directory of any size cost a fixed amount of memory.
+ * --------------------------------------------------------------------------- */
+
+#ifndef OOPS_HOST_BUILD
+
+#define OOPS_DIRENT_BUF 4096
+#define OOPS_DT_DIR 4 /* FreeBSD's DT_DIR */
+
+struct oops_bsd_dirent {
+  uint32_t d_fileno;
+  uint16_t d_reclen;
+  uint8_t d_type;
+  uint8_t d_namlen;
+  char d_name[256];
+};
+
+#endif
+
+struct oops_dir {
+  int fd;
+#ifndef OOPS_HOST_BUILD
+  int used;   /* bytes of buf that getdents filled */
+  int offset; /* how far through buf readdir has walked */
+  char buf[OOPS_DIRENT_BUF];
+#endif
+};
+
+oops_dir_t *oops_fs_opendir(const char *path) {
+  if (path == NULL) {
+    return NULL;
+  }
+
+  oops_dir_t *dir = (oops_dir_t *)oops_malloc(sizeof(*dir));
+  if (dir == NULL) {
+    return NULL;
+  }
+
+  dir->fd = oops_fs_open(path, OOPS_O_RDONLY, 0);
+  if (dir->fd < 0) {
+    oops_free(dir);
+    return NULL;
+  }
+#ifndef OOPS_HOST_BUILD
+  dir->used = 0;
+  dir->offset = 0;
+#endif
+  return dir;
+}
+
+int oops_fs_readdir(oops_dir_t *dir, oops_dirent_t *out) {
+  if (dir == NULL || out == NULL) {
+    return -1;
+  }
+
+#ifndef OOPS_HOST_BUILD
+  for (;;) {
+    if (dir->offset >= dir->used) {
+      /* Buffer drained: ask for more. Zero means the directory is finished. */
+      long n = sys_call(SYS_getdents, dir->fd, (long)dir->buf, OOPS_DIRENT_BUF, 0, 0, 0);
+      if (n < 0) {
+        return -1;
+      }
+      if (n == 0) {
+        return 0;
+      }
+      dir->used = (int)n;
+      dir->offset = 0;
+    }
+
+    const struct oops_bsd_dirent *ent =
+        (const struct oops_bsd_dirent *)(const void *)(dir->buf + dir->offset);
+
+    if (ent->d_reclen == 0 || (int)ent->d_reclen > dir->used - dir->offset) {
+      /* A record that does not fit or does not advance is a malformed buffer, not an entry.
+         Stopping is the only safe answer; carrying on would loop for ever. */
+      return -1;
+    }
+    dir->offset += (int)ent->d_reclen;
+
+    /* A zero inode is a deleted entry the kernel left in place - skip it and take the next. */
+    if (ent->d_fileno == 0u) {
+      continue;
+    }
+
+    unsigned int len = ent->d_namlen;
+    if (len >= sizeof(out->name)) {
+      len = (unsigned int)sizeof(out->name) - 1u;
+    }
+    for (unsigned int i = 0; i < len; i++) {
+      out->name[i] = ent->d_name[i];
+    }
+    out->name[len] = '\0';
+    out->is_directory = (ent->d_type == OOPS_DT_DIR) ? 1 : 0;
+    return 1;
+  }
+#else
+  (void)dir;
+  (void)out;
+  return -1; /* the host build has no use for this and does not pretend otherwise */
+#endif
+}
+
+int oops_fs_closedir(oops_dir_t *dir) {
+  if (dir == NULL) {
+    return -1;
+  }
+  int rc = oops_fs_close(dir->fd);
+  oops_free(dir);
+  return rc;
+}
+
 int oops_fs_unlink(const char *path) {
   if (path == NULL) {
     return -1;

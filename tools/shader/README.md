@@ -165,12 +165,29 @@ wrong once and a wrong encoding in a compiler is wrong in every shader it ever e
   interpolation (`v_interp_p1_f32`/`p2`, across all four channels and a high attribute, so the
   attribute field is pinned separately from its channel), the export, the VOP1 transcendentals,
   the VOP2 pairs and the conditional move, the VOPC comparisons with the lane kill - and, since
-  2026-09-21, **scalar memory**: the five `s_load_dword*` widths and the `s_waitcnt lgkmcnt(0)`
-  that has to follow them, which is how a uniform reaches a compiled shader. Its three
-  cross-check lines (`s_endpgm`, `s_nop 0`, `s_waitcnt vmcnt(0)`) came out as words already in
-  the tree. Checked by `test_glsl_emit_matches_the_assembler`.
+  2026-09-21, **scalar memory** (the five `s_load_dword*` widths and the `s_waitcnt lgkmcnt(0)`
+  that has to follow them, which is how a uniform reaches a compiled shader), **the exec mask**
+  (`s_and_saveexec_b32`, `s_andn2_b32` in both its destination forms, and `s_mov_b32 exec_lo`,
+  which are what an `if` and a `discard` are made of) and **`image_sample`** across two
+  destinations, two coordinate pairs, two descriptor sets and all four dimensions, with
+  `s_wqm_b32` beside it. Its cross-check lines - `s_endpgm`, `s_nop 0`, `s_waitcnt vmcnt(0)`,
+  `s_and_b32 exec_lo, exec_lo, vcc_lo`, and `image_sample_lz` itself - came out as words already
+  in the tree. Checked by `test_glsl_emit_matches_the_assembler`.
 
-  Three traps are recorded in the file rather than in anyone's memory, because each produces a
-  shader that runs: `v_sin_f32` takes **revolutions** and not radians, `v_exp_f32` and
-  `v_log_f32` are base **two**, and an SGPR is a legal operand only in `src0` - `vsrc1` is eight
-  bits and always a VGPR.
+  Six traps are recorded in the file rather than in anyone's memory, because each produces a
+  shader that runs: `v_sin_f32` takes **revolutions** and not radians; `v_exp_f32` and
+  `v_log_f32` are base **two**; an SGPR is a legal operand only in `src0`, because `vsrc1` is
+  eight bits and always a VGPR; `s_andn2_b32 d, a, b` is `a & ~b`, so the saved mask goes in
+  `ssrc0` and the one to remove in `ssrc1` - the other way round computes a set of lanes that
+  were not running in the first place; MIMG's `srsrc` and `ssamp` hold the register number
+  **divided by four**, so a bare register number names a descriptor four times further up the
+  file; and a scalar load's destination alignment is **four for every width past two**, not the
+  width - the obvious guess would cost each descriptor set three spare registers for nothing,
+  and the file assembles `s_load_dwordx16 s[52:67]` to prove it.
+
+  **There is no branch in the control flow**, and that is deliberate rather than pending. A
+  fragment shader's `if` narrows the exec mask; a body no lane is running still executes and
+  writes nothing, so `s_cbranch_execz` would be a saving and not a correctness requirement.
+  Leaving it out is what lets the generator emit straight through with no labels and no offsets
+  to backpatch - a whole mechanism's worth of mistakes not made. Loops are the exception, and
+  they are not generated.

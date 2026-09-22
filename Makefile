@@ -48,6 +48,7 @@ OBJS := \
     $(BUILD)/display.o \
     $(GRAPHICS_OBJS) \
     $(BUILD)/gl/gl_context.o \
+    $(BUILD)/gl/gfx.o \
     $(BUILD)/gl/gl_state.o \
     $(BUILD)/gl/gl_matrix.o \
     $(BUILD)/gl/gl_glu.o \
@@ -94,6 +95,7 @@ OBJS := \
     $(BUILD)/net/dns.o \
     $(BUILD)/draw/draw.o \
     $(BUILD)/draw/png.o \
+    $(BUILD)/hud/hud.o \
     $(BUILD)/system/pkg.o \
     $(BUILD)/system/freestd.o \
     $(BUILD)/system/scanf.o \
@@ -147,6 +149,7 @@ TEST_SRCS := \
     src/agc/agc_draw.c \
     src/draw/draw.c \
     src/draw/png.c \
+    src/hud/hud.c \
     src/input/input.c \
     src/input/keyboard.c \
     src/input/mouse.c \
@@ -179,6 +182,7 @@ TEST_SRCS := \
     src/net/netctl.c \
     src/net/dns.c \
     src/gl/gl_context.c \
+    src/gl/gfx.c \
     src/gl/gl_state.c \
     src/gl/gl_matrix.c \
     src/gl/gl_glu.c \

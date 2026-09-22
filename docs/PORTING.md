@@ -47,14 +47,20 @@ as an extension, which is why the claim is the only door to that one.
 generic vertex attributes, separate stencil and blend state, and **GLSL 1.10 and 1.20** behind
 them: a shader compiles, a program links, and both stages run.
 
-**On a build machine it all works. On a console it has never run.** The fragment stage compiles
-to real gfx1030 instructions and the draw path binds them, but no console has executed one -
-obSCEne's `REQ-20260921T1615Z-4e77` is the measurement that says whether a generated shader
-retires at all. And the back end generates arithmetic, swizzles and constructors only: a shader
-with a uniform, a texture lookup or an `if` is **refused** for the console with a sentence
-naming what is missing, and still runs on the software path. So a GL 2.0 port is a thing you can
-develop here today and cannot ship yet, which is worth knowing before you start rather than
-after. A GL 1.x port is unaffected: it never binds a program.
+**It runs on a console too** (measured 2026-09-21). The fragment stage compiles to real gfx1030
+instructions, the draw path binds them, and obSCEne's `REQ-20260921T1615Z-4e77` and
+`REQ-20260921T1730Z-6c0d` measured a generated shader retiring, its interpolated parameters
+arriving bit for bit, and its uniform block loading intact.
+
+**What a compiled fragment shader can do** is arithmetic, swizzle reads and writes,
+constructors, the built-in library, file-scope `const`s, uniforms, `texture2D` through up to two
+samplers, comparisons, `?:`, `if`/`else` and `discard`. What it cannot: **loops**, because a mask
+cannot express a per-lane trip count and a real branch is needed; the projective, cube, volume
+and shadow texture lookups; user-defined functions; integer arithmetic; and the inverse
+trigonometric functions, where the only lowering is a polynomial of somebody's choosing. A shader
+the back end will not take is refused with a sentence naming what is missing, and still runs on
+the software path - the draw is what fails, with `GL_INVALID_OPERATION`, rather than quietly
+drawing something else. A GL 1.x port is unaffected: it never binds a program.
 
 **`#version 120` is a different language from `#version 110`, and the number decides which you
 get.** 1.20 converts `int` to `float` implicitly, so `pos * 2` and `clamp(v, 0, 1)` are shaders;
@@ -117,6 +123,62 @@ error is one you find on your desk.
 | Framebuffer objects, `glDrawBuffers` to colour attachments | GL 3.0. `glDrawBuffers` on the window-system framebuffer is here and means what the specification says it means there: the same fragment colour to several buffers |
 | C++ runtime, exceptions, the standard library | This is a C SDK. A C++ port is a much larger job |
 | Colour-index visuals | `glutGet(GLUT_DISPLAY_MODE_POSSIBLE)` answers 0 for them |
+
+## Porting to the Mesa renderer, which is a different job
+
+Everything above describes oops-gl, this SDK's own OpenGL. A title can instead set
+`OOPS_RENDERER = mesa` in its Makefile and get **upstream Mesa with radeonsi and ACO**
+(`oops-mesa`). The scope there is OpenGL 3.3 and the driver reports 4.6 - see `oops-mesa#D014`
+for which of those is a promise and `oops-mesa/docs/GL_SURFACE.md` for what is reachable.
+
+Most of this document still applies, because most of it is about the C surface. What changes:
+
+**GLUT works on both, and that is not an accident.** `src/gl/glut.c` names no OpenGL
+implementation - it goes through `oops/gfx.h` and otherwise calls plain GL - so the same GLUT
+drives oops-gl or Mesa depending on one line in the Makefile. A GLUT port does not have to choose
+a renderer up front. This is the single biggest reason a GL program ports here at all, and it is
+worth not breaking.
+
+**GLU does not.** `src/gl/gl_glu.c` reaches into oops-gl for `gl_sin`, `gl_sqrt`,
+`gl_pixel_transfer_rgbaf` and more, and those live in files that between them define forty `gl*`
+entry points - linking them beside Mesa would put a second `glMatrixMode` in the binary. So a
+Mesa-linked title currently **cannot use this SDK's GLU**, including `gluNewQuadric` and the
+`glutSolid*` shapes built on it. Filed as `REQ-20260922T0940Z-5c17`; until it lands, a title that
+needs them carries its own, and `oops-apps/src/oops-titles/mesa-demos/shim/` shows what that
+costs.
+
+**A requested window size is a hint.** `glutInitWindowSize` is a request to a window manager and
+there is not one. The Mesa backend opens the display at its own extent when the requested size
+cannot be scanned out, and `glutGet(GLUT_WINDOW_WIDTH)` and the reshape callback then report what
+was actually opened - exactly as on a desktop whose window manager gave you something else. Read
+them; do not assume you got what you asked for.
+
+### If the program loads GL through glad, GLEW or epoxy
+
+Modern GL programs resolve entry points at run time through a loader, because on a desktop libGL
+exports only GL 1.1 and everything newer arrives as a function pointer. **That problem does not
+exist here.** Mesa is linked statically and every `gl*` name is bound at link time, so the loading
+half of any of those libraries is a no-op and does not need porting.
+
+**The reporting half does, and it is the part that will catch you.** Loaders also expose booleans
+- glad's `GLAD_GL_EXT_fog_coord`, GLEW's `GLEW_EXT_fog_coord` - that programs read to decide
+whether to take an extension path at all. Defining them all to 1 is one line and is wrong in a way
+that produces no diagnostic: the program takes a path for an extension that is not there and draws
+nothing. Answer them from `glutExtensionSupported` (below) or from `glGetString` directly, so a
+flag is false when the driver says so and the program takes its own "not supported" path.
+
+`oops-apps/src/oops-titles/mesa-demos/shim/include/glad/glad.h` is a worked example: eleven names,
+all queried, none asserted.
+
+### `glutExtensionSupported` is here, and you should use it
+
+`int glutExtensionSupported(const char *name)` matches **whole words** against the driver's
+extension list, and asks both the flat `glGetString(GL_EXTENSIONS)` and the indexed
+`glGetStringi` form so it keeps answering on a core profile.
+
+Whole-word matching is the point. A plain `strstr` finds `GL_EXT_texture` inside
+`GL_EXT_texture3D`, so a driver offering only the second reports both - and the bug surfaces as a
+blank screen much later. If you write your own, match boundaries.
 
 ## The one that will get you
 

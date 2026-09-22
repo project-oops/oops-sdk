@@ -97,6 +97,22 @@ double pow(double base, double exp_) { return (double)oops_powf((float)base, (fl
 double hypot(double x, double y) { return (double)hypotf((float)x, (float)y); }
 double round(double x) { return (double)roundf((float)x); }
 double trunc(double x) { return (double)truncf((float)x); }
+
+/*
+ * Round to nearest, **ties to even** - which is what separates these from `round` above, and
+ * what libvorbis's floor and psychoacoustic code assumes. The builtins lower to a single SSE4.1
+ * instruction on this target, so writing them out in C would be slower and no more correct.
+ *
+ * Unlike `round` and `trunc` beside them, these do not go through a `float` round trip: the
+ * builtins have double forms, and narrowing to float first would change the answer for exactly
+ * the values a round-to-nearest call is asked about.
+ */
+double rint(double x) { return __builtin_rint(x); }
+float rintf(float x) { return __builtin_rintf(x); }
+double nearbyint(double x) { return __builtin_nearbyint(x); }
+float nearbyintf(float x) { return __builtin_nearbyintf(x); }
+long lrint(double x) { return __builtin_lrint(x); }
+long long llrint(double x) { return __builtin_llrint(x); }
 double fmin(double a, double b) { return (a < b) ? a : b; }
 double fmax(double a, double b) { return (a > b) ? a : b; }
 
@@ -360,6 +376,20 @@ char *getenv(const char *name) {
   return (char *)0;
 }
 
+/* The other half. Nothing to write into, so the write is dropped and `getenv` goes on saying
+   the name is unset - consistent, which is the most that can be offered here. */
+int setenv(const char *name, const char *value, int overwrite) {
+  (void)name;
+  (void)value;
+  (void)overwrite;
+  return 0;
+}
+
+int unsetenv(const char *name) {
+  (void)name;
+  return 0;
+}
+
 long long llabs(long long x) { return (x < 0) ? -x : x; }
 
 div_t div(int num, int den) {
@@ -484,6 +514,9 @@ static void libc_log_putc(int sink, char c) {
 static void libc_log_write(int sink, const char *s, size_t n) {
     for (size_t k = 0; k < n; k++) libc_log_putc(sink, s[k]);
 }
+
+/* `remove` was already here, a few lines down; this is its missing partner. */
+int rename(const char *from, const char *to) { return oops_fs_rename(from, to); }
 
 FILE *fopen(const char *path, const char *mode) {
     if (!path || !mode) return (FILE *)0;
@@ -679,9 +712,262 @@ int sprintf(char *buf, const char *fmt, ...) {
  * --------------------------------------------------------------------------- */
 
 time_t time(time_t *out) {
-    const time_t s = (time_t)(oops_time_get_ns() / 1000000000ull);
+    /*
+     * The wall clock, not the process clock. This used to divide `oops_time_get_ns()`, which
+     * counts from process start - fine for `srand(time(NULL))` and useless for a date. See
+     * `include/libc/time.h` for why that was never a decision.
+     *
+     * Falling back to the process clock when the platform will not answer keeps the old
+     * behaviour for the callers that only wanted a changing number, and `time()` returning
+     * something small is exactly what a caller checking for a plausible date will reject.
+     */
+    uint64_t epoch = oops_time_get_epoch_seconds();
+    const time_t s = epoch ? (time_t)epoch : (time_t)(oops_time_get_ns() / 1000000000ull);
     if (out) *out = s;
     return s;
+}
+
+/* ---------------------------------------------------------------------------
+ * setjmp / longjmp
+ *
+ * **Ours, in assembly, rather than the platform's.** `include/libc/setjmp.h` used to declare
+ * these as imports the FreeBSD-derived C library would resolve at load, on the reasoning that
+ * `setjmp` cannot be written in C so it should not be attempted. The first title to need them
+ * showed why that does not work here: `mkmodule` refuses an imported symbol whose library the
+ * mined corpus cannot name, because a module must declare where each import resolves. An import
+ * nobody can attribute is not a dependency this SDK can ship.
+ *
+ * libpng is what needs them - its error handling is `setjmp(png_jmpbuf(png_ptr))`, which every
+ * caller writes, including Neverball's `share/fs_png.c`.
+ *
+ * The System V AMD64 ABI says what has to be saved: the callee-saved registers `rbx`, `rbp`,
+ * `r12`-`r15`, the stack pointer, and where to resume. Eight quadwords, well inside the twelve
+ * `jmp_buf` gives. Nothing here is platform-specific - it is the architecture's calling
+ * convention, which is published.
+ *
+ * Written as a global assembly block rather than a `.S` file because `oops-sdk.mk` compiles C.
+ * --------------------------------------------------------------------------- */
+
+__asm__(".text\n"
+        ".globl setjmp\n"
+        ".type setjmp,@function\n"
+        "setjmp:\n"
+        "  movq %rbx,  0(%rdi)\n"
+        "  movq %rbp,  8(%rdi)\n"
+        "  movq %r12, 16(%rdi)\n"
+        "  movq %r13, 24(%rdi)\n"
+        "  movq %r14, 32(%rdi)\n"
+        "  movq %r15, 40(%rdi)\n"
+        /* The stack pointer as it will be *after* this function returns, so longjmp resumes
+           into the caller's frame rather than into one that has gone. */
+        "  leaq 8(%rsp), %rax\n"
+        "  movq %rax, 48(%rdi)\n"
+        /* The return address, which is where longjmp jumps back to. */
+        "  movq (%rsp), %rax\n"
+        "  movq %rax, 56(%rdi)\n"
+        "  xorl %eax, %eax\n"
+        "  ret\n"
+        ".size setjmp,.-setjmp\n"
+        "\n"
+        ".globl longjmp\n"
+        ".type longjmp,@function\n"
+        "longjmp:\n"
+        "  movq  0(%rdi), %rbx\n"
+        "  movq  8(%rdi), %rbp\n"
+        "  movq 16(%rdi), %r12\n"
+        "  movq 24(%rdi), %r13\n"
+        "  movq 32(%rdi), %r14\n"
+        "  movq 40(%rdi), %r15\n"
+        "  movq 56(%rdi), %rdx\n"
+        "  movq 48(%rdi), %rsp\n"
+        /* C requires longjmp(env, 0) to make setjmp return 1: zero is the value setjmp itself
+           returns, so it must never be handed back. */
+        "  movl %esi, %eax\n"
+        "  testl %eax, %eax\n"
+        "  jnz 1f\n"
+        "  incl %eax\n"
+        "1:\n"
+        "  jmp *%rdx\n"
+        ".size longjmp,.-longjmp\n");
+
+/* ---------------------------------------------------------------------------
+ * The calendar
+ *
+ * Howard Hinnant's civil-from-days algorithm, which is the one every modern C library and
+ * `<chrono>` implementation uses: shift the year so it starts in March, and leap days land at
+ * the end of the cycle where they stop being a special case. It is exact for the whole range of
+ * a 64-bit `time_t` and has no table.
+ *
+ * Written out rather than taken from anywhere: it is arithmetic on a published calendar, the
+ * kind of thing `docs/CONVENTIONS.md` calls a format fact.
+ * --------------------------------------------------------------------------- */
+
+#define OOPS_SECS_PER_DAY 86400
+
+static const char *const s_wday_short[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+static const char *const s_mon_short[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+struct tm *gmtime_r(const time_t *t, struct tm *out) {
+    if (!t || !out) return (struct tm *)0;
+
+    int64_t secs = (int64_t)*t;
+    int64_t days = secs / OOPS_SECS_PER_DAY;
+    int64_t rem = secs % OOPS_SECS_PER_DAY;
+    if (rem < 0) { /* C's division truncates toward zero; days must floor */
+        rem += OOPS_SECS_PER_DAY;
+        days -= 1;
+    }
+
+    out->tm_hour = (int)(rem / 3600);
+    out->tm_min = (int)((rem % 3600) / 60);
+    out->tm_sec = (int)(rem % 60);
+
+    /* 1970-01-01 was a Thursday, which is 4. */
+    out->tm_wday = (int)((days + 4) % 7);
+    if (out->tm_wday < 0) out->tm_wday += 7;
+
+    /* Civil from days: shift the epoch to 0000-03-01 so leap days end the cycle. */
+    int64_t z = days + 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const uint64_t doe = (uint64_t)(z - era * 146097);                      /* 0..146096 */
+    const uint64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; /* 0..399 */
+    const int64_t y = (int64_t)yoe + era * 400;
+    const uint64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);           /* 0..365 */
+    const uint64_t mp = (5 * doy + 2) / 153;                                /* 0..11, March = 0 */
+    const uint64_t d = doy - (153 * mp + 2) / 5 + 1;                        /* 1..31 */
+    const uint64_t m = mp < 10 ? mp + 3 : mp - 9;                           /* 1..12 */
+
+    const int64_t year = y + (m <= 2 ? 1 : 0);
+    out->tm_year = (int)(year - 1900);
+    out->tm_mon = (int)m - 1;
+    out->tm_mday = (int)d;
+    out->tm_isdst = 0;
+
+    /* Day of the year, counted from January the first of this year. */
+    {
+        static const int cum[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+        const int leap =
+            ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0) ? 1 : 0;
+        out->tm_yday = cum[out->tm_mon] + out->tm_mday - 1 +
+                       ((leap && out->tm_mon > 1) ? 1 : 0);
+    }
+    return out;
+}
+
+struct tm *gmtime(const time_t *t) {
+    static struct tm s_tm;
+    return gmtime_r(t, &s_tm);
+}
+
+/* UTC, as `include/libc/time.h` says: there is no timezone to apply. */
+struct tm *localtime_r(const time_t *t, struct tm *out) { return gmtime_r(t, out); }
+struct tm *localtime(const time_t *t) { return gmtime(t); }
+
+time_t mktime(struct tm *tm) {
+    if (!tm) return (time_t)-1;
+
+    /* days_from_civil, the inverse of the above. */
+    int64_t y = (int64_t)tm->tm_year + 1900;
+    int64_t m = (int64_t)tm->tm_mon + 1;
+
+    /* Accept a month outside 1..12, as C requires mktime to normalise. */
+    y += (m - 1) / 12;
+    m = (m - 1) % 12 + 1;
+    if (m <= 0) { m += 12; y -= 1; }
+
+    y -= (m <= 2) ? 1 : 0;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const uint64_t yoe = (uint64_t)(y - era * 400);
+    const uint64_t doy =
+        (uint64_t)((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + (uint64_t)tm->tm_mday - 1u;
+    const uint64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const int64_t days = era * 146097 + (int64_t)doe - 719468;
+
+    const int64_t secs = days * OOPS_SECS_PER_DAY + (int64_t)tm->tm_hour * 3600 +
+                         (int64_t)tm->tm_min * 60 + (int64_t)tm->tm_sec;
+
+    /* C says mktime writes the normalised fields back. */
+    const time_t out = (time_t)secs;
+    (void)gmtime_r(&out, tm);
+    return out;
+}
+
+/*
+ * `strftime`, for the conversions a port actually writes. Anything else is copied through
+ * unchanged rather than silently dropped, so an unsupported `%q` appears in the output and is
+ * visible instead of vanishing.
+ */
+static size_t oops_strftime_num(char *buf, size_t max, size_t at, int value, int width) {
+    char tmp[16];
+    int n = 0;
+    int v = value < 0 ? -value : value;
+    do {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v != 0 && n < (int)sizeof(tmp));
+    while (n < width && n < (int)sizeof(tmp)) tmp[n++] = '0';
+    if (value < 0 && n < (int)sizeof(tmp)) tmp[n++] = '-';
+    while (n > 0) {
+        if (at + 1 >= max) return at;
+        buf[at++] = tmp[--n];
+    }
+    return at;
+}
+
+static size_t oops_strftime_str(char *buf, size_t max, size_t at, const char *s) {
+    while (*s) {
+        if (at + 1 >= max) return at;
+        buf[at++] = *s++;
+    }
+    return at;
+}
+
+size_t strftime(char *buf, size_t max, const char *format, const struct tm *tm) {
+    if (!buf || !format || !tm || max == 0) return 0;
+
+    size_t at = 0;
+    for (const char *p = format; *p; p++) {
+        if (*p != '%') {
+            if (at + 1 >= max) { buf[at] = '\0'; return 0; }
+            buf[at++] = *p;
+            continue;
+        }
+        p++;
+        switch (*p) {
+        case 'Y': at = oops_strftime_num(buf, max, at, tm->tm_year + 1900, 1); break;
+        case 'y': at = oops_strftime_num(buf, max, at, (tm->tm_year + 1900) % 100, 2); break;
+        case 'm': at = oops_strftime_num(buf, max, at, tm->tm_mon + 1, 2); break;
+        case 'd': at = oops_strftime_num(buf, max, at, tm->tm_mday, 2); break;
+        case 'H': at = oops_strftime_num(buf, max, at, tm->tm_hour, 2); break;
+        case 'M': at = oops_strftime_num(buf, max, at, tm->tm_min, 2); break;
+        case 'S': at = oops_strftime_num(buf, max, at, tm->tm_sec, 2); break;
+        case 'j': at = oops_strftime_num(buf, max, at, tm->tm_yday + 1, 3); break;
+        case 'a':
+            at = oops_strftime_str(buf, max, at,
+                                   s_wday_short[(tm->tm_wday >= 0 && tm->tm_wday < 7)
+                                                    ? tm->tm_wday : 0]);
+            break;
+        case 'b':
+            at = oops_strftime_str(buf, max, at,
+                                   s_mon_short[(tm->tm_mon >= 0 && tm->tm_mon < 12)
+                                                   ? tm->tm_mon : 0]);
+            break;
+        case '%':
+            if (at + 1 < max) buf[at++] = '%';
+            break;
+        case '\0':
+            /* A trailing '%' with nothing after it. Stop rather than read past the string. */
+            buf[at] = '\0';
+            return at;
+        default:
+            /* Unsupported: emit it as written, so it is visible in the output. */
+            if (at + 2 < max) { buf[at++] = '%'; buf[at++] = *p; }
+            break;
+        }
+    }
+    buf[at] = '\0';
+    return at;
 }
 
 clock_t clock(void) {

@@ -275,6 +275,31 @@ int  glutBitmapWidth(void *font, int character);
 int  glutBitmapLength(void *font, const unsigned char *string);
 int  glutBitmapHeight(void *font);
 
+/*
+ * Asking the driver what it supports.
+ *
+ * `glutExtensionSupported` is GLUT's own convenience over `glGetString(GL_EXTENSIONS)`, and ports
+ * reach for it constantly - it is how a program decides whether to take an extension path at all.
+ * It is here rather than left to each port because getting it *right* is fiddly in a way that is
+ * quiet when got wrong: a plain `strstr` matches `GL_EXT_texture` inside `GL_EXT_texture3D`, so a
+ * driver offering only the latter gets reported as offering both, the port takes a path that is
+ * not there, and the screen goes black with nothing in the log. This implementation matches whole
+ * words only, and asks both the flat string and the indexed form, so it keeps answering on a core
+ * profile where `glGetString(GL_EXTENSIONS)` returns NULL.
+ *
+ * Returns non-zero when present. With no current context it returns 0, which is the honest answer
+ * and lets a port take its "not supported" path rather than fault.
+ */
+int glutExtensionSupported(const char *name);
+
+/*
+ * The GLUT version a port compiles against. Programs test it with `#ifdef GLUT_API_VERSION` or
+ * compare it before calling something added later; mesa-demos' `glinfo` is one. 4 is the last
+ * GLUT API version, and the subset here is a GLUT 3/4 subset, so 4 is what it reports - the
+ * alternative is a port silently taking a GLUT-2 path for a function that is present.
+ */
+#define GLUT_API_VERSION 4
+
 #ifdef __cplusplus
 }
 #endif

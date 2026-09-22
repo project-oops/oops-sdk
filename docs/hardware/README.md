@@ -9,3 +9,4 @@ its own `data/hardware/`.
 | | |
 |---|---|
 | `agc-gl-cube-oracle-fw1240.md` | the GL cube frame on firmware 12.40: the whole command stream, shaders, descriptors, fence, GPU clock and pixel hash, untextured and textured |
+| `agc-blend-and-export-fw1240.md` | four answers from obSCEne sweep `20260921-run17`: a constant-colour blend reads green from `CB_BLEND_ALPHA`, dual-target blending works, linear 3D mip levels are not 2D packing with a depth term, and a fifth vertex parameter exports intact |

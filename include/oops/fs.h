@@ -47,6 +47,35 @@ int oops_fs_write_all(const char *path, const void *data, size_t size);
 /* Directory and file manipulation */
 int oops_fs_mkdir(const char *path, int mode);
 int oops_fs_unlink(const char *path);
+int oops_fs_rename(const char *from, const char *to);
+
+/*
+ * **Walking a directory** (2026-09-22).
+ *
+ * This was absent for no better reason than that nothing had asked for it - `SYS_getdents` has
+ * been in `<oops/syscall.h>` the whole time, next to the `SYS_mkdir` that `oops_fs_mkdir`
+ * already uses. Neverball asked: `share/dir.c` lists levels, sets and replays, which is what a
+ * game with user content does.
+ *
+ * The shape is the POSIX one because that is what a port expects and what the kernel gives:
+ * open a directory, read entries until there are none, close it. `oops_fs_opendir` returns a
+ * handle or NULL; `oops_fs_readdir` fills `out` and returns 1 for an entry, 0 at the end and
+ * -1 on error, so a caller can tell "finished" from "failed" - which a NULL-or-not API cannot.
+ *
+ * `.` and `..` are **returned**, not filtered. They are directory entries and a caller that
+ * wants them gone says so; hiding them here would be this SDK deciding what a port's file list
+ * means.
+ */
+typedef struct oops_dir oops_dir_t;
+
+typedef struct oops_dirent {
+  char name[256];   /* NUL-terminated; the kernel's own limit is 255 */
+  int is_directory; /* 1 when the entry is itself a directory */
+} oops_dirent_t;
+
+oops_dir_t *oops_fs_opendir(const char *path);
+int oops_fs_readdir(oops_dir_t *dir, oops_dirent_t *out);
+int oops_fs_closedir(oops_dir_t *dir);
 
 #ifdef __cplusplus
 }

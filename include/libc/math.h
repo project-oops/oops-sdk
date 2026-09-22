@@ -82,6 +82,25 @@ double pow(double base, double exp);
 double hypot(double x, double y);
 double round(double x);
 double trunc(double x);
+
+/*
+ * **The round-to-nearest-integer family C99 requires beside `round`** (2026-09-21). `round` was
+ * already here and rounds halves away from zero; these round to *even* on a tie, which is the
+ * default IEEE mode and a different answer for exactly the inputs that matter.
+ *
+ * Found by libvorbis, which uses `rint` in five of its twenty sources - the decoder's floor and
+ * psychoacoustic code, where round-half-to-even is the behaviour the format assumes.
+ *
+ * These are the compiler's builtins, which is what a hosted `<math.h>` expands them to, and
+ * expressing them any other way here would be slower and no more correct. `nearbyint` differs
+ * from `rint` only in whether it may raise the inexact flag, which nothing on this target reads.
+ */
+double rint(double x);
+float rintf(float x);
+double nearbyint(double x);
+float nearbyintf(float x);
+long lrint(double x);
+long long llrint(double x);
 double fmin(double a, double b);
 double fmax(double a, double b);
 

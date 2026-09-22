@@ -1,27 +1,28 @@
 /*
  * setjmp/longjmp, over the platform's own.
  *
- * **Declarations, not an implementation.** `setjmp` cannot be written in C - it has to save the
- * callee-saved registers, the stack pointer and the return address, which is architecture
- * assembly - and this SDK does not need to write it, because the console carries the
- * FreeBSD-derived C library that already has it. These bind at load exactly as `__error` and the
- * POSIX socket calls do.
+ * **Implemented here, in assembly, and not imported from the platform.**
  *
- * **`jmp_buf` is FreeBSD's amd64 layout and that is not ours to choose.** `_JBLEN` is 12 there,
- * so the buffer is twelve `long`s: the platform's `setjmp` writes it and the platform's
- * `longjmp` reads it, and a smaller one here would be a buffer overrun in somebody else's code.
- * Nothing in this SDK interprets the contents.
+ * This header first declared them as platform imports, on the reasoning that `setjmp` cannot be
+ * written in C so this SDK should not try - the console carries a FreeBSD-derived C library that
+ * has them, and `__error` binds that way already. That was wrong for a reason that only shows up
+ * one step later: **`mkmodule` refuses an imported symbol whose library the mined corpus cannot
+ * name**, because a module must declare where each of its imports resolves. `setjmp` is not in
+ * that corpus. An import nobody can attribute is not a dependency this SDK can ship, however
+ * certain we are that the platform has it.
  *
- * It arrives because FreeType wants it: `ftstdlib.h` includes `<setjmp.h>` unconditionally for
- * `ft_jmp_buf`, and 15 of its sources failed on the missing header before reaching anything of
- * their own. Note the shape of that - the *type* is what every FreeType translation unit needs,
- * while the *functions* are called only from the gzip and LZW decompressors. A build that leaves
- * those modules out compiles against this header and never references the symbols.
+ * So `src/system/libc.c` carries a global assembly block: save `rbx`, `rbp`, `r12`-`r15`, the
+ * stack pointer and the return address, per the System V AMD64 ABI. Eight quadwords. Nothing in
+ * it is platform-specific - it is the architecture's published calling convention - and the
+ * result is a definition rather than a question.
  *
- * **These are not confirmed to bind on hardware.** `__error` was measured (obSCEne sweep
- * 20260909-083918); this pair has not been, and a caller that actually longjmps should want that
- * confirmed first. Declared here so the type is available and the gap is visible, rather than
- * left as a missing header that reads like an oversight.
+ * **libpng is what needs them.** Its error handling is `setjmp(png_jmpbuf(png_ptr))`, written by
+ * every caller, including Neverball's `share/fs_png.c`. FreeType wants the *type* far more
+ * widely - `ftstdlib.h` includes this header unconditionally for `ft_jmp_buf` - but calls the
+ * functions only from its gzip module, which `oops-deps/freetype` does not build.
+ *
+ * `jmp_buf` keeps FreeBSD's twelve-`long` size although only eight are used, so a buffer
+ * allocated against this header stays the size anything else on this platform expects.
  */
 #ifndef OOPS_LIBC_SETJMP_H
 #define OOPS_LIBC_SETJMP_H

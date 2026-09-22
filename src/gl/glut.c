@@ -27,11 +27,14 @@
  */
 #include "GL/glut.h"
 #include "gl_internal.h"
+#include "oops/gfx.h"
 #include "oops/display.h"
 #include "oops/input.h"
 #include "oops/keyboard.h"
 #include "oops/mouse.h"
 #include "oops/time.h"
+
+#include <string.h> /* strstr, for glutExtensionSupported's whole-word match */
 
 #define GLUT_MAX_TIMERS 16
 
@@ -43,8 +46,7 @@ typedef struct {
 } glut_timer_t;
 
 static struct {
-    oops_display_t *disp;
-    void *ctx;
+    oops_gfx_t *gfx;            /* the display and context, brought up together (oops/gfx.h) */
     int width, height;          /* what was opened */
     int want_width, want_height; /* what glutInitWindowSize asked for */
     unsigned int mode;
@@ -103,17 +105,18 @@ int glutCreateWindow(const char *title) {
     (void)title; /* nothing shows it */
     if (g.created) return 1;
     if (!g.want_width) glutInit((int *)0, (char **)0);
-    g.disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, (uint32_t)g.want_width,
-                               (uint32_t)g.want_height);
-    if (!g.disp) return 0;
-    g.ctx = glContextCreate(g.disp);
-    if (!g.ctx) {
-        oops_display_close(g.disp);
-        g.disp = (oops_display_t *)0;
-        return 0;
+    /* Display and context in one call, made current for us. GLUT wanted a specific size, so it is
+     * passed through; a depth buffer and vsync are the GLUT defaults a program expects. */
+    g.gfx = oops_gfx_create(&(oops_gfx_desc_t){ .width = (uint32_t)g.want_width,
+                                                .height = (uint32_t)g.want_height,
+                                                .depth = true, .vsync = true });
+    if (!g.gfx) return 0;
+    {
+        uint32_t w = 0, h = 0;
+        oops_gfx_extent(g.gfx, &w, &h);
+        g.width = (int)w;
+        g.height = (int)h;
     }
-    g.width = (int)oops_display_get_width(g.disp);
-    g.height = (int)oops_display_get_height(g.disp);
     g.mouse_x = g.width / 2;
     g.mouse_y = g.height / 2;
     g.created = 1;
@@ -128,10 +131,8 @@ int glutCreateWindow(const char *title) {
 void glutDestroyWindow(int window) {
     (void)window;
     if (!g.created) return;
-    glContextDestroy(g.ctx);
-    oops_display_close(g.disp);
-    g.ctx = (void *)0;
-    g.disp = (oops_display_t *)0;
+    oops_gfx_destroy(g.gfx);
+    g.gfx = (oops_gfx_t *)0;
     g.created = 0;
     g.running = 0;
 }
@@ -179,7 +180,7 @@ void glutTimerFunc(unsigned int millis, void (*func)(int value), int value) {
 
 void glutPostRedisplay(void) { g.redisplay = 1; }
 
-void glutSwapBuffers(void) { glSwapBuffers(); }
+void glutSwapBuffers(void) { (void)oops_gfx_present(g.gfx); }
 
 int glutGetModifiers(void) { return g.modifiers; }
 
@@ -895,3 +896,64 @@ static void glut_teapot(GLdouble size, GLenum mode) {
 void glutSolidTeapot(GLdouble size) { glut_teapot(size, GL_FILL); }
 
 void glutWireTeapot(GLdouble size) { glut_teapot(size, GL_LINE); }
+
+/* ---------------------------------------------------------------------------
+ * Asking the driver what it supports
+ * --------------------------------------------------------------------------- */
+
+/*
+ * Whole-word search of a space-separated list.
+ *
+ * `strstr` alone is the trap: `GL_EXT_texture` occurs inside `GL_EXT_texture3D`, so a driver
+ * offering only the latter would be reported as offering both. The boundary checks are what make
+ * this an answer rather than a guess, and the failure they prevent is silent - a port takes an
+ * extension path that is not there and draws nothing.
+ */
+static int glut_has_word(const char *list, const char *word) {
+    if (!list || !word || !*word) return 0;
+
+    size_t n = 0;
+    while (word[n]) n++;
+
+    for (const char *p = list; (p = strstr(p, word)) != 0; p += n) {
+        const int left_ok = (p == list) || (p[-1] == ' ');
+        const int right_ok = (p[n] == '\0') || (p[n] == ' ');
+        if (left_ok && right_ok) return 1;
+    }
+    return 0;
+}
+
+int glutExtensionSupported(const char *name) {
+    /* The flat string first: it is what a compatibility profile answers, which is what this SDK's
+     * own contexts are. */
+    const GLubyte *all = glGetString(GL_EXTENSIONS);
+    if (all && glut_has_word((const char *)all, name)) return 1;
+
+    /*
+     * And the indexed form, for a core profile where the above returns NULL.
+     *
+     * **Guarded, because this file compiles against two different sets of GL headers.** Built as
+     * part of this SDK it sees oops-gl's, which are GL 1.x/2.x and declare neither
+     * `GL_NUM_EXTENSIONS` nor `glGetStringi` - and do not need to, because a context that old has
+     * only the flat string. Built into a hosted title it sees upstream Mesa's, which declare
+     * both. The `#ifdef` is what lets one implementation be correct in both, rather than two
+     * copies drifting apart.
+     */
+#ifdef GL_NUM_EXTENSIONS
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+
+    /* A context that does not support the query leaves an error rather than a count; it is
+     * cleared so a port does not later find somebody else's. */
+    if (count <= 0) {
+        (void)glGetError();
+        return 0;
+    }
+
+    for (GLint i = 0; i < count; i++) {
+        const GLubyte *one = glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (one && glut_has_word((const char *)one, name)) return 1;
+    }
+#endif
+    return 0;
+}
