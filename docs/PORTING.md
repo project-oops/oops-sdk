@@ -124,6 +124,64 @@ error is one you find on your desk.
 | C++ runtime, exceptions, the standard library | This is a C SDK. A C++ port is a much larger job |
 | Colour-index visuals | `glutGet(GLUT_DISPLAY_MODE_POSSIBLE)` answers 0 for them |
 
+## Porting a shader: what the console's back end generates
+
+A GL 2.0 program has two implementations here and they are not the same code. The software
+rasteriser runs your GLSL on the CPU and implements all of it. The console compiles your
+**fragment** shader to gfx1030 at `glLinkProgram`; the vertex shader runs on the CPU on both
+paths, so nothing in this section is about it.
+
+**A shader the back end will not generate still links.** `glLinkProgram` succeeds,
+`GL_LINK_STATUS` is true, and the program draws correctly on the software path. What it does on
+a console is nothing: the draw records `GL_INVALID_OPERATION` and logs one line naming what
+could not be generated, once per program. `glGetProgramHardwareLog` returns that same line, which is the check to make at startup if you
+want to know before you draw.
+
+`GL_PROGRAM_HW_PS_WORDS` is the instruction count and is zero for **two** different programs: one
+that was refused, and one with no fragment shader at all - the second is not a failure, since the
+fixed-function pixel shader runs for it. The log tells them apart: it names a reason for the
+first and is empty for the second.
+
+That arrangement is deliberate. A back end that quietly substituted something plausible would
+put a picture on screen that your shader did not ask for, and you would be debugging the
+picture instead of reading the reason.
+
+### What is generated
+
+Float, vector and matrix arithmetic; `int` and `bool`, including `ivec` and `bvec`; swizzles on
+both sides of an assignment; the comparisons, the logical operators and `?:`; `if`/`else`;
+`discard`; `texture2D` through two samplers; uniforms of every scalar and vector type;
+user-defined functions, including `out` and `inout` parameters; the vector relational family
+(`lessThan` and its relatives, `any`, `all`, `not`); the derivatives `dFdx`, `dFdy` and
+`fwidth`; and the fragment built-ins `gl_FragCoord`, `gl_FrontFacing`, `gl_FragDepth`,
+`gl_Color` and `gl_FragColor`.
+
+Integer division truncates toward zero and is exact - there is no divide instruction on this
+part, so the quotient is computed from a reciprocal and then corrected, which is why `7 / 7` is
+1 and not 0.
+
+### What is refused, and what it says
+
+| Refused | What you get, and what to write instead |
+|---|---|
+| A loop whose trip count is not known at compile time | Loops are **unrolled**, not branched: a loop whose condition never goes false hangs the part rather than drawing the wrong colour, and that is not a failure this SDK will risk on your behalf. `for (int i = 0; i < 8; i++)` unrolls; a bound that is a uniform does not, and says so. The limit is 64 trips, and the message carries that number |
+| `break` and `continue` | Each needs the exec mask carried through the rest of the loop. Write the loop without them - a `if (cond) { ... }` around the rest of the body is the usual shape and unrolls fine |
+| An early `return` from a function | Same reason. A function whose body ends in its `return` is generated; one that returns from inside an `if` is not |
+| A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
+| `asin`, `acos`, `atan`, `refract` | No instruction on this part, and a polynomial of unmeasured accuracy is not written in their place. Each is refused **by name**, so you are told which one |
+| `textureCube`, `texture3D`, the `Proj` and shadow forms | Only `texture2D` is generated. The others are each a different lookup rather than the same one with a flag |
+| Matrix by matrix, matrix by scalar | `mat * vec` and `vec * mat` are generated at every square size, and they are different products - the second is the transpose's |
+| More than 16 floats of varyings, more than 32 floats of uniforms, more than two samplers | Each is refused with its own number in the message, so you know what to cut to |
+
+Everything above is refused **by name with a line and column**, not as a general failure. If a
+shader will not compile for the console, the log tells you which construct and where.
+
+### If you are reading this against an older build
+
+The whole of the above arrived between 2026-09-21 and 2026-09-22. A build from before that
+compiles a much smaller subset and refuses the rest the same way, so the diagnosis method is
+unchanged: read the line the draw logged.
+
 ## Porting to the Mesa renderer, which is a different job
 
 Everything above describes oops-gl, this SDK's own OpenGL. A title can instead set
