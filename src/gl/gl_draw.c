@@ -2379,7 +2379,24 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x1b4u, 0x00000002u}, /* SPI_PS_INPUT_ADDR: PERSP_CENTER_ENA (patched: the stipple) */
         {0x1b5u, 0x00000001u}, /* SPI_INTERP_CONTROL_0: FLAT_SHADE_ENA (no parameter is flagged flat) */
         {0x1b6u, 0x00000002u}, /* SPI_PS_IN_CONTROL: NUM_INTERP=2 */
-        {0x1b8u, 0x01000000u}, /* SPI_BARYC_CNTL: FRONT_FACE_ALL_BITS */
+        /* **`SPI_BARYC_CNTL` must be zero, and `FRONT_FACE_ALL_BITS` is why.**
+         *
+         * Bit 24 chooses what the SPI puts in the face register. Set, it is an integer mask -
+         * all ones or all zeros. Clear, it is a float, positive for a front-facing primitive,
+         * which is the form every consumer here expects: Mesa lowers `load_front_face` to
+         * `fgt(reg, 0)` (`ac_nir_lower_intrinsics_to_args.c:361`) and this back end emits that
+         * same `v_cmp_gt_f32` in `glsl_ps.c`. radeonsi writes the whole register as zero
+         * (`si_state.c:4895`); every other field here was already zero, so this is now exactly
+         * radeonsi's value.
+         *
+         * **Set, the comparison is false for both windings and neither is a mistake you can
+         * see in it.** A front-facing primitive gives 0x00000000, and `0.0 > 0.0` is false; a
+         * back-facing one gives all ones, which as a float is a NaN, and a NaN is not greater
+         * than anything either. So `gl_FrontFacing` read false everywhere and the shader took
+         * its back-facing arm for the whole screen - gl2-probe's `front-facing`, failing since
+         * the check was written, with `gt-zero-selected` measured as 0 for *both* windings on
+         * `166-agc/compiled-ps` arm10 (2026-09-23). */
+        {0x1b8u, 0x00000000u}, /* SPI_BARYC_CNTL */
         /* TA_BC_BASE_ADDR and _HI (patched): the border colour table a sampler's
          * SQ_TEX_BORDER_COLOR_REGISTER reads, in the payload - mm 0x28080 and 0x28084 for gfx103
          * (gfx103.json:2932-2943), which radeonsi sets once in its GFX10 preamble
@@ -2572,6 +2589,14 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     ctx->hw_frame_tex = 0u; /* the new frame's descriptor slot holds nothing yet */
     ctx->hw_desc_slot = 0u; /* and its textures start at the original table - see the ring */
     ctx->hw_gl2_slot = 0u;         /* the GL 2.0 block ring restarts with the frame ... */
+    /* ... and so does the textured shader's variant ring: a retired batch holds no draw that
+     * still points at a slot, so all six are free to be written again. The keys go with them,
+     * because a slot that is not live must not be matched. */
+    for (uint32_t i = 0u; i < OOPS_GL_PS_RING_SLOTS; i++) {
+        ctx->ps_ring_live[i] = GL_FALSE;
+        ctx->ps_ring_key[i] = 0u;
+    }
+    ctx->ps_ring_next = 0u;
     ctx->hw_gl2_slot_program = 0u; /* ... and its first slot holds nothing */
     ctx->hw_params = 2u;    /* the stage table above bound the two-parameter vertex shader */
     /* And what that table wrote into SPI_PS_INPUT_ENA/_ADDR, so a draw needing something else
@@ -2582,6 +2607,64 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     ctx->hw_z_format = 0u;
     ctx->hw_db_shader_control = 0x00000010u;
     ctx->hw_frame_active = GL_TRUE;
+}
+
+/* The address a textured draw should bind, as an offset into the payload.
+ *
+ * A variant already resident costs nothing: the common case is a program alternating between a
+ * few arrangements - Neverball's is the default stage and the two-stage shadow - and those stay
+ * in the ring for the whole batch. A variant that is not resident costs one copy of 1280 bytes.
+ * Only when every slot is already referenced by a queued draw does this submit, and then the
+ * batch is retired and all six are free again. */
+uint32_t gl_ps_ring_offset(gl_context_t *ctx) {
+#ifdef OOPS_HOST_BUILD
+    (void)ctx;
+    return OOPS_GL_PS_TEX_OFFSET;
+#else
+    uint32_t *const master = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
+    if (ctx->ps_master_dirty) {
+        /* FNV-1a over the shader's words. A hash rather than a comparison because this is asked
+         * once per change and compared once per draw, and 1280 bytes of memcmp per draw is the
+         * kind of cost that replaces one performance problem with another. */
+        uint32_t h = 2166136261u;
+        for (uint32_t i = 0u; i < OOPS_GL_PS_TEX_WORDS; i++) {
+            h ^= master[i];
+            h *= 16777619u;
+        }
+        /* Zero is the "nothing here" key, so a shader that hashes to it takes the next value.
+           One collision in 2^32 of being wrong about a variant is not a risk worth carrying for
+           the sake of one branch. */
+        ctx->ps_master_key = h ? h : 1u;
+        ctx->ps_master_dirty = GL_FALSE;
+    }
+    for (uint32_t i = 0u; i < OOPS_GL_PS_RING_SLOTS; i++) {
+        if (ctx->ps_ring_live[i] && ctx->ps_ring_key[i] == ctx->ps_master_key) {
+            return OOPS_GL_PS_RING_OFFSET + i * OOPS_GL_PS_TEX_WORDS * 4u;
+        }
+    }
+    if (ctx->ps_ring_next >= OOPS_GL_PS_RING_SLOTS) {
+        /* Every slot is spoken for by a draw already built. The frame runs, and those draws
+           read the variants they were built with; `gl_hw_begin_frame` empties the ring. */
+        gl_hw_flush(ctx);
+        gl_hw_begin_frame(ctx);
+    }
+    const uint32_t slot = ctx->ps_ring_next++;
+    const uint32_t off = OOPS_GL_PS_RING_OFFSET + slot * OOPS_GL_PS_TEX_WORDS * 4u;
+    memcpy((char *)ctx->gpu_payload + off, master, OOPS_GL_PS_TEX_WORDS * 4u);
+    /* **And out of this core's caches**, which `gl_ps_flush_shaders` does not do for the ring -
+     * it flushes the three fixed shader ranges and knows nothing about these slots. The hazard
+     * is the one its own comment names: a payload edit the GPU has not seen flushed is the
+     * previous shader running against this draw's parameters. Only the slot just written, not
+     * the whole ring, because the others have not changed. */
+#if !defined(OOPS_HOST_BUILD) && defined(__x86_64__)
+    for (size_t p = 0u; p < OOPS_GL_PS_TEX_WORDS * 4u; p += 64u) {
+        __builtin_ia32_clflush((const void *)((const char *)ctx->gpu_payload + off + p));
+    }
+#endif
+    ctx->ps_ring_key[slot] = ctx->ps_master_key;
+    ctx->ps_ring_live[slot] = GL_TRUE;
+    return off;
+#endif
 }
 
 /* **The vertex stage's interface, switched between two and three parameters** (since
@@ -4026,7 +4109,9 @@ vertices_written:
                 ps_rsrc2 = (prog->hw_ps_user_sgprs & 0x1fu) << 1u;
             }
         } else if (eff_tex > 0u) {
-            ps_va = payload_va + OOPS_GL_PS_TEX_OFFSET; /* Stage 5: Textured + Gouraud */
+            /* Stage 5: Textured + Gouraud - the ring's copy holding this draw's patched words,
+               not the master, which the GPU never reads. See OOPS_GL_PS_RING_OFFSET. */
+            ps_va = payload_va + gl_ps_ring_offset(ctx);
             ps_rsrc2 = 0x00000004u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor table. 0x2 loads one SGPR and the primitive mask lands in s1 (measured 2026-09-14) */
             for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
                 if (ctx->textures[ti].used && ctx->textures[ti].id == eff_tex) {

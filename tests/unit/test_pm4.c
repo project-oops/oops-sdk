@@ -1590,6 +1590,65 @@ static void test_pm4_gl_a_discarding_shader_sets_kill_enable(void) {
   oops_display_close(disp);
 }
 
+/* **`SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS` decides what kind of number the face register is, and
+ * it has to be clear.**
+ *
+ * Set, the SPI delivers an integer mask: all zeros for a front-facing primitive, all ones for a
+ * back-facing one. Clear, it delivers a float that is positive at the front - which is the form
+ * `glsl_ps.c` compiles for, because Mesa lowers `load_front_face` to `fgt(reg, 0)`
+ * (`ac_nir_lower_intrinsics_to_args.c:361`) and this back end emits the same `v_cmp_gt_f32`.
+ *
+ * **The wrong setting is false for both windings**, which is the part that made it invisible:
+ * `0.0 > 0.0` is false, and all-ones read as a float is a NaN, which is not greater than
+ * anything either. `gl_FrontFacing` came back false for the whole screen - gl2-probe's
+ * `front-facing`, failing since it was written, with `gt-zero-selected` measured as 0 for
+ * *both* windings on hardware (`166-agc/compiled-ps` arm10, 2026-09-23).
+ *
+ * radeonsi writes the whole register as zero (`si_state.c:4895`) and so does this. */
+static void test_pm4_gl_baryc_cntl_delivers_a_float_face(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[8192];
+  static _Alignas(256) uint8_t payload[0x20000];
+  static _Alignas(256) uint8_t vbo[16384];
+  static _Alignas(64) uint32_t fence[4] = {0x11111111u};
+  static _Alignas(64) uint32_t canary[16];
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 8192;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  pm4_draw_plain_quad();
+
+  GLboolean seen = GL_FALSE;
+  for (uint32_t i = 0; i + 2 < ctx->dcb_words; i++) {
+    if (dcb[i] == 0xc0016900u && dcb[i + 1] == 0x1b8u) {
+      /* Bit 24 clear, and every other field zero - radeonsi's exact value. */
+      ASSERT_EQ(dcb[i + 2], 0x00000000u);
+      seen = GL_TRUE;
+    }
+  }
+  ASSERT_EQ(seen, GL_TRUE); /* written at all: inheriting it would be the same bug, silently */
+
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 /* The fixed-function path kills as well - the alpha test and the polygon stipple both clear
  * `exec` - and had the same register wrong for the same reason. No GL 1.x check combines either
  * with a depth test, so nothing had measured it. */
@@ -4977,6 +5036,7 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_depth_range_changes_within_a_frame);
   RUN_TEST(test_pm4_gl_logic_op_and_blend_constant_reach_their_registers);
   RUN_TEST(test_pm4_gl_vertex_ring_submits_before_it_wraps);
+  RUN_TEST(test_pm4_gl_baryc_cntl_delivers_a_float_face);
   RUN_TEST(test_pm4_gl_a_discarding_shader_sets_kill_enable);
   RUN_TEST(test_pm4_gl_alpha_test_sets_kill_enable);
   RUN_TEST(test_pm4_gl_mip_chain_reaches_the_descriptor);
