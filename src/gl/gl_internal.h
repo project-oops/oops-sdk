@@ -1229,7 +1229,16 @@ typedef struct gl_context {
     GLboolean hw_cube_logged; /* and a cube-mapped one */
     GLboolean hw_env_logged; /* and one for an environment the pixel shader cannot combine */
     GLboolean hw_unit_logged; /* and one for a texture unit above 0, which the console leaves out */
-    GLboolean hw_prog_logged; /* and one for a GL 2.0 program the back end would not compile */
+    /* **The last GL 2.0 program refused, so each one says why once.** Not a flag like the four
+     * above: those describe a piece of context state, and a second line about the same one would
+     * repeat every frame it is set. A refused program is different - a draw loop binding one
+     * refused program would still print once, and a suite binding forty different ones has forty
+     * different reasons, which is exactly the list worth having.
+     *
+     * gl2-probe's first hardware run (2026-09-22) was the measurement: twenty-odd checks drew
+     * nothing, and one line came out for all of them. 0 is "none refused yet", and program names
+     * start at 1. */
+    GLuint hw_prog_logged;
     /* Which program's compiled pixel shader is in the payload's one GL 2.0 slot, 0 for none. A
      * frame that draws with one program uploads it once; one that alternates pays an upload and
      * a cache flush per switch, which is what this measures rather than assumes. */
