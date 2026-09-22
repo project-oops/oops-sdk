@@ -1319,10 +1319,18 @@ static void test_gl_glu_scales_projects_and_builds_mipmaps(void) {
     /* The mean of all sixteen reds is 66. Sampling the original at 1x1 would give one corner. */
     ASSERT_TRUE(back[0] >= 65 && back[0] <= 67);
 
-    /* The caller's unpack state is put back, not left as the builder needed it. */
+    /* The caller's unpack state is put back, not left as the builder needed it - and level zero
+     * is read *through* that state, so the source has to be the image that state describes. A row
+     * length of 7 with an alignment of 8 puts the rows 32 bytes apart, which is more than the
+     * 16 bytes a row of `in4` occupies: the 4x4 window goes in a staging buffer of that stride,
+     * with the columns past it filled with a red the image does not contain. Passing `in4` here
+     * would have the builder read 112 bytes out of 64. */
+    GLubyte wide[4 * 32];
+    memset(wide, 0xFF, sizeof(wide));
+    for (int wy = 0; wy < 4; wy++) memcpy(wide + (size_t)wy * 32, in4 + (size_t)wy * 16, 16);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 7);
-    ASSERT_EQ(gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGBA, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, in4), 0);
+    ASSERT_EQ(gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGBA, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, wide), 0);
     GLint v = 0;
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &v);
     ASSERT_EQ(v, 8);
@@ -1330,6 +1338,10 @@ static void test_gl_glu_scales_projects_and_builds_mipmaps(void) {
     ASSERT_EQ(v, 7);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    /* The same sixteen reds as before, so the same 1x1 level: the stride was honoured and the
+     * padding columns never averaged in. Reading them would give 158, not 66. */
+    glGetTexImage(GL_TEXTURE_2D, 2, GL_RGBA, GL_UNSIGNED_BYTE, back);
+    ASSERT_TRUE(back[0] >= 65 && back[0] <= 67);
 
     /* **gluProject and gluUnProject** are each other's inverse, through a projection that is not
      * the identity - an orthographic one would hide a mistake in the w divide. */
