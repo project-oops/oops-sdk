@@ -2622,6 +2622,44 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
     glContextDestroy(ctx);
 }
 
+static void test_gl2_vector_relationals_reduce_a_bvec(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **`any` and `all` are a max and a min**, which is only true because a bvec component is
+     * exactly 0.0 or 1.0. `lessThan((0,1,2), (1,1,1))` is `(true, false, false)`, so `any` is
+     * true, `all` is false, and `all(not(c))` is false as well - three different reductions of
+     * one comparison, and a back end that confused the two reductions gets the middle one
+     * wrong while the first still looks right. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  bvec3 c = lessThan(vec3(0.0, 1.0, 2.0), vec3(1.0, 1.0, 1.0));\n"
+                    "  gl_FragColor = vec4(any(c) ? 1.0 : 0.0, all(c) ? 1.0 : 0.0,\n"
+                    "                      all(not(c)) ? 1.0 : 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f); /* any: the first component is true */
+    ASSERT_NEAR(o[1], 0.0f, 1e-6f); /* all: the other two are not */
+    ASSERT_NEAR(o[2], 0.0f, 1e-6f); /* all(not): the first is false once inverted */
+
+    /* `not` on its own, and a comparison whose answer differs per component - so a lowering
+     * that compared once and broadcast gives the same value three times and fails. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  bvec3 c = greaterThan(vec3(2.0, 0.0, 3.0), vec3(1.0, 1.0, 1.0));\n"
+                    "  bvec3 n = not(c);\n"
+                    "  gl_FragColor = vec4(n.x ? 1.0 : 0.0, n.y ? 1.0 : 0.0,\n"
+                    "                      n.z ? 1.0 : 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0f, 1e-6f); /* 2 > 1, so not is false */
+    ASSERT_NEAR(o[1], 1.0f, 1e-6f); /* 0 > 1 is false, so not is true */
+    ASSERT_NEAR(o[2], 0.0f, 1e-6f);
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_gl_color_lands_where_the_link_put_it(void) {
     void *ctx = gl2_context();
     gl_context_t *c = (gl_context_t *)ctx;
@@ -3688,6 +3726,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
+    RUN_TEST(test_gl2_vector_relationals_reduce_a_bvec);
     RUN_TEST(test_gl2_gl_color_lands_where_the_link_put_it);
     RUN_TEST(test_gl2_matrix_products_are_two_products);
     RUN_TEST(test_gl2_integers_are_floats_kept_whole);

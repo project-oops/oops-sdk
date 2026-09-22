@@ -171,7 +171,16 @@ static int mat_dim(glsl_type_t t) {
  * `1 - a`. No comparison is needed for any of them.
  */
 static GLboolean is_bool_family(glsl_type_t t) {
-    return (t == GLSL_TYPE_BOOL) ? GL_TRUE : GL_FALSE;
+    switch (t) {
+        case GLSL_TYPE_BOOL:
+        /* **A `bvec` is the same thing per component**, which costs nothing extra: the
+         * comparisons write one per component and the reductions are a `min` or a `max` over
+         * values that are only ever 0.0 or 1.0. */
+        case GLSL_TYPE_BVEC2: case GLSL_TYPE_BVEC3: case GLSL_TYPE_BVEC4:
+            return GL_TRUE;
+        default:
+            return GL_FALSE;
+    }
 }
 
 /*
@@ -919,13 +928,6 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         nm_is(nm, len, "outerProduct")) {
         return gen_fail(g, "the matrix built-ins are not generated; only mat4 * vec4 is", node);
     }
-    if (nm_is(nm, len, "lessThan") || nm_is(nm, len, "lessThanEqual") ||
-        nm_is(nm, len, "greaterThan") || nm_is(nm, len, "greaterThanEqual") ||
-        nm_is(nm, len, "equal") || nm_is(nm, len, "notEqual") || nm_is(nm, len, "any") ||
-        nm_is(nm, len, "all") || nm_is(nm, len, "not")) {
-        return gen_fail(g, "the vector relational functions return a bvec, which this back end "
-                           "has no representation for yet", node);
-    }
     /* `texture2D` is generated; the rest of section 8.7 is not. Each of the others needs
      * something this has no measurement for - a cube's coordinate is a direction the hardware
      * resolves to a face, a volume's is three components, a `Proj` form divides by its last,
@@ -994,8 +996,13 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
             return gen_fail(g, "more arguments than any built-in generated here takes", node);
         }
         const glsl_type_t at = glsl_type_of(g->sema, a);
-        if (!is_float_family(at) || is_matrix(at)) {
-            return gen_fail(g, "this built-in is generated for float and vector arguments only",
+        /* A `bool` or a `bvec` is a float per component here, so the reductions take one
+         * directly; an `int` is a whole float and compares and scales like any other. What is
+         * still refused is a matrix, whose components are a square and not a run. */
+        if ((!is_float_family(at) && !is_bool_family(at) && !is_int_family(at)) ||
+            is_matrix(at)) {
+            return gen_fail(g, "this built-in is generated for float, int and bool arguments "
+                               "only",
                             node);
         }
         arg[argc] = gen_expr(g, a);
@@ -1011,6 +1018,65 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
     int w = arg[0].count;
     for (int i = 1; i < argc; i++) {
         if (arg[i].count > w) w = arg[i].count;
+    }
+
+    /* --- the vector relational family ------------------------------------
+     *
+     * **A `bvec` is what a `bool` already was, one per component**: a float that is 0.0 or 1.0.
+     * So the comparisons are the scalar compare-and-select run down the two operands, and the
+     * reductions need no comparison at all - `any` is the `max` of values that are only ever 0
+     * or 1, `all` is the `min`, and `not` is `1 - x`. The representation is what makes that
+     * true, and it is the same reason `&&` is a `min` here. */
+    {
+        struct { const char *name; uint32_t op; } const REL[] = {
+            {"lessThan",         GLSL_VOPC_LT_F32},
+            {"lessThanEqual",    GLSL_VOPC_LE_F32},
+            {"greaterThan",      GLSL_VOPC_GT_F32},
+            {"greaterThanEqual", GLSL_VOPC_GE_F32},
+            {"equal",            GLSL_VOPC_EQ_F32},
+            {"notEqual",         GLSL_VOPC_NEQ_F32},
+        };
+        for (size_t i = 0; i < sizeof(REL) / sizeof(REL[0]); i++) {
+            if (!nm_is(nm, len, REL[i].name)) continue;
+            if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
+            if (arg[0].count != arg[1].count) {
+                return gen_fail(g, "the vector relational functions take two operands of the "
+                                   "same width", node);
+            }
+            glsl_value_t rzero = gen_const(g, 0.0, node);
+            if (is_bad(rzero)) return rzero;
+            glsl_value_t rone = gen_const(g, 1.0, node);
+            if (is_bad(rone)) return rone;
+            glsl_value_t d = gen_alloc(g, arg[0].count, node);
+            if (is_bad(d)) return d;
+            for (int cc = 0; cc < arg[0].count; cc++) {
+                glsl_emit_cmp(g->code, REL[i].op, comp_of(arg[0], cc), comp_of(arg[1], cc));
+                glsl_emit_cndmask(g->code, d.base + (uint32_t)cc, rzero.base, rone.base);
+            }
+            return d;
+        }
+    }
+    if (nm_is(nm, len, "any") || nm_is(nm, len, "all")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        const uint32_t rop = nm_is(nm, len, "any") ? GLSL_VOP2_MAX_F32 : GLSL_VOP2_MIN_F32;
+        glsl_value_t d = gen_alloc(g, 1, node);
+        if (is_bad(d)) return d;
+        glsl_emit_mov(g->code, d.base, arg[0].base);
+        for (int cc = 1; cc < arg[0].count; cc++) {
+            glsl_emit_vop2_op(g->code, rop, d.base, d.base, comp_of(arg[0], cc));
+        }
+        return d;
+    }
+    if (nm_is(nm, len, "not")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t rone = gen_const(g, 1.0, node);
+        if (is_bad(rone)) return rone;
+        glsl_value_t d = gen_alloc(g, arg[0].count, node);
+        if (is_bad(d)) return d;
+        for (int cc = 0; cc < arg[0].count; cc++) {
+            glsl_emit_sub_f32(g->code, d.base + (uint32_t)cc, rone.base, comp_of(arg[0], cc));
+        }
+        return d;
     }
 
     /* --- one instruction a component ------------------------------------ */
