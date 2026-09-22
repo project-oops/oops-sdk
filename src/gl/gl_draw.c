@@ -3658,6 +3658,34 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
             gl_hw_begin_frame(ctx);
         }
 
+        /* **A GL 2.0 program's shader is copied into the payload here, before this triangle
+         * takes a place in the vertex ring, because the copy can submit the frame.**
+         *
+         * `gl_ps_sync_payload_edit` flushes when the words differ - the GPU may not yet have
+         * read what is being overwritten - and `gl_hw_flush` puts `hw_vbo_cursor` back to zero
+         * along with the command stream. Done after the vertices were written, that hands the
+         * *next* triangle the offset this one is already using: it overwrites these vertices,
+         * and the two draws then read one triangle. Half of every quad, with the surviving half
+         * carrying the right colour, which is what gl2-probe measured eleven times over -
+         * `drawn 3876` against a 7752-pixel rect, the left flank drawn and the right the clear.
+         *
+         * Moving the command cursor below the copy was necessary and was not sufficient: the
+         * stream and the vertex ring are both reset by a flush, and only one of them had been
+         * accounted for. */
+        if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u) {
+            uint32_t *const ps_slot =
+                (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_GL2_OFFSET);
+            if (ctx->hw_ps_resident != prog->hw_ps_serial) {
+                gl_ps_sync_payload_edit(ctx, ps_slot, prog->hw_ps, prog->hw_ps_words);
+                memcpy(ps_slot, prog->hw_ps, prog->hw_ps_words * sizeof(uint32_t));
+                /* Everything after the shader is left as it was; `s_endpgm` is the last word it
+                 * wrote, so nothing beyond it is reachable. */
+                gl_ps_flush_shaders(ctx);
+                ctx->hw_ps_resident = prog->hw_ps_serial;
+                if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+            }
+        }
+
         /* This triangle's place in the vertex buffer: three vertices of 48 bytes, or 64. */
         size_t vbo_offset = ctx->hw_vbo_cursor;
         ctx->hw_vbo_cursor += tri_bytes;
@@ -3796,26 +3824,9 @@ vertices_written:
          * that says how much of the file to allocate stays at the measured value rather than
          * becoming a second thing to get right. */
         if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u) {
-            uint32_t *const slot =
-                (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_GL2_OFFSET);
-            /* **By serial, because a name is reused and a shader is not.** The slot holds one
-             * compiled shader; asking whether it is this program's by name meant a program that
-             * inherited a freed name was taken for the one that had it before, and its upload
-             * skipped - so the draw ran the earlier program's shader with no error anywhere. */
-            if (ctx->hw_ps_resident != prog->hw_ps_serial) {
-                gl_ps_sync_payload_edit(ctx, slot, prog->hw_ps, prog->hw_ps_words);
-                memcpy(slot, prog->hw_ps, prog->hw_ps_words * sizeof(uint32_t));
-                /* Everything after the shader is left as it was; `s_endpgm` is the last word it
-                 * wrote, so nothing beyond it is reachable. */
-                gl_ps_flush_shaders(ctx);
-                ctx->hw_ps_resident = prog->hw_ps_serial;
-                /* **The sync above may have submitted**, and a submitted frame is a closed one:
-                 * the render target, the stage table and every piece of state this draw is
-                 * about to rely on were emitted into the stream that just went. Re-opening is
-                 * what the texture paths above already do after their own prepares, and this
-                 * one needed it for the same reason. */
-                if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
-            }
+            /* The copy itself happened above, before this triangle took its place in the vertex
+             * ring - it can submit the frame, and a submit resets that ring. What is left here
+             * is choosing the address and the block, neither of which touches the GPU. */
             ps_va = payload_va + OOPS_GL_PS_GL2_OFFSET;
             ps_rsrc2 = 0u;
 
