@@ -8994,13 +8994,18 @@ static void test_gl_pixel_types_and_store(void) {
   GLushort p565 = 0;
   glReadPixels(0, 0, 1, 1, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, &p565);
   ASSERT_EQ(p565, 0xF800u);
-  GLubyte skipped[12];
+  /* Four bytes of slack past the pixel, left at 0xcd: a skip moves where the pixel lands, it
+   * does not widen what is written. Sized to exactly the twelve bytes the skip and the pixel
+   * need, this is correct but a pack that ran long would have nowhere to land and nothing to
+   * fail on. */
+  GLubyte skipped[16];
   memset(skipped, 0xcd, sizeof(skipped));
   glPixelStorei(GL_PACK_SKIP_PIXELS, 2);
   glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, skipped);
   glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
-  ASSERT_EQ(skipped[0], 0xcd); /* the two skipped pixels untouched */
-  ASSERT_EQ(skipped[8], 255);  /* red, third pixel */
+  ASSERT_EQ(skipped[0], 0xcd);  /* the two skipped pixels untouched */
+  ASSERT_EQ(skipped[8], 255);   /* red, third pixel */
+  ASSERT_EQ(skipped[12], 0xcd); /* and nothing past it */
   GLshort sred[3] = {0, 0, 0};
   glReadPixels(0, 0, 1, 1, GL_RGB, GL_SHORT, sred);
   ASSERT_EQ(sred[0], 32767);   /* ((2^16 - 1) * 1 - 1) / 2 */
