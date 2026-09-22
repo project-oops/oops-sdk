@@ -2196,7 +2196,15 @@ typedef struct {
      * (2026-09-22). The interpolation arm below refuses to run without it, so removing the
      * prologue's `s_mov_b32 m0` fails here instead of on a console. */
     GLboolean m0_set;
+    /* **Which of the hardware's own registers this shader actually asked for**, from the
+     * `SPI_PS_INPUT_ENA` the compiler reported. Reading one that is not live is reading what
+     * the previous wave left. */
+    GLboolean hw_vgpr_live[8];
 } sim_t;
+
+/* The first register the allocator owns; everything below it is the SPI's. Mirrors
+ * `GL_PS_FIRST_FREE_VGPR` in `glsl_ps.c`, which is not a header constant. */
+#define GL_PS_FIRST_FREE_VGPR_SIM 8u
 
 static float sim_f32(uint32_t bits) {
     union { uint32_t u; float f; } cvt;
@@ -2208,8 +2216,19 @@ static float sim_f32(uint32_t bits) {
  * literal dword that follows the instruction. */
 static float sim_src(sim_t *s, uint32_t src0, const uint32_t *w, uint32_t *i) {
     if (src0 >= 256u) {
-        ASSERT_EQ(s->vpending[src0 - 256u], GL_FALSE);
-        return s->v[src0 - 256u];
+        const uint32_t r = src0 - 256u;
+        ASSERT_EQ(s->vpending[r], GL_FALSE);
+        /* **A register the SPI was never asked to fill is not a register to read.** Below
+         * `GL_PS_FIRST_FREE_VGPR` the file belongs to the hardware, and which of it is live
+         * depends entirely on `SPI_PS_INPUT_ENA`: the barycentrics always, the window position
+         * only for a shader that names `gl_FragCoord`, the face only for one that names
+         * `gl_FrontFacing` - and they are packed, so enabling one moves the next.
+         *
+         * Reading an unasked one is not a fault on hardware. It returns whatever the previous
+         * wave left, which is the same shape of bug as the missing `m0` and just as quiet. The
+         * simulator knows what was asked for, so here it is an assertion instead. */
+        if (r < GL_PS_FIRST_FREE_VGPR_SIM) ASSERT_TRUE(s->hw_vgpr_live[r]);
+        return s->v[r];
     }
     if (src0 == 128u) return 0.0f;
     if (src0 == 242u) return 1.0f;
@@ -2460,6 +2479,9 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
 #define SIM_FRAG_Y     20.5f
 #define SIM_FRAG_Z     0.25f
 #define SIM_FRAG_W     2.0f
+/* Positive, so `gl_FrontFacing` is true; distinct from every other seeded value so reading it
+ * by mistake shows up as a number that could have come from nowhere else. */
+#define SIM_FRONT_FACE 7.5f
 
 static GLboolean compile_and_run_prog(void *ctx, GLuint prog, const float attr[4][4],
                                       float out[4]) {
@@ -2467,10 +2489,10 @@ static GLboolean compile_and_run_prog(void *ctx, GLuint prog, const float attr[4
     ASSERT_TRUE(p != NULL);
 
     static uint32_t words[512];
-    uint32_t count = 0u, vgprs = 0u;
+    uint32_t count = 0u, vgprs = 0u, ena = 0u;
     char log[256] = {0};
     const GLboolean ok =
-        gl_program_compile_fragment(p, words, 512u, &count, &vgprs, NULL, NULL, log,
+        gl_program_compile_fragment(p, words, 512u, &count, &vgprs, NULL, &ena, log,
                                     sizeof(log));
     if (!ok) printf("\n    compile failed: %s\n", log);
     ASSERT_EQ(ok, GL_TRUE);
@@ -2487,14 +2509,31 @@ static GLboolean compile_and_run_prog(void *ctx, GLuint prog, const float attr[4
         s.ublock[OOPS_GL_GL2_UNIFORM_AT / 4 + i] = p->values[i];
     }
     s.ublock[OOPS_GL_GL2_DRAWCONST_AT / 4 + OOPS_GL_GL2_DC_VIEWPORT_H] = SIM_VIEWPORT_H;
-    /* **What the SPI would have put in v2..v5** for a shader that asked for the window
-     * position. Seeded for every program, because a shader that did not ask is a shader that
-     * never reads them - and one that did, and read the wrong register, gets a number here
-     * rather than whatever a zeroed array would have made look plausible. */
-    s.v[2] = SIM_FRAG_X;
-    s.v[3] = SIM_FRAG_Y;
-    s.v[4] = SIM_FRAG_Z;
-    s.v[5] = SIM_FRAG_W;
+
+    /* **The SPI fills exactly what it was asked for, packed in order**, and this models that
+     * rather than filling the low registers and hoping. `input_ena` came out of the compile, so
+     * the two cannot disagree: the barycentrics are always live, the window position follows
+     * when the shader named `gl_FragCoord`, and the face follows whatever is there.
+     *
+     * Everything else below v8 stays dead, and `sim_src` refuses to read a dead one. That is
+     * what makes a wrong register number a failure here rather than a plausible value - which
+     * is the whole hazard, since the packing moves the face from v2 to v6 depending on a bit
+     * set somewhere else entirely. */
+    s.hw_vgpr_live[0] = GL_TRUE; /* the i barycentric */
+    s.hw_vgpr_live[1] = GL_TRUE; /* and j */
+    {
+        uint32_t next = 2u;
+        if ((ena & 0x00000f00u) != 0u) {
+            s.v[next] = SIM_FRAG_X; s.hw_vgpr_live[next++] = GL_TRUE;
+            s.v[next] = SIM_FRAG_Y; s.hw_vgpr_live[next++] = GL_TRUE;
+            s.v[next] = SIM_FRAG_Z; s.hw_vgpr_live[next++] = GL_TRUE;
+            s.v[next] = SIM_FRAG_W; s.hw_vgpr_live[next++] = GL_TRUE;
+        }
+        if ((ena & 0x00001000u) != 0u) {
+            /* Positive is front-facing; the sign is the answer, not the value. */
+            s.v[next] = SIM_FRONT_FACE; s.hw_vgpr_live[next++] = GL_TRUE;
+        }
+    }
     sim_run(&s, words, count, attr);
     ASSERT_EQ(s.exported, GL_TRUE);
     ASSERT_EQ(s.ended, GL_TRUE);
@@ -2802,6 +2841,29 @@ static void test_gl2_front_facing_is_a_sign_not_a_flag(void) {
         }
         ASSERT_TRUE(saw_v6);
     }
+
+    /* **And run, not only inspected.** The simulator fills exactly the registers
+     * `input_ena` asked for and refuses to read any other, so this arm fails if the prologue
+     * reaches for the face at the wrong number - which is the failure the packing invites,
+     * since enabling `gl_FragCoord` moves it. Both shapes are run for that reason. */
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(gl_FrontFacing ? 1.0 : 0.0, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f); /* the seeded face is positive, so front */
+
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(gl_FrontFacing ? 1.0 : 0.0, gl_FragCoord.y,\n"
+                    "                      gl_FragCoord.x, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f);
+    ASSERT_NEAR(o[1], SIM_VIEWPORT_H - SIM_FRAG_Y, 1e-6f);
+    ASSERT_NEAR(o[2], SIM_FRAG_X, 1e-6f);
 
     glContextDestroy(ctx);
 }
