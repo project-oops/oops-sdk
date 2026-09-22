@@ -1113,6 +1113,54 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
             return d;
         }
     }
+    /* --- the derivatives -------------------------------------------------
+     *
+     * **A derivative is the difference between this lane and its neighbour in the quad**, which
+     * is the whole of what makes it a quad operation: the value has to exist in the lane next
+     * door, and in a lane the primitive does not cover it only exists because whole-quad mode
+     * kept that lane running. `glsl_ps.c` turns WQM on for a shader that names one, the same
+     * way it does for a shader that samples, and for the same reason.
+     *
+     * `dFdy`'s sign follows the window's y, which counts down the screen - so this is the
+     * bottom row less the top, matching the reference's own finite difference rather than
+     * GL's bottom-left convention. */
+    if (nm_is(nm, len, "dFdx") || nm_is(nm, len, "dFdy") || nm_is(nm, len, "fwidth")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        glsl_value_t d = gen_alloc(g, arg[0].count, node);
+        if (is_bad(d)) return d;
+        const GLboolean want_x = (GLboolean)!nm_is(nm, len, "dFdy");
+        const GLboolean want_y = (GLboolean)!nm_is(nm, len, "dFdx");
+        for (int cc = 0; cc < arg[0].count; cc++) {
+            const uint32_t mark = gen_mark(g);
+            glsl_value_t t = gen_alloc(g, 2, node);
+            if (is_bad(t)) return t;
+            const uint32_t near = t.base + 0u, acc = t.base + 1u;
+            const uint32_t s = comp_of(arg[0], cc);
+            if (want_x) {
+                glsl_emit_dpp_mov(g->code, near, s, GLSL_DPP_QUAD_X_NEAR);
+                glsl_emit_dpp_sub(g->code, acc, s, near, GLSL_DPP_QUAD_X_FAR);
+                if (!want_y) glsl_emit_mov(g->code, d.base + (uint32_t)cc, acc);
+            }
+            if (want_y) {
+                const uint32_t ydst = want_x ? near : (d.base + (uint32_t)cc);
+                glsl_emit_dpp_mov(g->code, t.base + 0u, s, GLSL_DPP_QUAD_Y_NEAR);
+                glsl_emit_dpp_sub(g->code, ydst, s, t.base + 0u, GLSL_DPP_QUAD_Y_FAR);
+                if (want_x) {
+                    /* `fwidth` is |dFdx| + |dFdy|, and an absolute value here is `max(v, -v)`
+                     * - the same two instructions the integer divide uses. */
+                    glsl_value_t n2 = gen_alloc(g, 1, node);
+                    if (is_bad(n2)) return n2;
+                    glsl_emit_neg_f32(g->code, n2.base, acc);
+                    glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, acc, acc, n2.base);
+                    glsl_emit_neg_f32(g->code, n2.base, ydst);
+                    glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, ydst, ydst, n2.base);
+                    glsl_emit_add_f32(g->code, d.base + (uint32_t)cc, acc, ydst);
+                }
+            }
+            gen_release(g, mark);
+        }
+        return d;
+    }
     if (nm_is(nm, len, "any") || nm_is(nm, len, "all")) {
         if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
         const uint32_t rop = nm_is(nm, len, "any") ? GLSL_VOP2_MAX_F32 : GLSL_VOP2_MIN_F32;

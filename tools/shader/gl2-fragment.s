@@ -263,3 +263,26 @@ image_sample_lz v[4:7], v[2:3], s[4:11], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D
 s_endpgm                    // 0xbf810000, the word every shader here ends with
 s_nop 0                     // 0xbf800000, what an unused patch slot holds
 s_waitcnt vmcnt(0)          // 0xbf8c3f70, after every image_sample in the tree
+
+// ---------------------------------------------------------------------------
+// DPP: the same instruction reading a neighbour's register rather than its own,
+// which is how a derivative is taken. Eight bytes - the ordinary word with src0
+// set to 0xfa, then a dword carrying the real source, the permute, and the row
+// and bank masks.
+//
+// A quad is (0,0) (1,0) / (0,1) (1,1), so x pairs lanes 0-1 and 2-3 and y pairs
+// 0-2 and 1-3. Each permute below broadcasts one side of a pair across the quad;
+// the difference of two of them is the slope. **Only src0 can be permuted**,
+// which is why a derivative is a move and a subtract and not one instruction.
+// ---------------------------------------------------------------------------
+v_mov_b32_dpp v4, v5 quad_perm:[0,0,2,2] row_mask:0xf bank_mask:0xf
+v_sub_f32_dpp v4, v5, v5 quad_perm:[1,1,3,3] row_mask:0xf bank_mask:0xf
+v_mov_b32_dpp v4, v5 quad_perm:[0,1,0,1] row_mask:0xf bank_mask:0xf
+v_sub_f32_dpp v4, v5, v5 quad_perm:[2,3,2,3] row_mask:0xf bank_mask:0xf
+
+// ---------------------------------------------------------------------------
+// The depth export, on target 8 with one channel. It carries neither `done` nor
+// `vm`: `done` marks a shader's last export and the colour export that follows
+// is the one entitled to say it.
+// ---------------------------------------------------------------------------
+exp mrtz v4, off, off, off

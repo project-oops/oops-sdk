@@ -377,6 +377,15 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
      * across the 2x2 quad, so every step that *produced* that coordinate has to have run in the
      * helper lanes too - which means the interpolation below and whatever the body does to it.
      * The live mask is kept and put back before the export. */
+    /* **A derivative needs whole-quad mode too**, and for the same reason a sample does: it
+     * reads the lane next door, and in a lane the primitive does not cover there is a value
+     * there only because WQM kept that lane running. Decided from the source rather than from
+     * generation, because the mode has to be entered before any of the body runs and by then
+     * it would be too late to find out. */
+    if (ok && (glsl_unit_mentions(fs, "dFdx", 4u) || glsl_unit_mentions(fs, "dFdy", 4u) ||
+               glsl_unit_mentions(fs, "fwidth", 6u))) {
+        gen->wqm = GL_TRUE;
+    }
     if (ok && gen->wqm) {
         glsl_emit_exec_save(&code, GLSL_GEN_LIVE_SGPR);
         glsl_emit_wqm(&code);

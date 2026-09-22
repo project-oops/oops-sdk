@@ -238,6 +238,35 @@ void glsl_emit_interp_pair(glsl_code_t *c, uint32_t vdst, uint32_t attr, uint32_
  * `done` says this is the shader's last export and `vm` that the exec mask is valid - both are
  * what every pixel shader in this repository sets, and a shader that exports without `done`
  * does not retire. Verified from `exp mrt0 v4, v5, v6, v7 done vm` = 0xf800180f, 0x07060504. */
+/* **DPP: the same instruction, reading a neighbour's register instead of its own.**
+ *
+ * Eight bytes - the ordinary VALU word with `src0` set to 0xfa, then a second dword holding the
+ * real source register, the permute, and the row and bank masks. `row_mask` and `bank_mask` are
+ * 0xf here, which is every lane; a derivative wants the whole quad and nothing narrower.
+ *
+ * Verified against the assembler: `v_sub_f32_dpp v4, v5, v5 quad_perm:[1,1,3,3] row_mask:0xf
+ * bank_mask:0xf` is 0x08080afa / 0xff0005f5, and `v_mov_b32_dpp v4, v5 quad_perm:[0,0,2,2]` is
+ * 0x7e0802fa / 0xff0005a0.
+ *
+ * **Only `src0` can be permuted**, which is why a derivative is two instructions and not one:
+ * the far value has to be moved into a register of its own before the subtract can read the
+ * near one through the permute. */
+static void put_dpp_tail(glsl_code_t *c, uint32_t src, uint32_t ctrl) {
+    put(c, (0xffu << 24) | ((ctrl & 0xffu) << 8) | (src & 0xffu));
+}
+
+void glsl_emit_dpp_mov(glsl_code_t *c, uint32_t dst, uint32_t src, uint32_t ctrl) {
+    put(c, (0x3fu << 25) | ((dst & 0xffu) << 17) | ((GLSL_VOP1_MOV_B32 & 0xffu) << 9) | 0xfau);
+    put_dpp_tail(c, src, ctrl);
+}
+
+void glsl_emit_dpp_sub(glsl_code_t *c, uint32_t dst, uint32_t src0, uint32_t vsrc1,
+                       uint32_t ctrl) {
+    put(c, ((GLSL_VOP2_SUB_F32 & 0x3fu) << 25) | ((dst & 0xffu) << 17) |
+              ((vsrc1 & 0xffu) << 9) | 0xfau);
+    put_dpp_tail(c, src0, ctrl);
+}
+
 /* `exp mrtz <reg>, off, off, off` - the depth a shader wrote, on target 8 with only the first
  * channel enabled. Verified as 0xf8000081 / 0x00000004 for `v4`.
  *

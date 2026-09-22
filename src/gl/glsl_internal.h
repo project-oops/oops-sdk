@@ -614,6 +614,22 @@ void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base);
  * neither `done` nor `vm`. */
 void glsl_emit_export_mrtz(glsl_code_t *c, uint32_t reg);
 
+/* **The quad permutes a derivative needs**, as `quad_perm` control values. A quad is laid out
+ * (0,0) (1,0) / (0,1) (1,1), so the x pair is lanes 0-1 and 2-3 and the y pair is 0-2 and 1-3.
+ * Each of these broadcasts one side of that pair across the quad, and the difference of two is
+ * the derivative. Verified against the assembler, all four. */
+#define GLSL_DPP_QUAD_X_FAR  0xf5u /* [1,1,3,3] - the right-hand column */
+#define GLSL_DPP_QUAD_X_NEAR 0xa0u /* [0,0,2,2] - the left-hand column */
+#define GLSL_DPP_QUAD_Y_FAR  0xeeu /* [2,3,2,3] - the bottom row */
+#define GLSL_DPP_QUAD_Y_NEAR 0x44u /* [0,1,0,1] - the top row */
+
+/* `dst = src`, read through a quad permute. */
+void glsl_emit_dpp_mov(glsl_code_t *c, uint32_t dst, uint32_t src, uint32_t ctrl);
+/* `dst = perm(src0) - vsrc1`. Only `src0` can be permuted, which is why a derivative takes a
+ * move and a subtract rather than one instruction. */
+void glsl_emit_dpp_sub(glsl_code_t *c, uint32_t dst, uint32_t src0, uint32_t vsrc1,
+                       uint32_t ctrl);
+
 /* -------------------------------------------------------------------------
  * Instruction selection: the tree becomes instructions
  *

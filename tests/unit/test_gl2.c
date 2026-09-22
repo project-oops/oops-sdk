@@ -1863,6 +1863,19 @@ static void test_gl2_pixel_shader_encodings_match_the_assembler(void) {
     ASSERT_EQ(words[0], 0xbefc0300u); /* s_mov_b32 m0, s0 */
     ASSERT_EQ(words[1], 0xbefc0302u); /* s_mov_b32 m0, s2 */
 
+    /* **DPP, the eight-byte form a derivative reads its neighbour through.** `src0` is 0xfa in
+     * the first word - the marker - and the real source register, the permute and the masks are
+     * in the second. A reader that stopped at the first word would take the next instruction's
+     * words for operands. */
+    glsl_code_init(&c, words, 64);
+    glsl_emit_dpp_mov(&c, 4u, 5u, GLSL_DPP_QUAD_X_NEAR);
+    glsl_emit_dpp_sub(&c, 4u, 5u, 5u, GLSL_DPP_QUAD_X_FAR);
+    ASSERT_EQ(c.count, 4u);
+    ASSERT_EQ(words[0], 0x7e0802fau); /* v_mov_b32_dpp v4, v5 quad_perm:[0,0,2,2] */
+    ASSERT_EQ(words[1], 0xff00a005u); /* [0x05,0xa0,0x00,0xff] - source, permute, then masks */
+    ASSERT_EQ(words[2], 0x08080afau); /* v_sub_f32_dpp v4, v5, v5 quad_perm:[1,1,3,3] */
+    ASSERT_EQ(words[3], 0xff00f505u);
+
     /* **The depth export.** Target 8, one channel, and **no `done`** - the colour export that
      * follows is the one that says it, and two exports both claiming to be last is a shader
      * that does not retire. Compare with `exp mrt0 ... done vm` below, which differs in every
@@ -2244,6 +2257,17 @@ static float sim_src(sim_t *s, uint32_t src0, const uint32_t *w, uint32_t *i) {
     if (src0 == 128u) return 0.0f;
     if (src0 == 242u) return 1.0f;
     if (src0 == 255u) return sim_f32(w[++(*i)]);
+    if (src0 == 250u) {
+        /* **DPP: a read of the lane next door, and this simulator has one lane.**
+         *
+         * The extra dword carries the real source register and the permute. With a single lane
+         * every permute selects that lane, so the value is its own - which makes a derivative
+         * come out exactly zero here. That is the honest answer for one lane rather than a
+         * convenient one, and it is why the derivative tests assert instructions and whole-quad
+         * mode rather than a slope: a slope needs four lanes and this has one. */
+        const uint32_t tail = w[++(*i)];
+        return s->v[tail & 0xffu];
+    }
     if (src0 < 102u) {
         /* **A scalar read with a load still in flight is the bug this models.** The hardware
          * would return whatever the register held; there is nothing to see on a host and
@@ -2638,6 +2662,99 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
      * viewport height that flips y lives there. A shader handed no block would have read the
      * flip out of a scalar register nothing loaded. */
     ASSERT_EQ(usg, 2u);
+
+    glContextDestroy(ctx);
+}
+
+static void test_gl2_derivatives_are_quad_reads_under_whole_quad_mode(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+    uint32_t words[256];
+    uint32_t count = 0u, vgprs = 0u, ena = 0u, usg = 0u;
+    char log[256] = {0};
+
+    /* **The permutes are the whole of a derivative**, and the four of them differ only in that
+     * byte - so the test names the byte. `dFdx` takes the right-hand column less the left,
+     * `dFdy` the bottom row less the top; using an x permute for `dFdy` gives a slope along
+     * the wrong axis and nothing else changes. */
+    const GLuint dx = linked_program(
+        VS_ONE_VARYING,
+        "varying vec4 vin;\n"
+        "void main() { gl_FragColor = vec4(dFdx(vin.x), 0.0, 0.0, 1.0); }\n");
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, dx), words, 256u, &count, &vgprs,
+                                          &usg, &ena, log, sizeof(log)),
+              GL_TRUE);
+    {
+        GLboolean far_x = GL_FALSE, near_x = GL_FALSE, any_y = GL_FALSE, wqm = GL_FALSE;
+        for (uint32_t i = 0; i + 1 < count; i++) {
+            if ((words[i] & 0x1ffu) != 0xfau) continue;
+            const uint32_t ctrl = (words[i + 1] >> 8) & 0xffu;
+            if (ctrl == GLSL_DPP_QUAD_X_FAR) far_x = GL_TRUE;
+            if (ctrl == GLSL_DPP_QUAD_X_NEAR) near_x = GL_TRUE;
+            if (ctrl == GLSL_DPP_QUAD_Y_FAR || ctrl == GLSL_DPP_QUAD_Y_NEAR) any_y = GL_TRUE;
+        }
+        /* `s_wqm_b32 exec_lo, exec_lo` - the mode a quad read needs, because the lane next door
+         * may be one the primitive does not cover and would otherwise not be running. */
+        for (uint32_t i = 0; i < count; i++) {
+            if (words[i] == 0xbefe097eu) wqm = GL_TRUE;
+        }
+        ASSERT_TRUE(far_x);
+        ASSERT_TRUE(near_x);
+        ASSERT_TRUE(!any_y);  /* dFdx reaches for no row permute */
+        ASSERT_TRUE(wqm);
+    }
+
+    /* `dFdy` is the same shape on the other axis - and asserts the x permutes are absent, so a
+     * lowering that used one set for both fails one of the two arms. */
+    const GLuint dy = linked_program(
+        VS_ONE_VARYING,
+        "varying vec4 vin;\n"
+        "void main() { gl_FragColor = vec4(dFdy(vin.x), 0.0, 0.0, 1.0); }\n");
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, dy), words, 256u, &count, &vgprs,
+                                          &usg, &ena, log, sizeof(log)),
+              GL_TRUE);
+    {
+        GLboolean far_y = GL_FALSE, near_y = GL_FALSE, any_x = GL_FALSE;
+        for (uint32_t i = 0; i + 1 < count; i++) {
+            if ((words[i] & 0x1ffu) != 0xfau) continue;
+            const uint32_t ctrl = (words[i + 1] >> 8) & 0xffu;
+            if (ctrl == GLSL_DPP_QUAD_Y_FAR) far_y = GL_TRUE;
+            if (ctrl == GLSL_DPP_QUAD_Y_NEAR) near_y = GL_TRUE;
+            if (ctrl == GLSL_DPP_QUAD_X_FAR || ctrl == GLSL_DPP_QUAD_X_NEAR) any_x = GL_TRUE;
+        }
+        ASSERT_TRUE(far_y);
+        ASSERT_TRUE(near_y);
+        ASSERT_TRUE(!any_x);
+    }
+
+    /* `fwidth` is both, so all four permutes appear in the one shader. */
+    const GLuint fw = linked_program(
+        VS_ONE_VARYING,
+        "varying vec4 vin;\n"
+        "void main() { gl_FragColor = vec4(fwidth(vin.x), 0.0, 0.0, 1.0); }\n");
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, fw), words, 256u, &count, &vgprs,
+                                          &usg, &ena, log, sizeof(log)),
+              GL_TRUE);
+    {
+        int seen = 0;
+        for (uint32_t i = 0; i + 1 < count; i++) {
+            if ((words[i] & 0x1ffu) != 0xfau) continue;
+            const uint32_t ctrl = (words[i + 1] >> 8) & 0xffu;
+            if (ctrl == GLSL_DPP_QUAD_X_FAR || ctrl == GLSL_DPP_QUAD_X_NEAR ||
+                ctrl == GLSL_DPP_QUAD_Y_FAR || ctrl == GLSL_DPP_QUAD_Y_NEAR) {
+                seen++;
+            }
+        }
+        ASSERT_TRUE(seen >= 4);
+    }
+
+    /* A shader that names none of them does not enter whole-quad mode and pays nothing. */
+    const GLuint plain = linked_program(
+        VS_ONE_VARYING, "void main() { gl_FragColor = vec4(1.0); }\n");
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, plain), words, 256u, &count,
+                                          &vgprs, &usg, &ena, log, sizeof(log)),
+              GL_TRUE);
+    for (uint32_t i = 0; i < count; i++) ASSERT_TRUE(words[i] != 0xbefe097eu);
 
     glContextDestroy(ctx);
 }
@@ -3825,6 +3942,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
+    RUN_TEST(test_gl2_derivatives_are_quad_reads_under_whole_quad_mode);
     RUN_TEST(test_gl2_frag_depth_exports_before_the_colour);
     RUN_TEST(test_gl2_vector_relationals_reduce_a_bvec);
     RUN_TEST(test_gl2_gl_color_lands_where_the_link_put_it);
