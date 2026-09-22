@@ -200,6 +200,19 @@ void glsl_emit_kill_from_vcc(glsl_code_t *c) {
     put(c, 0x877e6a7eu);
 }
 
+/* `s_mov_b32 m0, s<n>` - the parameter cache address every `v_interp` below reads.
+ *
+ * `s_mov_b32 m0, s0` = 0xbefc0300 and `s_mov_b32 m0, s2` = 0xbefc0302, which are the words the
+ * payload's own `ps_untex` and `ps_tex` carry (`gl_context.c`) and what clang assembles for
+ * gfx1030. **No wait state separates it from the interpolation**: LLVM emits `s_mov_b32 m0, s0`
+ * immediately before `v_interp_p1_f32` for an `amdgpu_ps` function, and its hazard recogniser
+ * is what would have padded the pair if the part needed it.
+ *
+ * The header says what leaving this out looks like, which is not a blank screen. */
+void glsl_emit_s_mov_m0(glsl_code_t *c, uint32_t ssrc) {
+    glsl_emit_sop1(c, GLSL_SOP1_MOV_B32, GLSL_SREG_M0, ssrc);
+}
+
 /* VINTRP: `110010 vdst[25:18] opcode[17:16] attr[15:10] chan[9:8] vsrc[7:0]`, opcode 0 for
  * `p1` and 1 for `p2`.
  *
@@ -250,6 +263,9 @@ void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base) {
  *   - **The width is the opcode**, and the five are consecutive - so an off-by-one loads twice
  *     or half as many SGPRs as the shader then reads, which faults nothing and reads whatever
  *     those registers held.
+ *   - **The destination's alignment is four, not the width.** Anything four dwords or wider
+ *     needs a 4-aligned first register whatever its size, a pair needs 2, a single needs
+ *     nothing - read out of the assembler by trying them rather than assumed from the widths.
  *
  * Verified from `tools/shader/gl2-fragment.s` across three destinations, three offsets and all
  * five widths, so the fields are pinned rather than inferred from one example. */
@@ -267,6 +283,58 @@ void glsl_emit_s_load(glsl_code_t *c, uint32_t op, uint32_t sdata, uint32_t sbas
  * operation as well - correct, slower, and not what the shader asked for. */
 void glsl_emit_s_waitcnt_lgkm(glsl_code_t *c) {
     put(c, 0xbf8cc07fu);
+}
+
+/* -------------------------------------------------------------------------
+ * Sampling a texture
+ * ------------------------------------------------------------------------- */
+
+/* MIMG:
+ *
+ *     word0: `111100 . opcode[24:18] . glc[13] unrm[12] dmask[11:8] . dim[5:3] .`
+ *     word1: `ssamp[25:21] srsrc[20:16] vdata[15:8] vaddr[7:0]`
+ *
+ * **`srsrc` and `ssamp` are SGPR numbers divided by four**, because both fields are five bits
+ * and both operands are register *groups*. Writing the register number straight in names a
+ * descriptor four times further up the file - which is not a fault, just a sample of whatever
+ * is there.
+ *
+ * `vaddr` is the first of a run of **consecutive** VGPRs holding the coordinate: two for 2D,
+ * three for 3D and cube. `vdata` is the first of four, because `dmask` is 0xf here and the mask
+ * decides how many registers come back - a narrower one returns fewer and leaves the rest of the
+ * destination holding what it held.
+ *
+ * Field positions verified across two destinations, two coordinate pairs, two descriptor sets,
+ * two masks and all four dimensions - `tools/shader/gl2-fragment.s`. The cross-check that this
+ * is right rather than self-consistent is `image_sample_lz` at opcode 39, which assembles to
+ * `0xf09c0f08 0x00610402`: the two words `tex-prolog.s` records as what the textured pixel
+ * shader used to carry. */
+void glsl_emit_image_sample(glsl_code_t *c, uint32_t opcode, uint32_t dim, uint32_t vdata,
+                            uint32_t vaddr, uint32_t srsrc, uint32_t ssamp) {
+    const uint32_t dmask = 0xfu;    /* all four channels: a vec4 result */
+    put(c, (0x3cu << 26) | ((opcode & 0x7fu) << 18) | (dmask << 8) | ((dim & 0x7u) << 3));
+    put(c, (((ssamp / 4u) & 0x1fu) << 21) | (((srsrc / 4u) & 0x1fu) << 16) |
+              ((vdata & 0xffu) << 8) | (vaddr & 0xffu));
+}
+
+/* `s_waitcnt vmcnt(0)` - the wait a sample needs before anything reads what it returned. A
+ * different counter from the scalar loads' `lgkmcnt`, and waiting on the wrong one waits for
+ * something that has already happened. */
+void glsl_emit_s_waitcnt_vm(glsl_code_t *c) {
+    put(c, 0xbf8c3f70u);
+}
+
+/* `s_wqm_b32 exec_lo, exec_lo` - **whole-quad mode**, which is what makes an implicit derivative
+ * exist at all. `image_sample` takes its level of detail from how the coordinate changes across
+ * the 2x2 quad, and a fragment's neighbours in that quad may be outside the primitive and so not
+ * running. This turns them on; the caller puts the real mask back before anything writes. */
+void glsl_emit_wqm(glsl_code_t *c) {
+    glsl_emit_sop1(c, GLSL_SOP1_WQM_B32, GLSL_SREG_EXEC_LO, GLSL_SREG_EXEC_LO);
+}
+
+/* `s_mov_b32 sN, exec_lo` - keeping the live-lane mask across the whole-quad section. */
+void glsl_emit_exec_save(glsl_code_t *c, uint32_t saved) {
+    glsl_emit_sop1(c, GLSL_SOP1_MOV_B32, saved, GLSL_SREG_EXEC_LO);
 }
 
 /* -------------------------------------------------------------------------

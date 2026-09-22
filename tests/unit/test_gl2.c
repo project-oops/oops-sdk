@@ -1382,6 +1382,71 @@ static void test_gl2_attribute_arrays_feed_the_shader(void) {
     oops_display_close(t.disp);
 }
 
+/* **The same two features on the path that defines the answer.**
+ *
+ * `glsl_gen.c` compiles file-scope `const`s and `discard` for the console, and the console is
+ * meant to agree with this rasteriser rather than the other way round - so a construct the
+ * compiler accepts and the reference cannot run is the one divergence that would never show up
+ * as a wrong pixel anywhere a test could look. Until 2026-09-21 the interpreter declared
+ * attributes, varyings and uniforms and nothing else, so a shader opening with
+ * `const float pi = 3.14159;` - which is how most real ones open - failed here while compiling
+ * there.
+ */
+static void test_gl2_the_reference_runs_globals_and_discard(void) {
+    gl2_target_t t = gl2_target();
+    static const GLfloat verts[9] = {
+        -0.9f, -0.9f, 0.0f,
+         0.9f, -0.9f, 0.0f,
+         0.0f,  0.9f, 0.0f};
+
+    /* Three globals, the third written in terms of the first two - so they have to be declared
+     * in source order and not merely all declared. */
+    const GLuint prog = linked_program(
+        "attribute vec3 pos;\n"
+        "void main() { gl_Position = vec4(pos, 1.0); }\n",
+        "const float half_on = 0.5;\n"
+        "const vec3 warm = vec3(1.0, 0.5, 0.0);\n"
+        "const vec3 dim = warm * half_on;\n"
+        "void main() { gl_FragColor = vec4(dim, 1.0); }\n");
+    const GLint loc = glGetAttribLocation(prog, "pos");
+    ASSERT_TRUE(loc >= 0);
+    glUseProgram(prog);
+    glVertexAttribPointer((GLuint)loc, 3, GL_FLOAT, GL_FALSE, 0, verts);
+    glEnableVertexAttribArray((GLuint)loc);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    /* `dim` is `warm * half_on`, so (0.5, 0.25, 0.0) - and the third global being right is the
+     * whole point: a `const` declared but not initialised would give black here, and one
+     * declared out of order would give zero for `warm` and black again. */
+    const uint32_t mid = px(&t, GL2_W / 2, GL2_H / 2 + 6);
+    ASSERT_TRUE(px_r(mid) > 115 && px_r(mid) < 140);
+    ASSERT_TRUE(px_g(mid) > 54 && px_g(mid) < 76);
+    ASSERT_TRUE(px_b(mid) < 12);
+
+    /* And `discard`, where the check is that the background survives - a fragment that was
+     * thrown away must leave what was under it. */
+    const GLuint killer = linked_program(
+        "attribute vec3 pos;\n"
+        "void main() { gl_Position = vec4(pos, 1.0); }\n",
+        "const float always = 1.0;\n"
+        "void main() {\n"
+        "  if (always > 0.5) { discard; }\n"
+        "  gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);\n"
+        "}\n");
+    glUseProgram(killer);
+    glVertexAttribPointer((GLuint)glGetAttribLocation(killer, "pos"), 3, GL_FLOAT, GL_FALSE, 0,
+                          verts);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    /* Still the previous shader's colour, not white. */
+    const uint32_t after = px(&t, GL2_W / 2, GL2_H / 2 + 6);
+    ASSERT_EQ(after, mid);
+
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 static void test_gl2_frag_coord_and_derivatives(void) {
     gl2_target_t t = gl2_target();
 
@@ -1786,6 +1851,18 @@ static void test_gl2_pixel_shader_encodings_match_the_assembler(void) {
     uint32_t words[64];
     glsl_code_t c;
 
+    /* **The parameter cache address**, which every interpolation below reads out of `m0`. Both
+     * source registers, because the back end emits whichever the draw's user-SGPR count puts
+     * the primitive mask in - and these are the same two words the payload's hand-written pixel
+     * shaders carry (`gl_context.c`, `ps_untex[1]` and `ps_tex[1]`), which is the cross-check
+     * that the generated prologue and the fixed-function one mean the same thing. */
+    glsl_code_init(&c, words, 64);
+    glsl_emit_s_mov_m0(&c, 0u);
+    glsl_emit_s_mov_m0(&c, 2u);
+    ASSERT_EQ(c.count, 2u);
+    ASSERT_EQ(words[0], 0xbefc0300u); /* s_mov_b32 m0, s0 */
+    ASSERT_EQ(words[1], 0xbefc0302u); /* s_mov_b32 m0, s2 */
+
     /* Interpolation, across all four channels and a high attribute - so the attribute's field
      * is pinned apart from its channel's, which one example would not have separated. */
     glsl_code_init(&c, words, 64);
@@ -1899,27 +1976,43 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
     uint32_t words[256];
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
-    const GLboolean ok =
-        gl_program_compile_fragment(p, words, 256u, &count, &vgprs, log, sizeof(log));
+    uint32_t user_sgprs = 99u;
+    const GLboolean ok = gl_program_compile_fragment(p, words, 256u, &count, &vgprs,
+                                                     &user_sgprs, log, sizeof(log));
     if (!ok) printf("\n    compile failed: %s\n", log);
     ASSERT_EQ(ok, GL_TRUE);
 
-    /* **The uniforms come first**, because they are a memory load and the wait for it wants as
-     * much between it and the first read as possible. This program's pool is the vertex
-     * shader's `mat4 mvp` - sixteen floats, one `s_load_dwordx16` into s16..s31 - and the
-     * fragment shader names none of them, so nothing is moved into a VGPR for it. */
-    ASSERT_EQ(words[0], 0xf4100400u); /* s_load_dwordx16 s[16:31], s[0:1], 0x0 */
-    ASSERT_EQ(words[1], 0xfa000000u);
-    ASSERT_EQ(words[2], 0xbf8cc07fu); /* s_waitcnt lgkmcnt(0) */
+    /* **`m0` before anything else**, because every interpolation below reads the parameter
+     * cache through it and a shader without it interpolates whatever the previous wave was
+     * pointed at. s2 because this program is handed the block in s[0:1], which puts the SPI's
+     * primitive mask in the register after them. */
+    ASSERT_EQ(words[0], 0xbefc0302u); /* s_mov_b32 m0, s2 */
+
+    /* **Then the uniforms**, because they are a memory load and the wait for it wants as much
+     * between it and the first read as possible. This program's pool is the vertex shader's
+     * `mat4 mvp` - sixteen floats, one `s_load_dwordx16` into s48..s63 - and the fragment
+     * shader names none of them, so nothing is moved into a VGPR for it. */
+    ASSERT_EQ(words[1], 0xf4100c00u); /* s_load_dwordx16 s[48:63], s[0:1], 0x80 */
+    /* **0x80, not 0.** The block's first two 0x40 are the texture units' descriptors; the
+     * uniforms start after them, and a shader loading from 0 would compute with an image
+     * descriptor read as floats. */
+    ASSERT_EQ(words[2], 0xfa000080u);
+    ASSERT_EQ(words[3], 0xbf8cc07fu); /* s_waitcnt lgkmcnt(0) */
 
     /* Then three components of one varying, each a `p1`/`p2` pair, into v8, v9, v10 - the first
      * registers above the ones the hardware owns. */
-    ASSERT_EQ(words[3], 0xc8200000u); /* v_interp_p1_f32 v8, v0, attr0.x */
-    ASSERT_EQ(words[4], 0xc8210001u); /* v_interp_p2_f32 v8, v1, attr0.x */
-    ASSERT_EQ(words[5], 0xc8240100u); /* v9, attr0.y */
-    ASSERT_EQ(words[6], 0xc8250101u);
-    ASSERT_EQ(words[7], 0xc8280200u); /* v10, attr0.z */
-    ASSERT_EQ(words[8], 0xc8290201u);
+    ASSERT_EQ(words[4], 0xc8200000u); /* v_interp_p1_f32 v8, v0, attr0.x */
+    ASSERT_EQ(words[5], 0xc8210001u); /* v_interp_p2_f32 v8, v1, attr0.x */
+    ASSERT_EQ(words[6], 0xc8240100u); /* v9, attr0.y */
+    ASSERT_EQ(words[7], 0xc8250101u);
+    ASSERT_EQ(words[8], 0xc8280200u); /* v10, attr0.z */
+    ASSERT_EQ(words[9], 0xc8290201u);
+
+    /* **The block's address and the mask register are one decision.** Two user SGPRs is what
+     * the draw configures into `SPI_SHADER_PGM_RSRC2_PS`, and it is also what puts the mask in
+     * s2 - so a shader that reported a different count would be moving the wrong register into
+     * `m0` on the very draw that configured it. */
+    ASSERT_EQ(user_sgprs, 2u);
 
     /* The epilogue, whatever the body did in between: the colour into v4..v7, the export, and
      * `s_endpgm`. */
@@ -1947,9 +2040,14 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
         NULL);
     const gl_program_object_t *p2 = gl_find_program(c, vs_only);
     count = 99u;
-    ASSERT_EQ(gl_program_compile_fragment(p2, words, 256u, &count, &vgprs, log, sizeof(log)),
+    user_sgprs = 99u;
+    ASSERT_EQ(gl_program_compile_fragment(p2, words, 256u, &count, &vgprs, &user_sgprs, log,
+                                          sizeof(log)),
               GL_TRUE);
     ASSERT_EQ(count, 0u);
+    /* Nothing was compiled, so the draw configures nothing: a program on this arm runs the
+     * fixed-function pixel shader, which brings its own user data. */
+    ASSERT_EQ(user_sgprs, 0u);
 
     glContextDestroy(ctx);
 }
@@ -1960,22 +2058,49 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
 
-    /* **Refused, not guessed at.** The generator has instruction selection for arithmetic,
-     * swizzles, constructors and assignment; a texture lookup needs `image_sample` and its
-     * descriptors, which have not been wired to a compiled shader. A back end that emitted
-     * something plausible would produce a frame that is wrong rather than a build that stops. */
-    const GLuint tex = linked_program(
+    /* **Refused, not guessed at.** `texture2D` is generated; the rest of section 8.7 is not,
+     * and each one is refused rather than sampled through the 2D path. A cube's coordinate is a
+     * direction the hardware resolves to a face and a `Proj` form divides by its last - close
+     * enough to look interchangeable, different enough to draw the wrong thing. */
+    gl_context_t *c = (gl_context_t *)ctx;
+    static const char *const REFUSED_LOOKUPS[] = {
+        "uniform sampler2D s;\nvarying vec2 uv;\n"
+        "void main() { gl_FragColor = texture2DProj(s, vec3(uv, 1.0)); }\n",
+        "uniform samplerCube s;\nvarying vec2 uv;\n"
+        "void main() { gl_FragColor = textureCube(s, vec3(uv, 1.0)); }\n",
+        "uniform sampler3D s;\nvarying vec2 uv;\n"
+        "void main() { gl_FragColor = texture3D(s, vec3(uv, 1.0)); }\n",
+    };
+    for (size_t i = 0; i < sizeof(REFUSED_LOOKUPS) / sizeof(REFUSED_LOOKUPS[0]); i++) {
+        memset(log, 0, sizeof(log));
+        const GLuint p = linked_program(
+            "attribute vec3 pos;\n"
+            "varying vec2 uv;\n"
+            "void main() { uv = pos.xy; gl_Position = vec4(pos, 1.0); }\n",
+            REFUSED_LOOKUPS[i]);
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, p), words, 256u, &count, &vgprs,
+                                              NULL, log, sizeof(log)),
+                  GL_FALSE);
+        ASSERT_TRUE(log[0] != '\0');
+    }
+
+    /* **And a third sampler**, which is one more than a draw carries descriptor sets for. The
+     * message names the number rather than saying "too many", because the number is the thing
+     * to check against. */
+    memset(log, 0, sizeof(log));
+    const GLuint three = linked_program(
         "attribute vec3 pos;\n"
         "varying vec2 uv;\n"
         "void main() { uv = pos.xy; gl_Position = vec4(pos, 1.0); }\n",
-        "uniform sampler2D s;\n"
+        "uniform sampler2D a;\nuniform sampler2D b;\nuniform sampler2D d;\n"
         "varying vec2 uv;\n"
-        "void main() { gl_FragColor = texture2D(s, uv); }\n");
-    gl_context_t *c = (gl_context_t *)ctx;
-    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, tex), words, 256u, &count, &vgprs,
-                                          log, sizeof(log)),
+        "void main() {\n"
+        "  gl_FragColor = texture2D(a, uv) + texture2D(b, uv) + texture2D(d, uv);\n"
+        "}\n");
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, three), words, 256u, &count,
+                                          &vgprs, NULL, log, sizeof(log)),
               GL_FALSE);
-    ASSERT_TRUE(log[0] != '\0');
+    ASSERT_TRUE(strstr(log, "2") != NULL);
 
     /* **The hardware's own limit**, named with its number: four parameters, sixteen floats.
      * Five has never run on this part, so a program needing a fifth is refused here rather than
@@ -1991,7 +2116,7 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
         "void main() { gl_FragColor = a + b + d + e + f; }\n");
     memset(log, 0, sizeof(log));
     ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, wide), words, 256u, &count, &vgprs,
-                                          log, sizeof(log)),
+                                          NULL, log, sizeof(log)),
               GL_FALSE);
     ASSERT_TRUE(strstr(log, "16") != NULL);
 
@@ -2025,8 +2150,18 @@ typedef struct {
      * `glsl_gen.c` saves exec masks into s4..s15 - and keeping them apart here means a shader
      * that confused the two would read a zero rather than a plausible float. */
     GLboolean smask[128];
-    const float *ublock;    /* what `s[0:1]` points at */
+    /* **The whole block `s[0:1]` points at**, laid out the way `gl_gl2_build_block` lays it
+     * out: two texture units' descriptors, then the uniforms at 0x80. Built here rather than
+     * pointed at `p->values` directly, so that a shader loading its uniforms from the wrong
+     * offset reads a descriptor rather than the right answer. */
+    float ublock[OOPS_GL_GL2_SLOT_STRIDE / 4];
     int ublock_floats;
+    /* **Set by a sample and cleared by `s_waitcnt vmcnt(0)`.** Reading one of these before the
+     * wait is a shader computing with what the register held, which is the hazard obSCEne
+     * measured for the scalar loads (`-6c0d`, arm 5) and the same one applies here. */
+    GLboolean vpending[256];
+    int samples;            /* how many `image_sample`s ran */
+    uint32_t last_tex_set;  /* which descriptor set the last one used */
     GLboolean vcc;
     GLboolean exec;
     float out[4];
@@ -2037,6 +2172,13 @@ typedef struct {
      * a shader reading a register the load has not delivered into - which on hardware is
      * whatever it held, and here is a test failure. */
     GLboolean lgkm_pending;
+    /* **Whether `m0` has been pointed at the parameter cache.** The hardware reads it on every
+     * `v_interp`, and a shader that never sets it interpolates against whatever the previous
+     * wave left - which is not a blank screen or a fault but a surface speckled, wave by wave,
+     * with another primitive's parameters. That was gl2-cube's first frame on hardware
+     * (2026-09-22). The interpolation arm below refuses to run without it, so removing the
+     * prologue's `s_mov_b32 m0` fails here instead of on a console. */
+    GLboolean m0_set;
 } sim_t;
 
 static float sim_f32(uint32_t bits) {
@@ -2048,7 +2190,10 @@ static float sim_f32(uint32_t bits) {
 /* A source operand: a VGPR, an SGPR, one of the two inline constants this back end emits, or a
  * literal dword that follows the instruction. */
 static float sim_src(sim_t *s, uint32_t src0, const uint32_t *w, uint32_t *i) {
-    if (src0 >= 256u) return s->v[src0 - 256u];
+    if (src0 >= 256u) {
+        ASSERT_EQ(s->vpending[src0 - 256u], GL_FALSE);
+        return s->v[src0 - 256u];
+    }
     if (src0 == 128u) return 0.0f;
     if (src0 == 242u) return 1.0f;
     if (src0 == 255u) return sim_f32(w[++(*i)]);
@@ -2087,13 +2232,60 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
         if (x == 0xbf810000u) { s->ended = GL_TRUE; break; }
         if (x == 0xbf800000u) continue;          /* s_nop */
         if (x == 0xbf8cc07fu) { s->lgkm_pending = GL_FALSE; continue; } /* s_waitcnt lgkmcnt(0) */
+        if (x == 0xbf8c3f70u) {                                        /* s_waitcnt vmcnt(0) */
+            for (int k = 0; k < 256; k++) s->vpending[k] = GL_FALSE;
+            continue;
+        }
+
+        if ((x >> 26) == 0x3cu) {                /* MIMG: image_sample */
+            const uint32_t w1 = w[++i];
+            const uint32_t vdata = (w1 >> 8) & 0xffu;
+            const uint32_t vaddr = w1 & 0xffu;
+            const uint32_t srsrc = ((w1 >> 16) & 0x1fu) * 4u;
+            const uint32_t ssamp = ((w1 >> 21) & 0x1fu) * 4u;
+            ASSERT_EQ((x >> 18) & 0x7fu, 32u);           /* image_sample, not _lz */
+            ASSERT_EQ((x >> 8) & 0xfu, 0xfu);            /* all four channels */
+            ASSERT_EQ((x >> 3) & 0x7u, 1u);              /* 2D */
+            /* The sampler's four registers sit eight above the image's eight - the layout
+             * `glsl_internal.h` sets out and the prologue loads into. */
+            ASSERT_EQ(ssamp, srsrc + 8u);
+            ASSERT_TRUE(srsrc >= 4u);
+            const uint32_t set = (srsrc - 4u) / 12u;
+            ASSERT_TRUE(set < 2u);
+            /* **A texture whose texel is its own coordinate**, plus the set it came through.
+             * That is not a real filter and does not need to be: what these tests check is that
+             * the right coordinate reached the right descriptor set, and a texel derived from
+             * both says so in one value. */
+            if (s->exec) {
+                s->v[vdata + 0u] = s->v[vaddr];
+                s->v[vdata + 1u] = s->v[vaddr + 1u];
+                s->v[vdata + 2u] = (float)set;
+                s->v[vdata + 3u] = 1.0f;
+            }
+            for (uint32_t k = 0; k < 4u; k++) s->vpending[vdata + k] = GL_TRUE;
+            s->samples++;
+            s->last_tex_set = set;
+            continue;
+        }
 
         /* SOP1, which has to be tested before SOP2: its top two bits are SOP2's as well. */
         if ((x >> 23) == 0x17du) {
             const uint32_t sdst = (x >> 16) & 0x7fu;
             const uint32_t op = (x >> 8) & 0xffu;
             const uint32_t ssrc0 = x & 0xffu;
-            if (op == 3u) {                      /* s_mov_b32 */
+            if (op == 3u && sdst == 124u) {      /* s_mov_b32 m0, s<n> */
+                /* The parameter cache address. Which scalar register it comes from is the
+                 * draw's user-SGPR count - s0 with none, s2 with the block's address in
+                 * s[0:1] - and both are legal; what is not legal is interpolating without it. */
+                ASSERT_TRUE(ssrc0 == 0u || ssrc0 == 2u);
+                s->m0_set = GL_TRUE;
+            } else if (op == 3u) {               /* s_mov_b32 */
+                sim_set_mask(s, sdst, sim_mask(s, ssrc0));
+            } else if (op == 9u) {
+                /* `s_wqm_b32`. One lane is modelled, so the helper lanes it would turn on are
+                 * not here to turn on and this is the identity - including for a zero mask,
+                 * which whole-quad mode leaves zero. What the tests can still see is that the
+                 * live mask was saved before it and restored after. */
                 sim_set_mask(s, sdst, sim_mask(s, ssrc0));
             } else if (op == 60u) {              /* s_and_saveexec_b32 */
                 sim_set_mask(s, sdst, s->exec);
@@ -2112,14 +2304,20 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
             static const uint32_t WIDTH[5] = {1u, 2u, 4u, 8u, 16u};
             ASSERT_TRUE(op < 5u);
             ASSERT_EQ(sbase, 0u);                          /* s[0:1] - the block's address */
-            ASSERT_EQ(sdata % WIDTH[op], 0u);              /* the destination's alignment rule */
+            /* **The destination's alignment, which is the assembler's rule and not the width.**
+             * A single dword goes anywhere, a pair is 2-aligned, and everything four dwords and
+             * wider is **4**-aligned - so `s_load_dwordx16 s[52:67]` is legal and
+             * `s_load_dwordx8 s[6:13]` is not. Read out of clang by trying them. */
+            {
+                const uint32_t align = WIDTH[op] >= 4u ? 4u : WIDTH[op];
+                ASSERT_EQ(sdata % align, 0u);
+            }
             ASSERT_EQ(offset % 4u, 0u);
             for (uint32_t k = 0; k < WIDTH[op]; k++) {
                 const uint32_t f = offset / 4u + k;
                 /* Past the block is whatever the payload slot holds; the shader loads a whole
                  * sixteen and uses what it declared, so this is normal and reads as zero. */
-                s->s[sdata + k] =
-                    (s->ublock && (int)f < s->ublock_floats) ? s->ublock[f] : 0.0f;
+                s->s[sdata + k] = (f < (uint32_t)s->ublock_floats) ? s->ublock[f] : 0.0f;
             }
             s->lgkm_pending = GL_TRUE;
             continue;
@@ -2141,6 +2339,11 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
             const uint32_t op = (x >> 16) & 0x3u;
             const uint32_t at = (x >> 10) & 0x3fu;
             const uint32_t ch = (x >> 8) & 0x3u;
+            /* **The parameter cache has to have been addressed.** On hardware this is not a
+             * fault: the interpolation reads through whatever `m0` happens to hold and returns
+             * another primitive's parameters. Modelled as a failure because a simulator whose
+             * every answer stayed right would be the one thing that could not have caught it. */
+            ASSERT_TRUE(s->m0_set);
             if (op == 0u && s->exec) s->v[vdst] = attr[at][ch]; /* p1 loads; p2 adds nothing */
             continue;
         }
@@ -2239,7 +2442,7 @@ static GLboolean compile_and_run_prog(void *ctx, GLuint prog, const float attr[4
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
     const GLboolean ok =
-        gl_program_compile_fragment(p, words, 512u, &count, &vgprs, log, sizeof(log));
+        gl_program_compile_fragment(p, words, 512u, &count, &vgprs, NULL, log, sizeof(log));
     if (!ok) printf("\n    compile failed: %s\n", log);
     ASSERT_EQ(ok, GL_TRUE);
     /* Whatever it emitted has to fit the file the stage table allocated. */
@@ -2248,8 +2451,11 @@ static GLboolean compile_and_run_prog(void *ctx, GLuint prog, const float attr[4
     sim_t s;
     memset(&s, 0, sizeof(s));
     s.exec = GL_TRUE;            /* the lane starts live */
-    s.ublock = p->values;
-    s.ublock_floats = p->value_floats;
+    s.ublock_floats = (int)(sizeof(s.ublock) / sizeof(s.ublock[0]));
+    /* The block as the draw path builds it: descriptors first, the value pool at 0x80. */
+    for (int i = 0; i < p->value_floats; i++) {
+        s.ublock[OOPS_GL_GL2_UNIFORM_AT / 4 + i] = p->values[i];
+    }
     sim_run(&s, words, count, attr);
     ASSERT_EQ(s.exported, GL_TRUE);
     ASSERT_EQ(s.ended, GL_TRUE);
@@ -2532,7 +2738,8 @@ static void test_gl2_compiled_uniforms_come_from_the_scalar_file(void) {
     static uint32_t words[512];
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
-    ASSERT_EQ(gl_program_compile_fragment(sp, words, 512u, &count, &vgprs, log, sizeof(log)),
+    ASSERT_EQ(gl_program_compile_fragment(sp, words, 512u, &count, &vgprs, NULL, log,
+                                          sizeof(log)),
               GL_TRUE);
     /* v8 and v9 for the one varying component and `k`, plus `gl_FragColor`'s four and the
      * eight the hardware owns: nowhere near the seventeen a materialised `mvp` would add. */
@@ -2541,6 +2748,303 @@ static void test_gl2_compiled_uniforms_come_from_the_scalar_file(void) {
     compile_and_run_prog(ctx, shared, attr, o);
     ASSERT_NEAR(o[0], 0.75f, tol);
     ASSERT_NEAR(o[3], 0.25f, tol);
+
+    glContextDestroy(ctx);
+}
+
+static void test_gl2_compiled_control_flow_runs_the_right_arm(void) {
+    void *ctx = gl2_context();
+    const float tol = 1e-6f;
+    float o[4];
+
+    /* `vin.x` is the condition's input, so the same shader is run twice with different values
+     * and has to take different arms. **A single lane is enough to see the mask arithmetic go
+     * wrong**: both arms execute either way, and what is being checked is which one wrote. */
+    const char *const IF_ELSE =
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  vec4 c = vec4(0.0);\n"
+        "  if (vin.x > 0.5) { c = vec4(1.0, 0.0, 0.0, 1.0); }\n"
+        "  else { c = vec4(0.0, 1.0, 0.0, 1.0); }\n"
+        "  gl_FragColor = c;\n"
+        "}\n";
+    const float hi[4][4] = {{0.9f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float lo[4][4] = {{0.1f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, IF_ELSE, hi, o), GL_TRUE);
+    ASSERT_NEAR(o[0], 1.0f, tol);
+    ASSERT_NEAR(o[1], 0.0f, tol);
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, IF_ELSE, lo, o), GL_TRUE);
+    ASSERT_NEAR(o[0], 0.0f, tol);
+    ASSERT_NEAR(o[1], 1.0f, tol);
+
+    /* Nested, and an `if` with no `else`. The inner one saves into the next scalar register
+     * along, and an outer arm no lane is running must not let the inner one write. */
+    const char *const NESTED =
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  float r = 0.0;\n"
+        "  if (vin.x > 0.5) {\n"
+        "    r = 0.25;\n"
+        "    if (vin.y > 0.5) { r = 0.5; }\n"
+        "  }\n"
+        "  gl_FragColor = vec4(r, 0.0, 0.0, 1.0);\n"
+        "}\n";
+    const float both[4][4] = {{0.9f, 0.9f, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float outer[4][4] = {{0.9f, 0.1f, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float neither[4][4] = {{0.1f, 0.9f, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    compile_and_run(ctx, VS_ONE_VARYING, NESTED, both, o);
+    ASSERT_NEAR(o[0], 0.5f, tol);
+    compile_and_run(ctx, VS_ONE_VARYING, NESTED, outer, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    /* **The one that catches a wrong inner mask.** The outer arm is dead, so the inner `if`'s
+     * condition is true and its body must still write nothing. */
+    compile_and_run(ctx, VS_ONE_VARYING, NESTED, neither, o);
+    ASSERT_NEAR(o[0], 0.0f, tol);
+
+    /* The logical operators, which over values that are exactly 0.0 or 1.0 are min, max and
+     * `1 - x` - no comparison and no branch among them. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  bool a = vin.x > 0.5;\n"
+                    "  bool b = vin.y > 0.5;\n"
+                    "  float p = (a && b) ? 1.0 : 0.0;\n"
+                    "  float q = (a || b) ? 1.0 : 0.0;\n"
+                    "  float r = (!a) ? 1.0 : 0.0;\n"
+                    "  gl_FragColor = vec4(p, q, r, 1.0);\n"
+                    "}\n",
+                    outer, o);   /* a true, b false */
+    ASSERT_NEAR(o[0], 0.0f, tol);
+    ASSERT_NEAR(o[1], 1.0f, tol);
+    ASSERT_NEAR(o[2], 0.0f, tol);
+
+    /* A vector `==`, which is true only when **every** component agrees - the case a
+     * per-component answer combined with the wrong operator gets backwards. */
+    const float magenta[4][4] = {{1.0f, 0.0f, 1.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float nearly[4][4] = {{1.0f, 0.5f, 1.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const char *const VEC_EQ =
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  float m = (vin.xyz == vec3(1.0, 0.0, 1.0)) ? 1.0 : 0.0;\n"
+        "  gl_FragColor = vec4(m, 0.0, 0.0, 1.0);\n"
+        "}\n";
+    compile_and_run(ctx, VS_ONE_VARYING, VEC_EQ, magenta, o);
+    ASSERT_NEAR(o[0], 1.0f, tol);
+    compile_and_run(ctx, VS_ONE_VARYING, VEC_EQ, nearly, o);
+    ASSERT_NEAR(o[0], 0.0f, tol);
+
+    glContextDestroy(ctx);
+}
+
+static void test_gl2_compiled_discard_kills_the_lane_for_good(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float hi[4][4] = {{0.9f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float lo[4][4] = {{0.1f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **This is the shape craft's block shader opens with**, and the one that matters: a
+     * conditional discard, then work afterwards that the surviving lanes still do. */
+    const char *const KEY =
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  if (vin.x > 0.5) { discard; }\n"
+        "  gl_FragColor = vec4(0.25, 0.5, 0.75, 1.0);\n"
+        "}\n";
+
+    /* **The lane comes back if the discard only narrowed `exec`.** The `if` restores the mask
+     * it saved on the way in, so a discard that did not also take the lane out of that save
+     * would be undone three instructions later - and the shader would export a colour for a
+     * fragment it had just thrown away. */
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, KEY, hi, o), GL_FALSE);
+    /* It still exports, and still with `done`: a wave that discarded every lane must retire. */
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, KEY, lo, o), GL_TRUE);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.75f, 1e-6f);
+
+    /* The same from two levels in, where the lane has to come out of both saved masks. */
+    const char *const NESTED_KEY =
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  if (vin.x > 0.5) {\n"
+        "    if (vin.y > 0.5) { discard; }\n"
+        "  }\n"
+        "  gl_FragColor = vec4(1.0);\n"
+        "}\n";
+    const float both[4][4] = {{0.9f, 0.9f, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float one[4][4] = {{0.9f, 0.1f, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, NESTED_KEY, both, o), GL_FALSE);
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, NESTED_KEY, one, o), GL_TRUE);
+
+    /* An unconditional one, which kills the lane whatever the inputs are. */
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING,
+                              "varying vec4 vin;\n"
+                              "void main() { discard; gl_FragColor = vec4(1.0); }\n",
+                              lo, o),
+              GL_FALSE);
+
+    glContextDestroy(ctx);
+}
+
+static void test_gl2_compiled_globals_are_in_scope(void) {
+    void *ctx = gl2_context();
+    const float tol = 1e-5f;
+    float o[4];
+    const float attr[4][4] = {{0.5f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **A `const` at file scope is what a real shader opens with** - craft's block shader
+     * declares `pi`, `light_color` and `ambient_color` before `main` and uses all three. They
+     * are generated in source order, so one may be written in terms of an earlier one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "const float half_turn = 0.5;\n"
+                    "const vec3 tint = vec3(0.2, 0.4, 0.6);\n"
+                    "const vec3 doubled = tint + tint;\n"
+                    "varying vec4 vin;\n"
+                    "void main() { gl_FragColor = vec4(doubled * half_turn, vin.x); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.2f, tol);
+    ASSERT_NEAR(o[1], 0.4f, tol);
+    ASSERT_NEAR(o[2], 0.6f, tol);
+    ASSERT_NEAR(o[3], 0.5f, tol);
+
+    /* A plain global, which GLSL 1.10 allows and which is a variable like any other. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "float scale = 3.0;\n"
+                    "varying vec4 vin;\n"
+                    "void main() { scale = scale + 1.0; gl_FragColor = vec4(scale * 0.1); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.4f, tol);
+
+    glContextDestroy(ctx);
+}
+
+/*
+ * **A whole shader of the shape a port actually has**, rather than one feature at a time.
+ *
+ * This is craft's block shader with the texture lookups taken out: file-scope `const`s, uniforms
+ * the API set, varyings, a conditional `discard`, `min`, `clamp`, `mix`, and a vector times a
+ * scalar in three different places. The point is that the pieces compose - each has its own test
+ * above, and a back end can pass all of those and still fall over on the first shader that uses
+ * six of them at once, usually by running out of registers or by getting the allocator's
+ * per-statement mark wrong.
+ */
+static void test_gl2_a_realistic_shader_compiles_and_computes(void) {
+    void *ctx = gl2_context();
+    float o[4];
+
+    const float ao_in = 0.6f, light_in = 0.1f, fog_in = 0.25f, diffuse_in = 0.7f;
+    const float attr[4][4] = {{ao_in, light_in, fog_in, diffuse_in},
+                              {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    const GLuint prog = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "uniform float daylight;\n"
+        "uniform vec3 fog_color;\n"
+        "varying vec4 vin;\n"
+        "const vec3 light_color = vec3(0.6);\n"
+        "const vec3 ambient_color = vec3(0.4);\n"
+        "void main() {\n"
+        "  vec3 color = vec3(0.8, 0.7, 0.5);\n"
+        "  if (color.r < 0.0) { discard; }\n"
+        "  float ao = min(1.0, vin.x + vin.y);\n"
+        "  float df = min(1.0, vin.w + vin.y);\n"
+        "  vec3 light = ambient_color + light_color * df;\n"
+        "  color = clamp(color * light * ao, vec3(0.0), vec3(1.0));\n"
+        "  color = mix(color, fog_color * daylight, vin.z);\n"
+        "  gl_FragColor = vec4(color, 1.0);\n"
+        "}\n");
+    glUseProgram(prog);
+    glUniform1f(glGetUniformLocation(prog, "daylight"), 0.8f);
+    glUniform3f(glGetUniformLocation(prog, "fog_color"), 0.5f, 0.6f, 0.7f);
+
+    /* The lane survives: the discard's condition is false. */
+    ASSERT_EQ(compile_and_run_prog(ctx, prog, attr, o), GL_TRUE);
+
+    /* The same arithmetic, written the way the shader writes it. */
+    const float base[3] = {0.8f, 0.7f, 0.5f};
+    const float fogc[3] = {0.5f, 0.6f, 0.7f};
+    const float ao = 1.0f < (ao_in + light_in) ? 1.0f : (ao_in + light_in);
+    const float df = 1.0f < (diffuse_in + light_in) ? 1.0f : (diffuse_in + light_in);
+    const float light = 0.4f + 0.6f * df;
+    for (int i = 0; i < 3; i++) {
+        float c = base[i] * light * ao;
+        if (c < 0.0f) c = 0.0f;
+        if (c > 1.0f) c = 1.0f;
+        const float f = fogc[i] * 0.8f;
+        ASSERT_NEAR(o[i], c + (f - c) * fog_in, 1e-5f);
+    }
+    ASSERT_NEAR(o[3], 1.0f, 1e-6f);
+
+    glContextDestroy(ctx);
+}
+
+/*
+ * **Sampling a texture from a compiled shader.**
+ *
+ * The simulator's texture returns its own coordinate in x and y and the descriptor set it came
+ * through in z, which is not a filter and does not need to be: what these check is that the
+ * right coordinate reached the right set, and a texel made of both says so in one value.
+ */
+static void test_gl2_compiled_texture_lookups_reach_the_right_set(void) {
+    void *ctx = gl2_context();
+    const float tol = 1e-6f;
+    float o[4];
+    const float attr[4][4] = {{0.25f, 0.75f, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler2D tex;\n"
+                    "varying vec4 vin;\n"
+                    "void main() { gl_FragColor = texture2D(tex, vin.xy); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);   /* the coordinate arrived ... */
+    ASSERT_NEAR(o[1], 0.75f, tol);
+    ASSERT_NEAR(o[2], 0.0f, tol);    /* ... through set 0 */
+    ASSERT_NEAR(o[3], 1.0f, tol);
+
+    /* **Two samplers take two sets, in declaration order.** A shader that sampled both through
+     * set 0 would read one texture twice - which looks like a texture-binding bug and is a
+     * compiler one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler2D first;\n"
+                    "uniform sampler2D second;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  vec4 a = texture2D(first, vin.xy);\n"
+                    "  vec4 b = texture2D(second, vin.xy);\n"
+                    "  gl_FragColor = vec4(a.z, b.z, a.x, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0f, tol);    /* `first` is set 0 ... */
+    ASSERT_NEAR(o[1], 1.0f, tol);    /* ... and `second` is set 1 */
+    ASSERT_NEAR(o[2], 0.25f, tol);
+
+    /* The result composes with everything else: a sample scaled by a uniform, added to a const,
+     * behind a discard. */
+    const GLuint prog = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "uniform sampler2D tex;\n"
+        "uniform float amount;\n"
+        "const vec3 lift = vec3(0.1, 0.0, 0.0);\n"
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  vec3 c = texture2D(tex, vin.xy).rgb;\n"
+        "  if (c.r > 0.9) { discard; }\n"
+        "  gl_FragColor = vec4(c * amount + lift, 1.0);\n"
+        "}\n");
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "tex"), 0);
+    glUniform1f(glGetUniformLocation(prog, "amount"), 2.0f);
+    ASSERT_EQ(compile_and_run_prog(ctx, prog, attr, o), GL_TRUE);
+    ASSERT_NEAR(o[0], 0.25f * 2.0f + 0.1f, 1e-5f);
+    ASSERT_NEAR(o[1], 0.75f * 2.0f, 1e-5f);
+
+    /* And the discard still bites when the sampled value asks for it. */
+    const float bright[4][4] = {{0.95f, 0.5f, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    ASSERT_EQ(compile_and_run_prog(ctx, prog, bright, o), GL_FALSE);
 
     glContextDestroy(ctx);
 }
@@ -2564,7 +3068,7 @@ static void test_gl2_the_back_end_refuses_by_name(void) {
         char log[256] = {0};
         const GLuint prog = linked_program(VS_ONE_VARYING, REFUSED[i]);
         ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, prog), words, 256u, &count,
-                                              &vgprs, log, sizeof(log)),
+                                              &vgprs, NULL, log, sizeof(log)),
                   GL_FALSE);
         ASSERT_TRUE(log[0] != '\0');
     }
@@ -2598,6 +3102,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_control_flow_and_functions_run);
     RUN_TEST(test_gl2_a_sampler_reads_its_own_unit);
     RUN_TEST(test_gl2_attribute_arrays_feed_the_shader);
+    RUN_TEST(test_gl2_the_reference_runs_globals_and_discard);
     RUN_TEST(test_gl2_frag_coord_and_derivatives);
     RUN_TEST(test_gl2_a_vertex_shader_alone_feeds_fixed_function);
     RUN_TEST(test_gl2_glsl_120_runs_what_it_compiles);
@@ -2609,6 +3114,11 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);
     RUN_TEST(test_gl2_compiled_swizzle_writes_land_where_they_are_named);
     RUN_TEST(test_gl2_compiled_uniforms_come_from_the_scalar_file);
+    RUN_TEST(test_gl2_compiled_control_flow_runs_the_right_arm);
+    RUN_TEST(test_gl2_compiled_discard_kills_the_lane_for_good);
+    RUN_TEST(test_gl2_compiled_globals_are_in_scope);
+    RUN_TEST(test_gl2_compiled_texture_lookups_reach_the_right_set);
+    RUN_TEST(test_gl2_a_realistic_shader_compiles_and_computes);
     RUN_TEST(test_gl2_the_back_end_refuses_by_name);
     RUN_TEST(test_gl2_separate_stencil_and_blend_state);
     RUN_TEST(test_gl2_separate_blend_equation_blends);

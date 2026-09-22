@@ -2084,6 +2084,63 @@ static void gl_hw_emit_stencil_bind(gl_context_t *ctx, uint32_t **dw_ptr) {
     *dw_ptr = dw;
 }
 
+/* -------------------------------------------------------------------------
+ * The block a compiled GL 2.0 pixel shader is handed
+ * ------------------------------------------------------------------------- */
+
+/* The texture the program's sampler for descriptor set `s` currently names.
+ *
+ * **Two lookups, not one.** The sampler's *value* is a texture unit number - that is what
+ * `glUniform1i` on a sampler means - and the unit then has a texture bound to it. A shader that
+ * never set its sampler gets unit 0, which is the specification's default and the thing every
+ * program forgets. NULL when the unit has nothing complete bound, which is not an error: the
+ * shader samples and gets whatever the descriptors last held, exactly as the fixed-function
+ * path does. */
+static gl_texture_object_t *gl_gl2_sampler_texture(gl_context_t *ctx,
+                                                   const gl_program_object_t *prog, int s) {
+    if (s < 0 || s >= prog->hw_tex_sets) return (gl_texture_object_t *)0;
+    const int ui = prog->hw_tex_uniform[s];
+    if (ui < 0 || ui >= prog->uniform_count || !prog->values) return (gl_texture_object_t *)0;
+    const float unit_f = prog->values[prog->uniforms[ui].offset];
+    if (unit_f < 0.0f || unit_f >= (float)OOPS_GL_MAX_TEXTURE_UNITS) {
+        return (gl_texture_object_t *)0;
+    }
+    const GLuint id = gl_unit_texture_id(ctx, (GLuint)unit_f);
+    if (id == 0u) return (gl_texture_object_t *)0;
+    for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
+        if (ctx->textures[ti].used && ctx->textures[ti].id == id) return &ctx->textures[ti];
+    }
+    return (gl_texture_object_t *)0;
+}
+
+/* Builds the whole block: descriptors at 0x00 and 0x40, the uniform pool at 0x80.
+ *
+ * **Built whole every time, including the parts that did not change.** The block is compared
+ * against the slot to decide whether this draw needs a new one, and a comparison against
+ * something only partly written would answer about the bytes that were left over from the last
+ * program. Zeroed first for the same reason. */
+static void gl_gl2_build_block(gl_context_t *ctx, const gl_program_object_t *prog,
+                               uint32_t *block) {
+    memset(block, 0, OOPS_GL_GL2_SLOT_STRIDE);
+    for (int s = 0; s < prog->hw_tex_sets && s < (int)OOPS_GL_MAX_TEXTURE_UNITS; s++) {
+        gl_texture_object_t *obj = gl_gl2_sampler_texture(ctx, prog, s);
+        if (!obj) continue;
+        uint32_t *set = block + (size_t)s * (OOPS_GL_DESC_UNIT_STRIDE / 4u);
+        memcpy(set, obj->img_desc, 32);
+        memcpy(set + 8, obj->samp_desc, 16);
+        /* GL 1.4's bias, the texture's and the unit's, joins the sampler here rather than in
+         * the texture's own descriptor, since half of it is context state - the same place the
+         * fixed-function path puts it. */
+        const int ui = prog->hw_tex_uniform[s];
+        const GLuint unit = (GLuint)prog->values[prog->uniforms[ui].offset];
+        set[10] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[unit], obj));
+    }
+    if (prog->value_floats > 0 && prog->values) {
+        memcpy((char *)block + OOPS_GL_GL2_UNIFORM_AT, prog->values,
+               (size_t)prog->value_floats * sizeof(float));
+    }
+}
+
 static void gl_hw_begin_frame(gl_context_t *ctx) {
     uint32_t *dw = ctx->dcb_mem;
     uint64_t color_gpu = (uint64_t)(uintptr_t)ctx->framebuffer;
@@ -2451,8 +2508,8 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     ctx->hw_blend_color_dirty = GL_TRUE; /* not in the table above; first constant-factor draw sends it */
     ctx->hw_frame_tex = 0u; /* the new frame's descriptor slot holds nothing yet */
     ctx->hw_desc_slot = 0u; /* and its textures start at the original table - see the ring */
-    ctx->hw_gl2_uniform_slot = 0u;    /* the GL 2.0 uniform ring restarts with the frame ... */
-    ctx->hw_gl2_uniform_program = 0u; /* ... and its first slot holds nothing */
+    ctx->hw_gl2_slot = 0u;         /* the GL 2.0 block ring restarts with the frame ... */
+    ctx->hw_gl2_slot_program = 0u; /* ... and its first slot holds nothing */
     ctx->hw_params = 2u;    /* the stage table above bound the two-parameter vertex shader */
     ctx->hw_frame_active = GL_TRUE;
 }
@@ -3212,6 +3269,18 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
             gl_record_error(ctx, GL_INVALID_OPERATION);
             return;
         }
+        /* **The block a compiled pixel shader is handed**: two texture units' descriptors and
+         * this program's uniforms, built once below and copied into the ring slot the same pass
+         * chooses. A program with neither is handed nothing and takes no user SGPRs. */
+        uint32_t gl2_block[OOPS_GL_GL2_SLOT_STRIDE / 4u];
+        /* **The compiled shader says whether it wants one**, rather than this recomputing the
+         * condition the compiler used. `hw_ps_user_sgprs` is two exactly when the shader was
+         * built to be handed the block's address - and the same count decides where the SPI
+         * puts the primitive mask, which the shader has already moved into `m0`. One answer,
+         * read in both places. */
+        const GLboolean gl2_block_used =
+            (GLboolean)(prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u &&
+                        prog->hw_ps_user_sgprs > 0u);
         if (ctx->hw_failed) return; /* the failure is on the log and the status query; nothing is drawn */
         if (!ctx->hw_frame_active) {
             gl_hw_begin_frame(ctx);
@@ -3496,29 +3565,38 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
          * second colour - and the software path, which has no slot at all, draws it correctly,
          * so nothing on the host would ever show it.
          *
-         * Which slot, only. The block is copied into it where the shader's address is chosen. */
-        if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u &&
-            prog->value_floats > 0) {
+         * The block is **built here and copied where the shader's address is chosen**, because
+         * deciding which slot to use means knowing what would go in it - and building it twice
+         * would be two chances to build it differently. */
+        if (gl2_block_used) {
+            /* Any texture this program samples has to be uploaded and have its descriptors
+             * built before they can be copied, and that can submit the frame. */
+            for (int s = 0; s < prog->hw_tex_sets; s++) {
+                gl_texture_object_t *obj = gl_gl2_sampler_texture(ctx, prog, s);
+                if (!obj) continue;
+                gl_tex_hw_prepare(ctx, obj);
+                if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
+            }
             if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
-            const float *uslot =
-                (const float *)((const char *)ctx->gpu_payload +
-                                gl_hw_gl2_uniform_slot_offset(ctx->hw_gl2_uniform_slot));
-            const size_t ubytes = (size_t)prog->value_floats * sizeof(float);
-            const GLboolean umoved =
-                (GLboolean)(ctx->hw_gl2_uniform_program != 0u &&
-                            (ctx->hw_gl2_uniform_program != prog->name ||
-                             memcmp(uslot, prog->values, ubytes) != 0));
-            if (umoved) {
-                if (ctx->hw_gl2_uniform_slot + 1u >= OOPS_GL_GL2_UNIFORM_SLOTS) {
+            gl_gl2_build_block(ctx, prog, gl2_block);
+
+            const void *slot = (const char *)ctx->gpu_payload +
+                               gl_hw_gl2_slot_offset(ctx->hw_gl2_slot);
+            const GLboolean moved_block =
+                (GLboolean)(ctx->hw_gl2_slot_program != 0u &&
+                            (ctx->hw_gl2_slot_program != prog->name ||
+                             memcmp(slot, gl2_block, OOPS_GL_GL2_SLOT_STRIDE) != 0));
+            if (moved_block) {
+                if (ctx->hw_gl2_slot + 1u >= OOPS_GL_GL2_SLOTS) {
                     /* The ring is full: the frame runs, and the draws it holds read the values
                      * they were built with. `gl_hw_begin_frame` puts the slot back to 0. */
                     gl_hw_flush(ctx);
                     gl_hw_begin_frame(ctx);
                 } else {
-                    ctx->hw_gl2_uniform_slot++;
+                    ctx->hw_gl2_slot++;
                 }
             }
-            ctx->hw_gl2_uniform_program = prog->name;
+            ctx->hw_gl2_slot_program = prog->name;
         }
 
         /* **A full vertex ring is submitted before it is reused.** Each triangle's vertices go
@@ -3727,17 +3805,20 @@ vertices_written:
              * Flushed from the CPU's cache like every other payload edit: this is GPU-visible
              * memory and an unflushed write is the previous draw's uniforms running against
              * this draw's geometry. */
-            if (prog->value_floats > 0) {
-                const uint32_t uoff = gl_hw_gl2_uniform_slot_offset(ctx->hw_gl2_uniform_slot);
-                float *ub = (float *)((char *)ctx->gpu_payload + uoff);
-                memcpy(ub, prog->values, (size_t)prog->value_floats * sizeof(float));
+            if (gl2_block_used) {
+                const uint32_t boff = gl_hw_gl2_slot_offset(ctx->hw_gl2_slot);
+                char *dst = (char *)ctx->gpu_payload + boff;
+                memcpy(dst, gl2_block, OOPS_GL_GL2_SLOT_STRIDE);
 #if defined(__x86_64__)
-                for (uint32_t b = 0; b < OOPS_GL_GL2_UNIFORM_STRIDE; b += 64u) {
-                    __builtin_ia32_clflush((const void *)((const char *)ub + b));
+                for (uint32_t b = 0; b < OOPS_GL_GL2_SLOT_STRIDE; b += 64u) {
+                    __builtin_ia32_clflush((const void *)(dst + b));
                 }
 #endif
-                desc_table_va = payload_va + uoff;
-                ps_rsrc2 = 0x00000004u; /* USER_SGPR=2: s[0:1] is the uniform block's address */
+                desc_table_va = payload_va + boff;
+                /* USER_SGPR is bits 5:1, and the count is the shader's own: s[0:1] is the
+                 * block's address and the primitive mask lands in s2, which is where the
+                 * prologue's `s_mov_b32 m0, s2` reads it from. */
+                ps_rsrc2 = (prog->hw_ps_user_sgprs & 0x1fu) << 1u;
             }
         } else if (eff_tex > 0u) {
             ps_va = payload_va + OOPS_GL_PS_TEX_OFFSET; /* Stage 5: Textured + Gouraud */
@@ -3933,12 +4014,39 @@ vertices_written:
          * radeonsi writes them the same way - one sequence of the four floats' bits
          * (gallium/drivers/radeonsi/si_state.c:730-738). */
         if (ctx->hw_blend_color_dirty && gl_blend_reads_constant(ctx)) {
+            /*
+             * **Green goes in the alpha slot when the colour constant is read**, because on this
+             * part it is read from there.
+             *
+             * obSCEne measured it (`-2e9f`, sweep 20260921-run17, firmware 12.40; the arms are in
+             * `docs/hardware/agc-blend-and-export-fw1240.md`): the green channel of a
+             * `BLEND_CONSTANT_COLOR` blend takes `CB_BLEND_ALPHA` at `0x108` and ignores
+             * `CB_BLEND_GREEN` at `0x106`, whatever the packet shape or write order. Red and blue
+             * take their own registers. Writing green twice is the only way to make
+             * `glBlendColor` mean what GL says it means.
+             *
+             * **And a draw that reads both families is refused rather than half-served.** Both
+             * want `0x108`: the colour constant needs green there and the alpha constant needs
+             * alpha. Nothing can satisfy both, and a silently wrong channel is exactly what
+             * `D009` exists to prevent - `glBlendFuncSeparate(GL_CONSTANT_COLOR, ...,
+             * GL_CONSTANT_ALPHA, ...)` is legal GL and is rare, so it fails loudly here.
+             */
+            const GLboolean wants_color = gl_blend_reads_constant_color(ctx);
+            const GLboolean wants_alpha = gl_blend_reads_constant_alpha(ctx);
+
+            if (wants_color && wants_alpha) {
+                gl_record_error(ctx, GL_INVALID_OPERATION);
+            }
+
             *dw++ = 0xc0046900u; /* PACKET3_SET_CONTEXT_REG, four data dwords */
             *dw++ = 0x105u;      /* mmCB_BLEND_RED .. ALPHA */
             *dw++ = gl_f32_bits(ctx->blend_color[0]);
             *dw++ = gl_f32_bits(ctx->blend_color[1]);
             *dw++ = gl_f32_bits(ctx->blend_color[2]);
-            *dw++ = gl_f32_bits(ctx->blend_color[3]);
+            /* The alpha slot carries green for a colour-constant draw, and the real alpha
+               otherwise. When both were asked for, the error above has already been recorded and
+               the colour constant is the one served. */
+            *dw++ = gl_f32_bits(wants_color ? ctx->blend_color[1] : ctx->blend_color[3]);
             ctx->hw_blend_color_dirty = GL_FALSE;
         }
 

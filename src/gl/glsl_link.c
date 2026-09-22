@@ -518,8 +518,13 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     p->hw_ps = (uint32_t *)0;
     p->hw_ps_words = 0u;
     p->hw_ps_vgprs = 0u;
+    p->hw_ps_user_sgprs = 0u;
     p->hw_params = 0u;
     p->hw_ps_log[0] = '\0';
+    p->hw_tex_sets = 0;
+    for (size_t i = 0; i < sizeof(p->hw_tex_uniform) / sizeof(p->hw_tex_uniform[0]); i++) {
+        p->hw_tex_uniform[i] = -1;
+    }
 
     if (!vs && !fs) {
         oops_snprintf(p->info_log, sizeof(p->info_log), "no shaders attached");
@@ -597,6 +602,30 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
      * GL_LINK_STATUS answer differently on a host and on hardware, which is the one divergence
      * a probe could never see past.
      * ----------------------------------------------------------------- */
+    /* **Which sampler gets which descriptor set**, in the order the fragment shader declares
+     * them - decided here because the compiled shader and the draw path both have to agree on
+     * it, and one decision is the only way to be sure they do. Only the fragment shader's
+     * samplers get a set: a vertex shader cannot sample here. */
+    if (fs) {
+        const int max_sets =
+            (int)(sizeof(p->hw_tex_uniform) / sizeof(p->hw_tex_uniform[0]));
+        for (int32_t d = fs->ast.nodes[fs->root].a;
+             d != GLSL_NO_NODE && p->hw_tex_sets < max_sets;
+             d = fs->ast.nodes[d].sibling) {
+            const glsl_node_t *n = &fs->ast.nodes[d];
+            if (n->kind != GLSL_NODE_DECL || n->qualifier != GLSL_TOK_KW_UNIFORM) continue;
+            for (int i = 0; i < p->uniform_count; i++) {
+                if (p->uniforms[i].type != GL_SAMPLER_2D) continue;
+                if (!name_eq(p->uniforms[i].name, lit_len(p->uniforms[i].name), n->text,
+                             n->length)) {
+                    continue;
+                }
+                p->hw_tex_uniform[p->hw_tex_sets++] = i;
+                break;
+            }
+        }
+    }
+
     p->hw_params = (uint32_t)((p->varying_floats + 3) / 4);
     if (p->hw_params < 2u) p->hw_params = 2u;   /* the pipeline's smallest configuration */
     if (fs) {
@@ -605,11 +634,13 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
             oops_snprintf(p->hw_ps_log, sizeof(p->hw_ps_log),
                           "no memory for a compiled pixel shader");
         } else if (!gl_program_compile_fragment(p, p->hw_ps, OOPS_GL_PS_GL2_WORDS,
-                                                &p->hw_ps_words, &p->hw_ps_vgprs, p->hw_ps_log,
+                                                &p->hw_ps_words, &p->hw_ps_vgprs,
+                                                &p->hw_ps_user_sgprs, p->hw_ps_log,
                                                 sizeof(p->hw_ps_log))) {
             gl_heap_free(p->hw_ps);
             p->hw_ps = (uint32_t *)0;
             p->hw_ps_words = 0u;
+            p->hw_ps_user_sgprs = 0u;
         }
     } else {
         /* No fragment stage: the fixed-function pixel shader in the payload is what runs, and

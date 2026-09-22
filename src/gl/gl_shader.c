@@ -146,6 +146,7 @@ static void program_destroy(gl_program_object_t *p) {
     p->hw_ps = (uint32_t *)0;
     p->hw_ps_words = 0u;
     p->hw_ps_vgprs = 0u;
+    p->hw_ps_user_sgprs = 0u;
     p->hw_params = 0u;
     p->hw_ps_log[0] = '\0';
     p->linked = GL_FALSE;
@@ -596,6 +597,16 @@ void glGetProgramiv(GLuint program, GLenum pname, GLint *params) {
         case GL_ATTACHED_SHADERS: *params = p->attached_count; break;
         case GL_ACTIVE_UNIFORMS:  *params = p->uniform_count; break;
         case GL_ACTIVE_ATTRIBUTES: *params = p->attrib_count; break;
+        /* **oops-gl's own, not OpenGL's**: what the console back end made of the fragment stage.
+         *
+         * A program that links is not necessarily a program that draws here - the back end
+         * compiles the fragment shader to gfx1030 or refuses it, and a refused one fails the
+         * *draw* with GL_INVALID_OPERATION rather than falling back. There is nothing in GL that
+         * asks about that, so a title that wants to say why its screen is black before it is
+         * black asks these. Zero words is a refusal, and `glGetProgramHardwareLog` says why. */
+        case GL_PROGRAM_HW_PS_WORDS: *params = (GLint)p->hw_ps_words; break;
+        case GL_PROGRAM_HW_PS_VGPRS: *params = (GLint)p->hw_ps_vgprs; break;
+        case GL_PROGRAM_HW_PARAMS:   *params = (GLint)p->hw_params; break;
         case GL_INFO_LOG_LENGTH:
             *params = p->info_log[0] ? (GLint)(str_len(p->info_log) + 1u) : 0;
             break;
@@ -639,6 +650,33 @@ void glGetProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei *length, GLcha
         return;
     }
     return_string(p->info_log, bufSize, length, infoLog);
+}
+
+/* **Why the console back end would not generate for this program**, which is a different
+ * question from why it would not link and so needs a different log.
+ *
+ * A program can link perfectly and still have no console code: `glsl_ps.c` refuses a fragment
+ * shader it has no verified instruction for, by name, and the draw then fails rather than
+ * running the fixed-function instruments in its place. `GL_INFO_LOG_LENGTH` and the log beside
+ * it are the specification's, are about linking, and are empty in that case - so this is the one
+ * that says "only texture2D is generated" or "this shader needs 152 registers".
+ *
+ * Empty when the program has console code, or when it has no fragment stage at all (for which
+ * the fixed-function pixel shader runs and there is nothing to refuse). */
+void glGetProgramHardwareLog(GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog) {
+    gl_context_t *ctx = gl2_ctx();
+    if (!ctx) return;
+    if (bufSize < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    const gl_program_object_t *p = gl_find_program(ctx, program);
+    if (!p) {
+        gl_record_error(ctx, gl_find_shader(ctx, program) ? GL_INVALID_OPERATION
+                                                          : GL_INVALID_VALUE);
+        return;
+    }
+    return_string(p->hw_ps_log, bufSize, length, infoLog);
 }
 
 void glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei *count, GLuint *shaders) {

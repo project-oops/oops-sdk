@@ -487,12 +487,16 @@ void glsl_emit_s_waitcnt_lgkm(glsl_code_t *c);
  * halves - `vcc` and `exec` are the 64-bit names and encode differently. */
 #define GLSL_SREG_VCC_LO  106u
 #define GLSL_SREG_EXEC_LO 126u
+/* `m0`, which a pixel shader sets once and never reads: see `glsl_emit_s_mov_m0`. */
+#define GLSL_SREG_M0      124u
 
 /* SOP1 and SOP2 opcodes, from `tools/shader/gl2-fragment.s`:
  * `s_mov_b32 exec_lo, s4` = 0xbefe0304, `s_and_saveexec_b32 s4, vcc_lo` = 0xbe843c6a,
  * `s_andn2_b32 exec_lo, s4, exec_lo` = 0x8a7e7e04, and `s_and_b32` from the word already in the
  * tree, 0x877e6a7e. */
 #define GLSL_SOP1_MOV_B32          3u
+/* `s_wqm_b32 exec_lo, exec_lo` = 0xbefe097e - whole-quad mode, for a sample's derivatives. */
+#define GLSL_SOP1_WQM_B32          9u
 #define GLSL_SOP1_AND_SAVEEXEC_B32 60u
 #define GLSL_SOP2_AND_B32          14u
 #define GLSL_SOP2_ANDN2_B32        20u
@@ -502,6 +506,30 @@ void glsl_emit_sop2(glsl_code_t *c, uint32_t op, uint32_t sdst, uint32_t ssrc0, 
 /* An `if`'s four moments. See `glsl_emit.c` - and note that there is no branch among them:
  * a body run with `exec` zero writes nothing, so skipping it is a saving and not a requirement,
  * and not needing a branch is what lets the generator emit straight through with no labels. */
+/* MIMG opcodes, from `tools/shader/gl2-fragment.s`: `image_sample` = 0xf0800f08 and
+ * `image_sample_lz` = 0xf09c0f08, the opcode being bits 24:18 of the first word.
+ *
+ * **`_lz` is the easy one and the wrong one.** It samples level zero, so it needs no
+ * derivatives and no whole-quad mode - and leaves the mip chain, the minification filter and
+ * GL 1.4's LOD bias unused. The textured fixed-function shader found that on 2026-09-19. */
+#define GLSL_MIMG_SAMPLE    32u
+#define GLSL_MIMG_SAMPLE_LZ 39u
+
+/* The `dim` field, bits 5:3 of the first word. */
+#define GLSL_IMG_DIM_1D   0u
+#define GLSL_IMG_DIM_2D   1u
+#define GLSL_IMG_DIM_3D   2u
+#define GLSL_IMG_DIM_CUBE 3u
+
+/* `srsrc` and `ssamp` are the **first SGPR** of the descriptor group; the encoder divides by
+ * four. `vaddr` is the first of a consecutive run holding the coordinate, `vdata` the first of
+ * the four the sample returns. */
+void glsl_emit_image_sample(glsl_code_t *c, uint32_t opcode, uint32_t dim, uint32_t vdata,
+                            uint32_t vaddr, uint32_t srsrc, uint32_t ssamp);
+void glsl_emit_s_waitcnt_vm(glsl_code_t *c);
+void glsl_emit_wqm(glsl_code_t *c);
+void glsl_emit_exec_save(glsl_code_t *c, uint32_t saved);
+
 void glsl_emit_exec_save_and_vcc(glsl_code_t *c, uint32_t saved);
 void glsl_emit_exec_else(glsl_code_t *c, uint32_t saved);
 void glsl_emit_exec_restore(glsl_code_t *c, uint32_t saved);
@@ -542,8 +570,21 @@ void glsl_emit_kill_from_vcc(glsl_code_t *c);
  * takes one. Neither depends on the GLSL, and both are the frame the compiled body sits in.
  * ------------------------------------------------------------------------- */
 
+/* **`m0` addresses the parameter cache, and every `v_interp` reads it.** The SPI hands the
+ * wave its primitive mask in the scalar register just past the user data, and `m0` has to be
+ * moved from there before the first interpolation - so `ssrc` is s2 for a shader that takes the
+ * block's address in s[0:1] and s0 for one that takes no user data at all.
+ *
+ * **Leaving it out does not fail loudly.** `m0` is whatever the last wave in that slot left in
+ * it, so some waves interpolate the right primitive's parameters and some do not, and the
+ * result is a correct-looking surface speckled with fragments built from another primitive's
+ * data - per wave, which is why it reads as a fine regular stipple rather than a wrong
+ * triangle. Every hand-written pixel shader in the payload sets it (`gl_context.c`, `ps_untex`
+ * and `ps_tex`); the generated ones did not until 2026-09-22. */
+void glsl_emit_s_mov_m0(glsl_code_t *c, uint32_t ssrc);
 /* One component of one parameter into `vdst`: `p2` false for the first half of the pair and
- * true for the second, which must follow it immediately. `attr` is 0..31 and `chan` 0..3. */
+ * true for the second, which must follow it immediately. `attr` is 0..31 and `chan` 0..3.
+ * `glsl_emit_s_mov_m0` has to have run first. */
 void glsl_emit_interp(glsl_code_t *c, uint32_t vdst, uint32_t attr, uint32_t chan,
                       GLboolean p2);
 /* Both halves for one component, which is what a caller always wants. */
@@ -565,14 +606,35 @@ void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base);
 #define GLSL_MAX_VGPRS 256u
 #define GLSL_GEN_MAX_VARS 64
 
-/* **Where an `if` saves the exec mask.** One SGPR a nesting level, and they have to be clear of
- * everything else the shader uses its scalar file for: s0 and s1 are the uniform block's
- * address, s2 is where the primitive mask lands with two user SGPRs, and `glsl_ps.c` loads the
- * uniforms themselves from s16 up. That leaves s4..s15 - twelve levels, which no fragment shader
- * this is meant to compile comes near, and a thirteenth is refused rather than written over the
- * uniforms. */
-#define GLSL_GEN_EXEC_SGPR_BASE 4u
-#define GLSL_GEN_MAX_EXEC_DEPTH 12
+/*
+ * **The scalar file, as a compiled pixel shader divides it up.**
+ *
+ *     s0, s1    the block's address, handed over as user data
+ *     s2, s3    the primitive mask, which the prologue moves into `m0` for the interpolator.
+ *               It lands in s2 with two user SGPRs and in s0 with none, so a shader that takes
+ *               no block reads it from s0 and s[0:1] are not an address at all.
+ *     s4..s15   texture set 0: the image descriptor in s[4:11], the sampler in s[12:15]
+ *     s16..s27  texture set 1
+ *     s28       the live-lane mask, kept across a whole-quad section
+ *     s29..s40  an `if`'s saved exec mask, one a nesting level
+ *     s48..s79  the uniforms, two `s_load_dwordx16`s
+ *
+ * **Every group above starts on a multiple of four, and that is the rule** - not the width. A
+ * scalar load of four dwords or more needs a 4-aligned destination whatever its width, so
+ * `s_load_dwordx16 s[52:67]` is legal and `s_load_dwordx8 s[6:13]` is not; a pair needs 2 and a
+ * single needs nothing. MIMG says the same thing from the other direction: `srsrc` and `ssamp`
+ * are five-bit fields holding the register number **divided by four**, so a descriptor group
+ * that did not start on a multiple of four could not be named at all.
+ *
+ * Twelve nesting levels is more than any fragment shader this is meant to compile; a thirteenth
+ * is refused rather than written over the uniforms.
+ */
+#define GLSL_GEN_TEX_SGPR_BASE   4u   /* set n: image at +12n, sampler at +12n+8 */
+#define GLSL_GEN_TEX_SGPR_STRIDE 12u
+#define GLSL_GEN_MAX_TEX_SETS    2
+#define GLSL_GEN_LIVE_SGPR       28u
+#define GLSL_GEN_EXEC_SGPR_BASE  29u
+#define GLSL_GEN_MAX_EXEC_DEPTH  12
 
 typedef struct {
     uint32_t base;  /* the first VGPR of the run */
@@ -597,6 +659,18 @@ typedef struct {
     /* How many enclosing `if`s have saved the exec mask. `discard` reads it: a discarded lane
      * has to come out of every one of those saves, or the innermost restore brings it back. */
     int exec_depth;
+    /* Whether this shader runs in whole-quad mode, which it does exactly when it samples. When
+     * it is set, `discard` has one more mask to take the lane out of - the live one at
+     * `GLSL_GEN_LIVE_SGPR`, which is what the export is restored from. */
+    GLboolean wqm;
+    /* The sampler uniforms this shader named, in the order it named them, each with the
+     * descriptor set the prologue loaded for it. */
+    struct {
+        const char *name;
+        size_t name_len;
+        uint32_t set;
+    } samplers[GLSL_GEN_MAX_TEX_SETS];
+    int sampler_count;
     const char *error;    /* the **first** failure, which stops everything after it */
     int error_line, error_column;
 } glsl_gen_t;
@@ -617,6 +691,10 @@ glsl_value_t glsl_gen_declare_input(glsl_gen_t *g, const char *name, size_t len,
 void glsl_gen_reserve(glsl_gen_t *g, uint32_t first);
 /* Where a declared name lives. False when nothing of that name has a register. */
 GLboolean glsl_gen_lookup(glsl_gen_t *g, const char *name, size_t len, glsl_value_t *out);
+/* Tells the generator that `name` is a sampler whose descriptors the prologue loaded into set
+ * `set`. A `texture2D` on any other name is refused, which is what stops a shader sampling
+ * through something the draw path never filled in. */
+GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set);
 
 /* -------------------------------------------------------------------------
  * A compiled unit

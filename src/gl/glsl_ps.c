@@ -71,11 +71,11 @@
 #define GL_PS_MAX_VGPRS 136u
 
 /* **Where the uniform block lands in the scalar file.** s0 and s1 are the block's own address,
- * handed over as user data, and the system SGPRs follow them - so the first safe destination is
- * well above both. s16 is also **16-aligned**, which `s_load_dwordx16` requires of its
- * destination and which s2 or s4 would not satisfy: the loads march on by sixteen from here, so
- * every one of them is aligned for its width. */
-#define GL_PS_UNIFORM_SGPR_BASE 16u
+ * the texture descriptors take s4..s27 and the mask registers s28..s40 - `glsl_internal.h` has
+ * the map. s48 is the first multiple of four clear of all of it, and a multiple of four is what
+ * a scalar load of four dwords or more needs; the loads march on by sixteen from here, so every
+ * one of them lands on one too. */
+#define GL_PS_UNIFORM_SGPR_BASE 48u
 
 static size_t lit_len(const char *s) {
     size_t n = 0;
@@ -101,6 +101,14 @@ static glsl_type_t type_from_gl(GLenum t) {
         case GL_FLOAT_VEC2: return GLSL_TYPE_VEC2;
         case GL_FLOAT_VEC3: return GLSL_TYPE_VEC3;
         case GL_FLOAT_VEC4: return GLSL_TYPE_VEC4;
+        /* **An `int` or `bool` uniform is carried as the float it already is.** The program's
+         * value pool has one representation for every uniform (`gl_internal.h` says why), so
+         * `glUniform1i(ortho, 1)` has already become 1.0f before this sees it - and a shader
+         * that reads such a uniform reads it through `bool()` or a comparison, both of which
+         * work on that float unchanged. Integer *arithmetic* on it is still refused: the type
+         * stays `int` here, and the generator has no verified instruction for it. */
+        case GL_INT: return GLSL_TYPE_INT;
+        case GL_BOOL: return GLSL_TYPE_BOOL;
         default: return GLSL_TYPE_ERROR;
     }
 }
@@ -142,10 +150,12 @@ static int32_t find_main(const glsl_unit_t *u) {
 
 GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *words,
                                       uint32_t capacity, uint32_t *out_count,
-                                      uint32_t *out_vgprs, char *log, size_t log_size) {
+                                      uint32_t *out_vgprs, uint32_t *out_user_sgprs, char *log,
+                                      size_t log_size) {
     if (log && log_size) log[0] = '\0';
     if (out_count) *out_count = 0u;
     if (out_vgprs) *out_vgprs = 0u;
+    if (out_user_sgprs) *out_user_sgprs = 0u;
     if (!p || !p->linked || !words) {
         log_say(log, log_size, "no linked fragment stage to compile", 0, 0);
         return GL_FALSE;
@@ -191,61 +201,129 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     glsl_gen_reserve(gen, GL_PS_FIRST_FREE_VGPR);
 
     /* ---------------------------------------------------------------------
-     * The uniforms, before anything else touches a register.
+     * The block, before anything else touches a register.
      *
-     * The draw puts this program's value pool in the payload and its address in the pixel
-     * shader's first user SGPR pair, so the block is `s[0:1] + 0`. Two scalar loads bring up to
-     * thirty-two floats into s16..s47, and **one wait** covers both - `lgkmcnt(0)` waits for
-     * every outstanding scalar load, not for one.
+     * The draw puts one block in the payload and its address in the pixel shader's first user
+     * SGPR pair, so everything below is at an offset from `s[0:1]`: a texture unit's descriptors
+     * at 0x00 and 0x40, this program's whole value pool at 0x80.
      *
-     * Then each uniform this shader actually names is moved into a VGPR of its own and declared
-     * like any other input, so the rest of the generator sees a variable and needs no notion of
-     * an SGPR at all. That costs one register and one instruction a float, and the alternative -
-     * teaching every operand path that a value might live in an SGPR - would buy those back at
-     * the price of a second register class in a back end that has one.
+     * **The samplers are found first**, because whether this shader samples decides whether it
+     * runs in whole-quad mode - and that has to be emitted before any of the body, by which time
+     * finding out would be too late.
      * --------------------------------------------------------------------- */
+    const int tex_sets = p->hw_tex_sets;
+    for (int s = 0; ok && s < tex_sets; s++) {
+        const gl_uniform_t *u = &p->uniforms[p->hw_tex_uniform[s]];
+        if (!glsl_gen_declare_sampler(gen, u->name, lit_len(u->name), (uint32_t)s)) {
+            log_say(log, log_size, gen->error ? gen->error : "a sampler has no set", 0, 0);
+            ok = GL_FALSE;
+        }
+    }
+    /* A sampler the linker could not give a set to - because there were more than the draw
+     * carries, or because it is not a 2D one - is named here rather than at the lookup. The
+     * lookup's message would be about the function; this one is about the declaration, and a
+     * shader declaring a `samplerCube` was never going to sample it with `texture2D`. */
+    for (int i = 0; ok && i < p->uniform_count; i++) {
+        const gl_uniform_t *u = &p->uniforms[i];
+        if (!gl_type_is_sampler(u->type)) continue;
+        if (!unit_declares_uniform(fs, u->name, lit_len(u->name))) continue;
+        GLboolean has_set = GL_FALSE;
+        for (int s = 0; s < tex_sets; s++) {
+            if (p->hw_tex_uniform[s] == i) { has_set = GL_TRUE; break; }
+        }
+        if (has_set) continue;
+        if (u->type != GL_SAMPLER_2D) {
+            oops_snprintf(log, log_size,
+                          "uniform '%s' is a sampler this path does not carry; only sampler2D "
+                          "is generated", u->name);
+        } else {
+            oops_snprintf(log, log_size,
+                          "this shader samples through more than %d textures, and a draw "
+                          "carries that many descriptor sets", GLSL_GEN_MAX_TEX_SETS);
+        }
+        ok = GL_FALSE;
+    }
+
     if (ok && p->value_floats > OOPS_GL_GL2_UNIFORM_FLOATS) {
         oops_snprintf(log, log_size,
                       "this program's uniforms are %d floats and a draw carries %d",
                       p->value_floats, OOPS_GL_GL2_UNIFORM_FLOATS);
         ok = GL_FALSE;
     }
-    if (ok && p->value_floats > 0) {
+
+    /* **Whether this shader is handed the block at all**, which decides two things together and
+     * so is decided once: the scalar loads below, and how many user SGPRs the draw configures -
+     * which in turn is where the SPI puts the primitive mask. The draw path reads the answer
+     * back off the program (`hw_ps_user_sgprs`) rather than working it out a second time, so
+     * the shader and the register that feeds it cannot come to different conclusions. */
+    const GLboolean takes_block = (GLboolean)(tex_sets > 0 || p->value_floats > 0);
+    const uint32_t user_sgprs = takes_block ? 2u : 0u;
+
+    /* **`m0` first, because every interpolation reads it** - and because a shader that skips it
+     * still runs, still exports, and draws a surface speckled with another primitive's
+     * parameters. See `glsl_emit_s_mov_m0`. The mask sits just past the user data: s2 with the
+     * block, s0 without. */
+    if (ok) glsl_emit_s_mov_m0(&code, user_sgprs);
+
+    /* **One wait covers every load below**, because `lgkmcnt(0)` waits for all of them and not
+     * for one. Leaving it out is not a slower shader but a wrong one: obSCEne's `-6c0d` ran
+     * exactly that arm and the shader read all zeros. */
+    if (ok && takes_block) {
+        for (int s = 0; s < tex_sets; s++) {
+            const uint32_t base =
+                GLSL_GEN_TEX_SGPR_BASE + (uint32_t)s * GLSL_GEN_TEX_SGPR_STRIDE;
+            const uint32_t at = (uint32_t)s * OOPS_GL_DESC_UNIT_STRIDE;
+            glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX8, base, 0u, at);
+            glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX4, base + 8u, 0u, at + 32u);
+        }
         for (int base = 0; base < p->value_floats; base += 16) {
             glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX16,
                              GL_PS_UNIFORM_SGPR_BASE + (uint32_t)base, 0u,
-                             (uint32_t)base * 4u);
+                             OOPS_GL_GL2_UNIFORM_AT + (uint32_t)base * 4u);
         }
         glsl_emit_s_waitcnt_lgkm(&code);
+    }
 
-        for (int i = 0; ok && i < p->uniform_count; i++) {
-            const gl_uniform_t *u = &p->uniforms[i];
-            const size_t ulen = lit_len(u->name);
-            if (!unit_declares_uniform(fs, u->name, ulen)) continue;
-            const glsl_type_t t = type_from_gl(u->type);
-            if (t == GLSL_TYPE_ERROR || u->size != 1) {
-                /* A sampler, a matrix or an array. The first is refused where the lookup is;
-                 * the other two would need a wider `type_from_gl` and, for the array, an index
-                 * this back end cannot generate. Named rather than silently skipped, because a
-                 * skipped uniform reads as zero and draws. */
-                oops_snprintf(log, log_size,
-                              "uniform '%s' is not a float or a float vector, and the compiled "
-                              "path carries nothing else yet", u->name);
-                ok = GL_FALSE;
-                break;
-            }
-            const glsl_value_t home = glsl_gen_declare_input(gen, u->name, ulen, t);
-            if (home.count == 0) {
-                log_say(log, log_size, gen->error ? gen->error : "a uniform has no register", 0,
-                        0);
-                ok = GL_FALSE;
-                break;
-            }
-            for (int c = 0; c < home.count; c++) {
-                glsl_emit_vop1(&code, GLSL_VOP1_MOV_B32, home.base + (uint32_t)c,
-                               glsl_sgpr(GL_PS_UNIFORM_SGPR_BASE +
-                                         (uint32_t)(u->offset + c)));
-            }
+    /* **Whole-quad mode, if this shader samples**, and from here rather than from just before
+     * the lookup: `image_sample` takes its level of detail from how the coordinate changes
+     * across the 2x2 quad, so every step that *produced* that coordinate has to have run in the
+     * helper lanes too - which means the interpolation below and whatever the body does to it.
+     * The live mask is kept and put back before the export. */
+    if (ok && gen->wqm) {
+        glsl_emit_exec_save(&code, GLSL_GEN_LIVE_SGPR);
+        glsl_emit_wqm(&code);
+    }
+
+    /* Each uniform this shader actually names is moved into a VGPR of its own and declared like
+     * any other input, so the rest of the generator sees a variable and needs no notion of an
+     * SGPR at all. That costs one register and one instruction a float; the alternative -
+     * teaching every operand path that a value might live in an SGPR - would buy those back at
+     * the price of a second register class in a back end that has one. */
+    for (int i = 0; ok && i < p->uniform_count; i++) {
+        const gl_uniform_t *u = &p->uniforms[i];
+        const size_t ulen = lit_len(u->name);
+        if (!unit_declares_uniform(fs, u->name, ulen)) continue;
+        if (gl_type_is_sampler(u->type)) continue; /* its descriptors are in the scalar file */
+        const glsl_type_t t = type_from_gl(u->type);
+        if (t == GLSL_TYPE_ERROR || u->size != 1) {
+            /* A matrix or an array: the first would need a wider `type_from_gl`, the second an
+             * index this back end cannot generate. Named rather than silently skipped, because
+             * a skipped uniform reads as zero and draws. */
+            oops_snprintf(log, log_size,
+                          "uniform '%s' is not a float or a float vector, and the compiled "
+                          "path carries nothing else yet", u->name);
+            ok = GL_FALSE;
+            break;
+        }
+        const glsl_value_t home = glsl_gen_declare_input(gen, u->name, ulen, t);
+        if (home.count == 0) {
+            log_say(log, log_size, gen->error ? gen->error : "a uniform has no register", 0, 0);
+            ok = GL_FALSE;
+            break;
+        }
+        for (int c = 0; c < home.count; c++) {
+            glsl_emit_vop1(&code, GLSL_VOP1_MOV_B32, home.base + (uint32_t)c,
+                           glsl_sgpr(GL_PS_UNIFORM_SGPR_BASE + (uint32_t)(u->offset + c)));
         }
     }
 
@@ -363,6 +441,10 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             log_say(log, log_size, "gl_FragColor did not survive to the export", 0, 0);
             ok = GL_FALSE;
         } else {
+            /* **Out of whole-quad mode before anything is written.** The helper lanes were on
+             * so the sample's derivatives would exist; letting them reach the export would put
+             * fragments on screen that the primitive does not cover. */
+            if (gen->wqm) glsl_emit_exec_restore(&code, GLSL_GEN_LIVE_SGPR);
             for (uint32_t i = 0; i < 4u; i++) {
                 /* A move onto itself would be a wasted instruction rather than a wrong one, and
                  * the export registers are below everything the allocator hands out - so this
@@ -392,6 +474,7 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
          * allocator ever held live, and the export registers sit below it - so it is the whole
          * of the file this shader touches. */
         if (out_vgprs) *out_vgprs = gen->high_water;
+        if (out_user_sgprs) *out_user_sgprs = user_sgprs;
     }
     gl_heap_free(sema);
     gl_heap_free(gen);

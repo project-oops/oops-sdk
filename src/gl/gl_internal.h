@@ -805,6 +805,13 @@ typedef struct {
     int floats;       /* how many floats one element occupies: 1, 2, 3, 4, 4, 9 or 16 */
 } gl_uniform_t;
 
+/* GLSL 1.10's six sampler types, which are consecutive enumerants (GL_SAMPLER_1D 0x8B5D through
+ * GL_SAMPLER_2D_SHADOW 0x8B62). A sampler is not a value the way the others are - its float
+ * slot holds a texture *unit* number - so several places need to tell one apart from a vec. */
+static inline GLboolean gl_type_is_sampler(GLenum t) {
+    return (t >= GL_SAMPLER_1D && t <= GL_SAMPLER_2D_SHADOW) ? GL_TRUE : GL_FALSE;
+}
+
 /* One attribute the linker bound, or one binding `glBindAttribLocation` asked for and the next
  * link will honour. The two are the same shape and are kept in separate tables, because a
  * binding that names no attribute in the shader is not an error and must not appear in
@@ -855,6 +862,13 @@ typedef struct {
 
     gl_uniform_t uniforms[OOPS_GL_MAX_PROGRAM_UNIFORMS];
     int uniform_count;
+    /* **Which sampler uniform each of the compiled shader's descriptor sets belongs to**, as an
+     * index into `uniforms`, and how many sets it uses. Decided at link time rather than
+     * separately by the compiler and the draw path: the shader loads set `n` from a fixed offset
+     * in the block and the draw fills that offset, so the two have to mean the same thing by
+     * `n`, and the only way to be sure is for there to be one decision. */
+    int hw_tex_uniform[2];
+    int hw_tex_sets;
     float *values;         /* the value pool the uniforms' offsets index */
     int value_floats;
 
@@ -882,6 +896,12 @@ typedef struct {
     uint32_t *hw_ps;
     uint32_t hw_ps_words;
     uint32_t hw_ps_vgprs;
+    /* **How many user SGPRs the compiled shader was built to be handed**: two when it is given
+     * the block's address in s[0:1], none when it needs no block. The draw path configures
+     * `SPI_SHADER_PGM_RSRC2_PS` from this rather than deciding a second time, because the count
+     * also fixes where the SPI puts the primitive mask - and the shader has already moved that
+     * register into `m0`. The two answers have to be the same one. */
+    uint32_t hw_ps_user_sgprs;
     /* How many four-component parameters this program's varyings occupy, which is what the
      * vertex stage exports and the pixel shader interpolates. Two at minimum, because the
      * pipeline's smallest configuration exports two. */
@@ -1390,11 +1410,12 @@ typedef struct gl_context {
     /* Which descriptor slot the textures of this frame have reached. 0 is the original table,
      * and a frame that never changes texture stays there - see the ring's note above. */
     uint32_t hw_desc_slot;
-    /* Which uniform slot this frame's GL 2.0 draws have reached, and whose values are in it.
-     * The program name is part of the question: two programs' pools are different lengths, so
-     * comparing the bytes alone could call one unchanged from the other. 0 is "nothing yet". */
-    uint32_t hw_gl2_uniform_slot;
-    GLuint hw_gl2_uniform_program;
+    /* Which block this frame's GL 2.0 draws have reached, and whose contents are in it - the
+     * uniforms and the texture descriptors together, since they share one block. The program
+     * name is part of the question: two programs' pools are different lengths, so comparing the
+     * bytes alone could call one unchanged from the other. 0 is "nothing yet". */
+    uint32_t hw_gl2_slot;
+    GLuint hw_gl2_slot_program;
     size_t depth_px;      /* floats in depth_buffer: the 64KB_Z_X tiled extent, both axes padded to 128 px */
     GLboolean use_hardware;
     uint32_t canary_vs;
@@ -1785,8 +1806,20 @@ static inline uint32_t gl_f32_bits(float f) {
 #define OOPS_GL_PS_GL2_WORDS  512u
 
 /*
- * **A ring of uniform blocks for GL 2.0 draws** (2026-09-21), at 0x4000 - which is where the
- * payload used to end, and is why the allocation grew to 0x8000.
+ * **A ring of blocks for GL 2.0 draws** (2026-09-21), at 0x4000 - which is where the payload
+ * used to end, and is why the allocation grew to 0x8000.
+ *
+ * One block holds everything a compiled pixel shader is handed, and the shader is given its
+ * address in `SPI_SHADER_USER_DATA_PS_0`/`_1`:
+ *
+ *     +0x00   texture unit 0: the image descriptor (8 dwords), then the sampler (4)
+ *     +0x40   texture unit 1, the same
+ *     +0x80   the uniform block: up to 32 floats
+ *
+ * **The two halves are one block on purpose.** `OOPS_GL_DESC_UNIT_STRIDE` is the same 0x40 the
+ * fixed-function descriptor table uses, so a unit's descriptors sit where `tex-prolog.s` would
+ * look for them - and a compiled shader takes one base address and finds both, rather than
+ * needing a second user SGPR pair for the second thing.
  *
  * A uniform is the same value in every lane and every fragment, so it belongs in an SGPR; an
  * SGPR is loaded from memory, so the values need an address. The block is `p->values` copied
@@ -1803,19 +1836,23 @@ static inline uint32_t gl_f32_bits(float f) {
  * compiled shader can sample - the shader would take a single base and find descriptors at one
  * offset and uniforms at another - but merging them now would change the stride of a ring the
  * GL 1.x console path runs through, and that path is measured (D007's oracle record is a frame
- * byte for byte). This region is reached only by a GL 2.0 draw, which has never run on
- * hardware, so nothing measured moves.
+ * byte for byte). This region is reached only by a GL 2.0 draw, so nothing measured moves -
+ * and obSCEne's `REQ-20260921T1730Z-6c0d` measured the block arriving intact through exactly
+ * this wiring: a 128-byte block, its address in the pixel shader's first user SGPR pair, and
+ * `s_load_dwordx16` from it. **Its second arm is the one to remember**: without the
+ * `s_waitcnt lgkmcnt(0)` the shader read all zeros, so the wait is load-bearing.
  *
- * Thirty-two floats a slot: two `s_load_dwordx16`s into s16..s47, which is eight mat4s' worth
- * of scalars or two mat4s. A program past it is refused by the compiler with the number.
+ * Thirty-two floats of uniform a slot: two `s_load_dwordx16`s, which is eight mat4s' worth of
+ * scalars or two mat4s. A program past it is refused by the compiler with the number.
  */
-#define OOPS_GL_GL2_UNIFORM_OFFSET 0x4000u
-#define OOPS_GL_GL2_UNIFORM_STRIDE 0x80u  /* 32 floats */
-#define OOPS_GL_GL2_UNIFORM_SLOTS  32u    /* 0x4000 .. 0x5000 */
+#define OOPS_GL_GL2_SLOT_OFFSET    0x4000u
+#define OOPS_GL_GL2_SLOT_STRIDE    0x100u /* two descriptor sets, then the uniforms */
+#define OOPS_GL_GL2_SLOTS          32u    /* 0x4000 .. 0x6000 */
+#define OOPS_GL_GL2_UNIFORM_AT     0x80u  /* the uniform block's offset within a slot */
 #define OOPS_GL_GL2_UNIFORM_FLOATS 32
 
-static inline uint32_t gl_hw_gl2_uniform_slot_offset(uint32_t slot) {
-    return OOPS_GL_GL2_UNIFORM_OFFSET + slot * OOPS_GL_GL2_UNIFORM_STRIDE;
+static inline uint32_t gl_hw_gl2_slot_offset(uint32_t slot) {
+    return OOPS_GL_GL2_SLOT_OFFSET + slot * OOPS_GL_GL2_SLOT_STRIDE;
 }
 
 #define OOPS_GL_PAYLOAD_BYTES 0x8000u
@@ -1838,9 +1875,13 @@ static inline uint32_t gl_hw_desc_slot_offset(uint32_t slot) {
 typedef char oops_gl_payload_map_closes[
     (OOPS_GL_DESC_RING_OFFSET + OOPS_GL_DESC_RING_SLOTS * OOPS_GL_DESC_SLOT_STRIDE <=
              OOPS_GL_PS_GL2_OFFSET &&
-     OOPS_GL_PS_GL2_OFFSET + OOPS_GL_PS_GL2_WORDS * 4u <= OOPS_GL_GL2_UNIFORM_OFFSET &&
-     OOPS_GL_GL2_UNIFORM_OFFSET + OOPS_GL_GL2_UNIFORM_SLOTS * OOPS_GL_GL2_UNIFORM_STRIDE <=
-             OOPS_GL_PAYLOAD_BYTES)
+     OOPS_GL_PS_GL2_OFFSET + OOPS_GL_PS_GL2_WORDS * 4u <= OOPS_GL_GL2_SLOT_OFFSET &&
+     OOPS_GL_GL2_SLOT_OFFSET + OOPS_GL_GL2_SLOTS * OOPS_GL_GL2_SLOT_STRIDE <=
+             OOPS_GL_PAYLOAD_BYTES &&
+     /* The uniform block has to start after both descriptor sets and end inside the slot. */
+     2u * OOPS_GL_DESC_UNIT_STRIDE <= OOPS_GL_GL2_UNIFORM_AT &&
+     OOPS_GL_GL2_UNIFORM_AT + (uint32_t)OOPS_GL_GL2_UNIFORM_FLOATS * 4u <=
+             OOPS_GL_GL2_SLOT_STRIDE)
         ? 1 : -1];
 
 /* The general combine's encoder: the three instruction formats it emits, laid out field by field
@@ -2935,6 +2976,34 @@ static inline GLboolean gl_blend_factor_is_constant(GLenum factor) {
                ? GL_TRUE : GL_FALSE;
 }
 
+/*
+ * **The two families are not interchangeable on this part**, and telling them apart is the whole
+ * of what the next two predicates are for.
+ *
+ * Measured by obSCEne (`REQ-...-2e9f`, sweep 20260921-run17, firmware 12.40, and written up in
+ * `docs/hardware/agc-blend-and-export-fw1240.md`): the **green** channel of a
+ * `BLEND_CONSTANT_COLOR` blend unconditionally reads `CB_BLEND_ALPHA` at `0x108` and ignores
+ * `CB_BLEND_GREEN` at `0x106`. Red and blue take their own registers.
+ *
+ * Constants of (0.25, 0.50, 0.75, 1.00) produced the pixel `0xff40ffbf` - red `0x40`, green
+ * `0xff`, blue `0xbf` - across four arms that varied one 4-dword packet against four single
+ * writes, rewrote green last, and programmed the RB+ registers. Same pixel every time, so it is
+ * not packet shape, not write ordering and not downconvert.
+ *
+ * A draw reading the colour constant therefore needs green placed in the alpha slot; one reading
+ * both families cannot be satisfied at all, because both want `0x108`. `gl_draw.c` does the
+ * first and refuses the second.
+ */
+static inline GLboolean gl_blend_factor_is_constant_color(GLenum factor) {
+    return (factor == GL_CONSTANT_COLOR || factor == GL_ONE_MINUS_CONSTANT_COLOR)
+               ? GL_TRUE : GL_FALSE;
+}
+
+static inline GLboolean gl_blend_factor_is_constant_alpha(GLenum factor) {
+    return (factor == GL_CONSTANT_ALPHA || factor == GL_ONE_MINUS_CONSTANT_ALPHA)
+               ? GL_TRUE : GL_FALSE;
+}
+
 /* Whether a draw with this state reads CB_BLEND_RED..ALPHA - blending on, not overridden by a
  * logic op, and one of the four factors a constant one. */
 static inline GLboolean gl_blend_reads_constant(const gl_context_t *ctx) {
@@ -2951,6 +3020,37 @@ static inline GLboolean gl_blend_reads_constant(const gl_context_t *ctx) {
                            gl_blend_factor_is_constant(ctx->blend_dst))) ||
             (!a_minmax && (gl_blend_factor_is_constant(ctx->blend_src_alpha) ||
                            gl_blend_factor_is_constant(ctx->blend_dst_alpha))))
+               ? GL_TRUE : GL_FALSE;
+}
+
+/*
+ * The same question, split by family, for the `0x108` conflict described above. Both mirror
+ * `gl_blend_reads_constant`'s equation masking rather than repeating a simpler test: a `GL_MIN`
+ * equation ignores its factors, so a constant named there is not read and must not count.
+ */
+static inline GLboolean gl_blend_reads_constant_color(const gl_context_t *ctx) {
+    if (!ctx->cap_blend || ctx->cap_color_logic_op) return GL_FALSE;
+    const GLboolean c_minmax =
+        (GLboolean)(ctx->blend_equation == GL_MIN || ctx->blend_equation == GL_MAX);
+    const GLboolean a_minmax = (GLboolean)(ctx->blend_equation_alpha == GL_MIN ||
+                                           ctx->blend_equation_alpha == GL_MAX);
+    return ((!c_minmax && (gl_blend_factor_is_constant_color(ctx->blend_src) ||
+                           gl_blend_factor_is_constant_color(ctx->blend_dst))) ||
+            (!a_minmax && (gl_blend_factor_is_constant_color(ctx->blend_src_alpha) ||
+                           gl_blend_factor_is_constant_color(ctx->blend_dst_alpha))))
+               ? GL_TRUE : GL_FALSE;
+}
+
+static inline GLboolean gl_blend_reads_constant_alpha(const gl_context_t *ctx) {
+    if (!ctx->cap_blend || ctx->cap_color_logic_op) return GL_FALSE;
+    const GLboolean c_minmax =
+        (GLboolean)(ctx->blend_equation == GL_MIN || ctx->blend_equation == GL_MAX);
+    const GLboolean a_minmax = (GLboolean)(ctx->blend_equation_alpha == GL_MIN ||
+                                           ctx->blend_equation_alpha == GL_MAX);
+    return ((!c_minmax && (gl_blend_factor_is_constant_alpha(ctx->blend_src) ||
+                           gl_blend_factor_is_constant_alpha(ctx->blend_dst))) ||
+            (!a_minmax && (gl_blend_factor_is_constant_alpha(ctx->blend_src_alpha) ||
+                           gl_blend_factor_is_constant_alpha(ctx->blend_dst_alpha))))
                ? GL_TRUE : GL_FALSE;
 }
 
@@ -3219,15 +3319,18 @@ void gl_free_all_shaders(gl_context_t *ctx);
  * ------------------------------------------------------------------------- */
 
 /* Compiles a linked program's fragment stage into a complete gfx1030 pixel shader: the varyings
- * interpolated, the body, and the colour exported. `out_count` is how many words it wrote and
- * `out_vgprs` how much of the register file it needs, for the shader's resource register.
+ * interpolated, the body, and the colour exported. `out_count` is how many words it wrote,
+ * `out_vgprs` how much of the register file it needs, for the shader's resource register, and
+ * `out_user_sgprs` how many user SGPRs the draw has to configure for it - see
+ * `hw_ps_user_sgprs`. `out_user_sgprs` may be null.
  *
  * **A program with no fragment stage succeeds with `out_count` zero** - the fixed-function
  * pixel shader in the payload is what runs for it, and there is nothing to compile. False is a
  * real failure, with `log` saying what the compiler would not generate. */
 GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *words,
                                       uint32_t capacity, uint32_t *out_count,
-                                      uint32_t *out_vgprs, char *log, size_t log_size);
+                                      uint32_t *out_vgprs, uint32_t *out_user_sgprs, char *log,
+                                      size_t log_size);
 
 /* **Submit before editing a shader the GPU may not have read yet.** The draws already in the
  * stream were built against the words that are there now; changing them first would have the

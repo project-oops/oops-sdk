@@ -29,6 +29,20 @@
 // `s_and_b32` on `exec_lo`, which is the same pair the alpha test and the polygon stipple use.
 
 // ---------------------------------------------------------------------------
+// The parameter cache address, which every interpolation below reads. The SPI
+// puts the wave's primitive mask in the scalar register just past the user
+// data, so a shader handed the block's address in s[0:1] reads it from s2 and
+// one handed nothing reads it from s0. Both forms, because the back end emits
+// whichever the draw configured.
+//
+// A shader that omits this still runs and still exports - m0 keeps whatever the
+// previous wave left - so nothing about the result says the instruction is
+// missing. That is why it is pinned here with the rest.
+// ---------------------------------------------------------------------------
+s_mov_b32 m0, s0
+s_mov_b32 m0, s2
+
+// ---------------------------------------------------------------------------
 // Interpolation. The four channels and a high attribute, so the field positions
 // are pinned rather than inferred from one example: vdst is bits 25:18, the
 // opcode 17:16 (p1 = 0, p2 = 1), the attribute 15:10 and its channel 9:8.
@@ -123,6 +137,16 @@ s_load_dwordx8  s[4:11],  s[0:1], 0x0
 s_load_dwordx8  s[12:19], s[0:1], 0x20
 s_load_dwordx16 s[16:31], s[0:1], 0x0
 
+// **The destination's alignment is four, not the width.** These two are legal
+// and are here to say so: a load of four dwords or more needs a 4-aligned first
+// register whatever its size. `s_load_dwordx8 s[6:13]` and
+// `s_load_dwordx16 s[50:65]` are both rejected by this assembler with "invalid
+// register alignment", which is how the rule was read rather than assumed - the
+// obvious guess, that each width needs its own alignment, would have cost every
+// descriptor set three spare registers for nothing.
+s_load_dwordx8  s[8:15],  s[0:1], 0x0
+s_load_dwordx16 s[52:67], s[0:1], 0x0
+
 // The wait. A scalar load is not in order with the instructions after it, so
 // **every one of these needs an `lgkmcnt(0)` before the first read** - without
 // it the shader computes with whatever those SGPRs held, which on a second draw
@@ -181,10 +205,54 @@ s_mov_b32 exec_lo, s15
 s_mov_b32 exec_lo, 0
 
 // ---------------------------------------------------------------------------
+// Sampling a texture.
+//
+// `image_sample` takes its image descriptor in eight SGPRs and its sampler in
+// four, both loaded from the block above, and its coordinate in **consecutive**
+// VGPRs. `dmask:0xf` asks for all four channels, which is what a `vec4` result
+// wants; a narrower mask returns fewer registers and would leave the rest of
+// the destination holding whatever it held.
+//
+// **Not `image_sample_lz`.** The `_lz` form samples level zero and needs no
+// derivatives, which makes it the easy one and the wrong one: it leaves the mip
+// chain, the minification filter and GL 1.4's LOD bias unused, exactly as the
+// textured fixed-function shader found on 2026-09-19. The plain form derives
+// the level of detail from how the coordinate changes across the quad - which
+// is why the shader has to be in whole-quad mode when it runs, below.
+//
+// Two destinations, two coordinate pairs, two descriptor sets and two masks, so
+// each field is pinned separately rather than inferred from one example.
+// ---------------------------------------------------------------------------
+image_sample v[4:7],   v[2:3],   s[4:11],  s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_sample v[8:11],  v[4:5],   s[4:11],  s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_sample v[8:11],  v[4:5],   s[16:23], s[24:27] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_sample v[12:15], v[20:21], s[4:11],  s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_sample v8,       v[4:5],   s[4:11],  s[12:15] dmask:0x1 dim:SQ_RSRC_IMG_2D
+// The four dimensions, which is one field and not four instructions.
+image_sample v[4:7], v2,     s[4:11], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_1D
+image_sample v[4:7], v[2:4], s[4:11], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_3D
+image_sample v[4:7], v[2:4], s[4:11], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_CUBE
+
+// **Whole-quad mode**, which is what makes the derivative above exist. A
+// fragment's neighbours in its 2x2 quad may be outside the primitive and so not
+// running; `s_wqm_b32` turns them on for as long as the derivative needs them,
+// and the real mask goes back before anything writes. The exec discipline is
+// ACO's (mesa/src/amd/compiler/aco_insert_exec_mask.cpp:61-97), and it is the
+// same pair `tex-prolog.s` already uses.
+s_mov_b32 s28, exec_lo
+s_wqm_b32 exec_lo, exec_lo
+s_mov_b32 s40, exec_lo
+
+// ---------------------------------------------------------------------------
 // The cross-checks. Each of these words is already in the tree from a
 // hand-written shader, so agreeing with them says this pipeline is right rather
 // than merely self-consistent.
+//
+// `image_sample_lz` and the wait after it are the strongest of them: those two
+// words are what `tex-prolog.s` says the textured pixel shader used to carry,
+// quoted there from a different assembly run.
 // ---------------------------------------------------------------------------
+image_sample_lz v[4:7], v[2:3], s[4:11], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D
 s_endpgm                    // 0xbf810000, the word every shader here ends with
 s_nop 0                     // 0xbf800000, what an unused patch slot holds
 s_waitcnt vmcnt(0)          // 0xbf8c3f70, after every image_sample in the tree
