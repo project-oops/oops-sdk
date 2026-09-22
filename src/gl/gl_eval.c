@@ -236,9 +236,11 @@ static GLboolean gl_eval_rec_map(gl_list_op_t op, GLenum target, GLfloat u1, GLf
         uorder >= 1 && uorder <= OOPS_GL_MAX_EVAL_ORDER && ustride >= k &&
         (!two || (vorder >= 1 && vorder <= OOPS_GL_MAX_EVAL_ORDER && vstride >= k)));
     void *pts = (void *)0;
+    size_t pack_bytes = 0u;
     if (packable) {
         const GLint vo = two ? vorder : 1;
-        pts = gl_list_alloc((size_t)uorder * (size_t)vo * (size_t)k * sizeof(float));
+        pack_bytes = (size_t)uorder * (size_t)vo * (size_t)k * sizeof(float);
+        pts = gl_list_alloc(pack_bytes);
         if (!pts) {
             gl_context_t *ctx = gl_get_ctx();
             gl_record_error(ctx, GL_OUT_OF_MEMORY);
@@ -249,10 +251,10 @@ static GLboolean gl_eval_rec_map(gl_list_op_t op, GLenum target, GLfloat u1, GLf
     if (two) {
         const gl_list_arg_t a[7] = {gl_la_e(target), gl_la_f(u1), gl_la_f(u2), gl_la_i(uorder),
                                     gl_la_f(v1), gl_la_f(v2), gl_la_i(vorder)};
-        return gl_list_rec_owned(op, a, 7, pts);
+        return gl_list_rec_owned(op, a, 7, pts, pts ? pack_bytes : 0u);
     }
     const gl_list_arg_t a[4] = {gl_la_e(target), gl_la_f(u1), gl_la_f(u2), gl_la_i(uorder)};
-    return gl_list_rec_owned(op, a, 4, pts);
+    return gl_list_rec_owned(op, a, 4, pts, pts ? pack_bytes : 0u);
 }
 
 void gl_eval_replay_map(const gl_list_cmd_t *cmd) {

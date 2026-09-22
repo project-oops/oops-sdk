@@ -574,7 +574,9 @@ void glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig,
         } else if (gl_list_rec_owned(GL_LIST_OP_BITMAP,
                                      GL_LIST_ARGV(gl_la_i(width), gl_la_i(height), gl_la_f(xorig),
                                                   gl_la_f(yorig), gl_la_f(xmove), gl_la_f(ymove)),
-                                     6, bits)) {
+                                     6, bits,
+                                     /* What gl_bitmap_copy_client packs: rows of ceil(w/8). */
+                                     bits ? (((size_t)width + 7u) / 8u) * (size_t)height : 0u)) {
             return;
         }
     }
@@ -810,7 +812,7 @@ void glPolygonStipple(const GLubyte *mask) {
         if (mask && !bits) {
             if (ctx->list_mode == GL_COMPILE) return; /* out of memory, already recorded */
         } else if (gl_list_rec_owned(GL_LIST_OP_POLYGON_STIPPLE, (const gl_list_arg_t *)0, 0,
-                                     bits)) {
+                                     bits, bits ? (32u / 8u) * 32u : 0u)) {
             return;
         }
     }
@@ -977,7 +979,8 @@ void glPixelMapfv(GLenum map, GLsizei mapsize, const GLfloat *values) {
         }
         if ((!keep || copy) &&
             gl_list_rec_owned(GL_LIST_OP_PIXEL_MAP,
-                              GL_LIST_ARGV(gl_la_e(map), gl_la_i(mapsize)), 2, copy)) {
+                              GL_LIST_ARGV(gl_la_e(map), gl_la_i(mapsize)), 2, copy,
+                              copy ? (size_t)mapsize * sizeof(GLfloat) : 0u)) {
             return;
         }
     }

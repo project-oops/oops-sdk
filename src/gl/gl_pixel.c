@@ -538,6 +538,19 @@ void gl_pack_value(const gl_context_t *ctx, const gl_pixel_fmt_t *f, float v, GL
  * Copies for display lists
  * ------------------------------------------------------------------------- */
 
+/* **How many bytes the function below produced.** Beside it rather than at its call sites,
+ * because the two must agree and the layout is this file's to know: tight rows of
+ * `width * pixel_bytes`, except a GL_BITMAP image, which is packed to the bit like glBitmap's.
+ * A capture has to write the blob's length down, and nothing else ever needed it. */
+size_t gl_pixel_packed_bytes(const gl_pixel_fmt_t *f, GLsizei width, GLsizei height,
+                             GLsizei depth) {
+    if (!f || width <= 0 || height <= 0 || depth <= 0) return 0u;
+    if (f->bitmap) {
+        return (depth == 1) ? (((size_t)width + 7u) / 8u) * (size_t)height : 0u;
+    }
+    return (size_t)width * f->pixel_bytes * (size_t)height * (size_t)depth;
+}
+
 void *gl_pixel_copy_client(const gl_context_t *ctx, const gl_pixel_fmt_t *f, const void *pixels,
                            GLsizei width, GLsizei height, GLsizei depth) {
     if (!pixels || width <= 0 || height <= 0 || depth <= 0) return (void *)0;

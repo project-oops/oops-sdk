@@ -4008,13 +4008,15 @@ GLboolean gl_list_rec_image(gl_list_op_t op, const gl_list_arg_t *args, int narg
     if (!ctx) return GL_FALSE;
     gl_pixel_fmt_t f;
     void *img = (void *)0;
+    size_t img_bytes = 0u;
     if (pixels && gl_pixel_fmt(format, type, &f) == GL_NO_ERROR && width > 0 && height > 0) {
         img = gl_pixel_copy_client(ctx, &f, pixels, width, height, 1);
         /* Out of memory, already recorded. Nothing is kept - a command replayed without its
          * image would upload garbage - and under GL_COMPILE_AND_EXECUTE the call still runs. */
         if (!img) return (GLboolean)(ctx->list_mode == GL_COMPILE);
+        img_bytes = gl_pixel_packed_bytes(&f, width, height, 1);
     }
-    return gl_list_rec_owned(op, args, nargs, img);
+    return gl_list_rec_owned(op, args, nargs, img, img_bytes);
 }
 
 /* `glAlphaFunc(func, ref)` - discards a fragment whose alpha fails the comparison.
@@ -6134,12 +6136,14 @@ static GLboolean gl_list_rec_volume(gl_list_op_t op, const gl_list_arg_t *args, 
     if (!ctx) return GL_FALSE;
     gl_pixel_fmt_t f;
     void *img = (void *)0;
+    size_t img_bytes = 0u;
     if (pixels && gl_pixel_fmt(format, type, &f) == GL_NO_ERROR &&
         width > 0 && height > 0 && depth > 0) {
         img = gl_pixel_copy_client(ctx, &f, pixels, width, height, depth);
         if (!img) return (GLboolean)(ctx->list_mode == GL_COMPILE);
+        img_bytes = gl_pixel_packed_bytes(&f, width, height, depth);
     }
-    return gl_list_rec_owned(op, args, nargs, img);
+    return gl_list_rec_owned(op, args, nargs, img, img_bytes);
 }
 
 void glTexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width,
@@ -6631,7 +6635,7 @@ void glPrioritizeTextures(GLsizei n, const GLuint *textures, const GLclampf *pri
             GLclampf *pri = (GLclampf *)(block + names_bytes);
             for (GLsizei i = 0; i < n; i++) pri[i] = priorities ? priorities[i] : 0.0f;
             if (gl_list_rec_owned(GL_LIST_OP_PRIORITIZE_TEXTURES, GL_LIST_ARGV(gl_la_i(n)), 1,
-                                  block)) {
+                                  block, names_bytes + (size_t)n * sizeof(GLclampf))) {
                 return;
             }
         }

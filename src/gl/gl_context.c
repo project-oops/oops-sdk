@@ -1524,6 +1524,7 @@ void glSwapBuffers(void) {
         ctx->front_pending = GL_FALSE;
         gl_draw_targets(ctx);
         ctx->frame_count++;
+        gl_capture_swap_tick(ctx);
         return;
     }
 #endif
@@ -1545,6 +1546,7 @@ void glSwapBuffers(void) {
     ctx->back_fb = oops_display_get_framebuffer(ctx->disp);
     gl_draw_targets(ctx);
     ctx->frame_count++;
+    gl_capture_swap_tick(ctx);
 }
 
 /* The front surface - the display's size, 64 KiB aligned as a colour target, in the Garlic

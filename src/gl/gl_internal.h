@@ -1356,6 +1356,10 @@ typedef struct gl_context {
      * hands over the same literal, so a pointer compare is both correct and cheap enough to sit
      * on this path. A site beyond the table is counted in `hw_flushes` and named nowhere, which
      * the report says rather than hides. */
+    /* **A capture is running**: every hookable entry point is written to a byte stream that can
+     * be replayed elsewhere - on the host's reference rasteriser, which is the point. See
+     * `oops_gl_capture_begin` in GL/gl.h. */
+    GLboolean capture_active;
     uint32_t hw_flushes;
     const char *hw_flush_site[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_site_n[OOPS_GL_FLUSH_SITES];
@@ -2339,13 +2343,27 @@ const uint8_t *gl_array_base(const gl_context_t *ctx, const gl_client_array_t *a
  * caller already allocated with `gl_list_alloc` (an image unpacked at compile time), and frees
  * it if the record fails. Either answers false, having recorded nothing, when it cannot allocate -
  * GL_OUT_OF_MEMORY is set, and under GL_COMPILE_AND_EXECUTE the caller then executes normally. */
+/* **True while a list is compiling, and also while a capture is running.**
+ *
+ * The two want the same 216 hooks and differ in what happens afterwards: a compiling list
+ * swallows the call, a capture records it and lets it through. `gl_list_rec_owned` decides
+ * which by looking at `list_compiling` again, so the only thing this gate has to do is let the
+ * recorder see the call at all. */
 static inline GLboolean gl_list_recording(void) {
     const gl_context_t *ctx = g_gl_ctx;
-    return (GLboolean)(ctx && ctx->list_compiling != 0u && ctx->list_suspend == 0u);
+    return (GLboolean)(ctx && (ctx->list_compiling != 0u || ctx->capture_active) &&
+                       ctx->list_suspend == 0u);
 }
 GLboolean gl_list_rec(gl_list_op_t op, const gl_list_arg_t *args, int nargs,
                       const void *data, size_t bytes);
-GLboolean gl_list_rec_owned(gl_list_op_t op, const gl_list_arg_t *args, int nargs, void *owned);
+/* **`bytes` describes `owned`.** A blob whose length is known only to its caller cannot be
+   written down, and a capture has to write it down. The list itself never needed the number -
+   replay recomputes what it wants from the arguments - which is exactly why it was missing and
+   why every call site had to be visited to add it. */
+GLboolean gl_list_rec_owned(gl_list_op_t op, const gl_list_arg_t *args, int nargs, void *owned,
+                            size_t bytes);
+/* Called by the swap, once per frame: starts an armed capture and finishes a running one. */
+void gl_capture_swap_tick(gl_context_t *ctx);
 void *gl_list_alloc(size_t bytes);
 /* An image's rows as `glPixelStorei` lays them out now, packed tight into a new block - what a
  * list must keep, because the unpack state it replays under will be different. NULL for no
@@ -2469,6 +2487,9 @@ void gl_unpack_row(const gl_context_t *ctx, const gl_pixel_fmt_t *f, uint8_t *ds
  * GL_OUT_OF_MEMORY set when it cannot allocate. */
 void *gl_pixel_copy_client(const gl_context_t *ctx, const gl_pixel_fmt_t *f, const void *pixels,
                            GLsizei width, GLsizei height, GLsizei depth);
+/* The size of what that produced, for a caller that has to write the blob down. */
+size_t gl_pixel_packed_bytes(const gl_pixel_fmt_t *f, GLsizei width, GLsizei height,
+                             GLsizei depth);
 /* Bit (x, y) of a client bitmap - glBitmap, glPolygonStipple - under the unpack state: row
  * length, alignment, skips, and GL_UNPACK_LSB_FIRST. */
 GLboolean gl_bitmap_bit(const gl_context_t *ctx, const GLubyte *bits, GLsizei width, int x, int y);

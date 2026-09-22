@@ -2374,6 +2374,42 @@ void glTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset
  * for a name this GL does not have, which is what a program probing for an extension expects. */
 void *oops_gl_get_proc_address(const char *name);
 
+/* **Recording a frame's GL calls, to replay them somewhere else.**
+ *
+ * A display list records a call to replay it later in the same process; a capture records it to
+ * replay it on a different implementation. The one that matters is the host software
+ * rasteriser, which is this library's reference: a capture taken on the console and replayed
+ * there renders the same program twice and the difference is the bug.
+ *
+ * This exists because a conformance suite covers what somebody thought to write down, and a
+ * program renders wrong in the combination nobody wrote down. Ninety-three checks passing while
+ * a port's colours are wrong is not a failure of the method, it is the method reaching its
+ * edge. A capture goes past it by testing the calls actually made.
+ *
+ *   oops_gl_capture_begin();
+ *   ... one frame ...
+ *   oops_gl_capture_end();
+ *   size_t n; unsigned calls;
+ *   const void *p = oops_gl_capture_data(&n, &calls);   // NULL if it overflowed
+ *
+ * The buffer belongs to the library and lives until the next `oops_gl_capture_begin`. Writing
+ * it to a file is the caller's job, so this layer needs no filesystem.
+ *
+ * Replay executes the stream against the current context through the same executor display
+ * lists use, so a capture cannot drift from a list. It returns the number of commands run,
+ * which is the count in the header unless the stream was truncated. */
+void oops_gl_capture_begin(void);
+void oops_gl_capture_end(void);
+const void *oops_gl_capture_data(size_t *out_bytes, unsigned *out_calls);
+unsigned oops_gl_capture_replay(const void *data, size_t bytes);
+
+/* **Capture a frame without touching the program.** Arms the buffer swap: the frame drawn after
+ * `frame` completes is recorded and written to `path`. A port needs no change of its own, which
+ * also means what lands in the file is the program's real behaviour and not the behaviour of a
+ * program with capture code in it. `path` is not copied, so it must outlive the frame - a string
+ * literal is the intended thing. */
+void oops_gl_capture_frame(unsigned frame, const char *path);
+
 #ifdef __cplusplus
 }
 #endif

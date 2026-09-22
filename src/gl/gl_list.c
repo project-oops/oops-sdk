@@ -56,6 +56,9 @@
 
 #ifdef OOPS_HOST_BUILD
 #include <stdlib.h>
+#else
+/* A finished capture writes itself out, so this file needs the filesystem the swap hook uses. */
+#include "oops/fs.h"
 #endif
 
 /* The allocator differs by build: the SDK's own heap on the target, the C library's on the
@@ -166,8 +169,93 @@ static void gl_list_execute_cmd(gl_context_t *ctx, const gl_list_cmd_t *cmd);
  * **A list that cannot grow is an error, not a truncation.** Dropping commands silently would
  * give a list that draws part of what was compiled into it, which looks like a modelling mistake
  * rather than a limit being hit. */
-GLboolean gl_list_rec_owned(gl_list_op_t op, const gl_list_arg_t *args, int nargs, void *owned) {
+/* -------------------------------------------------------------------------
+ * Capture: the same calls, written down instead of compiled
+ *
+ * A display list records a call to replay it later in the same process. A capture records it to
+ * replay it somewhere else - specifically on the host's software rasteriser, which is this
+ * library's reference implementation and is the thing the console path is supposed to agree
+ * with. Ninety-three hand-written conformance checks all pass while a real program renders
+ * wrong, because a hand-written check only covers what somebody thought to write down; a
+ * capture covers what the program actually did.
+ *
+ * The stream is flat and self-describing, so a reader needs nothing but the file:
+ *
+ *     "OGLCAP" 0x00 0x01   magic and version
+ *     u32 count            commands
+ *     then, per command:
+ *     u32 op, u32 a[10], u32 bytes, then `bytes` of blob padded up to a multiple of four
+ *
+ * Little-endian throughout, because both ends of this are x86-64 and pretending otherwise
+ * would be untested code standing in for a portability nobody has asked for. Arguments are
+ * written as the 32-bit words they already are - `gl_list_arg_t` is a union of four-byte
+ * scalars - so no conversion happens and a float survives exactly.
+ */
+#define GL_CAPTURE_MAGIC0 'O'
+#define GL_CAPTURE_VERSION 1u
+/* The header is 12 bytes: six of magic, one zero, one version, four of count. */
+#define GL_CAPTURE_HEADER_BYTES 12u
+
+static uint8_t *g_capture_buf;
+static size_t g_capture_len;
+static size_t g_capture_cap;
+static uint32_t g_capture_count;
+static GLboolean g_capture_overflow;
+
+static void gl_capture_put(const void *src, size_t n) {
+    if (g_capture_overflow) return;
+    if (g_capture_len + n > g_capture_cap) {
+        size_t grown = g_capture_cap ? g_capture_cap * 2u : 65536u;
+        while (grown < g_capture_len + n) grown *= 2u;
+        uint8_t *next = (uint8_t *)gl_list_alloc(grown);
+        if (!next) {
+            /* **Recorded, not ignored.** A capture that quietly stopped part way would be a
+               file that looks complete and replays a different program. */
+            g_capture_overflow = GL_TRUE;
+            return;
+        }
+        if (g_capture_len) memcpy(next, g_capture_buf, g_capture_len);
+        gl_list_release(g_capture_buf);
+        g_capture_buf = next;
+        g_capture_cap = grown;
+    }
+    if (src) memcpy(g_capture_buf + g_capture_len, src, n);
+    else memset(g_capture_buf + g_capture_len, 0, n);
+    g_capture_len += n;
+}
+
+static void gl_capture_put_u32(uint32_t v) { gl_capture_put(&v, 4u); }
+
+/* One command, arguments and blob, at the end of the stream. */
+static void gl_capture_append(gl_list_op_t op, const gl_list_arg_t *args, int nargs,
+                              const void *blob, size_t bytes) {
+    if (nargs < 0 || nargs > GL_LIST_MAX_ARGS) return;
+    gl_capture_put_u32((uint32_t)op);
+    for (int i = 0; i < GL_LIST_MAX_ARGS; i++) {
+        uint32_t w = 0u;
+        if (i < nargs) memcpy(&w, &args[i], 4u);
+        gl_capture_put_u32(w);
+    }
+    const uint32_t n = (blob && bytes) ? (uint32_t)bytes : 0u;
+    gl_capture_put_u32(n);
+    if (n) {
+        gl_capture_put(blob, n);
+        /* Padded so every command starts word-aligned and a reader can walk the stream
+           without knowing anything about the op it just passed. */
+        const size_t pad = (4u - ((size_t)n & 3u)) & 3u;
+        if (pad) gl_capture_put((const void *)0, pad);
+    }
+    g_capture_count++;
+}
+
+GLboolean gl_list_rec_owned(gl_list_op_t op, const gl_list_arg_t *args, int nargs, void *owned,
+                            size_t bytes) {
     gl_context_t *ctx = gl_get_ctx();
+    /* **The capture sees the call before the list decides to swallow it**, and sees it whether
+       or not a list is compiling at all. */
+    if (ctx && ctx->capture_active && ctx->list_suspend == 0u) {
+        gl_capture_append(op, args, nargs, owned, bytes);
+    }
     if (!ctx || ctx->list_compiling == 0u || ctx->list_suspend != 0u) {
         gl_list_release(owned);
         return GL_FALSE;
@@ -219,7 +307,7 @@ GLboolean gl_list_rec(gl_list_op_t op, const gl_list_arg_t *args, int nargs,
         }
         memcpy(copy, data, bytes);
     }
-    return gl_list_rec_owned(op, args, nargs, copy);
+    return gl_list_rec_owned(op, args, nargs, copy, copy ? bytes : 0u);
 }
 
 GLuint glGenLists(GLsizei range) {
@@ -639,7 +727,8 @@ void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
             /* Stored as offsets in GLuint - a negative one wraps, and wraps back when the base
              * is added, as the unsigned sum below does. */
             for (GLsizei i = 0; i < n; i++) names[i] = (GLuint)gl_call_lists_name(type, lists, i);
-            if (gl_list_rec_owned(GL_LIST_OP_CALL_LISTS, GL_LIST_ARGV(gl_la_i(n)), 1, names)) {
+            if (gl_list_rec_owned(GL_LIST_OP_CALL_LISTS, GL_LIST_ARGV(gl_la_i(n)), 1, names,
+                                  (size_t)n * sizeof(GLuint))) {
                 return;
             }
         }
@@ -647,5 +736,162 @@ void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
 
     for (GLsizei i = 0; i < n; i++) {
         glCallList(ctx->list_base + (GLuint)gl_call_lists_name(type, lists, i));
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * Capture: the public half
+ */
+
+void oops_gl_capture_begin(void) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    /* A second begin discards the first rather than appending to it: two captures joined end to
+       end would replay as one impossible program. */
+    gl_list_release(g_capture_buf);
+    g_capture_buf = (uint8_t *)0;
+    g_capture_len = 0u;
+    g_capture_cap = 0u;
+    g_capture_count = 0u;
+    g_capture_overflow = GL_FALSE;
+    /* Room for the header, filled in by `oops_gl_capture_end` once the count is known. */
+    gl_capture_put((const void *)0, GL_CAPTURE_HEADER_BYTES);
+    ctx->capture_active = GL_TRUE;
+}
+
+void oops_gl_capture_end(void) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (ctx) ctx->capture_active = GL_FALSE;
+    if (!g_capture_buf || g_capture_len < GL_CAPTURE_HEADER_BYTES) return;
+    static const char magic[6] = {'O', 'G', 'L', 'C', 'A', 'P'};
+    memcpy(g_capture_buf, magic, sizeof(magic));
+    g_capture_buf[6] = 0;
+    g_capture_buf[7] = (uint8_t)GL_CAPTURE_VERSION;
+    const uint32_t count = g_capture_count;
+    memcpy(g_capture_buf + 8, &count, 4u);
+}
+
+const void *oops_gl_capture_data(size_t *out_bytes, unsigned *out_calls) {
+    if (out_calls) *out_calls = g_capture_count;
+    /* **An overflowed capture hands back nothing.** Half a call stream replays as a different
+       program, and a caller that wrote it to a file would have a plausible artefact of a run
+       that never happened. */
+    if (g_capture_overflow) {
+        if (out_bytes) *out_bytes = 0u;
+        return (const void *)0;
+    }
+    if (out_bytes) *out_bytes = g_capture_len;
+    return g_capture_buf;
+}
+
+unsigned oops_gl_capture_replay(const void *data, size_t bytes) {
+    gl_context_t *ctx = gl_get_ctx();
+    const uint8_t *p = (const uint8_t *)data;
+    if (!ctx || !p || bytes < GL_CAPTURE_HEADER_BYTES) return 0u;
+    if (p[0] != 'O' || p[1] != 'G' || p[2] != 'L' || p[3] != 'C' || p[4] != 'A' || p[5] != 'P') {
+        return 0u;
+    }
+    if (p[7] != (uint8_t)GL_CAPTURE_VERSION) return 0u;
+    uint32_t count = 0u;
+    memcpy(&count, p + 8, 4u);
+
+    size_t off = GL_CAPTURE_HEADER_BYTES;
+    unsigned done = 0u;
+    for (uint32_t i = 0u; i < count; i++) {
+        /* op + ten arguments + the blob's length. */
+        const size_t fixed = 4u + (size_t)GL_LIST_MAX_ARGS * 4u + 4u;
+        if (off + fixed > bytes) break;
+        gl_list_cmd_t cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        uint32_t w = 0u;
+        memcpy(&w, p + off, 4u); off += 4u;
+        cmd.op = (gl_list_op_t)w;
+        for (int k = 0; k < GL_LIST_MAX_ARGS; k++) {
+            memcpy(&w, p + off, 4u); off += 4u;
+            memcpy(&cmd.a[k], &w, 4u);
+        }
+        uint32_t blob = 0u;
+        memcpy(&blob, p + off, 4u); off += 4u;
+        if (blob) {
+            if (off + blob > bytes) break;
+            /* **Pointed into the stream, not copied.** The executor only reads it, and the
+               caller owns the buffer for the length of the replay. */
+            cmd.data = (void *)(uintptr_t)(p + off);
+            off += blob;
+            off += (4u - ((size_t)blob & 3u)) & 3u;
+        }
+        /* The same executor a display list uses, so a capture cannot drift from a list. */
+        gl_list_execute_cmd(ctx, &cmd);
+        done++;
+    }
+    return done;
+}
+
+/* -------------------------------------------------------------------------
+ * Capturing a frame without the program's help
+ *
+ * `oops_gl_capture_begin`/`end` need somebody to call them at the right moment, and the right
+ * moment is between two buffer swaps - which a program's main loop knows about and a payload
+ * entry point does not. A port would need a patch to its own loop to use them, and the point of
+ * this is to avoid modifying the program under test.
+ *
+ * So the swap does it: arm a frame number and a path, and the frame after that number completes
+ * is recorded and written out. Nothing else in the title changes, which also means the captured
+ * stream is the program's real behaviour rather than the behaviour of a program with capture
+ * code in it.
+ */
+static uint32_t g_capture_arm_frame;
+static const char *g_capture_path;
+
+void oops_gl_capture_frame(unsigned frame, const char *path) {
+    g_capture_arm_frame = (uint32_t)frame;
+    g_capture_path = path;
+}
+
+void gl_capture_swap_tick(gl_context_t *ctx) {
+    if (!ctx) return;
+    if (ctx->capture_active) {
+        oops_gl_capture_end();
+        size_t bytes = 0u;
+        unsigned calls = 0u;
+        const void *data = oops_gl_capture_data(&bytes, &calls);
+        {
+            /* One line, three numbers: what was recorded, how big it is, and how the write went.
+               `gl_klog_val` belongs to gl_context.c, so this builds its own. */
+            char msg[128];
+            size_t n = 0;
+            const char *head = "capture: calls";
+            while (head[n] && n < sizeof(msg) - 80) { msg[n] = head[n]; n++; }
+            n = gl_msg_hex(msg, sizeof(msg), n, (uint32_t)calls);
+            const char *mid = " bytes";
+            size_t k = 0;
+            while (mid[k] && n < sizeof(msg) - 48) { msg[n++] = mid[k++]; }
+            n = gl_msg_hex(msg, sizeof(msg), n, (uint32_t)bytes);
+            int rc = 0;
+            if (data && bytes && g_capture_path) {
+#ifndef OOPS_HOST_BUILD
+                rc = oops_fs_write_all(g_capture_path, data, bytes);
+#endif
+                const char *tail = " write-rc";
+                size_t j = 0;
+                while (tail[j] && n < sizeof(msg) - 14) { msg[n++] = tail[j++]; }
+                n = gl_msg_hex(msg, sizeof(msg), n, (uint32_t)rc);
+            }
+            msg[n] = '\0';
+            gl_log_line(msg);
+        }
+        if (data && bytes && g_capture_path) {
+            /* Reported above. */
+        } else {
+            /* Overflowed, so `oops_gl_capture_data` handed back nothing. Said plainly: a
+               missing file with a reason beats a short file without one. */
+            gl_log_line("capture overflowed and was discarded - nothing written");
+        }
+        g_capture_arm_frame = 0u;
+        g_capture_path = (const char *)0;
+        return;
+    }
+    if (g_capture_arm_frame != 0u && ctx->frame_count == g_capture_arm_frame) {
+        oops_gl_capture_begin();
     }
 }

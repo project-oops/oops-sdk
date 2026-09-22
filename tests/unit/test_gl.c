@@ -1128,6 +1128,105 @@ static void test_gl_extension_entry_points_are_the_core_ones(void) {
  *
  * Each refusal is paired with a supported value asserted to still work, so a build that
  * refused everything would fail this too. */
+/* **A captured frame replays to the same pixels.**
+ *
+ * This is the whole claim the capture rests on, so it is asserted against pixels rather than
+ * against a call count: a stream that replays *nearly* right is worse than one that fails,
+ * because its whole purpose is to be the reference a hardware run is compared to.
+ *
+ * Three renders of the same drawing. The first is the truth. The second runs with capture on,
+ * which must not change what is drawn - a capture that perturbed the frame would be measuring
+ * itself. The third is the replay of that capture into a cleared buffer, and has to match the
+ * first exactly, not approximately.
+ *
+ * The drawing carries the things that are easy to get wrong in a serialiser: a float that has
+ * to survive bit-exact, an enum, and a texture upload, whose pixels are a blob whose length
+ * the command did not previously record - which is why `gl_list_rec_owned` grew a `bytes`
+ * parameter and every one of its nine call sites was visited. */
+static void test_gl_capture_replays_to_identical_pixels(void) {
+    enum { W = 32, H = 32 };
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
+    void *gc = glContextCreate(disp);
+    ASSERT_TRUE(gc != NULL);
+    glViewport(0, 0, W, H);
+
+    static const GLubyte texels[4][4] = {
+        {255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255}, {255, 255, 255, 255},
+    };
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+
+    /* One drawing, three times. `glGenTextures` is not compiled by GL and so is not captured;
+       the texture name is made once, outside, exactly as a real frame would find it already
+       made. */
+    #define DRAW_THE_FRAME()                                                                   \
+        do {                                                                                   \
+            glClearColor(0.125f, 0.25f, 0.5f, 1.0f);                                           \
+            glClear(GL_COLOR_BUFFER_BIT);                                                      \
+            glBindTexture(GL_TEXTURE_2D, tex);                                                 \
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);                 \
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);                 \
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);                                             \
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE,        \
+                         texels);                                                              \
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);                                             \
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);                        \
+            glEnable(GL_TEXTURE_2D);                                                           \
+            glBegin(GL_QUADS);                                                                 \
+            glTexCoord2f(0.0f, 0.0f); glVertex2f(-0.75f, -0.75f);                              \
+            glTexCoord2f(1.0f, 0.0f); glVertex2f( 0.75f, -0.75f);                              \
+            glTexCoord2f(1.0f, 1.0f); glVertex2f( 0.75f,  0.75f);                              \
+            glTexCoord2f(0.0f, 1.0f); glVertex2f(-0.75f,  0.75f);                              \
+            glEnd();                                                                           \
+            glDisable(GL_TEXTURE_2D);                                                          \
+        } while (0)
+
+    static GLubyte truth[W * H * 4];
+    static GLubyte during[W * H * 4];
+    static GLubyte after[W * H * 4];
+
+    DRAW_THE_FRAME();
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, truth);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    /* With capture on: the frame must be unchanged, and the stream must be non-empty. */
+    oops_gl_capture_begin();
+    DRAW_THE_FRAME();
+    oops_gl_capture_end();
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, during);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_EQ(memcmp(truth, during, sizeof(truth)), 0);
+
+    size_t bytes = 0;
+    unsigned calls = 0;
+    const void *stream = oops_gl_capture_data(&bytes, &calls);
+    ASSERT_TRUE(stream != NULL);
+    ASSERT_TRUE(calls > 0u);
+    ASSERT_TRUE(bytes > 12u); /* more than the header alone */
+
+    /* Wipe the buffer to something neither the clear colour nor any texel, so a replay that
+       drew nothing at all would fail rather than coincidentally match. */
+    glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    const unsigned ran = oops_gl_capture_replay(stream, bytes);
+    ASSERT_EQ(ran, calls);
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, after);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_EQ(memcmp(truth, after, sizeof(truth)), 0);
+
+    /* A stream that is not one of ours is refused rather than executed as noise. */
+    static const char junk[16] = {'N', 'O', 'T', 'C', 'A', 'P', 0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    ASSERT_EQ(oops_gl_capture_replay(junk, sizeof(junk)), 0u);
+    ASSERT_EQ(oops_gl_capture_replay(stream, 4u), 0u); /* shorter than a header */
+
+    #undef DRAW_THE_FRAME
+    glDeleteTextures(1, &tex);
+    glContextDestroy(gc);
+    oops_display_close(disp);
+}
+
 static void test_gl_unsupported_state_enums_are_refused(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -13623,6 +13722,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_draw_elements_refuses_an_unreadable_index_type);
     RUN_TEST(test_gl_strings_are_honest_and_parseable);
     RUN_TEST(test_gl_extension_entry_points_are_the_core_ones);
+    RUN_TEST(test_gl_capture_replays_to_identical_pixels);
     RUN_TEST(test_gl_unsupported_state_enums_are_refused);
     RUN_TEST(test_gl_hardware_badge_does_not_overclaim);
     RUN_TEST(test_gl_matrix_builders_match_their_definitions);
