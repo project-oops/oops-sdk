@@ -2994,6 +2994,58 @@ static void test_gl2_the_probes_control_flow_shaders_compile_and_run(void) {
     ASSERT_NEAR(o[1], 1.0f, 1e-6f);
     ASSERT_NEAR(o[2], 1.0f, 1e-6f);
 
+    /* **gl2-probe's `loop-divergence` shader, at both ends of its gradient.**
+     *
+     * On the console this runs with every column of the quad breaking on a different trip, which
+     * is the thing a one-lane simulator cannot reproduce - what it can do is run the same shader
+     * twice with the varying at each end and check the trip count follows it. If these two came
+     * out the same the probe's gradient would be flat for a reason that has nothing to do with
+     * the masks, and the hardware result would be unreadable. */
+    {
+        static const char *const FS_DIVERGE =
+            "varying vec4 vin;\n"
+            "void main() {\n"
+            "  float total = 0.0;\n"
+            "  for (int i = 0; i < 40; i++) {\n"
+            "    if (float(i) > vin.x * 32.0) break;\n"
+            "    total += 1.0;\n"
+            "  }\n"
+            "  gl_FragColor = vec4(total * 0.03, 0.0, 0.0, 1.0);\n"
+            "}\n";
+        const float lo[4][4] = {{0.0f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        const float hi[4][4] = {{1.0f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        compile_and_run(ctx, VS_ONE_VARYING, FS_DIVERGE, lo, o);
+        ASSERT_NEAR(o[0], 0.03f, 1e-6f);  /* one trip: i = 0 is not > 0 */
+        compile_and_run(ctx, VS_ONE_VARYING, FS_DIVERGE, hi, o);
+        ASSERT_NEAR(o[0], 0.99f, 1e-6f);  /* thirty-three: i = 0..32 */
+    }
+
+    /* And `discard-in-loop`, on both sides of its threshold. The discarding side must not come
+     * back - the loop reloads `exec` from its own mask every trip, and a lane left in that mask
+     * is handed straight back.
+     *
+     * **A hundred trips, so the loop branches.** At twenty-four it unrolls, and an unrolled
+     * loop has no reload to get wrong - the check would pass without reaching the path it is
+     * for. It also would not fit: twenty-four copies of this body is over the 512-instruction
+     * limit, which is how the difference first showed up. */
+    {
+        static const char *const FS_DISCARD_LOOP =
+            "varying vec4 vin;\n"
+            "void main() {\n"
+            "  float total = 0.0;\n"
+            "  for (int i = 0; i < 100; i++) {\n"
+            "    total += 1.0;\n"
+            "    if (vin.x > 0.5 && total > 4.0) discard;\n"
+            "  }\n"
+            "  gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+            "}\n";
+        const float keep[4][4] = {{0.0f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        const float kill[4][4] = {{1.0f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, FS_DISCARD_LOOP, keep, o), GL_TRUE);
+        ASSERT_NEAR(o[1], 1.0f, 1e-6f);
+        ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, FS_DISCARD_LOOP, kill, o), GL_FALSE);
+    }
+
     /* `^^` has no short-circuit in the language, so a right side that assigns is correct rather
      * than a problem - both sides always run and the mark always lands. */
     compile_and_run(ctx, VS_ONE_VARYING,
