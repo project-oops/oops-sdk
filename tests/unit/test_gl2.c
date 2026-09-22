@@ -2716,6 +2716,24 @@ static void test_gl2_loops_are_unrolled_when_the_count_is_known(void) {
                     attr, o);
     ASSERT_NEAR(o[0], 0.33f, 1e-6f); /* 10 + 11 + 12 */
 
+    /* **A `break` belongs to the loop it is in, and to no other.** Two loops here, one of them
+     * unrollable and one not - and the unrollable one has to compile. A check that looked for
+     * `break` anywhere in the shader rather than inside this loop's own body refuses both, and
+     * names the wrong one while doing it. A nested loop's `break` is its own for the same
+     * reason, which is why the search stops at one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "float other(float s) {\n"
+                    "  for (int k = 0; k < 2; k++) { s += 1.0; }\n"
+                    "  return s;\n"
+                    "}\n"
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 0; i < 3; i++) { total += 1.0; }\n"
+                    "  gl_FragColor = vec4(other(total) * 0.1, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-6f); /* 3 from one loop, 2 from the other */
+
     glContextDestroy(ctx);
 }
 
@@ -2752,6 +2770,17 @@ static void test_gl2_the_back_end_refuses_the_loops_it_cannot_unroll(void) {
          "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
          "}\n",
          "break"},
+        /* **And the loop that is named is the one with the `break` in it.** The clean loop on
+         * line 3 compiles; the one on line 4 does not, so the message begins "4:". A check that
+         * looked for a `break` anywhere in the shader refuses line 3 first and reports that -
+         * a true sentence about the wrong loop, which is worse than no sentence. */
+        {"void main() {\n"
+         "  float t = 0.0;\n"
+         "  for (int i = 0; i < 2; i++) { t += 1.0; }\n"
+         "  for (int j = 0; j < 2; j++) { if (t > 0.0) break; t += 1.0; }\n"
+         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+         "}\n",
+         "4:"},
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {

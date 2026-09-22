@@ -2045,6 +2045,30 @@ static GLboolean is_name(const glsl_gen_t *g, int32_t node, const char *name, si
 
 #define GLSL_GEN_MAX_UNROLL 64
 
+/* Whether this statement, or anything inside it, is a `break` or a `continue` **belonging to
+ * it**.
+ *
+ * A nested loop stops the search: its `break` is its own, and refusing the outer loop for it
+ * would be refusing the wrong thing. Only `{ ... }` walks a sibling chain, because that is the
+ * one place a sibling is the next statement rather than the next element of something else -
+ * following siblings everywhere would wander out of this loop and into the statements after
+ * it, which is how a first attempt at this refused every loop in a shader that had one
+ * `break` anywhere. */
+static GLboolean has_loop_flow(const glsl_gen_t *g, int32_t node) {
+    if (node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (n->kind == GLSL_NODE_BREAK || n->kind == GLSL_NODE_CONTINUE) return GL_TRUE;
+    if (n->kind == GLSL_NODE_FOR || n->kind == GLSL_NODE_WHILE) return GL_FALSE;
+    if (n->kind == GLSL_NODE_COMPOUND) {
+        for (int32_t s = n->a; s != GLSL_NO_NODE; s = g->ast->nodes[s].sibling) {
+            if (has_loop_flow(g, s)) return GL_TRUE;
+        }
+        return GL_FALSE;
+    }
+    return (GLboolean)(has_loop_flow(g, n->a) || has_loop_flow(g, n->b) ||
+                       has_loop_flow(g, n->c) || has_loop_flow(g, n->d));
+}
+
 static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
     const glsl_node_t *n = &g->ast->nodes[node];
 
@@ -2132,14 +2156,11 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
     /* `break` and `continue` would each need a mask carried through the rest of the loop, which
      * is the same thing an early `return` needs and is refused for the same reason. Checked
      * before anything is emitted. */
-    for (int32_t i = 0; i < g->ast->count; i++) {
-        const glsl_node_t *b = &g->ast->nodes[i];
-        if (b->kind == GLSL_NODE_BREAK || b->kind == GLSL_NODE_CONTINUE) {
-            (void)gen_fail(g, "`break` and `continue` are not generated: each needs the exec "
-                              "mask carried through the rest of the loop, which this generator "
-                              "does not do", node);
-            return GL_FALSE;
-        }
+    if (has_loop_flow(g, n->d)) {
+        (void)gen_fail(g, "`break` and `continue` are not generated: each needs the exec mask "
+                          "carried through the rest of the loop, which this generator does not "
+                          "do", node);
+        return GL_FALSE;
     }
 
     /* Out it goes, one copy per trip, with the counter a fresh constant each time. The scope is
