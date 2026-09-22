@@ -144,7 +144,16 @@ void glutDestroyWindow(int window) {
 void glutDisplayFunc(void (*func)(void)) { g.display = func; }
 void glutReshapeFunc(void (*func)(int, int)) { g.reshape = func; }
 void glutIdleFunc(void (*func)(void)) { g.idle = func; }
-void glutKeyboardFunc(void (*func)(unsigned char, int, int)) { g.keyboard = func; }
+/*
+ * Registering a keyboard callback says the program reads characters, so the keyboard stops
+ * doubling as a pad for it. Without this, `a` arrives as both the letter and `GLUT_KEY_LEFT`
+ * (`oops_input_set_keyboard_as_pad`). A program that registers no keyboard callback keeps the
+ * fallback, which is what makes a keyboard usable in a pad-only demo.
+ */
+void glutKeyboardFunc(void (*func)(unsigned char, int, int)) {
+    g.keyboard = func;
+    if (func != NULL) oops_input_set_keyboard_as_pad(0);
+}
 void glutKeyboardUpFunc(void (*func)(unsigned char, int, int)) { g.keyboard_up = func; }
 void glutSpecialFunc(void (*func)(int, int, int)) { g.special = func; }
 void glutSpecialUpFunc(void (*func)(int, int, int)) { g.special_up = func; }

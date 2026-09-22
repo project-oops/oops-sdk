@@ -167,6 +167,12 @@ int oops_input_init(void) {
  * no pad, and saying otherwise would be a lie a caller could act on. What changes is the return
  * code - a poll that has buttons to report succeeds, whatever produced them.
  */
+/* See `oops_input_set_keyboard_as_pad` in the header for why this defaults on and who turns it
+ * off. */
+static int s_keyboard_as_pad = 1;
+
+void oops_input_set_keyboard_as_pad(int enable) { s_keyboard_as_pad = enable ? 1 : 0; }
+
 static int input_keyboard_only(oops_pad_state_t *out_state, uint32_t kbd) {
   if (kbd == 0u) {
     return -1;
@@ -198,7 +204,8 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
    * An application that still calls `oops_keyboard_poll_buttons` itself is not broken by this -
    * the bits are the same and OR is idempotent - but the call is now redundant.
    */
-  const uint32_t kbd = (port == 0u) ? oops_keyboard_poll_buttons() : 0u;
+  const uint32_t kbd =
+      (port == 0u && s_keyboard_as_pad) ? oops_keyboard_poll_buttons() : 0u;
 
   /* Lazy-open port if uninitialized but requested */
   if (s_pad_handles[port] < 0 && (scePadOpen || scePadGetHandle)) {

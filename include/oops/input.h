@@ -130,6 +130,25 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state);
 int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
                           unsigned int max_samples);
 
+/*
+ * Whether `oops_input_poll` folds a keyboard's keys in as pad buttons on port 0. Default **on**.
+ *
+ * Keyboard-as-pad is a *fallback for an application that only understands a pad*: arrows and
+ * WASD become the D-pad, Enter becomes Cross, Escape becomes Circle, and a console with no
+ * controller is still usable. `oops_keyboard_poll_buttons` has always done this and SeaShell has
+ * always relied on it.
+ *
+ * **An application that reads real characters should turn it off**, because the same key arrives
+ * twice with two different meanings: press `a` in a GLUT program and it is both the letter `a`
+ * and `GLUT_KEY_LEFT`. Measured on hardware 2026-09-22, where `fbotexture` got both; it has no
+ * special-key handler so nothing came of it, and the next program will not be so lucky.
+ *
+ * oops-sdk's own GLUT calls this with 0 from `glutKeyboardFunc`, so a GLUT program that wants
+ * characters gets characters and one that does not keeps the fallback. Nothing else in the SDK
+ * changes it.
+ */
+void oops_input_set_keyboard_as_pad(int enable);
+
 int oops_input_set_rumble(unsigned int port, uint8_t small_motor,
                           uint8_t large_motor);
 int oops_input_set_lightbar(unsigned int port, uint8_t r, uint8_t g, uint8_t b);

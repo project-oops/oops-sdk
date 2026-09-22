@@ -441,6 +441,21 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
     }
   }
 
+  /*
+   * Said once, on the first key this function ever delivers.
+   *
+   * Establishing that a keystroke reached a title on 2026-09-22 took inferring it from a demo
+   * having presented two frames instead of one, because nothing on the path says anything. One
+   * line removes that inference for every future run and for every port - and it is the line
+   * that distinguishes "the keyboard is not working" from "the program ignored the key".
+   */
+  static int s_said_first;
+  if (n > 0u && !s_said_first) {
+    s_said_first = 1;
+    oops_kprintf("KBD", "first key delivered: usage 0x%02x - the read path works\n",
+                 (unsigned int)out_events[0].usage);
+  }
+
   return (int)n;
 }
 

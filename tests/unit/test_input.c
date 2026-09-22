@@ -132,6 +132,15 @@ static void test_input_poll_keyboard_fold(void) {
   /* Ports above 0 never consult the keyboard, so one keypress cannot arrive four times. */
   ASSERT_EQ(oops_input_poll(1, &st), -1);
   ASSERT_EQ((int)st.buttons, 0);
+
+  /* The fold is switchable, and switching it does not change the no-device answer either way.
+   * A program that reads characters turns it off so `a` is not also GLUT_KEY_LEFT. */
+  oops_input_set_keyboard_as_pad(0);
+  ASSERT_EQ(oops_input_poll(0, &st), -1);
+  ASSERT_EQ((int)st.buttons, 0);
+  oops_input_set_keyboard_as_pad(1);
+  ASSERT_EQ(oops_input_poll(0, &st), -1);
+  ASSERT_EQ((int)st.buttons, 0);
 }
 
 /* Mouse: same contract. */
