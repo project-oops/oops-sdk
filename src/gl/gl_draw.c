@@ -3770,7 +3770,6 @@ vertices_written:
 #endif
         }
 
-        uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
         uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
         /* This draw's own descriptor slot - slot 0 is the original table, so a frame that never
          * changes texture hands over the address it always did. */
@@ -3810,6 +3809,12 @@ vertices_written:
                  * wrote, so nothing beyond it is reachable. */
                 gl_ps_flush_shaders(ctx);
                 ctx->hw_ps_resident = prog->hw_ps_serial;
+                /* **The sync above may have submitted**, and a submitted frame is a closed one:
+                 * the render target, the stage table and every piece of state this draw is
+                 * about to rely on were emitted into the stream that just went. Re-opening is
+                 * what the texture paths above already do after their own prepares, and this
+                 * one needed it for the same reason. */
+                if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
             }
             ps_va = payload_va + OOPS_GL_PS_GL2_OFFSET;
             ps_rsrc2 = 0u;
@@ -3893,6 +3898,24 @@ vertices_written:
         }
 
         /* Emit dynamic Depth Control, Blending, Cull Mode, and Color Target Mask state */
+        /* **The command stream's cursor, taken after every payload edit above and not before.**
+         *
+         * Copying a compiled pixel shader into the payload submits the frame first, because the
+         * GPU may not yet have read the words being overwritten (`gl_ps_sync_payload_edit`) -
+         * and a submit resets `dcb_words`. A cursor read before that points past the end of a
+         * stream that has already gone, so the draw written through it sits beyond whatever the
+         * new stream contains, with the gap between filled by the previous frame's words.
+         *
+         * That is one lost draw per newly bound program, which is invisible in an app that
+         * binds one and keeps it - gl2-cube loses a triangle on its first frame and spins on -
+         * and is exactly half of every quad in a suite that binds a different program per check
+         * and draws two triangles with it. gl2-probe measured `drawn=3876` where the rect is
+         * 7752 pixels, eleven times over.
+         *
+         * Nothing between the old position and here touches `dw`, which is what makes moving it
+         * a move rather than a rewrite. */
+        uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
+
         uint32_t cur_depth_ctrl = gl_compute_db_depth_control(ctx);
         uint32_t cur_blend_ctrl = gl_compute_cb_blend_control(ctx);
         uint32_t cur_cull_ctrl = gl_compute_pa_su_sc_mode_cntl(ctx);
