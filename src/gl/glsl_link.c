@@ -519,6 +519,9 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     p->hw_ps_words = 0u;
     p->hw_ps_vgprs = 0u;
     p->hw_ps_user_sgprs = 0u;
+    /* A relink is a new answer, so a program refused again says why again: the source may have
+     * changed and the reason with it. */
+    p->hw_ps_logged = GL_FALSE;
     p->hw_params = 0u;
     p->hw_ps_log[0] = '\0';
     p->hw_tex_sets = 0;

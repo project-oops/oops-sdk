@@ -3264,8 +3264,8 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
              * same refused program still prints one line; a suite that binds a different one per
              * check gets a reason for each, which is the difference between "something was
              * refused" and a list of what the back end does not generate yet. */
-            if (ctx->hw_prog_logged != prog->name) {
-                ctx->hw_prog_logged = prog->name;
+            if (!prog->hw_ps_logged) {
+                prog->hw_ps_logged = GL_TRUE;
                 gl_log_line(prog->hw_ps_log[0]
                                 ? prog->hw_ps_log
                                 : "this program's fragment shader has no console code");

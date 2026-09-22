@@ -902,6 +902,11 @@ typedef struct {
      * also fixes where the SPI puts the primitive mask - and the shader has already moved that
      * register into `m0`. The two answers have to be the same one. */
     uint32_t hw_ps_user_sgprs;
+    /* **Whether this program's refusal has been said out loud.** Cleared at every link, so a
+     * relinked program that is still refused says so again - the source may have changed and
+     * the reason with it. On the program rather than the context because program names are
+     * recycled; see the note by `hw_ps_program`. */
+    GLboolean hw_ps_logged;
     /* How many four-component parameters this program's varyings occupy, which is what the
      * vertex stage exports and the pixel shader interpolates. Two at minimum, because the
      * pipeline's smallest configuration exports two. */
@@ -1229,16 +1234,12 @@ typedef struct gl_context {
     GLboolean hw_cube_logged; /* and a cube-mapped one */
     GLboolean hw_env_logged; /* and one for an environment the pixel shader cannot combine */
     GLboolean hw_unit_logged; /* and one for a texture unit above 0, which the console leaves out */
-    /* **The last GL 2.0 program refused, so each one says why once.** Not a flag like the four
-     * above: those describe a piece of context state, and a second line about the same one would
-     * repeat every frame it is set. A refused program is different - a draw loop binding one
-     * refused program would still print once, and a suite binding forty different ones has forty
-     * different reasons, which is exactly the list worth having.
-     *
-     * gl2-probe's first hardware run (2026-09-22) was the measurement: twenty-odd checks drew
-     * nothing, and one line came out for all of them. 0 is "none refused yet", and program names
-     * start at 1. */
-    GLuint hw_prog_logged;
+    /* The GL 2.0 refusal's "say it once" lives on the program object - `hw_ps_logged` - and not
+     * here, because a name is not an identity: `glDeleteProgram` frees it and the next
+     * `glCreateProgram` hands the same number out again. A suite that builds and deletes one
+     * program per check recycles names constantly, so a context-side marker keyed on the name
+     * would swallow the second program's reason for being refused and every one after it that
+     * landed on the same number. */
     /* Which program's compiled pixel shader is in the payload's one GL 2.0 slot, 0 for none. A
      * frame that draws with one program uploads it once; one that alternates pays an upload and
      * a cache flush per switch, which is what this measures rather than assumes. */
