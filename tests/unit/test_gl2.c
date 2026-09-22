@@ -2517,8 +2517,14 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
  * Chosen so no two are equal and none is 0 or 1: a shader reading the wrong one of the four, or
  * skipping the y flip, lands on a number no other component could have produced. `y` is the
  * hardware's - counted down from the top - so `gl_FragCoord.y` has to come out
- * SIM_VIEWPORT_H - SIM_FRAG_Y = 75.5. */
-#define SIM_VIEWPORT_H 96.0f
+ * SIM_TARGET_H - SIM_FRAG_Y = 1059.5.
+ *
+ * **The render target's height, not the viewport's.** `gl_FragCoord` is window-relative, so a
+ * shader drawing into a corner of a 1080-row target still counts from the bottom of the target.
+ * Seeding this with a viewport-sized number would agree with a back end that flipped by the
+ * viewport - which is the bug gl2-probe found, and a simulator that shared it would have kept
+ * quiet about it. */
+#define SIM_TARGET_H 1080.0f
 #define SIM_FRAG_X     10.5f
 #define SIM_FRAG_Y     20.5f
 #define SIM_FRAG_Z     0.25f
@@ -2552,7 +2558,7 @@ static GLboolean compile_and_run_prog(void *ctx, GLuint prog, const float attr[4
     for (int i = 0; i < p->value_floats; i++) {
         s.ublock[OOPS_GL_GL2_UNIFORM_AT / 4 + i] = p->values[i];
     }
-    s.ublock[OOPS_GL_GL2_DRAWCONST_AT / 4 + OOPS_GL_GL2_DC_VIEWPORT_H] = SIM_VIEWPORT_H;
+    s.ublock[OOPS_GL_GL2_DRAWCONST_AT / 4 + OOPS_GL_GL2_DC_TARGET_H] = SIM_TARGET_H;
 
     /* **The SPI fills exactly what it was asked for, packed in order**, and this models that
      * rather than filling the low registers and hoping. `input_ena` came out of the compile, so
@@ -2623,7 +2629,7 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
      * the window and the hardware counts down from the top, so this is the viewport height less
      * what the SPI supplied. A back end that passed the hardware value straight through would
      * draw every gradient upside down - and would pass a test that only checked x. */
-    ASSERT_NEAR(o[1], SIM_VIEWPORT_H - SIM_FRAG_Y, 1e-6f);
+    ASSERT_NEAR(o[1], SIM_TARGET_H - SIM_FRAG_Y, 1e-6f);
     ASSERT_NEAR(o[2], SIM_FRAG_Z, 1e-6f);
     ASSERT_NEAR(o[3], SIM_FRAG_W, 1e-6f);
 
@@ -2632,7 +2638,7 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
     compile_and_run(ctx, VS_ONE_VARYING,
                     "void main() { gl_FragColor = vec4(gl_FragCoord.yx, 0.0, 1.0); }\n", attr,
                     o);
-    ASSERT_NEAR(o[0], SIM_VIEWPORT_H - SIM_FRAG_Y, 1e-6f);
+    ASSERT_NEAR(o[0], SIM_TARGET_H - SIM_FRAG_Y, 1e-6f);
     ASSERT_NEAR(o[1], SIM_FRAG_X, 1e-6f);
 
     /* **A shader that never names it is not charged for it.** The declaration, the scalar load
@@ -3360,7 +3366,7 @@ static void test_gl2_front_facing_is_a_sign_not_a_flag(void) {
                     "}\n",
                     attr, o);
     ASSERT_NEAR(o[0], 1.0f, 1e-6f);
-    ASSERT_NEAR(o[1], SIM_VIEWPORT_H - SIM_FRAG_Y, 1e-6f);
+    ASSERT_NEAR(o[1], SIM_TARGET_H - SIM_FRAG_Y, 1e-6f);
     ASSERT_NEAR(o[2], SIM_FRAG_X, 1e-6f);
 
     /* The face beside `gl_FragDepth` and without `gl_FragCoord` - the shape above, run, so the

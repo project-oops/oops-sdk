@@ -449,7 +449,7 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
              * number and nothing else - so the height has to be the first operand, which is
              * also the order the subtraction wants. */
             glsl_emit_vop2(&code, GLSL_VOP2_SUB_F32, fc.base + 1u,
-                           glsl_sgpr(GL_PS_DRAWCONST_SGPR_BASE + OOPS_GL_GL2_DC_VIEWPORT_H),
+                           glsl_sgpr(GL_PS_DRAWCONST_SGPR_BASE + OOPS_GL_GL2_DC_TARGET_H),
                            GL_PS_FRAGPOS_VGPR + 1u);
             glsl_emit_mov(&code, fc.base + 2u, GL_PS_FRAGPOS_VGPR + 2u);
             glsl_emit_mov(&code, fc.base + 3u, GL_PS_FRAGPOS_VGPR + 3u);
