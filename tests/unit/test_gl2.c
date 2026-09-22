@@ -2583,6 +2583,62 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
     glContextDestroy(ctx);
 }
 
+static void test_gl2_matrix_products_are_two_products(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **`m * v` and `v * m` are different answers.** The second is the product with the
+     * transpose, and a matrix with one off-diagonal term is what separates them: with
+     * col0 = (1,2) and col1 = (0,1),
+     *
+     *   m * (1,0) = col0          = (1, 2)
+     *   (1,0) * m = (v.col0, v.col1) = (1, 0)
+     *
+     * so the `y` of the two differs, 2 against 0. A back end that folded the two together
+     * would give the same pair twice and would be right for a symmetric matrix - which is
+     * exactly the matrix a careless test uses. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  mat2 m = mat2(1.0, 2.0, 0.0, 1.0);\n"
+                    "  vec2 a = m * vec2(1.0, 0.0);\n"
+                    "  vec2 b = vec2(1.0, 0.0) * m;\n"
+                    "  gl_FragColor = vec4(a.x, a.y, b.x, b.y);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f);
+    ASSERT_NEAR(o[1], 2.0f, 1e-6f); /* m * v picks the column */
+    ASSERT_NEAR(o[2], 1.0f, 1e-6f);
+    ASSERT_NEAR(o[3], 0.0f, 1e-6f); /* v * m dots with the columns */
+
+    /* `mat2(0.5)` is a diagonal and not four halves - the constructor people get wrong. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  mat2 m = mat2(0.5);\n"
+                    "  vec2 v = m * vec2(1.0, 1.0);\n"
+                    "  gl_FragColor = vec4(v, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-6f); /* not 1.0, which four halves would give */
+    ASSERT_NEAR(o[1], 0.5f, 1e-6f);
+
+    /* Three dimensions, so the column stride is exercised at more than one value: a walk that
+     * hard-coded four would read past the end of a mat3 and a walk that hard-coded two would
+     * stop short. col0 = (1,0,0), col1 = (0,2,0), col2 = (3,0,4). */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  mat3 m = mat3(1.0, 0.0, 0.0,  0.0, 2.0, 0.0,  3.0, 0.0, 4.0);\n"
+                    "  vec3 a = m * vec3(1.0, 1.0, 1.0);\n"
+                    "  gl_FragColor = vec4(a, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 4.0f, 1e-6f); /* 1 + 0 + 3 */
+    ASSERT_NEAR(o[1], 2.0f, 1e-6f); /* 0 + 2 + 0 */
+    ASSERT_NEAR(o[2], 4.0f, 1e-6f); /* 0 + 0 + 4 */
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_integers_are_floats_kept_whole(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -3484,6 +3540,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
+    RUN_TEST(test_gl2_matrix_products_are_two_products);
     RUN_TEST(test_gl2_integers_are_floats_kept_whole);
     RUN_TEST(test_gl2_front_facing_is_a_sign_not_a_flag);
     RUN_TEST(test_gl2_user_functions_are_inlined);

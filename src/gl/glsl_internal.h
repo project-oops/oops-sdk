@@ -553,8 +553,12 @@ void glsl_emit_mov(glsl_code_t *c, uint32_t d, uint32_t s);
 void glsl_emit_mov_imm(glsl_code_t *c, uint32_t d, uint32_t bits);
 void glsl_emit_endpgm(glsl_code_t *c);
 void glsl_emit_nop(glsl_code_t *c);
+/* `dst[0..n-1] = m * v` for an n x n matrix, column-major. `dst` must not overlap `m` or `v`. */
+void glsl_emit_mat_mul_vec(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v, uint32_t n);
 /* `dst[0..3] = m * v`, column-major. `dst` must not overlap `v`. */
 void glsl_emit_mat4_mul_vec4(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v);
+/* `dst[0..n-1] = v * m`, which is the product with the transpose and **not** `m * v`. */
+void glsl_emit_vec_mul_mat(glsl_code_t *c, uint32_t dst, uint32_t v, uint32_t m, uint32_t n);
 
 /* One operand, one result: `v_sqrt_f32` and the rest of the VOP1 table above. */
 void glsl_emit_vop1_op(glsl_code_t *c, uint32_t opcode, uint32_t d, uint32_t s);

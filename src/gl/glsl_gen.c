@@ -144,6 +144,16 @@ static GLboolean is_matrix(glsl_type_t t) {
     return (t == GLSL_TYPE_MAT2 || t == GLSL_TYPE_MAT3 || t == GLSL_TYPE_MAT4) ? GL_TRUE : GL_FALSE;
 }
 
+/* The side of a square matrix, or 0 for anything else. */
+static int mat_dim(glsl_type_t t) {
+    switch (t) {
+        case GLSL_TYPE_MAT2: return 2;
+        case GLSL_TYPE_MAT3: return 3;
+        case GLSL_TYPE_MAT4: return 4;
+        default: return 0;
+    }
+}
+
 /*
  * **A bool is a float that is 0.0 or 1.0, in a register of its own.**
  *
@@ -466,15 +476,36 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
     glsl_value_t b = gen_expr(g, n->b);
     if (is_bad(b)) return b;
 
-    /* `mat4 * vec4`. The encoder owns the column-major walk. */
-    if (op == GLSL_TOK_STAR && lt == GLSL_TYPE_MAT4 && rt == GLSL_TYPE_VEC4) {
-        glsl_value_t out = gen_alloc(g, 4, node);
-        if (is_bad(out)) return out;
-        glsl_emit_mat4_mul_vec4(g->code, out.base, a.base, b.base);
-        return out;
+    /* **`m * v` and `v * m`, at every square size.** The encoder owns the column-major walk,
+     * and the two are separate calls because they are separate products: `v * m` is the one
+     * with the transpose, so it is a dot with each *column* rather than a sum over columns. A
+     * back end that folded them together would give the same answer twice and be right only
+     * for a symmetric matrix. */
+    if (op == GLSL_TOK_STAR && is_matrix(lt) && !is_matrix(rt)) {
+        const int n = mat_dim(lt);
+        if (b.count == n) {
+            glsl_value_t out = gen_alloc(g, n, node);
+            if (is_bad(out)) return out;
+            glsl_emit_mat_mul_vec(g->code, out.base, a.base, b.base, (uint32_t)n);
+            return out;
+        }
+    }
+    if (op == GLSL_TOK_STAR && !is_matrix(lt) && is_matrix(rt)) {
+        const int n = mat_dim(rt);
+        if (a.count == n) {
+            glsl_value_t out = gen_alloc(g, n, node);
+            if (is_bad(out)) return out;
+            glsl_emit_vec_mul_mat(g->code, out.base, a.base, b.base, (uint32_t)n);
+            return out;
+        }
     }
     if (is_matrix(lt) || is_matrix(rt)) {
-        return gen_fail(g, "the only matrix arithmetic generated so far is mat4 * vec4", node);
+        /* What is left is matrix times matrix, and matrix times scalar. The first is n of the
+         * products above and the second is componentwise; neither is written yet, and both are
+         * named rather than approximated. */
+        return gen_fail(g, "the matrix arithmetic generated is a square matrix times a vector "
+                           "and a vector times one; matrix by matrix and matrix by scalar are "
+                           "not", node);
     }
 
     const int width = a.count > b.count ? a.count : b.count;

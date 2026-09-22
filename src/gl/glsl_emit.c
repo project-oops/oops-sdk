@@ -419,15 +419,39 @@ void glsl_emit_endpgm(glsl_code_t *c) {
  * `dst` must not overlap `v`, because the first component of the result is written before the
  * last component of the vector is read. Overlapping `m` is fine.
  */
-void glsl_emit_mat4_mul_vec4(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v) {
+void glsl_emit_mat_mul_vec(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v, uint32_t n) {
     /* The first column multiplies, the rest accumulate: one instruction per element either
-     * way, and no separate zeroing pass. */
-    for (uint32_t row = 0; row < 4u; row++) {
+     * way, and no separate zeroing pass.
+     *
+     * **Column-major**, which is GLSL's storage and the reason this is a sum over columns
+     * rather than a dot product per row: element `row` of the result takes `m[col][row]` for
+     * every column, and those are `n` apart in the register run. */
+    for (uint32_t row = 0; row < n; row++) {
         glsl_emit_mul_f32(c, dst + row, m + row, v + 0u);
     }
-    for (uint32_t col = 1; col < 4u; col++) {
-        for (uint32_t row = 0; row < 4u; row++) {
-            glsl_emit_fmac_f32(c, dst + row, m + col * 4u + row, v + col);
+    for (uint32_t col = 1; col < n; col++) {
+        for (uint32_t row = 0; row < n; row++) {
+            glsl_emit_fmac_f32(c, dst + row, m + col * n + row, v + col);
+        }
+    }
+}
+
+void glsl_emit_mat4_mul_vec4(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v) {
+    glsl_emit_mat_mul_vec(c, dst, m, v, 4u);
+}
+
+/* `v * m`, which is **not** `m * v`: it is the product with the transpose, so component `i` of
+ * the result is the dot of `v` with column `i` rather than with row `i`. A back end that
+ * treated the two as one operation would give the same answer for both, and would be right
+ * only for a symmetric matrix.
+ *
+ * A column is contiguous here - column `i` starts at `m + i*n` - so each component is a
+ * multiply and `n-1` accumulates over consecutive registers. */
+void glsl_emit_vec_mul_mat(glsl_code_t *c, uint32_t dst, uint32_t v, uint32_t m, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        glsl_emit_mul_f32(c, dst + i, v + 0u, m + i * n);
+        for (uint32_t row = 1; row < n; row++) {
+            glsl_emit_fmac_f32(c, dst + i, v + row, m + i * n + row);
         }
     }
 }
