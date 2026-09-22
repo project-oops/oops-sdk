@@ -1243,7 +1243,8 @@ static GLboolean gl_smoothing(gl_context_t *ctx, GLboolean enabled, GLenum kind)
     /* The same condition `unit1_applied` uses at the draw, because it is the same question: does
      * this draw read the fourth parameter for a texture of its own? */
     const GLboolean two_units =
-        (GLboolean)(textured && ctx->hw_multitex && gl_unit_texture_id(ctx, 1u) != 0u);
+        (GLboolean)(textured && ctx->hw_multitex && gl_hw_base_unit(ctx) == 0u &&
+                    gl_unit_texture_id(ctx, 1u) != 0u);
     if (!two_units) {
         /* **A polygon leaves `aa_hw_on` alone**: its coverage is not an offset a corner carries,
          * so `gl_aa_stamp` has nothing to write. `ctx->aa_edges`, which the caller sets around
@@ -2152,7 +2153,7 @@ static void gl_gl2_build_block(gl_context_t *ctx, const gl_program_object_t *pro
      * only sometimes there is a constant that is sometimes stale. */
     {
         float dc[OOPS_GL_GL2_DRAWCONST_FLOATS] = {0.0f, 0.0f, 0.0f, 0.0f};
-        dc[OOPS_GL_GL2_DC_VIEWPORT_H] = (float)ctx->vp_h;
+        dc[OOPS_GL_GL2_DC_TARGET_H] = (float)(ctx->height ? ctx->height : 1080u);
         memcpy((char *)block + OOPS_GL_GL2_DRAWCONST_AT, dc, sizeof(dc));
     }
 }
@@ -3343,7 +3344,10 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
          * submits, and so does a border colour, which lives in a table a frame register names.
          * See `OOPS_GL_DESC_RING_OFFSET`. Only a *different* texture takes a slot: rebinding
          * the same one, which a display list does constantly, changes nothing. */
-        GLuint eff_tex = gl_effective_texture_id(ctx);
+        /* The unit the sampling stage draws from - the first with a texture, not necessarily
+         * unit 0. Its coordinate set is the one the vertex carries below. */
+        const GLuint base_unit = gl_hw_base_unit(ctx);
+        GLuint eff_tex = gl_unit_texture_id(ctx, base_unit);
         gl_texture_object_t *eff_obj = (gl_texture_object_t *)gl_lookup_texture(ctx, eff_tex);
         /*
          * **Texturing is on, a texture is bound, and GL says it cannot be sampled.**
@@ -3422,10 +3426,15 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
          * A third unit is a whole-library feature, not a gap in this path, and the docs that
          * listed it as a console difference were wrong.
          */
+        /* **A second stage only when unit 0 is the base.** When unit 1 *is* the base - unit 0
+         * disabled, which is Neverball's shadow arrangement - it is applied as the single stage
+         * above and there is nothing left over to report. */
         const GLboolean unit1_applied =
-            (GLboolean)(ctx->hw_multitex && eff_tex != 0u && gl_unit_texture_id(ctx, 1u) != 0u);
+            (GLboolean)(ctx->hw_multitex && base_unit == 0u && eff_tex != 0u &&
+                        gl_unit_texture_id(ctx, 1u) != 0u);
         for (GLuint tu = 1u; tu < OOPS_GL_MAX_TEXTURE_UNITS && !ctx->hw_unit_logged; tu++) {
             if (gl_unit_texture_id(ctx, tu) == 0u) continue;
+            if (tu == base_unit) continue;
             if (tu == 1u && unit1_applied) continue;
             gl_log_line("a texture unit this path does not apply is bound: it is applied by the "
                         "software rasteriser only and is left out of the draw");
@@ -3787,7 +3796,13 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
              * software rasteriser's gl_q_inv applies, rather than as an infinity waiting in the
              * shader's reciprocal. **z is the fog factor**, which the pixel shaders' fog slot
              * interpolates (gl_ps_patch_fog) - 1, no fog, when fog is off. */
-            const float *t0 = v0->tc[0], *t1 = v1->tc[0], *t2 = v2->tc[0];
+            /* **The base unit's coordinate set, not always set 0.** A vertex carries one per
+             * unit; the stage samples the unit `base_unit` names, so it must interpolate that
+             * unit's coordinates. Reading `tc[0]` here while sampling unit 1's texture would
+             * draw it with the wrong coordinates, which is a subtler wrong than drawing it not
+             * at all. */
+            const float *t0 = v0->tc[base_unit], *t1 = v1->tc[base_unit],
+                        *t2 = v2->tc[base_unit];
             float uv0[4] = {t0[0], t0[1], fog0, (t0[3] != 0.0f) ? t0[3] : 1.0f};
             float uv1[4] = {t1[0], t1[1], fog1, (t1[3] != 0.0f) ? t1[3] : 1.0f};
             float uv2[4] = {t2[0], t2[1], fog2, (t2[3] != 0.0f) ? t2[3] : 1.0f};

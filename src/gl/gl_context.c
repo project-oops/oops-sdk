@@ -1898,9 +1898,13 @@ GLboolean gl_ps_patch_tex_env(gl_context_t *ctx) {
      * primary colour (GL 1.3, 3.8.13), so both fall on v8..v11. */
     static const gl_ps_stage_t stage0 = {4u, 8u, 0u};
     const gl_ps_stage_t *const st = &stage0;
-    const gl_texture_object_t *t = gl_lookup_texture(ctx, gl_effective_texture_id(ctx));
+    /* **The environment comes from the unit the sample came from.** That is unit 0 whenever unit
+     * 0 has a texture, and unit 1 when it does not - see `gl_hw_base_unit`. Taking the mode from
+     * unit 0 regardless would combine unit 1's texel under unit 0's rule. */
+    const GLuint base_unit = gl_hw_base_unit(ctx);
+    const gl_texture_object_t *t = gl_lookup_texture(ctx, gl_unit_texture_id(ctx, base_unit));
     const GLenum base = gl_tex_sample_format(t);
-    const GLenum mode = ctx->tex_unit[st->unit].tex_env_mode;
+    const GLenum mode = ctx->tex_unit[base_unit].tex_env_mode;
     GLboolean exact = GL_TRUE;
     int rgb = GL_CH_MUL, alpha = GL_CH_MUL;
     if (base == GL_ALPHA || (mode == GL_DECAL && base != GL_RGB && base != GL_RGBA)) {

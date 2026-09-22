@@ -1911,8 +1911,14 @@ static inline uint32_t gl_f32_bits(float f) {
 #define OOPS_GL_GL2_UNIFORM_FLOATS 32
 
 /* **The draw's own constants**, four floats the shader may need that are not the program's
- * uniforms: the viewport height so far, which is what turns the hardware's window y into
+ * uniforms: the render target's height so far, which is what turns the hardware's window y into
  * `gl_FragCoord`'s.
+ *
+ * **The target's height and not the viewport's.** `gl_FragCoord` is window-relative - GL says
+ * so, and every other y flip in `gl_draw.c` uses `ctx->height` for the same reason. Using the
+ * viewport's height instead is right only when the viewport fills the window: gl2-probe draws
+ * into 96 rows at the bottom of 1080, where `96 - y` is hugely negative for every row it
+ * touches, and the whole region came out black with `drawn` reporting all 12288 pixels.
  *
  * It lives in the second descriptor set's tail rather than in a region of its own. A set is
  * `OOPS_GL_DESC_UNIT_STRIDE` = 0x40 and holds a 32-byte image descriptor and a 16-byte sampler,
@@ -1922,7 +1928,7 @@ static inline uint32_t gl_f32_bits(float f) {
 #define OOPS_GL_GL2_DRAWCONST_AT     0x70u
 #define OOPS_GL_GL2_DRAWCONST_FLOATS 4
 /* Which float is which. Room for three more before the set above it. */
-#define OOPS_GL_GL2_DC_VIEWPORT_H    0
+#define OOPS_GL_GL2_DC_TARGET_H      0
 
 static inline uint32_t gl_hw_gl2_slot_offset(uint32_t slot) {
     return OOPS_GL_GL2_SLOT_OFFSET + slot * OOPS_GL_GL2_SLOT_STRIDE;
@@ -2830,9 +2836,32 @@ static inline size_t gl_color_words(const gl_context_t *ctx) {
     return (size_t)ctx->width * (size_t)ctx->height;
 }
 
-/* Unit 0's - what the console's one sampled texture is. */
+/*
+ * **The unit the console's single sampling stage takes its texture from: the first that has
+ * one.**
+ *
+ * This was unit 0, always, and that is not GL's rule. A unit with texturing disabled is not a
+ * wall - it passes the fragment colour through, so a later unit's `GL_PREVIOUS` is simply the
+ * primary colour (GL 1.3, 3.8.13). Unit 0 does not have to be textured for unit 1 to apply.
+ *
+ * Neverball is what it cost. Its `tex_env_shadow` maps `GL_TEXTURE0` to the shadow stage and
+ * `GL_TEXTURE1` to the surface texture, and the shadow stage opens with
+ * `glDisable(GL_TEXTURE_2D)`; `tex_env_select` picks that arrangement whenever
+ * `GL_MAX_TEXTURE_UNITS` is at least 2, which is what this library honestly reports. Unit 0 had
+ * no texture, so the draw dropped unit 1 and the entire world rendered untextured - while 86
+ * conformance checks passed, because every one of them that used two units enabled both.
+ * `texture-unit1-alone` in gl1-probe is that shape, and it failed on hardware until this.
+ */
+static inline GLuint gl_hw_base_unit(const gl_context_t *ctx) {
+    for (GLuint u = 0u; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        if (gl_unit_texture_id(ctx, u) != 0u) return u;
+    }
+    return 0u;
+}
+
+/* What the console's one sampled texture is - the base unit's, which is usually unit 0's. */
 static inline GLuint gl_effective_texture_id(const gl_context_t *ctx) {
-    return gl_unit_texture_id(ctx, 0u);
+    return gl_unit_texture_id(ctx, gl_hw_base_unit(ctx));
 }
 
 size_t gl_unpack_row_stride(const gl_context_t *ctx, GLsizei width, size_t pixel_bytes);

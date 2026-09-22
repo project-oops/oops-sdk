@@ -4643,7 +4643,7 @@ static void test_pm4_gl_polygon_stipple_discards_in_the_shader(void) {
 
 /* A second texture unit on the console: left out of the draw, said once - the pixel shader samples
  * one texture until it takes a second coordinate. Unit 0 still draws as it did. */
-static void test_pm4_gl_second_unit_is_left_out_on_hardware(void) {
+static void test_pm4_gl_unit1_is_the_base_when_unit0_has_no_texture(void) {
   oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
   void *ctx_handle = glContextCreate(disp);
   gl_context_t *ctx = (gl_context_t *)ctx_handle;
@@ -4679,8 +4679,15 @@ static void test_pm4_gl_second_unit_is_left_out_on_hardware(void) {
   glVertex3f(-0.5f, -0.5f, 0.5f); glVertex3f(0.5f, -0.5f, 0.5f); glVertex3f(0.0f, 0.5f, 0.5f);
   glEnd();
   ASSERT_EQ(ctx->triangles_drawn, 1u);
-  ASSERT_EQ(ctx->hw_unit_logged, GL_TRUE);
-  ASSERT_EQ(ctx->hw_frame_tex, 0u); /* unit 0 has no texture, so the draw is untextured */
+  /* **Unit 1 is the base stage here, and the draw is textured.**
+   *
+   * This asserted the opposite until 2026-09-22 - that the unit was logged as left out and the
+   * draw went untextured - which recorded the old behaviour as though it were intended. It was
+   * a bug: a disabled unit passes the fragment colour through, so unit 0 need not be textured
+   * for unit 1 to apply. Neverball puts its surface texture on unit 1 and its whole world drew
+   * flat because of this. */
+  ASSERT_EQ(ctx->hw_unit_logged, GL_FALSE); /* nothing was left out */
+  ASSERT_NE(ctx->hw_frame_tex, 0u);         /* the draw sampled unit 1's texture */
 
   glDeleteTextures(1, &t);
   glContextDestroy(ctx_handle);
@@ -4701,7 +4708,7 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_combine_programs_compute_what_software_does);
   RUN_TEST(test_pm4_gl_color_sum_reaches_the_vertex_colour);
   RUN_TEST(test_pm4_gl_fog_reaches_both_shaders_and_the_vertex);
-  RUN_TEST(test_pm4_gl_second_unit_is_left_out_on_hardware);
+  RUN_TEST(test_pm4_gl_unit1_is_the_base_when_unit0_has_no_texture);
   RUN_TEST(test_pm4_gl_textured_shader_samples_with_lod_and_divides_q);
   RUN_TEST(test_pm4_gl_stencil_reaches_its_registers);
   RUN_TEST(test_pm4_gl_zs_tiling_is_a_permutation);
