@@ -400,6 +400,11 @@ glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
  * `gl_FragColor` and the fixed-function state a 1.10 shader may read. Called before
  * `glsl_check_unit`, since a shader may use one without declaring it. */
 GLboolean glsl_declare_builtins(glsl_sema_t *s, GLenum stage);
+/* Records one `GLSL_NODE_FUNCTION`'s return type and parameter types, so a call to it can be
+ * typed. `glsl_check_unit` does this for every function in a unit; a caller that builds its own
+ * symbol table - the pixel-shader back end does - has to do it too, or a call to a function the
+ * shader defines cannot be typed at all. */
+GLboolean glsl_declare_function(glsl_sema_t *s, int32_t node);
 /* Why a `gl_` name that is real GLSL is not declared here, or NULL when the name is not one this
  * knows about. What turns "use of an undeclared name" - which reads as a typo - into a sentence
  * naming the feature that is missing. */
@@ -635,6 +640,10 @@ void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base);
 #define GLSL_GEN_LIVE_SGPR       28u
 #define GLSL_GEN_EXEC_SGPR_BASE  29u
 #define GLSL_GEN_MAX_EXEC_DEPTH  12
+/* How deep user-defined calls may nest before the generator refuses. Eight is past anything a
+ * fragment shader written by hand does, and short enough that a shader calling itself is a
+ * message rather than a hang. */
+#define GLSL_GEN_MAX_INLINE_DEPTH 8
 
 typedef struct {
     uint32_t base;  /* the first VGPR of the run */
@@ -659,6 +668,12 @@ typedef struct {
     /* How many enclosing `if`s have saved the exec mask. `discard` reads it: a discarded lane
      * has to come out of every one of those saves, or the innermost restore brings it back. */
     int exec_depth;
+    /* **How many user-defined calls are being inlined around this point.** A call has no call
+     * instruction here - the body is generated where the call appears - so this is the only
+     * thing standing between a shader that calls itself and a generator that never returns.
+     * GLSL forbids recursion, but a compiler that loops forever on invalid input is still a
+     * compiler that loops forever. */
+    int inline_depth;
     /* Whether this shader runs in whole-quad mode, which it does exactly when it samples. When
      * it is set, `discard` has one more mask to take the lane out of - the live one at
      * `GLSL_GEN_LIVE_SGPR`, which is what the export is restored from. */

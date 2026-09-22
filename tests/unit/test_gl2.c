@@ -2583,6 +2583,118 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
     glContextDestroy(ctx);
 }
 
+static void test_gl2_user_functions_are_inlined(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float x = 0.75f, y = 0.25f, z = 3.0f, w = 2.0f;
+    const float attr[4][4] = {{x, y, z, w}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **Arguments bind by position, not by name.** `sub(a, b)` and `sub(b, a)` differ only in
+     * order, so a generator that bound them by name - or that evaluated the parameters in the
+     * callee's scope, where `a` and `b` mean something else - returns the same value for both
+     * and this fails on the second. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "float sub(float a, float b) { return a - b; }\n"
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(sub(vin.x, vin.y), sub(vin.y, vin.x), 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], x - y, 1e-6f);
+    ASSERT_NEAR(o[1], y - x, 1e-6f);
+
+    /* **A parameter shadows a caller's variable of the same name and gives it back.** The
+     * argument is evaluated before the parameter is bound, so `f(a)` where the parameter is
+     * also `a` passes the caller's - and after the call the caller's `a` is untouched. A
+     * generator that bound first would pass the parameter's own uninitialised register. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "float twice(float a) { a = a * 2.0; return a; }\n"
+                    "void main() {\n"
+                    "  float a = vin.x;\n"
+                    "  float t = twice(a);\n"
+                    "  gl_FragColor = vec4(t, a, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], x * 2.0f, 1e-6f);
+    ASSERT_NEAR(o[1], x, 1e-6f); /* the caller's `a`, not the parameter's */
+
+    /* Nesting, locals inside a body, and a vector return - one call feeding another, so a
+     * result register reused across the two would show up here. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "float add(float a, float b) { float s = a + b; return s; }\n"
+                    "vec3 scale(vec3 v, float k) { return v * k; }\n"
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(scale(vec3(vin.x, vin.y, add(vin.z, vin.w)), 2.0),\n"
+                    "                      1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], x * 2.0f, 1e-6f);
+    ASSERT_NEAR(o[1], y * 2.0f, 1e-6f);
+    ASSERT_NEAR(o[2], (z + w) * 2.0f, 1e-6f);
+
+    /* **Not tested here: a user function that hides a built-in of the same name.** GLSL 1.10
+     * allows it and the generator would inline the user's, because it looks for a definition in
+     * this shader before it reaches the built-in table. The front end does not get that far -
+     * `float min(float, float)` fails to compile, ahead of any of this - so the case cannot
+     * reach the back end and a test of it here would be testing the front end by proxy. */
+
+    glContextDestroy(ctx);
+}
+
+/* The shapes that are refused rather than generated, each with the reason named. A call
+ * mechanism that quietly did something else for these is the failure this guards. */
+static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+    uint32_t words[256];
+    uint32_t count = 0u, vgprs = 0u;
+    char log[256] = {0};
+
+    static const struct { const char *fs; const char *wants; } cases[] = {
+        /* An early return is an exec mask through every statement after it. */
+        {"varying vec4 vin;\n"
+         "float f(float a) { if (a > 0.0) { return 1.0; } return 0.0; }\n"
+         "void main() { gl_FragColor = vec4(f(vin.x), 0.0, 0.0, 1.0); }\n",
+         "return"},
+        /* Nothing writes back to the caller, so `out` is refused rather than treated as `in`. */
+        {"varying vec4 vin;\n"
+         "float f(float a, out float b) { b = a; return a; }\n"
+         "void main() { float q; gl_FragColor = vec4(f(vin.x, q), 0.0, 0.0, 1.0); }\n",
+         "out"},
+        /* A void function's effects would have to be its result. */
+        {"varying vec4 vin;\n"
+         "void f(float a) { }\n"
+         "void main() { f(vin.x); gl_FragColor = vec4(1.0); }\n",
+         "void"},
+        /* Recursion is invalid GLSL; what matters is that it ends in a message. */
+        {"varying vec4 vin;\n"
+         "float f(float a) { return f(a); }\n"
+         "void main() { gl_FragColor = vec4(f(vin.x), 0.0, 0.0, 1.0); }\n",
+         "recursion"},
+        /* Not here: a call with the wrong number of arguments. The back end checks it, because
+         * a mismatch there would bind a parameter to a register nothing wrote - but the front
+         * end rejects it first ("wrong number of arguments"), so no shader can carry one this
+         * far and a case for it would be testing the front end by proxy. */
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const GLuint prog = linked_program(VS_ONE_VARYING, cases[i].fs);
+        log[0] = '\0';
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, prog), words, 256u, &count,
+                                              &vgprs, NULL, NULL, log, sizeof(log)),
+                  GL_FALSE);
+        if (strstr(log, cases[i].wants) == NULL) {
+            printf("\n    case %d: expected a message about '%s', got '%s'\n", (int)i,
+                   cases[i].wants, log);
+        }
+        ASSERT_TRUE(strstr(log, cases[i].wants) != NULL);
+    }
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_arithmetic_matches_the_language(void) {
     void *ctx = gl2_context();
     /* The reciprocal is a 1-ULP instruction and the transcendentals are worse, so these compare
@@ -3205,6 +3317,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
+    RUN_TEST(test_gl2_user_functions_are_inlined);
+    RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);

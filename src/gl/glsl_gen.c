@@ -39,6 +39,9 @@ void glsl_gen_init(glsl_gen_t *g, glsl_ast_t *ast, glsl_sema_t *sema, glsl_code_
     g->high_water = 0u;
     g->var_count = 0;
     g->exec_depth = 0;
+    g->inline_depth = 0;
+    g->wqm = GL_FALSE;
+    g->sampler_count = 0;
     g->error = (const char *)0;
     g->error_line = 0;
     g->error_column = 0;
@@ -262,6 +265,27 @@ static GLboolean has_side_effect(const glsl_ast_t *ast, int32_t node) {
         for (int32_t s = n->b; s != GLSL_NO_NODE; s = ast->nodes[s].sibling) {
             if (has_side_effect(ast, s)) return GL_TRUE;
         }
+        /* **A call to a function this shader defines counts as one**, whatever its body does.
+         *
+         * `&&` and `||` are a `min` and a `max` here, so both sides are always evaluated - which
+         * is indistinguishable from short-circuiting for a pure expression and wrong for one
+         * that writes something. A user function's body could write to a global, and deciding
+         * whether it does means analysing it; assuming it does not is the mistake that draws.
+         * So `a && f(b)` is refused, and a shader that wants it inlines the call itself. */
+        const glsl_node_t *callee = (n->a != GLSL_NO_NODE) ? &ast->nodes[n->a]
+                                                           : (const glsl_node_t *)0;
+        if (callee && callee->kind == GLSL_NODE_IDENTIFIER) {
+            for (int32_t i = 0; i < ast->count; i++) {
+                const glsl_node_t *f = &ast->nodes[i];
+                if (f->kind != GLSL_NODE_FUNCTION || f->c == GLSL_NO_NODE) continue;
+                if (f->length != callee->length) continue;
+                GLboolean same = GL_TRUE;
+                for (size_t c = 0; c < f->length; c++) {
+                    if (f->text[c] != callee->text[c]) { same = GL_FALSE; break; }
+                }
+                if (same) return GL_TRUE;
+            }
+        }
     }
     return GL_FALSE;
 }
@@ -480,6 +504,7 @@ static glsl_type_t constructor_target(const glsl_node_t *callee) {
         {"float", GLSL_TYPE_FLOAT},
         {"vec2", GLSL_TYPE_VEC2}, {"vec3", GLSL_TYPE_VEC3}, {"vec4", GLSL_TYPE_VEC4},
         {"mat2", GLSL_TYPE_MAT2}, {"mat3", GLSL_TYPE_MAT3}, {"mat4", GLSL_TYPE_MAT4},
+        {"bool", GLSL_TYPE_BOOL}, {"int", GLSL_TYPE_INT},
     };
     for (size_t i = 0; i < sizeof(ctors) / sizeof(ctors[0]); i++) {
         size_t len = 0;
@@ -507,6 +532,34 @@ static glsl_type_t constructor_target(const glsl_node_t *callee) {
  */
 static glsl_value_t gen_construct(glsl_gen_t *g, glsl_type_t target, int32_t first_arg,
                                   int32_t node) {
+    /* **The two scalar conversions, which are not component copies.**
+     *
+     * `bool(x)` is `x != 0` and `int(x)` truncates toward zero - neither is the "take components
+     * until the target is full" rule below, and running them through it would copy the float
+     * across unchanged. `bool(2.0)` would then be 2.0, which is true in a condition and wrong
+     * everywhere the value itself is read; craft's `bool(ortho)` is exactly that call. */
+    if (target == GLSL_TYPE_BOOL || target == GLSL_TYPE_INT) {
+        if (first_arg == GLSL_NO_NODE || g->ast->nodes[first_arg].sibling != GLSL_NO_NODE) {
+            return gen_fail(g, "bool() and int() take one argument", node);
+        }
+        glsl_value_t s = gen_expr(g, first_arg);
+        if (is_bad(s)) return s;
+        if (s.count != 1) return gen_fail(g, "bool() and int() take a scalar", node);
+        glsl_value_t out = gen_alloc(g, 1, node);
+        if (is_bad(out)) return out;
+        if (target == GLSL_TYPE_INT) {
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_TRUNC_F32, out.base, s.base);
+            return out;
+        }
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero)) return zero;
+        glsl_value_t one = gen_const(g, 1.0, node);
+        if (is_bad(one)) return one;
+        glsl_emit_cmp(g->code, GLSL_VOPC_NEQ_F32, s.base, zero.base);
+        glsl_emit_cndmask(g->code, out.base, zero.base, one.base);
+        return out;
+    }
+
     const int needed = glsl_type_components(target);
     glsl_value_t out = gen_alloc(g, needed, node);
     if (is_bad(out)) return out;
@@ -747,6 +800,15 @@ static glsl_value_t gen_select_on_sign(glsl_gen_t *g, glsl_value_t x, uint32_t v
 
 #define GEN_MAX_ARGS 4
 
+/* How many arguments a call has, counted without evaluating any - `texture2D` has to check its
+ * arity before it looks at the first one, because the first one is a sampler and evaluating a
+ * sampler is not a thing. */
+static int argc_of(const glsl_gen_t *g, int32_t first_arg) {
+    int n = 0;
+    for (int32_t a = first_arg; a != GLSL_NO_NODE; a = g->ast->nodes[a].sibling) n++;
+    return n;
+}
+
 static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_t first_arg,
                                 int32_t node) {
     const char *const nm = callee->text;
@@ -776,12 +838,62 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         return gen_fail(g, "the vector relational functions return a bvec, which this back end "
                            "has no representation for yet", node);
     }
-    /* Every lookup in section 8.7 begins with one of these two, so the whole family is caught by
-     * its prefix rather than by eleven names - and the message is about the wiring, which is
-     * what is actually missing, rather than about the name. */
+    /* `texture2D` is generated; the rest of section 8.7 is not. Each of the others needs
+     * something this has no measurement for - a cube's coordinate is a direction the hardware
+     * resolves to a face, a volume's is three components, a `Proj` form divides by its last,
+     * and a shadow lookup compares rather than returns. The dimension is one field in the
+     * instruction (`tools/shader/gl2-fragment.s` pins all four), so these are a short step
+     * rather than a different problem - but a step nobody has taken. */
+    if (nm_is(nm, len, "texture2D")) {
+        if (argc_of(g, first_arg) != 2) {
+            return gen_fail(g, "texture2D takes a sampler and a vec2", node);
+        }
+        const glsl_node_t *sn = &g->ast->nodes[first_arg];
+        if (sn->kind != GLSL_NODE_IDENTIFIER) {
+            return gen_fail(g, "the sampler has to be named directly; there is no way to carry "
+                               "one in a variable here", node);
+        }
+        uint32_t set = 0u;
+        GLboolean found = GL_FALSE;
+        for (int i = 0; i < g->sampler_count; i++) {
+            if (g->samplers[i].name_len == sn->length &&
+                nm_is(sn->text, sn->length, g->samplers[i].name)) {
+                set = g->samplers[i].set;
+                found = GL_TRUE;
+                break;
+            }
+        }
+        if (!found) {
+            return gen_fail(g, "this name is not a sampler the draw path loads descriptors for",
+                            node);
+        }
+        const int32_t coord_node = g->ast->nodes[first_arg].sibling;
+        const glsl_type_t ct = glsl_type_of(g->sema, coord_node);
+        if (ct != GLSL_TYPE_VEC2) {
+            return gen_fail(g, "texture2D's coordinate is a vec2", node);
+        }
+        glsl_value_t uv = gen_expr(g, coord_node);
+        if (is_bad(uv)) return uv;
+        if (uv.count != 2) return gen_fail(g, "texture2D's coordinate is a vec2", node);
+
+        /* **The sample's four registers are allocated after the coordinate**, so they cannot
+         * overlap it - `image_sample` reads `vaddr` and writes `vdata`, and an overlap would
+         * have it read back what it had just written for the second component. */
+        glsl_value_t out = gen_alloc(g, 4, node);
+        if (is_bad(out)) return out;
+        const uint32_t srsrc = GLSL_GEN_TEX_SGPR_BASE + set * GLSL_GEN_TEX_SGPR_STRIDE;
+        glsl_emit_image_sample(g->code, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_2D, out.base, uv.base,
+                               srsrc, srsrc + 8u);
+        /* **A sample is not in order with what follows it.** Without this the next instruction
+         * reads the destination before the texture unit has written it, which is the same
+         * hazard `s_waitcnt lgkmcnt(0)` covers for the uniform block - and obSCEne measured
+         * that one returning all zeros when the wait was left out (`-6c0d`). */
+        glsl_emit_s_waitcnt_vm(g->code);
+        return out;
+    }
     if (nm_prefix(nm, len, "texture") || nm_prefix(nm, len, "shadow")) {
-        return gen_fail(g, "a texture lookup needs the image and sampler descriptors handed to "
-                           "the shader, which the compiled path does not wire up yet", node);
+        return gen_fail(g, "only texture2D is generated; the projective, cube, volume and "
+                           "shadow lookups each need something this has not measured", node);
     }
 
     /* The arguments, left to right. Evaluated once each and into registers that outlive the
@@ -1191,8 +1303,174 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
     }
 
     return gen_fail(g, "only constructors and the built-ins with verified instructions are "
-                       "generated; there is no call mechanism yet, so a function call is "
-                       "refused rather than inlined", node);
+                       "generated; this name is neither, and no function of that name is "
+                       "defined in this shader", node);
+}
+
+/* -------------------------------------------------------------------------
+ * User-defined functions, which are inlined
+ *
+ * There is no call instruction here and there does not need to be. GLSL forbids recursion, so
+ * every call graph is finite and every call can be generated where it appears - which is also
+ * what the register allocator wants, since a bump allocator has no notion of a frame to save
+ * and restore across a branch.
+ *
+ * What is supported is the shape almost every helper in a fragment shader has: value
+ * parameters, and a single `return` as the last statement of the body. An **early** return is
+ * refused rather than generated, because on this machine leaving a function early is an exec
+ * mask operation - the lanes that returned have to stop executing the rest of the body while
+ * the others carry on - and that mask would have to be threaded through every statement after
+ * it. `discard` does the same thing and can afford to, because it never comes back.
+ * ------------------------------------------------------------------------- */
+
+/* The function of this name with a body, or nothing. The AST is a flat array, so this reads it
+ * directly rather than walking the unit's declaration chain - which the generator is not given
+ * and does not otherwise need. A prototype has no body and is skipped: it is not the
+ * definition, and inlining it would produce nothing. */
+static int32_t gen_find_function(const glsl_gen_t *g, const char *name, size_t length) {
+    for (int32_t i = 0; i < g->ast->count; i++) {
+        const glsl_node_t *n = &g->ast->nodes[i];
+        if (n->kind != GLSL_NODE_FUNCTION || n->c == GLSL_NO_NODE) continue;
+        if (n->length != length) continue;
+        GLboolean same = GL_TRUE;
+        for (size_t c = 0; c < length; c++) {
+            if (n->text[c] != name[c]) { same = GL_FALSE; break; }
+        }
+        if (same) return i;
+    }
+    return GLSL_NO_NODE;
+}
+
+/* The last statement of a body, so the trailing `return` can be found without generating it
+ * twice - and so a body whose last statement is not one is refused before anything is emitted. */
+static int32_t gen_last_stmt(const glsl_gen_t *g, int32_t compound) {
+    if (compound == GLSL_NO_NODE) return GLSL_NO_NODE;
+    int32_t last = GLSL_NO_NODE;
+    for (int32_t s = g->ast->nodes[compound].a; s != GLSL_NO_NODE;
+         s = g->ast->nodes[s].sibling) {
+        last = s;
+    }
+    return last;
+}
+
+static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_arg,
+                                  int32_t node) {
+    const glsl_node_t *fn = &g->ast->nodes[fn_node];
+
+    if (g->inline_depth >= GLSL_GEN_MAX_INLINE_DEPTH) {
+        return gen_fail(g, "user-defined calls nest deeper than this generator inlines; GLSL "
+                           "forbids recursion, so a shader that reaches this is calling itself",
+                        node);
+    }
+
+    const glsl_type_t ret = glsl_type_from_token(fn->type_tok);
+    if (!is_generated(ret)) {
+        return gen_fail(g, "a function is generated only when it returns a float, a vector, a "
+                           "matrix or a bool - a void one would need its effects to be its "
+                           "result", node);
+    }
+
+    /* **The body's last statement has to be the return**, checked before a single instruction is
+     * emitted so a refusal leaves nothing half-generated behind it. */
+    const int32_t last = gen_last_stmt(g, fn->c);
+    if (last == GLSL_NO_NODE || g->ast->nodes[last].kind != GLSL_NODE_RETURN ||
+        g->ast->nodes[last].a == GLSL_NO_NODE) {
+        return gen_fail(g, "a function is generated only when its body ends in `return <expr>;` "
+                           "- an early or missing return would need the exec mask carried "
+                           "through the statements after it", node);
+    }
+
+    /* **The arguments are evaluated in the caller's scope**, before the parameters shadow
+     * anything: `f(x)` where the parameter is also called `x` has to read the caller's. */
+    glsl_value_t argv[GEN_MAX_ARGS];
+    int argc = 0;
+    for (int32_t a = first_arg; a != GLSL_NO_NODE; a = g->ast->nodes[a].sibling) {
+        if (argc >= GEN_MAX_ARGS) {
+            return gen_fail(g, "more arguments than this generator carries", node);
+        }
+        argv[argc] = gen_expr(g, a);
+        if (is_bad(argv[argc])) return argv[argc];
+        argc++;
+    }
+
+    const glsl_value_t out = gen_alloc(g, glsl_type_components(ret), node);
+    if (is_bad(out)) return out;
+
+    const int vars_before = g->var_count;
+    glsl_scope_push(g->sema);
+    g->inline_depth++;
+
+    /* **A parameter is a copy**, which is what `in` means and is also what makes a body free to
+     * assign to it. Nothing here writes back, so `out` and `inout` are refused below rather than
+     * silently behaving like `in`. */
+    int bound = 0;
+    for (int32_t p = fn->b; p != GLSL_NO_NODE; p = g->ast->nodes[p].sibling) {
+        const glsl_node_t *pn = &g->ast->nodes[p];
+        if (bound >= argc) {
+            (void)gen_fail(g, "this call passes fewer arguments than the function takes", node);
+            break;
+        }
+        if (pn->qualifier == GLSL_TOK_KW_OUT || pn->qualifier == GLSL_TOK_KW_INOUT) {
+            (void)gen_fail(g, "an `out` or `inout` parameter is not generated; only a value "
+                              "parameter is, because nothing here writes back to the caller",
+                           node);
+            break;
+        }
+        const glsl_type_t pt = glsl_type_from_token(pn->type_tok);
+        if (!is_generated(pt)) {
+            (void)gen_fail(g, "only float, vec, mat and bool parameters are generated", node);
+            break;
+        }
+        if (glsl_type_components(pt) != argv[bound].count) {
+            (void)gen_fail(g, "an argument is a different width from the parameter it binds",
+                           node);
+            break;
+        }
+        const glsl_value_t home = gen_alloc(g, argv[bound].count, node);
+        if (is_bad(home)) break;
+        for (int c = 0; c < home.count; c++) {
+            glsl_emit_mov(g->code, home.base + (uint32_t)c, argv[bound].base + (uint32_t)c);
+        }
+        if (!gen_declare(g, pn->text, pn->length, pt, home, node)) break;
+        if (!glsl_declare(g->sema, pn->text, pn->length, pt, GL_FALSE)) {
+            g->sema->error = (const char *)0;
+        }
+        bound++;
+    }
+    if (!g->error && bound != argc) {
+        (void)gen_fail(g, "this call passes more arguments than the function takes", node);
+    }
+
+    /* The body, every statement but the trailing return - which is generated here instead, into
+     * the caller's result register, because that is the whole of what returning means. */
+    if (!g->error) {
+        for (int32_t s = g->ast->nodes[fn->c].a; s != GLSL_NO_NODE && !g->error;
+             s = g->ast->nodes[s].sibling) {
+            if (s == last) break;
+            (void)glsl_gen_stmt(g, s);
+        }
+    }
+    if (!g->error) {
+        const uint32_t mark = gen_mark(g);
+        const glsl_value_t rv = gen_expr(g, g->ast->nodes[last].a);
+        if (!is_bad(rv)) {
+            if (rv.count != out.count) {
+                (void)gen_fail(g, "the returned expression is a different width from the "
+                                  "function's return type", node);
+            } else {
+                for (int c = 0; c < out.count; c++) {
+                    glsl_emit_mov(g->code, out.base + (uint32_t)c, rv.base + (uint32_t)c);
+                }
+            }
+        }
+        gen_release(g, mark);
+    }
+
+    g->inline_depth--;
+    glsl_scope_pop(g->sema);
+    g->var_count = vars_before;
+    if (g->error) { glsl_value_t none; none.base = 0u; none.count = 0; return none; }
+    return out;
 }
 
 static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
@@ -1306,7 +1584,13 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
             }
             const glsl_type_t target = constructor_target(callee);
             if (target != GLSL_TYPE_ERROR) return gen_construct(g, target, n->b, node);
-            /* Not a type name, so a function - which here means a built-in or a refusal. */
+            /* **A function this shader defines wins over the built-in table**, which is GLSL's
+             * own rule: a user function may share a name with a built-in and hides it. */
+            {
+                const int32_t fn = gen_find_function(g, callee->text, callee->length);
+                if (fn != GLSL_NO_NODE) return gen_call_user(g, fn, n->b, node);
+            }
+            /* Not a type name and not defined here, so a built-in or a refusal. */
             return gen_builtin(g, callee, n->b, node);
         }
         case GLSL_NODE_ASSIGN: {
@@ -1522,9 +1806,36 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
             for (int d = 0; d < g->exec_depth; d++) {
                 glsl_emit_exec_drop_live(g->code, GLSL_GEN_EXEC_SGPR_BASE + (uint32_t)d);
             }
+            /* **And the live mask, when the shader samples.** In whole-quad mode the export is
+             * restored from that mask rather than from `exec`, so a discard that did not reach
+             * it would be undone at the end of the shader instead of at the end of the `if` -
+             * the same bug one step further out. Taking helper lanes out of it along the way is
+             * harmless: they were never in it.
+             *
+             * **The known limit is a sample that comes *after* a discard.** A discarded lane is
+             * off from here on, so it no longer contributes to a neighbour's derivative, and a
+             * `texture2D` further down the shader gets a level of detail computed from a
+             * smaller quad. GLSL leaves derivatives undefined in non-uniform control flow, so
+             * this is within the specification - but ACO keeps a separate mask so the quad
+             * stays whole (`aco_insert_exec_mask.cpp`, the demote path), and a shader that
+             * samples after discarding will differ from a desktop driver in the last mip level
+             * it picks. Sampling and then discarding - which is what craft's block shader does,
+             * and the common shape - is unaffected. */
+            if (g->wqm) glsl_emit_exec_drop_live(g->code, GLSL_GEN_LIVE_SGPR);
             glsl_emit_exec_clear(g->code);
             return GL_TRUE;
         }
+        case GLSL_NODE_RETURN:
+            /* **A return reaching here is one that is not the last statement of a function
+             * body.** `gen_call_user` generates the trailing one itself, into the caller's
+             * result, and never walks as far as this arm. Anything else - a return inside an
+             * `if`, or one in `main` - would have to stop the lanes that took it from executing
+             * the rest of the body while the others carry on, and that mask would need
+             * threading through every statement after it. */
+            (void)gen_fail(g, "a return is generated only as the last statement of a function "
+                              "body; an early return is an exec mask this generator does not "
+                              "carry through the statements that follow it", node);
+            return GL_FALSE;
         default:
             (void)gen_fail(g, "this statement has no instruction selection yet: the generator "
                               "handles declarations, expressions, blocks, if and discard - a "
@@ -1544,6 +1855,34 @@ void glsl_gen_reserve(glsl_gen_t *g, uint32_t first) {
     if (g->next_vgpr > g->high_water) g->high_water = g->next_vgpr;
 }
 
+GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set) {
+    if (!g) return GL_FALSE;
+    if (g->sampler_count >= GLSL_GEN_MAX_TEX_SETS) {
+        (void)gen_fail(g, "more samplers than the draw path carries descriptor sets for",
+                       GLSL_NO_NODE);
+        return GL_FALSE;
+    }
+    g->samplers[g->sampler_count].name = name;
+    g->samplers[g->sampler_count].name_len = len;
+    g->samplers[g->sampler_count].set = set;
+    g->sampler_count++;
+    /* **And into the semantic stage, which is what types the lookup.** `texture2D(s, uv)` is
+     * resolved by rule from its argument types, so a `s` the symbol table has never heard of
+     * makes the whole call `GLSL_TYPE_ERROR` - and then `vec3(texture2D(...))` is refused for
+     * having an argument that is not a float or a vector, which is a true sentence about a
+     * false premise and sends the reader to the wrong place entirely. */
+    if (!glsl_declare(g->sema, name, len, GLSL_TYPE_SAMPLER2D, GL_FALSE)) {
+        g->sema->error = (const char *)0; /* already declared is the caller having done it */
+    }
+    /* **Sampling is what puts the shader in whole-quad mode**, and it is decided here rather
+     * than when the first `texture2D` is generated - the prologue has to emit `s_wqm_b32`
+     * before any of the body, and by then it is too late to find out. A shader that declares a
+     * sampler and never uses it therefore runs in whole-quad mode for nothing, which costs the
+     * two instructions and no correctness. */
+    g->wqm = GL_TRUE;
+    return GL_TRUE;
+}
+
 GLboolean glsl_gen_lookup(glsl_gen_t *g, const char *name, size_t len, glsl_value_t *out) {
     if (!g) return GL_FALSE;
     const glsl_gen_var_t *v = gen_find(g, name, len);
@@ -1556,8 +1895,13 @@ glsl_value_t glsl_gen_declare_input(glsl_gen_t *g, const char *name, size_t len,
                                     glsl_type_t type) {
     glsl_value_t none; none.base = 0u; none.count = 0;
     if (!g || g->error) return none;
-    if (!is_float_family(type)) {
-        return gen_fail(g, "only float, vec and mat inputs are generated", GLSL_NO_NODE);
+    /* `int` and `bool` join the float family here and nowhere else: a uniform of either is a
+     * float in the program's value pool, so it arrives in a register like any other and can be
+     * compared, converted with `bool()`, or used as a condition. What it cannot do is
+     * arithmetic - `glsl_type_of` still says `int`, and `gen_binary` still refuses it. */
+    if (!is_generated(type) && type != GLSL_TYPE_INT) {
+        return gen_fail(g, "only float, vec, mat, int and bool inputs are generated",
+                        GLSL_NO_NODE);
     }
     glsl_value_t home = gen_alloc(g, glsl_type_components(type), GLSL_NO_NODE);
     if (is_bad(home)) return home;

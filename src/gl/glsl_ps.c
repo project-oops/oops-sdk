@@ -239,6 +239,25 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     sema->version = fs->version ? fs->version : 110;
     GLboolean ok = glsl_declare_builtins(sema, GL_FRAGMENT_SHADER);
 
+    /* **The unit's own functions, back into the table.** `glsl_check_unit` recorded them during
+     * the compile and this symbol table is a fresh one, so without this a call to a function the
+     * shader defines has no signature to be typed against - and the generator, which asks this
+     * table for the type of every operand, cannot tell what a helper returns. It read as
+     * "only float, vec and mat constructor arguments are generated" the first time a helper's
+     * result was passed to `vec4`, which is a message about the wrong thing entirely. */
+    if (ok) {
+        for (int32_t d = fs->ast.nodes[fs->root].a; d != GLSL_NO_NODE;
+             d = fs->ast.nodes[d].sibling) {
+            if (fs->ast.nodes[d].kind != GLSL_NODE_FUNCTION) continue;
+            if (!glsl_declare_function(sema, d)) {
+                log_say(log, log_size, sema->error ? sema->error : "a function has no signature",
+                        0, 0);
+                ok = GL_FALSE;
+                break;
+            }
+        }
+    }
+
     glsl_gen_init(gen, (glsl_ast_t *)&fs->ast, sema, &code);
     glsl_gen_reserve(gen, GL_PS_FIRST_FREE_VGPR);
 

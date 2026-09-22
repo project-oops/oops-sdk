@@ -949,8 +949,14 @@ static GLboolean check_statement(glsl_sema_t *s, int32_t node) {
  * The translation unit
  * ------------------------------------------------------------------------- */
 
-/* Records a function's signature so calls can be checked against it. */
-static GLboolean declare_function(glsl_sema_t *s, int32_t node) {
+/* Records a function's signature so calls can be checked against it.
+ *
+ * Exported because the pixel-shader back end rebuilds a scoped symbol table of its own and has
+ * to put the unit's functions back into it: a call is typed against the recorded signature, and
+ * a table that holds only the globals cannot type one at all - which read as
+ * "only float, vec and mat constructor arguments are generated" the first time a helper's
+ * result was passed to a constructor. */
+GLboolean glsl_declare_function(glsl_sema_t *s, int32_t node) {
     const glsl_node_t *n = &s->ast->nodes[node];
     glsl_type_t ret = glsl_type_from_token(n->type_tok);
     if (ret == GLSL_TYPE_ERROR) {
@@ -991,7 +997,7 @@ GLboolean glsl_check_unit(glsl_sema_t *s, int32_t unit) {
      * happened to write them in. */
     for (int32_t d = u->a; d != GLSL_NO_NODE; d = s->ast->nodes[d].sibling) {
         if (s->ast->nodes[d].kind == GLSL_NODE_FUNCTION) {
-            if (!declare_function(s, d)) return GL_FALSE;
+            if (!glsl_declare_function(s, d)) return GL_FALSE;
         }
     }
 
