@@ -360,7 +360,21 @@ void gl_hw_flush(gl_context_t *ctx) {
         ctx->hw_frames_confirmed++;
     }
 
-    if (ctx->frame_count % 60 == 0 || ctx->frame_count < 5) {
+    /*
+     * **Rate-limited on the counter that moves here.** This ran on `frame_count`, which only
+     * advances when a frame is *presented* - and this block runs on every *submit*. An app that
+     * presents once per frame and submits once per frame is the case that was in mind, and it is
+     * not the general one: Neverball submits several times per present, so `frame_count` sat at
+     * single digits, `% 60` was true nearly always, and nine lines went to the kernel log per
+     * submit. At sixty frames a second that is thousands of lines a second, and it buried every
+     * `[NVRB00001:stderr]` line the title wrote - which is where a port says what went wrong.
+     *
+     * `hw_frames_confirmed` advances right above, once per submit the GPU acknowledged, so it is
+     * the counter this gate wanted. It has a property worth keeping too: **while frames are not
+     * confirming it stays at zero and every submit logs**, which is exactly when the detail is
+     * wanted and exactly when there is no flood to cause.
+     */
+    if (ctx->hw_frames_confirmed % 60 == 0 || ctx->hw_frames_confirmed < 5) {
         gl_klog_val("flush-words", (uint64_t)total_words);
         gl_klog_val("submit-rc", (uint64_t)(uint32_t)rc);
         gl_klog_val("fence-hit", (uint64_t)fence_hit);
