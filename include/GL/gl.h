@@ -16,6 +16,27 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * **GL's entry points are exported, against the payload's `-fvisibility=hidden` default.**
+ *
+ * `common/app.mk` compiles a payload with `-fvisibility=hidden`, which is the right default for
+ * a program: a symbol nothing outside needs should not be in the dynamic table. GL is the case
+ * where that is wrong, because a title written against desktop GL reaches its entry points **by
+ * name at run time** rather than by symbol - `SDL_GL_GetProcAddress("glGenBuffersARB")` and the
+ * `glXGetProcAddress` it stands for. `oops_gl_get_proc_address` answers those from the payload's
+ * own dynamic symbol table, and a hidden symbol is not in it.
+ *
+ * Neverball is what showed this. Its `share/glext.c` fills a table of function pointers from
+ * strings; every one came back NULL, and the first mesh it loaded called through one. The
+ * console faulted at `rip = 0`.
+ *
+ * It applies to declarations, so the definitions in `src/gl/` inherit it by having seen this
+ * header - which is why it is here and not spread across seventy files. `glu.h` and `glut.h` do
+ * not do this: nothing resolves GLU or GLUT by name, and this is the interface that has to be
+ * reachable, not every interface that could be.
+ */
+#pragma GCC visibility push(default)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -2156,6 +2177,25 @@ typedef struct gl_hw_status {
 } gl_hw_status_t;
 void glGetHardwareStatus(gl_hw_status_t *out);
 
+/*
+ * **What the console back end made of a program's fragment stage** - oops-gl's own queries, not
+ * OpenGL's, passed to `glGetProgramiv`.
+ *
+ * A program that links is not necessarily one that draws here. `glsl_ps.c` compiles the fragment
+ * shader to gfx1030 instructions or **refuses it by name**, and a refused one fails the *draw*
+ * with GL_INVALID_OPERATION rather than quietly running the fixed-function pixel shader in its
+ * place. Nothing in OpenGL asks about that, because on a desktop it cannot happen.
+ *
+ * `GL_PROGRAM_HW_PS_WORDS` is zero for a program with no console code - either refused, or a
+ * program with no fragment stage at all, for which the fixed-function shader runs and nothing
+ * was refused. `glGetProgramHardwareLog` tells those two apart: it names the reason for the
+ * first and is empty for the second.
+ */
+#define GL_PROGRAM_HW_PS_WORDS 0x9E00
+#define GL_PROGRAM_HW_PS_VGPRS 0x9E01
+#define GL_PROGRAM_HW_PARAMS   0x9E02
+void glGetProgramHardwareLog(GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
+
 /* The next submission logs its command stream, shader words, descriptors, fence and GPU clock to
  * klog as the oracle record. */
 void glRequestHardwareDump(void);
@@ -2348,8 +2388,17 @@ void glTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset
                         GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
                         const GLvoid *pixels);
 
+/* The address of a GL entry point by name, which is what `glXGetProcAddress` is on a desktop and
+ * what `SDL_GL_GetProcAddress` calls through to here. A title holding post-1.1 GL in function
+ * pointers fills them this way and never names the symbols, so being linked in is not enough -
+ * see the note beside the definition in `src/gl/gl_context.c`. NULL for a name this GL does not
+ * have, and for any name that is not a GL one. */
+void *oops_gl_get_proc_address(const char *name);
+
 #ifdef __cplusplus
 }
 #endif
+
+#pragma GCC visibility pop
 
 #endif /* __GL_H__ */

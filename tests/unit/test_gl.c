@@ -12923,6 +12923,50 @@ static void test_glsl_emit_matches_the_assembler(void) {
   ASSERT_EQ(words[7], 0xbefe030fu); /* s_mov_b32 exec_lo, s15 */
   ASSERT_EQ(words[8], 0xbefe0380u); /* s_mov_b32 exec_lo, 0 */
 
+  /* **Sampling a texture.** Two destinations, two coordinate pairs, two descriptor sets and all
+   * four dimensions, because each of those is its own field and one example would not have told
+   * them apart. Words from `tools/shader/gl2-fragment.s`. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_2D, 4u, 2u, 4u, 12u);
+  glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_2D, 8u, 4u, 4u, 12u);
+  glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_2D, 8u, 4u, 16u, 24u);
+  glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_2D, 12u, 20u, 4u, 12u);
+  ASSERT_EQ(words[0], 0xf0800f08u); /* image_sample v[4:7], v[2:3], s[4:11], s[12:15] */
+  ASSERT_EQ(words[1], 0x00610402u);
+  ASSERT_EQ(words[3], 0x00610804u); /* v[8:11], v[4:5] */
+  /* **The descriptor operands are SGPR numbers over four**, so s16/s24 encode as 4 and 6. A
+   * register number written in straight names a descriptor four times further up the file. */
+  ASSERT_EQ(words[5], 0x00c40804u); /* s[16:23], s[24:27] */
+  ASSERT_EQ(words[7], 0x00610c14u); /* v[12:15], v[20:21] */
+
+  glsl_code_init(&c, words, 64);
+  glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_1D, 4u, 2u, 4u, 12u);
+  glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_3D, 4u, 2u, 4u, 12u);
+  glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_CUBE, 4u, 2u, 4u, 12u);
+  glsl_emit_s_waitcnt_vm(&c);
+  glsl_emit_wqm(&c);
+  glsl_emit_exec_save(&c, 28u);
+  ASSERT_EQ(words[0], 0xf0800f00u); /* dim 1D */
+  ASSERT_EQ(words[2], 0xf0800f10u); /* dim 3D */
+  ASSERT_EQ(words[4], 0xf0800f18u); /* dim CUBE */
+  /* **The cross-check for this whole family.** `tex-prolog.s` records the sample the textured
+   * pixel shader used to carry as `0xf09c0f08 0x00610402`, and the wait after it as
+   * `0xbf8c3f70` - both from a different assembly run, years of this file's history apart. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE_LZ, GLSL_IMG_DIM_2D, 4u, 2u, 4u, 12u);
+  glsl_emit_s_waitcnt_vm(&c);
+  ASSERT_EQ(words[0], 0xf09c0f08u);
+  ASSERT_EQ(words[1], 0x00610402u);
+  ASSERT_EQ(words[2], 0xbf8c3f70u);
+
+  glsl_code_init(&c, words, 64);
+  glsl_emit_wqm(&c);
+  glsl_emit_exec_save(&c, 28u);
+  glsl_emit_exec_save(&c, 40u);
+  ASSERT_EQ(words[0], 0xbefe097eu); /* s_wqm_b32 exec_lo, exec_lo */
+  ASSERT_EQ(words[1], 0xbe9c037eu); /* s_mov_b32 s28, exec_lo */
+  ASSERT_EQ(words[2], 0xbea8037eu); /* s_mov_b32 s40, exec_lo */
+
   /* **The cross-check that the SOP2 fields are right rather than merely self-consistent**: this
    * exact word is already in the tree behind glAlphaFunc and the polygon stipple, and it comes
    * out of the same encoder as the four above. */
@@ -12997,6 +13041,84 @@ static void test_glsl_emit_mat4_is_column_major(void) {
   #undef VDST
   #undef SRC1
   #undef SRC0
+}
+
+/*
+ * **A title holding GL in function pointers gets them from here, and a NULL is a jump to zero.**
+ *
+ * `oops_gl_get_proc_address` answered NULL for everything until 2026-09-22, on the reasoning
+ * that a statically linked payload has every entry point already bound. Neverball showed what
+ * that misses: its `share/glext.c` fills `glGenBuffers_` from the *string* `"glGenBuffersARB"`,
+ * so the linker never saw the name and had nothing to bind. The pointer stayed NULL, the first
+ * mesh it loaded called through it, and the console faulted at `rip = 0` inside `sol_load_full`.
+ *
+ * These are the names Neverball actually asks for, which is why they are named one at a time
+ * rather than swept: the resolution of one of them is the difference between a port that runs
+ * and a port that faults, and a sweep would not say which.
+ */
+static void test_gl_proc_address_resolves_entry_points_by_name(void) {
+  /*
+   * **What this can and cannot establish here, stated rather than implied.**
+   *
+   * The lookup reads the image's *dynamic* symbol table, which is the only one mapped at run
+   * time. A payload is linked `-shared`, so all 11,851 of its globals are in it and every name
+   * below resolves. This test runner is an ordinary executable linked without `-rdynamic`: its
+   * `.dynsym` holds 207 libc imports and nothing of its own, and `glGetString` appears only in
+   * `.symtab`, which is not loaded. Adding `-rdynamic` is a change to `oops-sdk/Makefile`.
+   *
+   * So the positive case is asserted as a consistency rule instead of an absolute one: **each
+   * name either resolves to exactly the right function, or the image exports nothing at all** -
+   * and which of those held is checked, so this cannot quietly become a test that asserts
+   * nothing. The names are listed one at a time because they are the ones Neverball asks for by
+   * string, and the resolution of any one of them is the difference between a port that runs and
+   * a port that faults at `rip = 0`.
+   */
+  const int exports = oops_gl_get_proc_address("glGetString") != NULL;
+
+#define ASSERT_RESOLVES(fn)                                                    \
+  do {                                                                         \
+    void *got = oops_gl_get_proc_address(#fn);                                 \
+    if (exports) { ASSERT_EQ(got, (void *)fn); } else { ASSERT_EQ(got, NULL); } \
+  } while (0)
+
+  ASSERT_RESOLVES(glGetString);
+
+  /* ARB_multitexture and ARB_vertex_buffer_object, both advertised in GL_EXTENSIONS, under the
+   * suffixed spellings a program of that era asks for. */
+  ASSERT_RESOLVES(glActiveTextureARB);
+  ASSERT_RESOLVES(glClientActiveTextureARB);
+  ASSERT_RESOLVES(glGenBuffersARB);
+  ASSERT_RESOLVES(glBindBufferARB);
+  ASSERT_RESOLVES(glBufferDataARB);
+  ASSERT_RESOLVES(glBufferSubDataARB);
+  ASSERT_RESOLVES(glDeleteBuffersARB);
+  ASSERT_RESOLVES(glIsBufferARB);
+
+  /* ARB_point_parameters, under both of its published spellings. */
+  ASSERT_RESOLVES(glPointParameterfARB);
+  ASSERT_RESOLVES(glPointParameterfvARB);
+  ASSERT_RESOLVES(glPointParameterfEXT);
+
+  /* The unsuffixed core spelling is a separate definition rather than an alias, so it has its own
+   * address, and a caller asking for it must get that one. */
+  ASSERT_RESOLVES(glActiveTexture);
+
+#undef ASSERT_RESOLVES
+
+  /* A GL name this GL does not have is NULL, which is what a program probing for an extension it
+   * can do without is asking. Neverball asks for both of these and takes no for an answer; had
+   * they resolved to anything, it would have called them. */
+  ASSERT_EQ(oops_gl_get_proc_address("glCreateShaderObjectARB"), NULL);
+  ASSERT_EQ(oops_gl_get_proc_address("glStringMarkerGREMEDY"), NULL);
+
+  /* **The prefix is the boundary**, and it holds whether or not the image exports anything. The
+   * lookup walks the whole symbol table, so a resolver that answered for any name at all would
+   * be a door onto every symbol in the image, opened by whatever string a caller passed. */
+  ASSERT_EQ(oops_gl_get_proc_address("malloc"), NULL);
+  ASSERT_EQ(oops_gl_get_proc_address("oops_gl_get_proc_address"), NULL);
+  ASSERT_EQ(oops_gl_get_proc_address(""), NULL);
+  ASSERT_EQ(oops_gl_get_proc_address("g"), NULL);
+  ASSERT_EQ(oops_gl_get_proc_address(NULL), NULL);
 }
 
 /*
@@ -13495,6 +13617,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_glsl_emit_matches_the_assembler);
     RUN_TEST(test_glsl_emit_mat4_is_column_major);
     RUN_TEST(test_gl_blend_control_carries_the_gl_state);
+    RUN_TEST(test_gl_proc_address_resolves_entry_points_by_name);
     RUN_TEST(test_glsl_gen_selects_arithmetic);
     RUN_TEST(test_glsl_gen_selects_swizzles_and_constructors);
     RUN_TEST(test_glsl_gen_refuses_what_it_cannot_encode);
