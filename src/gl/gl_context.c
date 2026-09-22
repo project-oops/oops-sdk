@@ -18,6 +18,7 @@ static inline __attribute__((unused)) void gl_klog_line(const char *msg) { (void
 static inline __attribute__((unused)) void gl_klog_val(const char *tag, uint64_t val) { (void)tag; (void)val; }
 #else
 #include "oops/syscall.h"
+#include "oops/time.h" /* the submit is timed - see hw_flush_ns */
 #endif
 
 __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
@@ -225,6 +226,9 @@ void gl_color_cpu_drain(gl_context_t *ctx) {
     ctx->cpu_color_hi = 0u;
 }
 
+/* The real work, wrapped below so every exit is timed. */
+static void gl_hw_flush_body(gl_context_t *ctx);
+
 void gl_hw_flush_at(gl_context_t *ctx, const char *fn) {
     if (ctx) {
         ctx->hw_flushes++;
@@ -245,6 +249,19 @@ void gl_hw_flush_at(gl_context_t *ctx, const char *fn) {
         if (!placed) ctx->hw_flush_unnamed++;
     }
     if (!ctx) return;
+    /* **Timed around the whole submit**, so a frame can be split into the part spent waiting
+       for the GPU and the part this library spent on the CPU. Two clock reads per submit, at a
+       few dozen a frame, which is nothing beside what they measure. */
+#ifndef OOPS_HOST_BUILD
+    const uint64_t t0 = oops_time_get_ns();
+    gl_hw_flush_body(ctx);
+    ctx->hw_flush_ns += oops_time_get_ns() - t0;
+#else
+    gl_hw_flush_body(ctx);
+#endif
+}
+
+static void gl_hw_flush_body(gl_context_t *ctx) {
     /* **Before the early return, not after it.** A flush is where "everything issued so far is
      * real" is promised, and that has to hold for a frame with nothing to submit as much as for
      * one with draws in it - a glDrawPixels followed by a glReadPixels builds no command stream
@@ -1474,6 +1491,11 @@ void glSwapBuffers(void) {
          * flips a second when this number is the problem, which is exactly when it is worth
          * reading. */
         gl_klog_val("flushes-this-frame", (uint64_t)ctx->hw_flushes);
+        /* **Microseconds waiting for the GPU this frame.** Against the frame's own duration this
+           says whether a slow frame is submits or this library's CPU work, which two rounds of
+           reasoning from the submit count alone got wrong. */
+        gl_klog_val("flush-us-this-frame", ctx->hw_flush_ns / 1000u);
+        ctx->hw_flush_ns = 0u;
         /* **Every site with a count, not the largest one.** A single winner would answer "what
            to fix first" and leave "is that all of it" open; the full breakdown sums to the
            total above, so a reader can see at a glance whether one site is the frame or merely

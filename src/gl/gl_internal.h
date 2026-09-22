@@ -1373,6 +1373,11 @@ typedef struct gl_context {
     GLboolean ps_master_dirty;
     GLboolean capture_active;
     uint32_t hw_flushes;
+    /* **Nanoseconds spent inside a submit, per frame.** The one number that splits a slow frame
+     * in two: subtract it from the frame time and what is left is this library's own CPU work.
+     * Guessing which half dominates has been wrong twice - the submit count looked like the
+     * whole frame and was 60% of it - so it is measured at the one place submits happen. */
+    uint64_t hw_flush_ns;
     const char *hw_flush_site[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_site_n[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_unnamed;
