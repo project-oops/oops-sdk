@@ -1863,6 +1863,16 @@ static void test_gl2_pixel_shader_encodings_match_the_assembler(void) {
     ASSERT_EQ(words[0], 0xbefc0300u); /* s_mov_b32 m0, s0 */
     ASSERT_EQ(words[1], 0xbefc0302u); /* s_mov_b32 m0, s2 */
 
+    /* **A scalar operand in `src0`**, which is how `gl_FragCoord.y` gets flipped: the viewport
+     * height is a per-draw constant in the scalar file and the hardware's row is a VGPR. VOP2's
+     * `src0` is nine bits and names either; `vsrc1` is eight and names a VGPR - so the order is
+     * forced, and `glsl_emit_sub_f32` cannot be used because it puts its first operand through
+     * `glsl_vgpr` and would encode s44 as v44. */
+    glsl_code_init(&c, words, 64);
+    glsl_emit_vop2(&c, GLSL_VOP2_SUB_F32, 8u, glsl_sgpr(44u), 3u);
+    ASSERT_EQ(c.count, 1u);
+    ASSERT_EQ(words[0], 0x0810062cu); /* v_sub_f32_e32 v8, s44, v3 */
+
     /* Interpolation, across all four channels and a high attribute - so the attribute's field
      * is pinned apart from its channel's, which one example would not have separated. */
     glsl_code_init(&c, words, 64);
@@ -1977,8 +1987,9 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
     uint32_t user_sgprs = 99u;
+    uint32_t input_ena = 0u;
     const GLboolean ok = gl_program_compile_fragment(p, words, 256u, &count, &vgprs,
-                                                     &user_sgprs, log, sizeof(log));
+                                                     &user_sgprs, &input_ena, log, sizeof(log));
     if (!ok) printf("\n    compile failed: %s\n", log);
     ASSERT_EQ(ok, GL_TRUE);
 
@@ -2014,6 +2025,12 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
      * `m0` on the very draw that configured it. */
     ASSERT_EQ(user_sgprs, 2u);
 
+    /* **And the pixel stage is asked for exactly what this shader reads**: the perspective
+     * centre barycentrics and nothing else, because nothing here names `gl_FragCoord`. Asking
+     * for the window position as well would cost four VGPRs of the stage's allocation on every
+     * shader that never looks at it. */
+    ASSERT_EQ(input_ena, 0x00000002u);
+
     /* The epilogue, whatever the body did in between: the colour into v4..v7, the export, and
      * `s_endpgm`. */
     ASSERT_EQ(words[count - 1u], 0xbf810000u); /* s_endpgm */
@@ -2041,8 +2058,8 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
     const gl_program_object_t *p2 = gl_find_program(c, vs_only);
     count = 99u;
     user_sgprs = 99u;
-    ASSERT_EQ(gl_program_compile_fragment(p2, words, 256u, &count, &vgprs, &user_sgprs, log,
-                                          sizeof(log)),
+    ASSERT_EQ(gl_program_compile_fragment(p2, words, 256u, &count, &vgprs, &user_sgprs, NULL,
+                                          log, sizeof(log)),
               GL_TRUE);
     ASSERT_EQ(count, 0u);
     /* Nothing was compiled, so the draw configures nothing: a program on this arm runs the
@@ -2079,7 +2096,7 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
             "void main() { uv = pos.xy; gl_Position = vec4(pos, 1.0); }\n",
             REFUSED_LOOKUPS[i]);
         ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, p), words, 256u, &count, &vgprs,
-                                              NULL, log, sizeof(log)),
+                                              NULL, NULL, log, sizeof(log)),
                   GL_FALSE);
         ASSERT_TRUE(log[0] != '\0');
     }
@@ -2098,7 +2115,7 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
         "  gl_FragColor = texture2D(a, uv) + texture2D(b, uv) + texture2D(d, uv);\n"
         "}\n");
     ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, three), words, 256u, &count,
-                                          &vgprs, NULL, log, sizeof(log)),
+                                          &vgprs, NULL, NULL, log, sizeof(log)),
               GL_FALSE);
     ASSERT_TRUE(strstr(log, "2") != NULL);
 
@@ -2116,7 +2133,7 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
         "void main() { gl_FragColor = a + b + d + e + f; }\n");
     memset(log, 0, sizeof(log));
     ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, wide), words, 256u, &count, &vgprs,
-                                          NULL, log, sizeof(log)),
+                                          NULL, NULL, log, sizeof(log)),
               GL_FALSE);
     ASSERT_TRUE(strstr(log, "16") != NULL);
 
@@ -2433,6 +2450,17 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
  * **The uniform block is `p->values`** - the pool `glUniform*` writes and the draw path copies
  * into the payload verbatim - so a test that sets a uniform through the API and reads the colour
  * back out has been through the same bytes the hardware would. */
+/* The window position the simulated SPI hands the shader, and the viewport it hands the draw.
+ * Chosen so no two are equal and none is 0 or 1: a shader reading the wrong one of the four, or
+ * skipping the y flip, lands on a number no other component could have produced. `y` is the
+ * hardware's - counted down from the top - so `gl_FragCoord.y` has to come out
+ * SIM_VIEWPORT_H - SIM_FRAG_Y = 75.5. */
+#define SIM_VIEWPORT_H 96.0f
+#define SIM_FRAG_X     10.5f
+#define SIM_FRAG_Y     20.5f
+#define SIM_FRAG_Z     0.25f
+#define SIM_FRAG_W     2.0f
+
 static GLboolean compile_and_run_prog(void *ctx, GLuint prog, const float attr[4][4],
                                       float out[4]) {
     const gl_program_object_t *p = gl_find_program((gl_context_t *)ctx, prog);
@@ -2442,7 +2470,8 @@ static GLboolean compile_and_run_prog(void *ctx, GLuint prog, const float attr[4
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
     const GLboolean ok =
-        gl_program_compile_fragment(p, words, 512u, &count, &vgprs, NULL, log, sizeof(log));
+        gl_program_compile_fragment(p, words, 512u, &count, &vgprs, NULL, NULL, log,
+                                    sizeof(log));
     if (!ok) printf("\n    compile failed: %s\n", log);
     ASSERT_EQ(ok, GL_TRUE);
     /* Whatever it emitted has to fit the file the stage table allocated. */
@@ -2452,10 +2481,20 @@ static GLboolean compile_and_run_prog(void *ctx, GLuint prog, const float attr[4
     memset(&s, 0, sizeof(s));
     s.exec = GL_TRUE;            /* the lane starts live */
     s.ublock_floats = (int)(sizeof(s.ublock) / sizeof(s.ublock[0]));
-    /* The block as the draw path builds it: descriptors first, the value pool at 0x80. */
+    /* The block as the draw path builds it: descriptors first, the draw's own constants in the
+     * second set's tail, the value pool at 0x80. */
     for (int i = 0; i < p->value_floats; i++) {
         s.ublock[OOPS_GL_GL2_UNIFORM_AT / 4 + i] = p->values[i];
     }
+    s.ublock[OOPS_GL_GL2_DRAWCONST_AT / 4 + OOPS_GL_GL2_DC_VIEWPORT_H] = SIM_VIEWPORT_H;
+    /* **What the SPI would have put in v2..v5** for a shader that asked for the window
+     * position. Seeded for every program, because a shader that did not ask is a shader that
+     * never reads them - and one that did, and read the wrong register, gets a number here
+     * rather than whatever a zeroed array would have made look plausible. */
+    s.v[2] = SIM_FRAG_X;
+    s.v[3] = SIM_FRAG_Y;
+    s.v[4] = SIM_FRAG_Z;
+    s.v[5] = SIM_FRAG_W;
     sim_run(&s, words, count, attr);
     ASSERT_EQ(s.exported, GL_TRUE);
     ASSERT_EQ(s.ended, GL_TRUE);
@@ -2486,6 +2525,63 @@ static const char *const VS_ONE_VARYING =
     "attribute vec4 pos;\n"
     "varying vec4 vin;\n"
     "void main() { vin = pos; gl_Position = pos; }\n";
+
+static void test_gl2_frag_coord_comes_from_the_window_position(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **Every component, in one export**, so reading the wrong register shows up as the wrong
+     * channel rather than as a value that could be anything. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() { gl_FragColor = gl_FragCoord; }\n", attr, o);
+    ASSERT_NEAR(o[0], SIM_FRAG_X, 1e-6f);
+    /* **y is flipped and the others are not.** GL counts `gl_FragCoord.y` up from the bottom of
+     * the window and the hardware counts down from the top, so this is the viewport height less
+     * what the SPI supplied. A back end that passed the hardware value straight through would
+     * draw every gradient upside down - and would pass a test that only checked x. */
+    ASSERT_NEAR(o[1], SIM_VIEWPORT_H - SIM_FRAG_Y, 1e-6f);
+    ASSERT_NEAR(o[2], SIM_FRAG_Z, 1e-6f);
+    ASSERT_NEAR(o[3], SIM_FRAG_W, 1e-6f);
+
+    /* A swizzle of it is the same registers read in another order, which is what almost every
+     * real shader does with it. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() { gl_FragColor = vec4(gl_FragCoord.yx, 0.0, 1.0); }\n", attr,
+                    o);
+    ASSERT_NEAR(o[0], SIM_VIEWPORT_H - SIM_FRAG_Y, 1e-6f);
+    ASSERT_NEAR(o[1], SIM_FRAG_X, 1e-6f);
+
+    /* **A shader that never names it is not charged for it.** The declaration, the scalar load
+     * and the four registers all hang off the mention, so this is the arm that says the cost is
+     * conditional - and `input_ena` is what the draw configures the stage with. */
+    gl_context_t *c = (gl_context_t *)ctx;
+    const GLuint plain = linked_program(VS_ONE_VARYING,
+                                        "void main() { gl_FragColor = vec4(1.0); }\n");
+    uint32_t words[256];
+    uint32_t count = 0u, vgprs = 0u, ena = 0u, usg = 0u;
+    char log[256] = {0};
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, plain), words, 256u, &count,
+                                          &vgprs, &usg, &ena, log, sizeof(log)),
+              GL_TRUE);
+    ASSERT_EQ(ena, 0x00000002u);  /* the barycentrics only */
+    ASSERT_EQ(usg, 0u);           /* and no block, so no user SGPRs */
+
+    const GLuint uses = linked_program(
+        VS_ONE_VARYING, "void main() { gl_FragColor = vec4(gl_FragCoord.xyz, 1.0); }\n");
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, uses), words, 256u, &count, &vgprs,
+                                          &usg, &ena, log, sizeof(log)),
+              GL_TRUE);
+    /* PERSP_CENTER plus POS_X/Y/Z/W - bits 8..11 of SPI_PS_INPUT_ENA for gfx103, which is
+     * R_0286CC and not R_02865C (that address is this register only from gfx12). */
+    ASSERT_EQ(ena, 0x00000f02u);
+    /* **And it takes the block**, though it declares no uniform and samples nothing: the
+     * viewport height that flips y lives there. A shader handed no block would have read the
+     * flip out of a scalar register nothing loaded. */
+    ASSERT_EQ(usg, 2u);
+
+    glContextDestroy(ctx);
+}
 
 static void test_gl2_compiled_arithmetic_matches_the_language(void) {
     void *ctx = gl2_context();
@@ -2738,7 +2834,7 @@ static void test_gl2_compiled_uniforms_come_from_the_scalar_file(void) {
     static uint32_t words[512];
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
-    ASSERT_EQ(gl_program_compile_fragment(sp, words, 512u, &count, &vgprs, NULL, log,
+    ASSERT_EQ(gl_program_compile_fragment(sp, words, 512u, &count, &vgprs, NULL, NULL, log,
                                           sizeof(log)),
               GL_TRUE);
     /* v8 and v9 for the one varying component and `k`, plus `gl_FragColor`'s four and the
@@ -3068,7 +3164,7 @@ static void test_gl2_the_back_end_refuses_by_name(void) {
         char log[256] = {0};
         const GLuint prog = linked_program(VS_ONE_VARYING, REFUSED[i]);
         ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, prog), words, 256u, &count,
-                                              &vgprs, NULL, log, sizeof(log)),
+                                              &vgprs, NULL, NULL, log, sizeof(log)),
                   GL_FALSE);
         ASSERT_TRUE(log[0] != '\0');
     }
@@ -3108,6 +3204,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_glsl_120_runs_what_it_compiles);
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
+    RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);

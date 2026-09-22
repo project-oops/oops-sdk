@@ -2139,6 +2139,16 @@ static void gl_gl2_build_block(gl_context_t *ctx, const gl_program_object_t *pro
         memcpy((char *)block + OOPS_GL_GL2_UNIFORM_AT, prog->values,
                (size_t)prog->value_floats * sizeof(float));
     }
+    /* **The draw's own constants**, which are not the program's and change without it. The
+     * viewport height is what turns the hardware's window y - counted down from the top - into
+     * `gl_FragCoord`'s, counted up from the bottom. Written whether or not the shader reads it:
+     * it costs four bytes of a block that is copied whole either way, and a constant that is
+     * only sometimes there is a constant that is sometimes stale. */
+    {
+        float dc[OOPS_GL_GL2_DRAWCONST_FLOATS] = {0.0f, 0.0f, 0.0f, 0.0f};
+        dc[OOPS_GL_GL2_DC_VIEWPORT_H] = (float)ctx->vp_h;
+        memcpy((char *)block + OOPS_GL_GL2_DRAWCONST_AT, dc, sizeof(dc));
+    }
 }
 
 static void gl_hw_begin_frame(gl_context_t *ctx) {
@@ -2511,6 +2521,9 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     ctx->hw_gl2_slot = 0u;         /* the GL 2.0 block ring restarts with the frame ... */
     ctx->hw_gl2_slot_program = 0u; /* ... and its first slot holds nothing */
     ctx->hw_params = 2u;    /* the stage table above bound the two-parameter vertex shader */
+    /* And what that table wrote into SPI_PS_INPUT_ENA/_ADDR, so a draw needing something else
+     * knows it has to say so - and one that does not, does not pay for it. */
+    ctx->hw_input_ena = gl_polygon_stipple_on(ctx) ? 0x00000302u : 0x00000002u;
     ctx->hw_frame_active = GL_TRUE;
 }
 
@@ -4071,6 +4084,27 @@ vertices_written:
         *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_RSRC2_PS */
         *dw++ = 0x0bu;
         *dw++ = ps_rsrc2;
+
+        /* **What the SPI hands the pixel stage**, which a compiled shader decides and the frame
+         * table cannot: `SPI_PS_INPUT_ENA` and `_ADDR` (context 0x1b3 and 0x1b4). The
+         * barycentrics always; a shader reading `gl_FragCoord` also asks for the window
+         * position, which the SPI then puts in v2..v5. A shader that read those without this
+         * would read whatever the registers held.
+         *
+         * Emitted only when it changes, because the frame table already set the value every
+         * fixed-function draw wants and most frames never leave it. `hw_input_ena` is put back
+         * to that value by `gl_hw_begin_frame`, alongside `hw_params`. */
+        {
+            const uint32_t want = (prog != (gl_program_object_t *)0 && prog->fs &&
+                                   prog->hw_ps_words > 0u)
+                                      ? prog->hw_ps_input_ena
+                                      : (gl_polygon_stipple_on(ctx) ? 0x00000302u : 0x00000002u);
+            if (want != ctx->hw_input_ena) {
+                *dw++ = 0xc0016900u; *dw++ = 0x1b3u; *dw++ = want;
+                *dw++ = 0xc0016900u; *dw++ = 0x1b4u; *dw++ = want;
+                ctx->hw_input_ena = want;
+            }
+        }
 
         /* Pass Descriptor Table VA to PS User SGPRs 0 and 1 (mmSPI_SHADER_USER_DATA_PS_0 = 0x0c, 0x0d) */
         *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_PS_0 */

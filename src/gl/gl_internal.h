@@ -916,6 +916,12 @@ typedef struct {
      * Issued from `hw_ps_next_serial` at each successful compile and never reused. Zero means
      * this program has no compiled shader. */
     uint64_t hw_ps_serial;
+    /* **What the pixel stage has to be handed for this shader to run**, as `SPI_PS_INPUT_ENA`
+     * and `_ADDR` - the barycentrics always, and the fragment's window position when the shader
+     * reads `gl_FragCoord`. Decided by the compiler because only it knows what the shader
+     * names, and written by the draw, which is the same division as `hw_ps_user_sgprs`: a
+     * shader reading a register the SPI was not told to supply reads whatever was in it. */
+    uint32_t hw_ps_input_ena;
     /* **Whether this program's refusal has been said out loud.** Cleared at every link, so a
      * relinked program that is still refused says so again - the source may have changed and
      * the reason with it. On the program rather than the context because program names are
@@ -1265,6 +1271,9 @@ typedef struct gl_context {
     /* The next serial to issue, so no two compiled shaders are ever confused for each other.
      * Starts at 1; 0 is "no shader". */
     uint64_t hw_ps_next_serial;
+    /* What `SPI_PS_INPUT_ENA` and `_ADDR` currently hold, so a draw emits them only when it
+     * wants something else. Set by `gl_hw_begin_frame` to whatever its table wrote. */
+    uint32_t hw_input_ena;
     /* The depth and stencil surfaces are the GPU's, 64KB_Z_X tiled (see gl_zs_depth_ptr): true
      * once the hardware path is up on the console, never on a host build. */
     GLboolean zs_tiled;
@@ -1882,6 +1891,20 @@ static inline uint32_t gl_f32_bits(float f) {
 #define OOPS_GL_GL2_UNIFORM_AT     0x80u  /* the uniform block's offset within a slot */
 #define OOPS_GL_GL2_UNIFORM_FLOATS 32
 
+/* **The draw's own constants**, four floats the shader may need that are not the program's
+ * uniforms: the viewport height so far, which is what turns the hardware's window y into
+ * `gl_FragCoord`'s.
+ *
+ * It lives in the second descriptor set's tail rather than in a region of its own. A set is
+ * `OOPS_GL_DESC_UNIT_STRIDE` = 0x40 and holds a 32-byte image descriptor and a 16-byte sampler,
+ * so the last sixteen bytes of each were padding; this is the second set's. Free space the
+ * layout already had, on a 4-aligned offset a scalar load of four dwords can name, and the
+ * assertion below holds it clear of both descriptors. */
+#define OOPS_GL_GL2_DRAWCONST_AT     0x70u
+#define OOPS_GL_GL2_DRAWCONST_FLOATS 4
+/* Which float is which. Room for three more before the set above it. */
+#define OOPS_GL_GL2_DC_VIEWPORT_H    0
+
 static inline uint32_t gl_hw_gl2_slot_offset(uint32_t slot) {
     return OOPS_GL_GL2_SLOT_OFFSET + slot * OOPS_GL_GL2_SLOT_STRIDE;
 }
@@ -1912,7 +1935,13 @@ typedef char oops_gl_payload_map_closes[
      /* The uniform block has to start after both descriptor sets and end inside the slot. */
      2u * OOPS_GL_DESC_UNIT_STRIDE <= OOPS_GL_GL2_UNIFORM_AT &&
      OOPS_GL_GL2_UNIFORM_AT + (uint32_t)OOPS_GL_GL2_UNIFORM_FLOATS * 4u <=
-             OOPS_GL_GL2_SLOT_STRIDE)
+             OOPS_GL_GL2_SLOT_STRIDE &&
+     /* The draw constants sit in the second set's padding: after its 48 bytes of descriptors,
+      * before the uniforms, and 4-aligned so a scalar load of four dwords can name them. */
+     OOPS_GL_DESC_UNIT_STRIDE + 48u <= OOPS_GL_GL2_DRAWCONST_AT &&
+     OOPS_GL_GL2_DRAWCONST_AT % 16u == 0u &&
+     OOPS_GL_GL2_DRAWCONST_AT + (uint32_t)OOPS_GL_GL2_DRAWCONST_FLOATS * 4u <=
+             OOPS_GL_GL2_UNIFORM_AT)
         ? 1 : -1];
 
 /* The general combine's encoder: the three instruction formats it emits, laid out field by field
@@ -3360,8 +3389,8 @@ void gl_free_all_shaders(gl_context_t *ctx);
  * real failure, with `log` saying what the compiler would not generate. */
 GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *words,
                                       uint32_t capacity, uint32_t *out_count,
-                                      uint32_t *out_vgprs, uint32_t *out_user_sgprs, char *log,
-                                      size_t log_size);
+                                      uint32_t *out_vgprs, uint32_t *out_user_sgprs,
+                                      uint32_t *out_input_ena, char *log, size_t log_size);
 
 /* **Submit before editing a shader the GPU may not have read yet.** The draws already in the
  * stream were built against the words that are there now; changing them first would have the

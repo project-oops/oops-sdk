@@ -163,6 +163,13 @@ v_mul_f32_e32 v4, s4, v5
 v_add_f32_e32 v4, s12, v5
 v_cmp_lt_f32_e32 vcc_lo, s4, v5
 
+// **A scalar minus a vector**, which is `gl_FragCoord.y`: GL counts it up from
+// the bottom of the window and the hardware hands down the row from the top, so
+// the flip is the viewport height - a per-draw constant in the scalar file -
+// less what the SPI supplied. The operand order is forced as well as wanted:
+// `src0` is the only one of the two that can name an SGPR.
+v_sub_f32_e32 v8, s44, v3
+
 // ---------------------------------------------------------------------------
 // Control flow, which on this machine is the exec mask and not a branch.
 //

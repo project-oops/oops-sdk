@@ -641,8 +641,8 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
                           "no memory for a compiled pixel shader");
         } else if (!gl_program_compile_fragment(p, p->hw_ps, OOPS_GL_PS_GL2_WORDS,
                                                 &p->hw_ps_words, &p->hw_ps_vgprs,
-                                                &p->hw_ps_user_sgprs, p->hw_ps_log,
-                                                sizeof(p->hw_ps_log))) {
+                                                &p->hw_ps_user_sgprs, &p->hw_ps_input_ena,
+                                                p->hw_ps_log, sizeof(p->hw_ps_log))) {
             gl_heap_free(p->hw_ps);
             p->hw_ps = (uint32_t *)0;
             p->hw_ps_words = 0u;

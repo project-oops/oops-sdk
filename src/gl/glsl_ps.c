@@ -77,6 +77,26 @@
  * one of them lands on one too. */
 #define GL_PS_UNIFORM_SGPR_BASE 48u
 
+/* **The draw's own constants**, loaded into s44..s47 - the last 4-aligned group below the
+ * uniforms and above the exec masks, which end at s40. Four dwords, so a 4-aligned destination
+ * is what the load needs and s44 is one. */
+#define GL_PS_DRAWCONST_SGPR_BASE 44u
+
+/* **Where the hardware puts the fragment's window position**, when `SPI_PS_INPUT_ENA` asks for
+ * it. The VGPRs are packed in the order Mesa enumerates them (`ac_get_fs_input_vgpr_cnt`,
+ * `ac_shader_util.c`): the perspective-centre barycentrics take v0 and v1, and x, y, z and w
+ * follow one register each. The payload's polygon stipple reads the same pair at v2 and v3 with
+ * `ENA` 0x302, which is the in-tree confirmation of the order.
+ *
+ * These are read in the prologue and copied into registers of their own, so nothing downstream
+ * depends on the layout - the same treatment a uniform gets, and for the same reason. */
+#define GL_PS_FRAGPOS_VGPR 2u
+
+/* `SPI_PS_INPUT_ENA` bits, from `R_0286CC_SPI_PS_INPUT_ENA` for gfx103 - not `R_02865C`, which
+ * is that register only from gfx12 and is `SPI_PS_INPUT_CNTL_6` here. */
+#define GL_PS_INPUT_PERSP_CENTER 0x00000002u
+#define GL_PS_INPUT_POS_XYZW     0x00000f00u
+
 static size_t lit_len(const char *s) {
     size_t n = 0;
     while (s[n] != '\0') n++;
@@ -119,6 +139,25 @@ static glsl_type_t type_from_gl(GLenum t) {
  * `mat4 mvp` be one uniform - so the pool holds names this shader never mentions. They are
  * loaded into SGPRs regardless, because the block is copied whole and a scalar load is cheap;
  * what they must not cost is a **VGPR each**, and a vertex-only `mat4` would cost sixteen. */
+/* **Does this shader name it anywhere?** A built-in is not declared, so there is no declaration
+ * list to walk and the question is about the whole body. The AST is a flat array, so this reads
+ * every node once rather than walking the tree - which also means a mention inside a branch the
+ * generator will never take still counts, and that is the right answer: the prologue has to be
+ * emitted before anything knows which branches there are. */
+static GLboolean unit_mentions(const glsl_unit_t *u, const char *name, size_t len) {
+    if (!u) return GL_FALSE;
+    for (int32_t i = 0; i < u->ast.count; i++) {
+        const glsl_node_t *n = &u->ast.nodes[i];
+        if (n->kind != GLSL_NODE_IDENTIFIER || (size_t)n->length != len) continue;
+        GLboolean same = GL_TRUE;
+        for (size_t c = 0; c < len; c++) {
+            if (n->text[c] != name[c]) { same = GL_FALSE; break; }
+        }
+        if (same) return GL_TRUE;
+    }
+    return GL_FALSE;
+}
+
 static GLboolean unit_declares_uniform(const glsl_unit_t *u, const char *name, size_t len) {
     if (!u || u->root == GLSL_NO_NODE) return GL_FALSE;
     for (int32_t d = u->ast.nodes[u->root].a; d != GLSL_NO_NODE; d = u->ast.nodes[d].sibling) {
@@ -150,12 +189,15 @@ static int32_t find_main(const glsl_unit_t *u) {
 
 GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *words,
                                       uint32_t capacity, uint32_t *out_count,
-                                      uint32_t *out_vgprs, uint32_t *out_user_sgprs, char *log,
-                                      size_t log_size) {
+                                      uint32_t *out_vgprs, uint32_t *out_user_sgprs,
+                                      uint32_t *out_input_ena, char *log, size_t log_size) {
     if (log && log_size) log[0] = '\0';
     if (out_count) *out_count = 0u;
     if (out_vgprs) *out_vgprs = 0u;
     if (out_user_sgprs) *out_user_sgprs = 0u;
+    /* The barycentrics whatever happens, so a caller that ignores a failure still configures a
+     * stage the fixed-function shaders can run in. */
+    if (out_input_ena) *out_input_ena = GL_PS_INPUT_PERSP_CENTER;
     if (!p || !p->linked || !words) {
         log_say(log, log_size, "no linked fragment stage to compile", 0, 0);
         return GL_FALSE;
@@ -256,8 +298,14 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
      * which in turn is where the SPI puts the primitive mask. The draw path reads the answer
      * back off the program (`hw_ps_user_sgprs`) rather than working it out a second time, so
      * the shader and the register that feeds it cannot come to different conclusions. */
-    const GLboolean takes_block = (GLboolean)(tex_sets > 0 || p->value_floats > 0);
+    /* **`gl_FragCoord` needs the block too**, for the viewport height that flips its y - so it
+     * joins the two things that already decide whether this shader is handed one. */
+    const GLboolean wants_fragcoord = unit_mentions(fs, "gl_FragCoord", 12u);
+    const GLboolean takes_block =
+        (GLboolean)(tex_sets > 0 || p->value_floats > 0 || wants_fragcoord);
     const uint32_t user_sgprs = takes_block ? 2u : 0u;
+    const uint32_t input_ena =
+        GL_PS_INPUT_PERSP_CENTER | (wants_fragcoord ? GL_PS_INPUT_POS_XYZW : 0u);
 
     /* **`m0` first, because every interpolation reads it** - and because a shader that skips it
      * still runs, still exports, and draws a surface speckled with another primitive's
@@ -280,6 +328,11 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX16,
                              GL_PS_UNIFORM_SGPR_BASE + (uint32_t)base, 0u,
                              OOPS_GL_GL2_UNIFORM_AT + (uint32_t)base * 4u);
+        }
+        /* The draw's constants, under the one wait below with everything else. */
+        if (wants_fragcoord) {
+            glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX4, GL_PS_DRAWCONST_SGPR_BASE, 0u,
+                             OOPS_GL_GL2_DRAWCONST_AT);
         }
         glsl_emit_s_waitcnt_lgkm(&code);
     }
@@ -324,6 +377,38 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         for (int c = 0; c < home.count; c++) {
             glsl_emit_vop1(&code, GLSL_VOP1_MOV_B32, home.base + (uint32_t)c,
                            glsl_sgpr(GL_PS_UNIFORM_SGPR_BASE + (uint32_t)(u->offset + c)));
+        }
+    }
+
+    /* **`gl_FragCoord`, copied out of the registers the SPI filled and into the allocator's.**
+     *
+     * x, z and w are the hardware's values. **y is not**: GL measures `gl_FragCoord.y` from the
+     * bottom of the window and the hardware hands down the row from the top, so this is
+     * `height - y`. The payload's polygon stipple is the in-tree witness - `gl_ps_patch_stipple`
+     * rotates its mask for the window height precisely because the two count opposite ways, and
+     * a shader that skipped the flip would draw every gradient upside down.
+     *
+     * Copied rather than used where they lie, because v4 and v5 are also the export registers:
+     * the epilogue writes them last, so reading them in place would work and would be one
+     * reordering away from not working. */
+    if (ok && wants_fragcoord) {
+        const glsl_value_t fc = glsl_gen_declare_input(gen, "gl_FragCoord", 12u, GLSL_TYPE_VEC4);
+        if (fc.count != 4) {
+            log_say(log, log_size, gen->error ? gen->error : "gl_FragCoord has no register", 0,
+                    0);
+            ok = GL_FALSE;
+        } else {
+            glsl_emit_mov(&code, fc.base + 0u, GL_PS_FRAGPOS_VGPR + 0u);
+            /* **`v_sub_f32` straight**, not through `glsl_emit_sub_f32`: that helper puts its
+             * first operand through `glsl_vgpr`, and this one is a scalar register. VOP2's
+             * `src0` is the nine-bit operand field that takes either, while `vsrc1` is a VGPR
+             * number and nothing else - so the height has to be the first operand, which is
+             * also the order the subtraction wants. */
+            glsl_emit_vop2(&code, GLSL_VOP2_SUB_F32, fc.base + 1u,
+                           glsl_sgpr(GL_PS_DRAWCONST_SGPR_BASE + OOPS_GL_GL2_DC_VIEWPORT_H),
+                           GL_PS_FRAGPOS_VGPR + 1u);
+            glsl_emit_mov(&code, fc.base + 2u, GL_PS_FRAGPOS_VGPR + 2u);
+            glsl_emit_mov(&code, fc.base + 3u, GL_PS_FRAGPOS_VGPR + 3u);
         }
     }
 
@@ -475,6 +560,7 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
          * of the file this shader touches. */
         if (out_vgprs) *out_vgprs = gen->high_water;
         if (out_user_sgprs) *out_user_sgprs = user_sgprs;
+        if (out_input_ena) *out_input_ena = input_ena;
     }
     gl_heap_free(sema);
     gl_heap_free(gen);
