@@ -212,10 +212,29 @@ worth not breaking.
 **GLU does not.** `src/gl/gl_glu.c` reaches into oops-gl for `gl_sin`, `gl_sqrt`,
 `gl_pixel_transfer_rgbaf` and more, and those live in files that between them define forty `gl*`
 entry points - linking them beside Mesa would put a second `glMatrixMode` in the binary. So a
-Mesa-linked title currently **cannot use this SDK's GLU**, including `gluNewQuadric` and the
-`glutSolid*` shapes built on it. Filed as `REQ-20260922T0940Z-5c17`; until it lands, a title that
-needs them carries its own, and `oops-apps/src/oops-titles/mesa-demos/shim/` shows what that
-costs.
+Mesa-linked title currently **cannot use this SDK's GLU**. Filed as `REQ-20260922T0940Z-5c17`;
+until it lands, a title that needs it carries its own, and
+`oops-apps/src/oops-titles/mesa-demos/shim/` shows what that costs.
+
+**Ten of the GLUT shapes go down with it**, which is not obvious from the name of the header they
+are declared in. `glut.c` is otherwise backend-agnostic, but these reach outside it:
+
+| shape | needs | 
+|---|---|
+| `glutSolidSphere`, `glutWireSphere`, `glutSolidCone`, `glutWireCone` | `gluNewQuadric`, `gluQuadricDrawStyle`, `gluQuadricNormals`, `gluSphere`, `gluCylinder`, `gluDeleteQuadric` |
+| `glutSolidTorus`, `glutWireTorus` | `gl_sin`, `gl_cos` |
+| `glutSolid`/`Wire` `Tetrahedron`, `Octahedron`, `Icosahedron`, `Dodecahedron` | `gl_sqrt` |
+
+Eight symbols. The cube and the teapot need none of them and work unchanged - they are arithmetic
+and a table respectively, and `GLU_FILL`/`GLU_LINE` elsewhere in the file are header constants,
+not calls. `mesa-demos`' shim supplies all eight in two small files; the trig three are one line
+each onto `libm`, and the quadrics are a transcription of a specified tessellation.
+
+**Get the sphere's normals right if you write your own.** `cubemap` on hardware on 2026-09-22 is
+the reason this paragraph exists: `GL_REFLECTION_MAP_ARB` and `GL_SPHERE_MAP` derive their texture
+coordinate from the *normal*, so a quadric with correct positions and absent normals draws a
+correctly-shaped object that reflects nothing - and that reads as a cube-map failure rather than a
+geometry one. For a unit sphere the normal is the position, so there is no excuse.
 
 **A requested window size is a hint.** `glutInitWindowSize` is a request to a window manager and
 there is not one. The Mesa backend opens the display at its own extent when the requested size
@@ -275,6 +294,19 @@ That makefile also makes itself a prerequisite of the ELF, which it was not befo
 ELF depends on its sources, not on the file that lists them, so adding a source did not relink
 what was already built - and the check then answered about the *previous* build, which is how a
 fix that had worked looked like it had not.
+
+**Know what that check cannot see: a stub satisfies it completely.** It asks whether every name
+is *defined*, and a function that returns immediately is defined. So the moment you paper over a
+missing dependency with a no-op - the obvious move when you are porting and want to get to a
+first frame - you have bought a clean build and a silent wrong answer, and you have bought it
+from the one check that was protecting you.
+
+`mesa-demos` did exactly this. Its GLU quadrics began as no-ops that logged their own absence,
+on the reasoning that a shape drawn wrong is worse than a shape not drawn. `cubemap` then linked,
+passed the check, ran on hardware and drew a perfect environment around an invisible sphere.
+A no-op that *says so* is the mitigation - that log line is what turned twenty minutes of
+suspecting cube mapping into one look at the console output - and it is a mitigation, not a fix.
+If you stub something, make it talk.
 
 This is not hypothetical, and not once. `glut-demo` was built with `-Werror` against these
 headers before `libc.c` was in any source list: it linked without a single diagnostic and left
