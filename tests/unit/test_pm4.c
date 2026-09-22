@@ -1590,6 +1590,75 @@ static void test_pm4_gl_a_discarding_shader_sets_kill_enable(void) {
   oops_display_close(disp);
 }
 
+/* **RB+ has to be programmed, not inherited.**
+ *
+ * This part has RB+ (`rbplus_allowed` for every `gfx_level >= GFX10_3`,
+ * `ac_gpu_info.c:1122`), which is a second description of the blend in five registers beside
+ * `CB_BLEND0_CONTROL`. radeonsi writes all of them on every framebuffer change; oops-gl wrote
+ * none, so a draw blended under whatever the previous process had left in the context - which
+ * on a console is nobody's idea of a default.
+ *
+ * Zero is radeonsi's own off switch rather than a shrug: `OPT_COMB_NONE` in both combine
+ * fields is what it writes to get RB+ out of the way, and with the combine disabled the
+ * `SRC_OPT`/`DST_OPT` fields are not read - which is what makes the all-zero word safe even
+ * though `PRESERVE_NONE_IGNORE_ALL` happens to be zero too.
+ *
+ * The test is that they are *written*. Inheriting the right value by luck on one console is the
+ * failure this is here to stop. */
+static void test_pm4_gl_rbplus_blend_opt_is_written_off(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[8192];
+  static _Alignas(256) uint8_t payload[0x20000];
+  static _Alignas(256) uint8_t vbo[16384];
+  static _Alignas(64) uint32_t fence[4] = {0x11111111u};
+  static _Alignas(64) uint32_t canary[16];
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 8192;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  /* Blending on, and the two equations different - the shape that made green follow alpha on
+   * hardware, so this is the state the registers most need to be right for. */
+  glEnable(GL_BLEND);
+  glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_ADD);
+  glBlendFunc(GL_ONE, GL_ONE);
+  pm4_draw_plain_quad();
+
+  /* 0x1d5..0x1d9: SX_PS_DOWNCONVERT, _BLEND_OPT_EPSILON, _BLEND_OPT_CONTROL, and MRT0/MRT1's
+   * blend opt. Every one written, and written as zero. */
+  for (uint32_t reg = 0x1d5u; reg <= 0x1d9u; reg++) {
+    GLboolean seen = GL_FALSE;
+    for (uint32_t i = 0; i + 2 < ctx->dcb_words; i++) {
+      if (dcb[i] == 0xc0016900u && dcb[i + 1] == reg) {
+        ASSERT_EQ(dcb[i + 2], 0x00000000u);
+        seen = GL_TRUE;
+      }
+    }
+    if (!seen) printf("\n    RB+ register 0x%x was never written\n", (unsigned)reg);
+    ASSERT_EQ(seen, GL_TRUE);
+  }
+
+  glDisable(GL_BLEND);
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 /* **`SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS` decides what kind of number the face register is, and
  * it has to be clear.**
  *
@@ -5036,6 +5105,7 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_depth_range_changes_within_a_frame);
   RUN_TEST(test_pm4_gl_logic_op_and_blend_constant_reach_their_registers);
   RUN_TEST(test_pm4_gl_vertex_ring_submits_before_it_wraps);
+  RUN_TEST(test_pm4_gl_rbplus_blend_opt_is_written_off);
   RUN_TEST(test_pm4_gl_baryc_cntl_delivers_a_float_face);
   RUN_TEST(test_pm4_gl_a_discarding_shader_sets_kill_enable);
   RUN_TEST(test_pm4_gl_alpha_test_sets_kill_enable);

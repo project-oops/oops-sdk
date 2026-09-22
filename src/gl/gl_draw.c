@@ -2279,6 +2279,38 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
          * came out the cyan GL asks for and its front did not. Unbound it stays zero, which is
          * blending off, which is what one colour target wants. */
         {0x1e1u, 0x00000000u}, /* CB_BLEND1_CONTROL (patched: colour 0's, or 0 when unbound) */
+        /*
+         * **RB+, switched off rather than left to whatever was in the context.**
+         *
+         * This part has RB+ - `rbplus_allowed` is true for every `gfx_level >= GFX10_3`
+         * (`ac_gpu_info.c:1122`) - and RB+ is a *second* description of the blend, held in five
+         * registers beside `CB_BLEND0_CONTROL`. It lets the colour block take shortcuts: skip a
+         * source it has been told will be ignored, or combine at a narrower precision than the
+         * export. radeonsi programs the lot on every framebuffer change
+         * (`si_state.c:162`, `:543`), and until now oops-gl programmed none of it - so a draw
+         * blended under whatever the previous process had left in these, which on a console is
+         * not zero and is not ours.
+         *
+         * **Zero is not "don't care", it is radeonsi's own off switch.** `COLOR_COMB_FCN` and
+         * `ALPHA_COMB_FCN` of `OPT_COMB_NONE` are what it writes when it wants RB+ out of the
+         * way - for dual-source blending, and on gfx11 for alpha-to-coverage
+         * (`si_state.c:490`, `:537`) - and with the combine disabled the `SRC_OPT`/`DST_OPT`
+         * fields stop being read, which is what makes the all-zero word safe despite
+         * `PRESERVE_NONE_IGNORE_ALL` also being zero. `SX_PS_DOWNCONVERT` zero is no
+         * downconversion, which is the honest description of a 32-bit export.
+         *
+         * **Suspected, not proven, in `separate-blend-eq`.** That check measures green taking
+         * the *alpha* equation whenever `SEPARATE_ALPHA_BLEND` is set - on hardware, twice, and
+         * once through obSCEne's own fixture (`166-agc/compiled-ps` arm12, 2026-09-23). A blend
+         * that behaved that way generally would break every application that ever called
+         * `glBlendFuncSeparate`, so the register pair is being read correctly and something
+         * else is deciding the channel. These five are the something else this path never set.
+         */
+        {0x1d5u, 0x00000000u}, /* SX_PS_DOWNCONVERT: none */
+        {0x1d6u, 0x00000000u}, /* SX_BLEND_OPT_EPSILON */
+        {0x1d7u, 0x00000000u}, /* SX_BLEND_OPT_CONTROL */
+        {0x1d8u, 0x00000000u}, /* SX_MRT0_BLEND_OPT: OPT_COMB_NONE both halves */
+        {0x1d9u, 0x00000000u}, /* SX_MRT1_BLEND_OPT */
         {0x200u, 0x00000000u}, /* DB_DEPTH_CONTROL (patched) */
         {0x201u, 0x00010000u}, /* DB_EQAA */
         {0x203u, 0x00000010u}, /* DB_SHADER_CONTROL: EARLY_Z_THEN_LATE_Z */
