@@ -3459,12 +3459,48 @@ static void test_pm4_gl_stencil_reaches_its_registers(void) {
   ASSERT_EQ(dc & 1u, 1u);               /* STENCIL_ENABLE */
   ASSERT_EQ((dc >> 8) & 7u, 2u);        /* STENCILFUNC FRAG_EQUAL */
   ASSERT_EQ(dc & 2u, 0u);               /* the depth test stays off */
-  ASSERT_EQ((dc >> 7) & 1u, 0u);        /* BACKFACE_ENABLE clear: one state for both faces */
+  /* **BACKFACE_ENABLE is set, and the back fields carry the back state.** `glStencilFunc` and
+   * `glStencilOp` write *both* faces - that is what the non-separate entry points mean - so the
+   * two halves are identical here and the register values below are unchanged by it. What the
+   * bit buys is the separate arm further down, where they differ. */
+  ASSERT_EQ((dc >> 7) & 1u, 1u);
+  ASSERT_EQ((dc >> 20) & 7u, 2u);       /* STENCILFUNC_BF, the same FRAG_EQUAL */
   /* fail KEEP 0, zpass REPLACE_TEST 3, zfail ADD_CLAMP 5; the back-face copies at +12. */
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x10bu), 0x00530530u);
   /* ref 1, value mask 0x0f, write mask 0x3c, STENCILOPVAL 1 - front and back. */
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x10cu), 0x013c0f01u);
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x10du), 0x013c0f01u);
+
+  /* **The two faces apart**, which is GL 2.0's `glStencilOpSeparate` and the whole reason the
+   * back fields exist. The shadow-volume idiom is the case: a front face increments where it
+   * passes and a back face decrements, so the stencil returns to where it started over a
+   * rectangle covered by both. A path that copied the front state into the back fields
+   * increments twice and leaves 2 - which is what gl2-probe's `separate-stencil` measured on
+   * hardware before this. */
+  /* The separate entry points are GL 2.0's and `gl_require_version` gates them, so this context
+   * has to say what it targets first - otherwise the calls below are refused with
+   * GL_INVALID_OPERATION and the registers keep the values above, which is what a first run of
+   * this arm measured. */
+  glContextSetVersion(2, 0);
+  glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR);
+  glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR);
+  glStencilFuncSeparate(GL_FRONT, GL_ALWAYS, 0, 0xffu);
+  glStencilFuncSeparate(GL_BACK, GL_NEVER, 0, 0xffu);
+  TRI();
+  {
+    const uint32_t sc = last_context_reg(dcb, ctx->dcb_words, 0x10bu);
+    /* zpass INCR is ADD_CLAMP 5 at bits 7:4; the back's DECR is SUB_CLAMP 6 at 19:16. */
+    ASSERT_EQ((sc >> 4) & 0xfu, 5u);
+    ASSERT_EQ((sc >> 16) & 0xfu, 6u);
+    ASSERT_TRUE(((sc >> 4) & 0xfu) != ((sc >> 16) & 0xfu));
+    const uint32_t dc2 = last_context_reg(dcb, ctx->dcb_words, 0x200u);
+    ASSERT_EQ((dc2 >> 7) & 1u, 1u);      /* BACKFACE_ENABLE, or the back fields are ignored */
+    ASSERT_EQ((dc2 >> 8) & 7u, 7u);      /* front GL_ALWAYS */
+    ASSERT_EQ((dc2 >> 20) & 7u, 0u);     /* back GL_NEVER - and not a copy of the front */
+  }
+  glStencilFunc(GL_EQUAL, 1, 0x0f);
+  glStencilOp(GL_KEEP, GL_INCR, GL_REPLACE);
+  TRI();
   /* Bound once a frame: a second draw sets the operations again but not the surface. */
   const uint32_t before = ctx->dcb_words;
   glStencilOp(GL_ZERO, GL_INVERT, GL_DECR_WRAP);

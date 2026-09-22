@@ -2917,10 +2917,22 @@ static inline uint32_t gl_compute_db_depth_control(const gl_context_t *ctx) {
     /* **The stencil test** (since 2026-09-19; seen on hardware 2026-09-20): STENCIL_ENABLE (bit 0) and
      * STENCILFUNC (bits 8-10), gfx103.json's DB_DEPTH_CONTROL fields, radeonsi's programming
      * (si_state.c:1418-1428). The compare functions are CompareFrag's, in GL's own order, so the
-     * depth function's mapping serves. BACKFACE_ENABLE stays clear: GL 1.x has one stencil state,
-     * which the hardware then applies to both faces. */
+     * depth function's mapping serves.
+     *
+     * **BACKFACE_ENABLE is set, and the back face gets its own function** (since 2026-09-22).
+     * It stayed clear while GL 1.x was the only caller, because one stencil state applied to
+     * both faces is what 1.x has - but `glStencilFuncSeparate` and `glStencilOpSeparate` are
+     * GL 2.0's, the context has carried the back state all along, and the software path has
+     * always read it. Leaving the bit clear made the hardware apply the front state to both:
+     * gl2-probe's `separate-stencil` draws the shadow-volume idiom, one front face incrementing
+     * and one back decrementing over the same rectangle, and got 2 where the stencil should
+     * have returned to 0.
+     *
+     * `STENCILFUNC_BF` is bits 22:20 (`R_028800`), and the back state mirrors the front when a
+     * program never calls the separate entry points - `glStencilFunc` writes both. */
     if (gl_hw_stencil_on(ctx)) {
-        v |= 1u | (gl_depth_func_to_zfunc(ctx->stencil_func) << 8);
+        v |= 1u | (gl_depth_func_to_zfunc(ctx->stencil_func) << 8) |
+             (1u << 7) | (gl_depth_func_to_zfunc(ctx->stencil_back_func) << 20);
     }
     return v;
 }

@@ -4083,19 +4083,36 @@ vertices_written:
             /* DB_STENCIL_CONTROL (0x10B), DB_STENCILREFMASK (0x10C), DB_STENCILREFMASK_BF (0x10D)
              * - context registers 0x2842C, 0x28430, 0x28434 in gfx103.json - consecutive, so one
              * packet. The fields are gfx103.json's; STENCILOPVAL 1 is radeonsi's, the step the
-             * increment and decrement operations take (si_state.c:1325-1333). The back-face
-             * copies match the front: GL 1.x has one stencil state. */
+             * increment and decrement operations take (si_state.c:1325-1333).
+             *
+             * **The back face carries its own operations and its own reference** (since
+             * 2026-09-22). These were copies of the front while GL 1.x was the only caller,
+             * which is what 1.x has - but `glStencilOpSeparate` is GL 2.0's and the context has
+             * carried the back state all along. The shadow-volume idiom is the case that shows
+             * it: one front face incrementing and one back decrementing over the same
+             * rectangle should leave the stencil where it started, and two copies of the front
+             * state leave 2.
+             *
+             * `_BF` sits at 12, 16 and 20 in `R_02842C`, which is the front's layout shifted by
+             * twelve - so the shift is still right and only the values were wrong. */
             const uint32_t ops = gl_hw_stencil_op(ctx->stencil_fail) |
                                  (gl_hw_stencil_op(ctx->stencil_zpass) << 4) |
                                  (gl_hw_stencil_op(ctx->stencil_zfail) << 8);
+            const uint32_t ops_bf = gl_hw_stencil_op(ctx->stencil_back_fail) |
+                                    (gl_hw_stencil_op(ctx->stencil_back_zpass) << 4) |
+                                    (gl_hw_stencil_op(ctx->stencil_back_zfail) << 8);
             const uint32_t refmask = ((uint32_t)ctx->stencil_ref & 0xffu) |
                                      ((ctx->stencil_value_mask & 0xffu) << 8) |
                                      ((ctx->stencil_writemask & 0xffu) << 16) | (1u << 24);
+            const uint32_t refmask_bf =
+                ((uint32_t)ctx->stencil_back_ref & 0xffu) |
+                ((ctx->stencil_back_value_mask & 0xffu) << 8) |
+                ((ctx->stencil_back_writemask & 0xffu) << 16) | (1u << 24);
             *dw++ = 0xc0036900u; /* PACKET3_SET_CONTEXT_REG, three data dwords */
             *dw++ = 0x10bu;
-            *dw++ = ops | (ops << 12);
+            *dw++ = ops | (ops_bf << 12);
             *dw++ = refmask;
-            *dw++ = refmask;
+            *dw++ = refmask_bf;
         }
 
         *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmDB_DEPTH_CONTROL (0x200) */
