@@ -1452,17 +1452,28 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
     }
 
     const glsl_type_t ret = glsl_type_from_token(fn->type_tok);
-    if (!is_generated(ret)) {
-        return gen_fail(g, "a function is generated only when it returns a float, a vector, a "
-                           "matrix or a bool - a void one would need its effects to be its "
-                           "result", node);
+    const GLboolean is_void = (GLboolean)(ret == GLSL_TYPE_VOID);
+    if (!is_void && !is_generated(ret)) {
+        return gen_fail(g, "a function is generated only when it returns void, a float, a "
+                           "vector, a matrix or a bool", node);
     }
 
-    /* **The body's last statement has to be the return**, checked before a single instruction is
-     * emitted so a refusal leaves nothing half-generated behind it. */
-    const int32_t last = gen_last_stmt(g, fn->c);
-    if (last == GLSL_NO_NODE || g->ast->nodes[last].kind != GLSL_NODE_RETURN ||
-        g->ast->nodes[last].a == GLSL_NO_NODE) {
+    /* **A value-returning body has to end in its return**, checked before a single instruction
+     * is emitted so a refusal leaves nothing half-generated behind it. A `void` body may end in
+     * anything, including a bare `return;` - which is generated as the nothing it is, since it
+     * is the last statement and there is nothing after it to skip. */
+    int32_t last = gen_last_stmt(g, fn->c);
+    if (is_void) {
+        if (last != GLSL_NO_NODE && g->ast->nodes[last].kind == GLSL_NODE_RETURN &&
+            g->ast->nodes[last].a != GLSL_NO_NODE) {
+            return gen_fail(g, "a void function returns a value", node);
+        }
+        /* A trailing bare `return;` is skipped rather than generated; anything else is body. */
+        if (last != GLSL_NO_NODE && g->ast->nodes[last].kind != GLSL_NODE_RETURN) {
+            last = GLSL_NO_NODE; /* nothing to hold back - every statement is generated */
+        }
+    } else if (last == GLSL_NO_NODE || g->ast->nodes[last].kind != GLSL_NODE_RETURN ||
+               g->ast->nodes[last].a == GLSL_NO_NODE) {
         return gen_fail(g, "a function is generated only when its body ends in `return <expr>;` "
                            "- an early or missing return would need the exec mask carried "
                            "through the statements after it", node);
@@ -1481,29 +1492,44 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
         argc++;
     }
 
-    const glsl_value_t out = gen_alloc(g, glsl_type_components(ret), node);
-    if (is_bad(out)) return out;
+    glsl_value_t out; out.base = 0u; out.count = 0;
+    if (!is_void) {
+        out = gen_alloc(g, glsl_type_components(ret), node);
+        if (is_bad(out)) return out;
+    }
 
     const int vars_before = g->var_count;
     glsl_scope_push(g->sema);
     g->inline_depth++;
 
-    /* **A parameter is a copy**, which is what `in` means and is also what makes a body free to
-     * assign to it. Nothing here writes back, so `out` and `inout` are refused below rather than
-     * silently behaving like `in`. */
+    /* **Every parameter is a copy, which is what GLSL says and not an implementation detail.**
+     * An `out` or `inout` is passed by value and copied back at the return - never by reference
+     * - so `swap(p, p)` leaves `p` alone rather than aliasing, and a body assigning to an `in`
+     * parameter changes nothing the caller can see.
+     *
+     * The copy-back needs the argument to be somewhere to write, which is the same question an
+     * assignment asks, so `gen_place_of` answers it. Resolved here and applied after the body:
+     * a place taken before the parameters shadow anything is the caller's. */
     int bound = 0;
+    gen_place_t writeback[GEN_MAX_ARGS];
+    glsl_value_t writeback_from[GEN_MAX_ARGS];
+    int writebacks = 0;
+    int32_t argn[GEN_MAX_ARGS];
+    {
+        int k = 0;
+        for (int32_t a = first_arg; a != GLSL_NO_NODE && k < GEN_MAX_ARGS;
+             a = g->ast->nodes[a].sibling) {
+            argn[k++] = a;
+        }
+    }
     for (int32_t p = fn->b; p != GLSL_NO_NODE; p = g->ast->nodes[p].sibling) {
         const glsl_node_t *pn = &g->ast->nodes[p];
         if (bound >= argc) {
             (void)gen_fail(g, "this call passes fewer arguments than the function takes", node);
             break;
         }
-        if (pn->qualifier == GLSL_TOK_KW_OUT || pn->qualifier == GLSL_TOK_KW_INOUT) {
-            (void)gen_fail(g, "an `out` or `inout` parameter is not generated; only a value "
-                              "parameter is, because nothing here writes back to the caller",
-                           node);
-            break;
-        }
+        const GLboolean writes_back = (GLboolean)(pn->qualifier == GLSL_TOK_KW_OUT ||
+                                                  pn->qualifier == GLSL_TOK_KW_INOUT);
         const glsl_type_t pt = glsl_type_from_token(pn->type_tok);
         if (!is_generated(pt)) {
             (void)gen_fail(g, "only float, vec, mat and bool parameters are generated", node);
@@ -1516,8 +1542,28 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
         }
         const glsl_value_t home = gen_alloc(g, argv[bound].count, node);
         if (is_bad(home)) break;
+        /* An `out` parameter starts undefined by the language's own rule, but copying the
+         * argument in costs one move and makes a body that reads before writing behave the way
+         * the reference does rather than reading whatever the allocator last held. */
         for (int c = 0; c < home.count; c++) {
             glsl_emit_mov(g->code, home.base + (uint32_t)c, argv[bound].base + (uint32_t)c);
+        }
+        if (writes_back) {
+            /* **The argument has to be a place**, which is the same question an assignment
+             * asks. A literal or an expression is not one, and GLSL refuses it - this says so
+             * from the side that would otherwise write the value into a temporary and drop it. */
+            if (!gen_place_of(g, argn[bound], &writeback[writebacks])) {
+                (void)gen_fail(g, "an `out` or `inout` argument has to be something that can be "
+                                  "assigned to", node);
+                break;
+            }
+            if (writeback[writebacks].count != home.count) {
+                (void)gen_fail(g, "an `out` argument is a different width from its parameter",
+                               node);
+                break;
+            }
+            writeback_from[writebacks] = home;
+            writebacks++;
         }
         if (!gen_declare(g, pn->text, pn->length, pt, home, node)) break;
         if (!glsl_declare(g->sema, pn->text, pn->length, pt, GL_FALSE)) {
@@ -1538,7 +1584,7 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
             (void)glsl_gen_stmt(g, s);
         }
     }
-    if (!g->error) {
+    if (!g->error && !is_void) {
         const uint32_t mark = gen_mark(g);
         const glsl_value_t rv = gen_expr(g, g->ast->nodes[last].a);
         if (!is_bad(rv)) {
@@ -1552,6 +1598,19 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
             }
         }
         gen_release(g, mark);
+    }
+
+    /* **The copy-back, after the body and before the parameters go out of scope.**
+     *
+     * This is what makes `out` and `inout` pass-by-value-and-copy-back rather than
+     * pass-by-reference, which is the language's rule and not a detail: with references,
+     * `swap(p, p)` aliases and leaves both unchanged; with copies it writes `p` twice and the
+     * second write wins. The places were resolved in the caller's scope before the parameters
+     * shadowed anything, so they name the caller's registers. */
+    for (int i = 0; !g->error && i < writebacks; i++) {
+        for (int c = 0; c < writeback[i].count; c++) {
+            glsl_emit_mov(g->code, writeback[i].reg[c], writeback_from[i].base + (uint32_t)c);
+        }
     }
 
     g->inline_depth--;
@@ -1829,7 +1888,12 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
             if (n->a == GLSL_NO_NODE) return GL_TRUE; /* the empty statement */
             const uint32_t mark = gen_mark(g);
             glsl_value_t v = gen_expr(g, n->a);
-            if (is_bad(v)) return GL_FALSE;
+            /* **A void call produces no value, and that is not a failure.** `is_bad` is a
+             * width of zero, which a call to a `void` function has by definition - so the error
+             * flag is what says whether anything went wrong here, and a statement is the one
+             * place a result of no width is the expected outcome. */
+            (void)v;
+            if (g->error) return GL_FALSE;
             gen_release(g, mark);
             return GL_TRUE;
         }

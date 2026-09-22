@@ -2919,6 +2919,35 @@ static void test_gl2_user_functions_are_inlined(void) {
     ASSERT_NEAR(o[1], y * 2.0f, 1e-6f);
     ASSERT_NEAR(o[2], (z + w) * 2.0f, 1e-6f);
 
+    /* **`inout` is pass-by-value-and-copy-back, not pass-by-reference.** The distinction is the
+     * language's and it is visible: with references `swap(p, p)` aliases and leaves `p` alone;
+     * with copies it writes `p` twice and the second write wins. The swap below is the ordinary
+     * case, and the aliased call after it is the one that tells the two apart. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void swap(inout float a, inout float b) { float t = a; a = b; b = t; }\n"
+                    "void main() {\n"
+                    "  float p = 1.0;\n"
+                    "  float q = 0.0;\n"
+                    "  swap(p, q);\n"
+                    "  gl_FragColor = vec4(p, q, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0f, 1e-6f);
+    ASSERT_NEAR(o[1], 1.0f, 1e-6f);
+
+    /* An `out` parameter, and a void function called as a statement - which produces no value,
+     * and is the one place a result of no width is the expected outcome rather than a failure. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "void twice(float a, out float r) { r = a + a; }\n"
+                    "void main() {\n"
+                    "  float d = 0.0;\n"
+                    "  twice(vin.x, d);\n"
+                    "  gl_FragColor = vec4(d, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], x + x, 1e-6f);
+
     /* **Not tested here: a user function that hides a built-in of the same name.** GLSL 1.10
      * allows it and the generator would inline the user's, because it looks for a definition in
      * this shader before it reaches the built-in table. The front end does not get that far -
@@ -2943,16 +2972,10 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
          "float f(float a) { if (a > 0.0) { return 1.0; } return 0.0; }\n"
          "void main() { gl_FragColor = vec4(f(vin.x), 0.0, 0.0, 1.0); }\n",
          "return"},
-        /* Nothing writes back to the caller, so `out` is refused rather than treated as `in`. */
-        {"varying vec4 vin;\n"
-         "float f(float a, out float b) { b = a; return a; }\n"
-         "void main() { float q; gl_FragColor = vec4(f(vin.x, q), 0.0, 0.0, 1.0); }\n",
-         "out"},
-        /* A void function's effects would have to be its result. */
-        {"varying vec4 vin;\n"
-         "void f(float a) { }\n"
-         "void main() { f(vin.x); gl_FragColor = vec4(1.0); }\n",
-         "void"},
+        /* Not here: an `out` argument that is not a place. The back end checks it, because the
+         * copy-back has to have somewhere to write - but the semantic stage owns l-value
+         * validity and refuses `f(x, q.xx)` and `f(x, 1.0)` before the back end sees either, so
+         * no shader can carry one this far. */
         /* Recursion is invalid GLSL; what matters is that it ends in a message. */
         {"varying vec4 vin;\n"
          "float f(float a) { return f(a); }\n"
