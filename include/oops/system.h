@@ -205,6 +205,26 @@ int oops_system_escape_sandbox(void);
  */
 __attribute__((noreturn)) void oops_system_park_until_closed(void);
 
+/*
+ * Cooperate with the dashboard's "Close Application".
+ *
+ * The system does not force a big-app down without warning: it sends the process a signal first
+ * (SIGTERM, with SIGINT/SIGHUP as siblings), and only kills it if it does not quiesce. A title
+ * that ignores the signal keeps submitting GPU work and is killed mid-frame - which surfaces as a
+ * crash. `seashell` closes cleanly because it catches the signal and stops; this is that pattern,
+ * shared.
+ *
+ * Call `oops_system_install_close_handler()` once at start-up, then check
+ * `oops_system_close_requested()` each frame and leave the render loop when it returns non-zero -
+ * stop drawing, tear the GL objects down, and either return (a freestanding title with a caller
+ * frame) or park (a hosted title that cannot). The kill then lands on a quiesced process.
+ *
+ * The handler needs the platform's `sigaction`; where it is unavailable the install is a no-op and
+ * the request flag simply never sets, so a caller's loop behaves exactly as it did before.
+ */
+void oops_system_install_close_handler(void);
+int  oops_system_close_requested(void);
+
 #ifdef __cplusplus
 }
 #endif

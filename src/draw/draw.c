@@ -516,3 +516,40 @@ void oops_draw_blit_blend(oops_surface_t *dst, int dx, int dy,
     }
   }
 }
+
+void oops_draw_blit_scaled_blend(oops_surface_t *dst, int dx, int dy, int dw,
+                                 int dh, const oops_surface_t *src, int sx,
+                                 int sy, int sw, int sh) {
+  if (!dst || !dst->pixels || !src || !src->pixels || sw <= 0 || sh <= 0 ||
+      dw <= 0 || dh <= 0)
+    return;
+
+  int x0 = (dx < 0) ? 0 : dx;
+  int y0 = (dy < 0) ? 0 : dy;
+  int x1 = (dx + dw > (int)dst->width) ? (int)dst->width : (dx + dw);
+  int y1 = (dy + dh > (int)dst->height) ? (int)dst->height : (dy + dh);
+  if (x0 >= x1 || y0 >= y1)
+    return;
+
+  for (int y = y0; y < y1; y++) {
+    int src_y = sy + ((y - dy) * sh) / dh;
+    if (src_y < 0)
+      src_y = 0;
+    if (src_y >= (int)src->height)
+      src_y = (int)src->height - 1;
+
+    for (int x = x0; x < x1; x++) {
+      int src_x = sx + ((x - dx) * sw) / dw;
+      if (src_x < 0)
+        src_x = 0;
+      if (src_x >= (int)src->width)
+        src_x = (int)src->width - 1;
+
+      uint32_t s =
+          src->pixels[oops_surf_index(src, (uint32_t)src_x, (uint32_t)src_y)];
+      uint32_t *p =
+          &dst->pixels[oops_surf_index(dst, (uint32_t)x, (uint32_t)y)];
+      *p = oops_src_over(s, *p);
+    }
+  }
+}

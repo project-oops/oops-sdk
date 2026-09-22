@@ -153,6 +153,9 @@ void oops_draw_blit(oops_surface_t *dst, int dx, int dy,
 void oops_draw_blit_blend(oops_surface_t *dst, int dx, int dy,
                           const oops_surface_t *src, int sx, int sy, int sw,
                           int sh);
+void oops_draw_blit_scaled_blend(oops_surface_t *dst, int dx, int dy, int dw,
+                                 int dh, const oops_surface_t *src, int sx,
+                                 int sy, int sw, int sh);
 
 /*
  * Decodes a PNG image from memory into 32bpp ARGB pixels.

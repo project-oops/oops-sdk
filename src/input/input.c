@@ -1,8 +1,24 @@
 #include "oops/input.h"
-#include "oops/keyboard.h" /* oops_input_poll folds the keyboard's buttons in - see it */
+#include "oops/keyboard.h"
 #include "oops/system.h"
 #include "pad_layout.h"
 #include <stddef.h>
+
+/*
+ * The keyboard fold, weakly. `oops_input_poll` merges a keyboard's buttons into port 0 (the
+ * feature `REQ-20260922T2015Z-b4d7` asked for), which means calling into keyboard.c. A *strong*
+ * reference would drag keyboard.c into every title that reads the pad - and silently fault a
+ * hosted title, whose undefined-symbol check is off, on the first poll if it did not link it.
+ *
+ * Weak instead: keyboard.c's definition satisfies it when a title links keyboard.c, and it
+ * resolves to null (and the call below is skipped) when a title does not. So a pad-only title
+ * neither fails to link nor faults, and a title that wants keyboard-as-pad gets it by linking
+ * keyboard.c exactly as before - no per-title source list to keep in step. `oops_keyboard_poll_buttons`
+ * is the one first-party name in `common/app.mk`'s undefined-symbol allow-list for this reason.
+ */
+__attribute__((weak)) uint32_t oops_keyboard_poll_buttons(void) {
+  return 0u;
+}
 
 /* Platform symbols from libScePad and libSceUserService */
 __attribute__((weak)) int scePadInit(void);
@@ -205,7 +221,9 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
    * the bits are the same and OR is idempotent - but the call is now redundant.
    */
   const uint32_t kbd =
-      (port == 0u && s_keyboard_as_pad) ? oops_keyboard_poll_buttons() : 0u;
+      (port == 0u && s_keyboard_as_pad && oops_keyboard_poll_buttons != 0)
+          ? oops_keyboard_poll_buttons()
+          : 0u;
 
   /* Lazy-open port if uninitialized but requested */
   if (s_pad_handles[port] < 0 && (scePadOpen || scePadGetHandle)) {

@@ -1,6 +1,7 @@
 # Build output. The archive is built, not shipped: nothing under build/ is tracked, and a
 # consumer either links what it built here or compiles OOPS_SDK_C_SRCS itself.
 build/
+savedata/
 *.o
 *.a
 *.elf

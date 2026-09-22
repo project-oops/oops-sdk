@@ -4,6 +4,8 @@
 CC := clang
 AR := ar
 
+include $(dir $(lastword $(MAKEFILE_LIST)))toolchain.mk
+
 # Target mode: orbis | neo | prospero | trinity
 # Default: prospero
 TARGET ?= prospero

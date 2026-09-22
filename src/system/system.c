@@ -774,6 +774,51 @@ int oops_system_escape_sandbox(void) {
 __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
 #endif
 
+/*
+ * The dashboard's close signal, caught. The platform's `sigaction` is a weak import here for the
+ * same reason `sceKernelUsleep` above is: a title that does not install the handler must not
+ * acquire a symbol that resolves nowhere. `seashell` proved this exact arrangement closes a
+ * big-app cleanly (`home_main.c`); this is it, shared so every title can cooperate.
+ */
+__attribute__((weak)) int _sigaction(int sig, const void *act, void *oact);
+
+static volatile int s_close_requested = 0;
+
+#ifndef OOPS_HOST_BUILD
+/* Only referenced by the install below, whose body is host-compiled away - so the handler is too,
+ * or a host build at -Werror trips on an unused static function. */
+static void oops_close_signal_handler(int sig) {
+  (void)sig;
+  s_close_requested = 1;
+}
+#endif
+
+void oops_system_install_close_handler(void) {
+#ifndef OOPS_HOST_BUILD
+  if (!oops_symbol_is_resolved((const void *)&_sigaction)) {
+    return;
+  }
+  /*
+   * A `struct sigaction` this platform's kernel accepts: the handler pointer is its first field.
+   * The rest (mask, flags) stays zero, which is the default disposition a plain handler wants.
+   * 32 bytes is comfortably larger than the struct, so the tail is ignored. This is the layout
+   * seashell uses and closes cleanly with.
+   */
+  unsigned char act[32];
+  for (size_t i = 0; i < sizeof(act); i++) {
+    act[i] = 0;
+  }
+  *(void **)(void *)(act + 0) = (void *)(uintptr_t)&oops_close_signal_handler;
+  (void)_sigaction(15 /* SIGTERM */, act, 0);
+  (void)_sigaction(2 /* SIGINT */, act, 0);
+  (void)_sigaction(1 /* SIGHUP */, act, 0);
+#endif
+}
+
+int oops_system_close_requested(void) {
+  return s_close_requested;
+}
+
 void oops_system_park_until_closed(void) {
 #ifndef OOPS_HOST_BUILD
   /*

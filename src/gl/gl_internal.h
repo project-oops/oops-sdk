@@ -47,6 +47,11 @@
 #define OOPS_GL_ATTRIB_STACK_CAPACITY 16
 #define OOPS_GL_CLIENT_ATTRIB_STACK_CAPACITY 16
 #define OOPS_GL_MAX_TEXTURE_OBJECTS 256
+/* Distinct sites that may submit a frame, for the per-site flush census. There are about a
+   dozen; the table has slack so a new one is counted under its own name rather than silently
+   folded into the unnamed remainder. Here rather than beside the other DCB sizes because the
+   context struct below needs it. */
+#define OOPS_GL_FLUSH_SITES 20u
 #define OOPS_GL_MAX_BUFFER_OBJECTS 64
 #define OOPS_GL_MAX_QUERY_OBJECTS 64
 /* GL 2.0's generic vertex attribute slots. 16 is the specification's minimum for
@@ -1340,6 +1345,21 @@ typedef struct gl_context {
      * forever while hundreds more are raised behind it. A count says how many; this says what
      * the latest was, and the two together separate one repeating fault from a scatter. */
     uint32_t hw_gl_error_last;
+    /* **Submits since the last flip, counted per site.**
+     *
+     * The count is the frame's real cost - a submit is a GPU round-trip - and the per-site
+     * breakdown is what makes the answer definitive rather than suggestive. Recording only the
+     * most recent site would sample one flush in a thousand and call it the cause; with a dozen
+     * sites able to submit, that is a guess wearing a measurement's clothes.
+     *
+     * Keyed on the `__func__` pointer, not on the string: every call site in a translation unit
+     * hands over the same literal, so a pointer compare is both correct and cheap enough to sit
+     * on this path. A site beyond the table is counted in `hw_flushes` and named nowhere, which
+     * the report says rather than hides. */
+    uint32_t hw_flushes;
+    const char *hw_flush_site[OOPS_GL_FLUSH_SITES];
+    uint32_t hw_flush_site_n[OOPS_GL_FLUSH_SITES];
+    uint32_t hw_flush_unnamed;
     /* The entry point that raised it, from `__func__` at the call site. A pointer to a string
      * literal in the payload, so it outlives every frame and costs nothing to keep. */
     const char *hw_gl_error_fn;
@@ -3487,7 +3507,14 @@ static inline void gl_compute_scissor(const gl_context_t *ctx, uint32_t fb_w, ui
 /* Rendering pipeline */
 void gl_rasterize_triangle(gl_context_t *ctx, const gl_screen_vertex_t *v0,
                            const gl_screen_vertex_t *v1, const gl_screen_vertex_t *v2);
-void gl_hw_flush(gl_context_t *ctx);
+/* **Which site submitted the frame, by name.** A submit is the expensive thing this layer does -
+ * measured at 548us of GPU round-trip on hardware - and there are a dozen places that can cause
+ * one: a full command buffer, a full vertex ring, a full descriptor ring, a query read, a
+ * pixel-shader payload edit, a flip. A port running at 1.8fps with ~990 submits per displayed
+ * frame is being flushed by one of them, over and over, and a count alone cannot say which.
+ * Same reasoning, and the same `__func__`-at-the-call-site trick, as `gl_record_error`. */
+void gl_hw_flush_at(gl_context_t *ctx, const char *fn);
+#define gl_hw_flush(ctx) gl_hw_flush_at((ctx), __func__)
 /* An occlusion query's two ends on the hardware path (gl_draw.c). `gl_hw_query_begin` clears the
  * counter slots and arms the draw path, which takes the begin snapshot at the first draw that has
  * a depth surface bound - never before one, because ZPASS_ENABLE with no depth target stalls the

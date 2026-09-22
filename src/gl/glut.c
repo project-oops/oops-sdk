@@ -32,6 +32,7 @@
 #include "oops/input.h"
 #include "oops/keyboard.h"
 #include "oops/mouse.h"
+#include "oops/system.h"
 #include "oops/time.h"
 
 #include <string.h> /* strstr, for glutExtensionSupported's whole-word match */
@@ -125,6 +126,7 @@ int glutCreateWindow(const char *title) {
     oops_keyboard_init();
     oops_mouse_init();
     oops_input_init();
+    oops_system_install_close_handler(); /* so glutMainLoop can end on a dashboard Close */
     return 1;
 }
 
@@ -433,6 +435,10 @@ void glutMainLoop(void) {
     if (g.visibility) g.visibility(GLUT_VISIBLE);
     g.redisplay = 1;
     while (g.running) {
+        /* Cooperate with the dashboard's Close (oops/system.h): end the loop so glutMainLoop
+         * returns and the program's own teardown runs, rather than the program being killed
+         * mid-frame. Every GLUT program gets this without a line of its own. */
+        if (oops_system_close_requested()) glutLeaveMainLoop();
         glut_pump_keyboard();
         glut_pump_mouse();
         glut_pump_pad();

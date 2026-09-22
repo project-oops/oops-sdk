@@ -129,9 +129,12 @@ long sys_call(long num, long a1, long a2, long a3, long a4, long a5, long a6) {
   __asm__ volatile("movq %7, %%rax\n"
                    "movq %8, %%r10\n"
                    "callq *%9\n"
+                   "jnc 1f\n"
+                   "negq %%rax\n"
+                   "1:\n"
                    : "=a"(ret)
                    : "D"(a1), "S"(a2), "d"(a3), "r"(r10_arg), "r"(r8_arg),
                      "r"(r9_arg), "r"(num), "r"(a4), "r"(s_ptr_syscall)
-                   : "rcx", "r11", "memory");
+                   : "rcx", "r11", "memory", "cc");
   return ret;
 }

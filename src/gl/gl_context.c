@@ -225,7 +225,25 @@ void gl_color_cpu_drain(gl_context_t *ctx) {
     ctx->cpu_color_hi = 0u;
 }
 
-void gl_hw_flush(gl_context_t *ctx) {
+void gl_hw_flush_at(gl_context_t *ctx, const char *fn) {
+    if (ctx) {
+        ctx->hw_flushes++;
+        /* Linear over a table of twenty, on a path that runs at most a few thousand times a
+           frame - and the thing it is measuring costs half a millisecond each, so the scan is
+           not what anybody will be reading about. */
+        GLboolean placed = GL_FALSE;
+        for (uint32_t i = 0u; i < OOPS_GL_FLUSH_SITES && !placed; i++) {
+            if (ctx->hw_flush_site[i] == fn) {
+                ctx->hw_flush_site_n[i]++;
+                placed = GL_TRUE;
+            } else if (ctx->hw_flush_site[i] == (const char *)0) {
+                ctx->hw_flush_site[i] = fn;
+                ctx->hw_flush_site_n[i] = 1u;
+                placed = GL_TRUE;
+            }
+        }
+        if (!placed) ctx->hw_flush_unnamed++;
+    }
     if (!ctx) return;
     /* **Before the early return, not after it.** A flush is where "everything issued so far is
      * real" is promised, and that has to hold for a frame with nothing to submit as much as for
@@ -1446,6 +1464,47 @@ void glSwapBuffers(void) {
         if (ctx->frame_count % 60 == 0 || ctx->frame_count < 5) {
             (void)sys_call(SYS_klog, 7, (long)"[OOPS-GL] AGC hardware frame rendered and flipped\n", 0, 0, 0, 0);
         }
+        /* **What the displayed frame actually cost**, reported here because this is the only
+         * point that corresponds to one: a submit is a GPU round-trip, so this count times
+         * that round-trip is the frame time, and the name says which site to go and look at.
+         * Reported every flip rather than on the submit gate - there are only a handful of
+         * flips a second when this number is the problem, which is exactly when it is worth
+         * reading. */
+        gl_klog_val("flushes-this-frame", (uint64_t)ctx->hw_flushes);
+        /* **Every site with a count, not the largest one.** A single winner would answer "what
+           to fix first" and leave "is that all of it" open; the full breakdown sums to the
+           total above, so a reader can see at a glance whether one site is the frame or merely
+           part of it. At most a dozen lines, once per displayed frame. */
+        for (uint32_t i = 0u; i < OOPS_GL_FLUSH_SITES; i++) {
+            if (!ctx->hw_flush_site[i] || ctx->hw_flush_site_n[i] == 0u) continue;
+            char msg[160];
+            size_t n = 0;
+            const char *head = "  flushed-by ";
+            while (head[n] && n < sizeof(msg) - 64) { msg[n] = head[n]; n++; }
+            size_t m = 0;
+            while (ctx->hw_flush_site[i][m] && n < sizeof(msg) - 16) {
+                msg[n++] = ctx->hw_flush_site[i][m++];
+            }
+            msg[n++] = ':';
+            msg[n++] = ' ';
+            /* The count, decimal, most significant digit first. */
+            uint32_t v = ctx->hw_flush_site_n[i];
+            uint32_t div = 1000000000u;
+            GLboolean lead = GL_FALSE;
+            while (div > 0u && n < sizeof(msg) - 2) {
+                const uint32_t d = (v / div) % 10u;
+                if (d != 0u || lead || div == 1u) { msg[n++] = (char)('0' + d); lead = GL_TRUE; }
+                div /= 10u;
+            }
+            msg[n] = '\0';
+            gl_log_line(msg);
+            ctx->hw_flush_site_n[i] = 0u;
+        }
+        if (ctx->hw_flush_unnamed) {
+            gl_klog_val("flushes-unnamed", (uint64_t)ctx->hw_flush_unnamed);
+            ctx->hw_flush_unnamed = 0u;
+        }
+        ctx->hw_flushes = 0u;
     }
 
     /* **The scanout path's swap** (gl_rx.h): the back was drawn in place, so it is flipped as
