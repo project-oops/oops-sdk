@@ -415,6 +415,9 @@ GLboolean glsl_declare_function(glsl_sema_t *s, int32_t node);
  * branches exist. A shader charged for a `gl_Color` it mentions and never reaches costs one
  * parameter; one not charged for a `gl_Color` it does reach reads a register nothing filled. */
 GLboolean glsl_unit_mentions(const glsl_unit_t *u, const char *name, size_t len);
+/* Whether the unit contains a `discard`. A keyword, so `glsl_unit_mentions` cannot find it -
+ * see the definition. */
+GLboolean glsl_unit_discards(const glsl_unit_t *u);
 /* Why a `gl_` name that is real GLSL is not declared here, or NULL when the name is not one this
  * knows about. What turns "use of an undeclared name" - which reads as a typo - into a sentence
  * naming the feature that is missing. */

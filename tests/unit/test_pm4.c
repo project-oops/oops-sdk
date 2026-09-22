@@ -1441,6 +1441,217 @@ static void test_pm4_gl_scissored_clear_is_drawn(void) {
   oops_display_close(disp);
 }
 
+/* A linked GL 2.0 program, for the two tests below. `test_gl2.c` has a fuller version of this;
+ * here it is three calls and the check that they worked, because a program that failed to link
+ * would draw the fixed-function path and the register assertions would be about nothing. */
+static GLuint pm4_linked_program(const char *vs_src, const char *fs_src) {
+  const GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+  const GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+  const GLuint prog = glCreateProgram();
+  GLint linked = 0;
+  glShaderSource(vs, 1, &vs_src, NULL);
+  glCompileShader(vs);
+  glShaderSource(fs, 1, &fs_src, NULL);
+  glCompileShader(fs);
+  glAttachShader(prog, vs);
+  glAttachShader(prog, fs);
+  glLinkProgram(prog);
+  glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+  if (!linked) {
+    char log[256] = {0};
+    glGetProgramInfoLog(prog, (GLsizei)sizeof(log), NULL, log);
+    printf("\n    link failed: %s\n", log);
+  }
+  ASSERT_EQ(linked, GL_TRUE);
+  return prog;
+}
+
+/* A quad through a program's own `pos` attribute. */
+static void pm4_draw_quad(GLuint prog) {
+  const GLint loc = glGetAttribLocation(prog, "pos");
+  const float xs[6] = {-0.8f, 0.8f, 0.8f, -0.8f, 0.8f, -0.8f};
+  const float ys[6] = {-0.8f, -0.8f, 0.8f, -0.8f, 0.8f, 0.8f};
+  ASSERT_TRUE(loc >= 0);
+  glBegin(GL_TRIANGLES);
+  for (int i = 0; i < 6; i++) {
+    glVertexAttrib3f((GLuint)loc, xs[i], ys[i], 0.0f);
+    glVertex3f(xs[i], ys[i], 0.0f);
+  }
+  glEnd();
+}
+
+/* And the same quad with no program at all, for the fixed-function path. */
+static void pm4_draw_plain_quad(void) {
+  const float xs[6] = {-0.8f, 0.8f, 0.8f, -0.8f, 0.8f, -0.8f};
+  const float ys[6] = {-0.8f, -0.8f, 0.8f, -0.8f, 0.8f, 0.8f};
+  glBegin(GL_TRIANGLES);
+  for (int i = 0; i < 6; i++) glVertex3f(xs[i], ys[i], 0.0f);
+  glEnd();
+}
+
+/* **A shader that discards has to tell the depth block, and `exec` is not how.**
+ *
+ * `DB_SHADER_CONTROL.KILL_ENABLE` (bit 6 of context register 0x203) is what says the shader can
+ * throw a fragment away. Without it the block runs early Z: it tests, writes and retires the
+ * pixel before the shader has run, on the understanding that the shader cannot change the
+ * answer - so a discarded fragment keeps its colour *and* its depth, and the next draw behind
+ * it is rejected by a depth value that should never have been written.
+ *
+ * That is gl2-probe's `discard` on hardware (2026-09-22): the discarded half came back holding
+ * the first draw's blue instead of the second draw's yellow. `discard-in-loop` passed in the
+ * same run and is the reason this is the explanation rather than "discard is broken" - it draws
+ * with no depth test, so there is no early Z to retire anything and the export's mask is the
+ * only thing deciding.
+ *
+ * From `uses_discard` in radeonsi, `si_state_shaders.cpp:1711`. Neither this register nor
+ * `SPI_SHADER_Z_FORMAT` had any test before this one, which is how it stayed quiet.
+ */
+static void test_pm4_gl_a_discarding_shader_sets_kill_enable(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[8192];
+  static _Alignas(256) uint8_t payload[0x20000];
+  static _Alignas(256) uint8_t vbo[16384];
+  static _Alignas(64) uint32_t fence[4] = {0x11111111u};
+  static _Alignas(64) uint32_t canary[16];
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 8192;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  glContextSetVersion(2, 0);
+  glEnable(GL_DEPTH_TEST);
+
+  /* The same shape as the probe's check: a varying decides, and half the quad goes. */
+  const GLuint prog = pm4_linked_program(
+      "attribute vec3 pos;\n"
+      "varying float side;\n"
+      "void main() { side = pos.x; gl_Position = vec4(pos, 1.0); }\n",
+      "varying float side;\n"
+      "void main() {\n"
+      "  if (side < 0.0) discard;\n"
+      "  gl_FragColor = vec4(0.0, 0.0, 1.0, 1.0);\n"
+      "}\n");
+  ASSERT_TRUE(prog != 0u);
+  glUseProgram(prog);
+  pm4_draw_quad(prog);
+
+  uint32_t last_dbsc = 0xffffffffu;
+  for (uint32_t i = 0; i + 2 < ctx->dcb_words; i++) {
+    if (dcb[i] == 0xc0016900u && dcb[i + 1] == 0x203u) last_dbsc = dcb[i + 2];
+  }
+  ASSERT_TRUE(last_dbsc != 0xffffffffu);   /* it was written at all */
+  ASSERT_EQ(last_dbsc & 0x40u, 0x40u);     /* KILL_ENABLE */
+  /* And Z_ORDER is still EARLY_Z_THEN_LATE_Z - radeonsi's case 1. A shader that kills does not
+   * move to late Z; the bit above is the whole of it. */
+  ASSERT_EQ((last_dbsc >> 4) & 0x3u, 1u);
+  /* No depth export, so the format register stays at zero. */
+  ASSERT_EQ(last_dbsc & 0x1u, 0u);
+
+  /* **A program that does not discard puts the bit back.** The register is state, so a draw
+   * that inherits a previous draw's kill would give up early Z for nothing - and, more to the
+   * point, this is what proves the emission is driven by the program and not written once. */
+  const GLuint plain = pm4_linked_program(
+      "attribute vec3 pos;\n"
+      "void main() { gl_Position = vec4(pos, 1.0); }\n",
+      "void main() { gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); }\n");
+  ASSERT_TRUE(plain != 0u);
+  glUseProgram(plain);
+  ctx->dcb_words = 0;
+  memset(dcb, 0, sizeof(dcb));
+  pm4_draw_quad(plain);
+
+  last_dbsc = 0xffffffffu;
+  for (uint32_t i = 0; i + 2 < ctx->dcb_words; i++) {
+    if (dcb[i] == 0xc0016900u && dcb[i + 1] == 0x203u) last_dbsc = dcb[i + 2];
+  }
+  /* **This is the case the old cache could not see.** Neither program exports depth, so
+   * `SPI_SHADER_Z_FORMAT` does not move between the two draws - and the register was emitted
+   * only when the format changed. Keyed that way, the kill bit would still be set here. */
+  ASSERT_TRUE(last_dbsc != 0xffffffffu);
+  ASSERT_EQ(last_dbsc & 0x40u, 0u);
+
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* The fixed-function path kills as well - the alpha test and the polygon stipple both clear
+ * `exec` - and had the same register wrong for the same reason. No GL 1.x check combines either
+ * with a depth test, so nothing had measured it. */
+static void test_pm4_gl_alpha_test_sets_kill_enable(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[8192];
+  static _Alignas(256) uint8_t payload[0x20000];
+  static _Alignas(256) uint8_t vbo[16384];
+  static _Alignas(64) uint32_t fence[4] = {0x11111111u};
+  static _Alignas(64) uint32_t canary[16];
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 8192;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  glEnable(GL_DEPTH_TEST);
+  glEnable(GL_ALPHA_TEST);
+  glAlphaFunc(GL_GREATER, 0.5f);
+  pm4_draw_plain_quad();
+
+  uint32_t last_dbsc = 0xffffffffu;
+  for (uint32_t i = 0; i + 2 < ctx->dcb_words; i++) {
+    if (dcb[i] == 0xc0016900u && dcb[i + 1] == 0x203u) last_dbsc = dcb[i + 2];
+  }
+  ASSERT_TRUE(last_dbsc != 0xffffffffu);
+  ASSERT_EQ(last_dbsc & 0x40u, 0x40u);
+
+  /* **`GL_ALWAYS` is not a kill.** A test that keeps every fragment has nothing to tell the
+   * depth block, and saying otherwise gives up early Z on every draw for nothing. */
+  glAlphaFunc(GL_ALWAYS, 0.0f);
+  ctx->dcb_words = 0;
+  memset(dcb, 0, sizeof(dcb));
+  pm4_draw_plain_quad();
+
+  last_dbsc = 0xffffffffu;
+  for (uint32_t i = 0; i + 2 < ctx->dcb_words; i++) {
+    if (dcb[i] == 0xc0016900u && dcb[i + 1] == 0x203u) last_dbsc = dcb[i + 2];
+  }
+  ASSERT_TRUE(last_dbsc != 0xffffffffu);
+  ASSERT_EQ(last_dbsc & 0x40u, 0u);
+
+  glDisable(GL_ALPHA_TEST);
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 static void test_pm4_gl_mip_chain_reaches_the_descriptor(void) {
   oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
   void *ctx_handle = glContextCreate(disp);
@@ -4766,6 +4977,8 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_depth_range_changes_within_a_frame);
   RUN_TEST(test_pm4_gl_logic_op_and_blend_constant_reach_their_registers);
   RUN_TEST(test_pm4_gl_vertex_ring_submits_before_it_wraps);
+  RUN_TEST(test_pm4_gl_a_discarding_shader_sets_kill_enable);
+  RUN_TEST(test_pm4_gl_alpha_test_sets_kill_enable);
   RUN_TEST(test_pm4_gl_mip_chain_reaches_the_descriptor);
   RUN_TEST(test_pm4_gl_scissored_clear_is_drawn);
   RUN_TEST(test_pm4_gl_volume_and_cube_sample_on_hardware);

@@ -938,6 +938,20 @@ typedef struct {
      * has to stop testing early - a depth the shader computes is not known until the shader has
      * run, and early Z would have tested the interpolated one instead. */
     GLboolean hw_ps_exports_depth;
+    /* **Whether the compiled shader can kill a fragment**, which the depth block has to be told
+     * in `DB_SHADER_CONTROL.KILL_ENABLE` - and which clearing `exec` does not tell it.
+     *
+     * A shader that discards and a depth block that has not been told are not the same picture
+     * with a wasted instruction between them. With early Z the block tests, writes and retires
+     * a pixel before the shader runs, because it has been told the shader cannot change the
+     * answer; the export's mask arrives too late to stop the write. The fragment keeps its
+     * colour *and* its depth, so the discard does nothing and the next draw behind it is
+     * rejected by a depth value that should never have been written.
+     *
+     * radeonsi sets this bit from `uses_discard` and leaves `Z_ORDER` at `EARLY_Z_THEN_LATE_Z`
+     * (`si_state_shaders.cpp:1711` and `:1758`) - so the kill is this one bit, not a switch to
+     * late Z. */
+    GLboolean hw_ps_kills;
     /* **Whether this program's refusal has been said out loud.** Cleared at every link, so a
      * relinked program that is still refused says so again - the source may have changed and
      * the reason with it. On the program rather than the context because program names are
@@ -1270,6 +1284,13 @@ typedef struct gl_context {
     GLboolean hw_cube_logged; /* and a cube-mapped one */
     GLboolean hw_env_logged; /* and one for an environment the pixel shader cannot combine */
     GLboolean hw_unit_logged; /* and one for a texture unit above 0, which the console leaves out */
+    /* **A census of the frame's draws, by whether one sampled a texture at all.** The one-shot
+     * lines above say *that* something was drawn untextured, never *how much*, and a port whose
+     * surfaces come out flat needs the proportion: a handful of untextured draws among hundreds
+     * is a HUD, and hundreds of them is the world. Counted per submit and reported by the same
+     * gate as the submit's other values, so a run costs a line a second, not a line a draw. */
+    uint32_t hw_draws_textured;
+    uint32_t hw_draws_untextured;
     /* The GL 2.0 refusal's "say it once" lives on the program object - `hw_ps_logged` - and not
      * here, because a name is not an identity: `glDeleteProgram` frees it and the next
      * `glCreateProgram` hands the same number out again. A suite that builds and deletes one
@@ -1290,9 +1311,16 @@ typedef struct gl_context {
     /* What `SPI_PS_INPUT_ENA` and `_ADDR` currently hold, so a draw emits them only when it
      * wants something else. Set by `gl_hw_begin_frame` to whatever its table wrote. */
     uint32_t hw_input_ena;
-    /* What `SPI_SHADER_Z_FORMAT` currently holds - 0 for no depth export, 1 for one. The
-     * paired `DB_SHADER_CONTROL` moves with it, so one cache covers both. */
+    /* What `SPI_SHADER_Z_FORMAT` currently holds - 0 for no depth export, 1 for one. */
     uint32_t hw_z_format;
+    /* And what `DB_SHADER_CONTROL` currently holds, cached **separately**.
+     *
+     * The two used to share one cache, on the grounds that the only thing that moved either was
+     * a shader exporting depth. `KILL_ENABLE` broke that: a program that discards and does not
+     * write depth changes this register and not the format, so a single cache keyed on the
+     * format would decide nothing had changed and emit neither. That is a register left at the
+     * previous draw's value, which is the quietest kind of wrong. */
+    uint32_t hw_db_shader_control;
     /* The depth and stencil surfaces are the GPU's, 64KB_Z_X tiled (see gl_zs_depth_ptr): true
      * once the hardware path is up on the console, never on a host build. */
     GLboolean zs_tiled;

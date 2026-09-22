@@ -145,6 +145,23 @@ static glsl_type_t type_from_gl(GLenum t) {
  * every node once rather than walking the tree - which also means a mention inside a branch the
  * generator will never take still counts, and that is the right answer: the prologue has to be
  * emitted before anything knows which branches there are. */
+/* **Whether this unit can throw a fragment away.**
+ *
+ * Not `glsl_unit_mentions("discard")`: that walks the identifiers, and `discard` is a keyword -
+ * it parses to a statement node and never to a name, so the search would look in the one place
+ * it cannot be and answer no every time. The node kind is the only thing that says it.
+ *
+ * Every `discard` in the unit counts, including ones in functions `main` never calls. That
+ * over-reports, and the cost of over-reporting is early Z given up on a draw that did not need
+ * to - while under-reporting is a depth block that never hears about the kill. */
+GLboolean glsl_unit_discards(const glsl_unit_t *u) {
+    if (!u) return GL_FALSE;
+    for (int32_t i = 0; i < u->ast.count; i++) {
+        if (u->ast.nodes[i].kind == GLSL_NODE_DISCARD) return GL_TRUE;
+    }
+    return GL_FALSE;
+}
+
 GLboolean glsl_unit_mentions(const glsl_unit_t *u, const char *name, size_t len) {
     if (!u) return GL_FALSE;
     for (int32_t i = 0; i < u->ast.count; i++) {

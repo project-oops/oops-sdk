@@ -12,6 +12,39 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Fixed
 
+- **A discarded fragment kept its depth, because the depth block was never told the shader could
+  kill** (2026-09-22). `DB_SHADER_CONTROL.KILL_ENABLE` - bit 6 of context register `0x203` - was
+  never set, by any path. Clearing `exec` stops the shader writing; it does not stop the depth
+  block, which under early Z has already tested, written and retired the pixel on the
+  understanding that the shader cannot change the answer. The discarded fragment therefore kept
+  its colour *and* its depth, and the next draw behind it was rejected by a depth value that
+  should never have been written.
+
+  **The bug was diagnosable only because two checks disagreed.** gl2-probe's `discard` has failed
+  on hardware since it first ran; the reading was "discard does not work". In the same run on
+  2026-09-22 the new `discard-in-loop` **passed**, and it discards too - the difference being
+  that it draws with no depth test, so there is no early Z to retire anything and the export's
+  mask is the only thing deciding. One check saying discard works and one saying it does not is
+  what located the register.
+
+  Set now from the shader's AST, and from the fixed-function state for GL 1.x - the alpha test
+  and the polygon stipple both clear `exec` and had the identical bug, unmeasured because no GL
+  1.x check put a kill and a depth test in the same draw. `gl1-probe`'s new `alpha-test-depth`
+  does. `Z_ORDER` stays at `EARLY_Z_THEN_LATE_Z`: radeonsi sets the kill bit from `uses_discard`
+  and leaves the order alone (`si_state_shaders.cpp:1711`, and case 1 of the table at `:1730`).
+
+  Two smaller things fell out of it. `glsl_unit_mentions(fs, "discard")` - the obvious way to
+  ask - walks the **identifiers**, and `discard` is a keyword, so it looks in the one place the
+  answer cannot be and returns false every time; `glsl_unit_discards` reads the node kind
+  instead. And `DB_SHADER_CONTROL` shared a cache with `SPI_SHADER_Z_FORMAT`, on the grounds
+  that only a depth-exporting shader moved either - so a program that discards and writes no
+  depth changed the register while the format stood still, and the emission keyed on the format
+  would have sent neither. The caches are separate, and
+  `test_pm4_gl_a_discarding_shader_sets_kill_enable` covers exactly that case. Neither register
+  had any test before this; that is how it stayed quiet.
+
+  Fixed in code and in the words; **not yet confirmed on a console**.
+
 - **The second colour target had no blend control** (2026-09-21). Blending on this part is per
   MRT - `CB_BLEND1_CONTROL` is `0x028784` (Mesa `src/amd/common/amdgfxregs.h:12802`), context
   offset `0x1e1`, and radeonsi writes the whole run as `R_028780_CB_BLEND0_CONTROL + i * 4`

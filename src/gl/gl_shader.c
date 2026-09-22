@@ -151,6 +151,7 @@ static void program_destroy(gl_program_object_t *p) {
     p->hw_ps_serial = 0u;
     p->hw_color_param = -1;
     p->hw_ps_exports_depth = GL_FALSE;
+    p->hw_ps_kills = GL_FALSE;
     p->hw_params = 0u;
     p->hw_ps_log[0] = '\0';
     p->linked = GL_FALSE;

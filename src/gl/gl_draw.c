@@ -2548,8 +2548,10 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     /* And what that table wrote into SPI_PS_INPUT_ENA/_ADDR, so a draw needing something else
      * knows it has to say so - and one that does not, does not pay for it. */
     ctx->hw_input_ena = gl_polygon_stipple_on(ctx) ? 0x00000302u : 0x00000002u;
-    /* And the depth block's half: the table above wrote no Z export and an early test. */
+    /* And the depth block's half: the table above wrote no Z export and an early test, with no
+     * kill - so a draw that discards has to say so again in every frame. */
     ctx->hw_z_format = 0u;
+    ctx->hw_db_shader_control = 0x00000010u;
     ctx->hw_frame_active = GL_TRUE;
 }
 
@@ -3399,6 +3401,13 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
             const GLboolean tex_on = (GLboolean)(u0->cap_texture_2d || u0->cap_texture_3d ||
                                                  u0->cap_texture_cube_map || u0->cap_texture_1d);
             const GLuint bound0 = u0->bound_texture_2d;
+            /* The census this draw contributes to - see the counters' note in gl_internal.h. A
+             * draw that wanted a texture and got none is the interesting half, so count by
+             * `eff_tex` rather than by the enable: a draw with texturing off is neither. */
+            if (tex_on) {
+                if (eff_tex != 0u) ctx->hw_draws_textured++;
+                else ctx->hw_draws_untextured++;
+            }
             if (!told_incomplete && tex_on && eff_tex == 0u) {
                 told_incomplete = GL_TRUE;
                 const gl_texture_object_t *t0 =
@@ -4285,15 +4294,43 @@ vertices_written:
          * Emitted only on a change, and put back by `gl_hw_begin_frame` to what the frame's own
          * table wrote, exactly as the input-enable above. */
         {
-            const GLboolean depth_ps = (GLboolean)(prog != (gl_program_object_t *)0 &&
-                                                   prog->fs && prog->hw_ps_words > 0u &&
-                                                   prog->hw_ps_exports_depth);
+            const GLboolean compiled_ps = (GLboolean)(prog != (gl_program_object_t *)0 &&
+                                                      prog->fs && prog->hw_ps_words > 0u);
+            const GLboolean depth_ps = (GLboolean)(compiled_ps && prog->hw_ps_exports_depth);
+            /* **`KILL_ENABLE`, which `discard` does not survive without.** Clearing `exec` stops
+             * the shader writing; it does not stop the depth block, which with early Z has
+             * already tested, written and retired the pixel on the understanding that the
+             * shader cannot change the answer. The discarded fragment then keeps its colour and
+             * its depth, and the draw behind it is rejected by a depth that should not be
+             * there - which is `gl2-probe`'s `discard` exactly, and why `discard-in-loop`
+             * passed beside it: that one runs with no depth test, so there is no early Z to
+             * retire the pixel and the export's mask is the only thing deciding.
+             *
+             * From `uses_discard` in radeonsi (`si_state_shaders.cpp:1711`). `Z_ORDER` stays
+             * `EARLY_Z_THEN_LATE_Z` - case 1 of the table at `:1730` - so this is one bit and
+             * not a move to late Z. */
+            /* **The fixed-function path kills too**, and has the same bug for the same reason:
+             * the alpha test and the polygon stipple both clear `exec`, and neither has ever
+             * told the depth block. GL 1.x has no check that combines one with a depth test, so
+             * nothing has measured it - the register is wrong either way, and `GL_ALWAYS` is
+             * excluded because a test that keeps everything is not a kill. */
+            const GLboolean kill_ff =
+                (GLboolean)((ctx->cap_alpha_test && ctx->alpha_func != GL_ALWAYS) ||
+                            gl_polygon_stipple_on(ctx));
+            const GLboolean kill_ps =
+                (GLboolean)(compiled_ps ? prog->hw_ps_kills : kill_ff);
             const uint32_t want_zfmt = depth_ps ? 1u : 0u;
-            const uint32_t want_dbsc = depth_ps ? 0x00000001u : 0x00000010u;
+            const uint32_t want_dbsc =
+                (depth_ps ? 0x00000001u : 0x00000010u) | (kill_ps ? 0x00000040u : 0u);
             if (want_zfmt != ctx->hw_z_format) {
                 *dw++ = 0xc0016900u; *dw++ = 0x1c4u; *dw++ = want_zfmt;
-                *dw++ = 0xc0016900u; *dw++ = 0x203u; *dw++ = want_dbsc;
                 ctx->hw_z_format = want_zfmt;
+            }
+            /* **Its own comparison, not the format's.** A program that discards and does not
+             * write depth moves this register while the format stands still. */
+            if (want_dbsc != ctx->hw_db_shader_control) {
+                *dw++ = 0xc0016900u; *dw++ = 0x203u; *dw++ = want_dbsc;
+                ctx->hw_db_shader_control = want_dbsc;
             }
         }
 

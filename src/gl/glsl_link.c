@@ -528,6 +528,7 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     p->hw_params = 0u;
     p->hw_color_param = -1;
     p->hw_ps_exports_depth = GL_FALSE;
+    p->hw_ps_kills = GL_FALSE;
     p->hw_ps_log[0] = '\0';
     p->hw_tex_sets = 0;
     for (size_t i = 0; i < sizeof(p->hw_tex_uniform) / sizeof(p->hw_tex_uniform[0]); i++) {
@@ -651,6 +652,10 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
      * the draw and the compiler both read it and must not each work it out. */
     p->hw_ps_exports_depth =
         (GLboolean)(fs != (glsl_unit_t *)0 && glsl_unit_mentions(fs, "gl_FragDepth", 12u));
+    /* **And whether it can kill**, for `DB_SHADER_CONTROL.KILL_ENABLE`. The node kind and not
+     * the name: `discard` is a keyword, so the identifier search beside this one looks in the
+     * one place it can never be. */
+    p->hw_ps_kills = glsl_unit_discards(fs);
 
     p->hw_color_param = -1;
     if (fs && glsl_unit_mentions(fs, "gl_Color", 8u)) {
