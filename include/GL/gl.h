@@ -16,27 +16,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/*
- * **GL's entry points are exported, against the payload's `-fvisibility=hidden` default.**
- *
- * `common/app.mk` compiles a payload with `-fvisibility=hidden`, which is the right default for
- * a program: a symbol nothing outside needs should not be in the dynamic table. GL is the case
- * where that is wrong, because a title written against desktop GL reaches its entry points **by
- * name at run time** rather than by symbol - `SDL_GL_GetProcAddress("glGenBuffersARB")` and the
- * `glXGetProcAddress` it stands for. `oops_gl_get_proc_address` answers those from the payload's
- * own dynamic symbol table, and a hidden symbol is not in it.
- *
- * Neverball is what showed this. Its `share/glext.c` fills a table of function pointers from
- * strings; every one came back NULL, and the first mesh it loaded called through one. The
- * console faulted at `rip = 0`.
- *
- * It applies to declarations, so the definitions in `src/gl/` inherit it by having seen this
- * header - which is why it is here and not spread across seventy files. `glu.h` and `glut.h` do
- * not do this: nothing resolves GLU or GLUT by name, and this is the interface that has to be
- * reachable, not every interface that could be.
- */
-#pragma GCC visibility push(default)
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -2390,15 +2369,13 @@ void glTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset
 
 /* The address of a GL entry point by name, which is what `glXGetProcAddress` is on a desktop and
  * what `SDL_GL_GetProcAddress` calls through to here. A title holding post-1.1 GL in function
- * pointers fills them this way and never names the symbols, so being linked in is not enough -
- * see the note beside the definition in `src/gl/gl_context.c`. NULL for a name this GL does not
- * have, and for any name that is not a GL one. */
+ * pointers fills them this way and never names the symbols, so being linked in is not enough.
+ * The list of what can be asked for is `src/gl/gl_procs.h`, which says why it is a list. NULL
+ * for a name this GL does not have, which is what a program probing for an extension expects. */
 void *oops_gl_get_proc_address(const char *name);
 
 #ifdef __cplusplus
 }
 #endif
-
-#pragma GCC visibility pop
 
 #endif /* __GL_H__ */

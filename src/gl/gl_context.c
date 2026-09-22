@@ -3,6 +3,7 @@
  */
 
 #include "gl_internal.h"
+#include "gl_procs.h"
 #include "oops/agc.h"
 
 gl_context_t *g_gl_ctx = NULL;
@@ -2699,209 +2700,34 @@ const GLuint *glGetFrameReadback(void) {
 
 /* ------------------------------------------------------------- entry points by name */
 /*
- * `oops_gl_get_proc_address` answers the question `glXGetProcAddress`, `wglGetProcAddress` and
- * `SDL_GL_GetProcAddress` all ask: **what is the address of the GL entry point with this name?**
- *
- * A title written against desktop GL does not call the post-1.1 entry points by symbol. It holds
- * function pointers and fills them by name, because on a desktop the driver is behind a loader
- * and the linker never sees them. Neverball's `share/glext.c` is the ordinary shape of it:
- *
- *     SDL_GL_GFPA(glGenBuffers_, "glGenBuffersARB");
- *     ...
- *     glGenBuffers_(1, &mp->vbo);
- *
- * There is no loader here and no library: oops-gl is linked into the payload. It is tempting to
- * conclude from that there is nothing to resolve - which is what this returned NULL for on the
- * reasoning that a statically linked payload has every entry point already bound. **That was
- * wrong, and the console said so.** The linker resolved nothing, because the title never names
- * `glGenBuffersARB` at all; it names the *string*. A NULL answer is a NULL function pointer, and
- * the first draw jumps to address zero - `sol_load_full` did exactly that, with `rdi = 1` and
- * `rsi` pointing at the buffer name it wanted back.
- *
- * So the lookup by name has to exist, and the payload's own dynamic symbol table is what holds
- * it. `.dynsym`, `.dynstr` and `.hash` are all mapped, and the 738 `gl*` symbols oops-gl exports
- * are in them under every spelling it defines - `glGenBuffers` and `glGenBuffersARB` alike,
- * because those are separate definitions in `gl_draw.c` rather than aliases. This walks that
- * table, which is the same thing `dlsym` would do if there were a loader to ask.
- *
- * **A name table would have been the other answer, and this is smaller and cannot drift.** A
- * hand-written list of 738 names beside 738 definitions is a list that goes stale the first time
- * a function is added and the list is not; the symbol table is produced by the linker from the
- * definitions themselves, so it is right by construction.
+ * `oops_gl_get_proc_address` is what `SDL_GL_GetProcAddress` calls through to, and it is
+ * `glXGetProcAddress` by another name: a title written against post-1.1 GL fills function
+ * pointers from **strings**, so being linked in is not enough - see `gl_procs.h`, which holds
+ * the list and the reason it is a list rather than a symbol-table walk.
  */
 
-/* Just enough ELF to read our own symbol table. The full definitions live in the platform's own
- * headers, which a freestanding build does not have. */
-typedef struct { int64_t d_tag; uint64_t d_val; } gl_elf64_dyn;
-typedef struct {
-    uint32_t st_name;
-    uint8_t  st_info;
-    uint8_t  st_other;
-    uint16_t st_shndx;
-    uint64_t st_value;
-    uint64_t st_size;
-} gl_elf64_sym;
+#define OOPS_GL_PROC_ROW(fn)          { #fn, (void *)fn },
+#define OOPS_GL_PROC_ROW_SUF(fn, sfx) { #fn #sfx, (void *)fn##sfx },
 
-#define GL_DT_NULL     0
-#define GL_DT_HASH     4
-#define GL_DT_STRTAB   5
-#define GL_DT_SYMTAB   6
-#define GL_DT_GNU_HASH 0x6ffffef5
+static const struct {
+    const char *name;
+    void *addr;
+} gl_proc_table[] = {
+    OOPS_GL_PROC_LIST(OOPS_GL_PROC_ROW, OOPS_GL_PROC_ROW_SUF)
+};
 
-/* Both are the linker's, not ours. `__executable_start` is the image's first byte, which lld
- * defines at link-time zero for a `-shared` payload - so its address at run time *is* the load
- * bias every recorded symbol value needs added. `_DYNAMIC` is the `.dynamic` array. */
-extern const char __executable_start[];
-extern const gl_elf64_dyn _DYNAMIC[];
-
-/*
- * **Both hash tables, because the two builds that matter do not carry the same one.** The
- * payload has `.hash` and `.gnu.hash`; a host test binary has only `.gnu.hash`. Reading just the
- * System V table would have left the host test unable to exercise any of this, and then the only
- * place this code could be shown to work would be the console - which is the expensive place and
- * the one that needs asking for. Twenty lines buys a gate that runs on every `make test`.
- */
-
-/* The System V ELF hash, as the standard defines it. `.hash` is keyed on it. */
-static uint32_t gl_elf_hash(const char *name) {
-    uint32_t h = 0;
-    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
-        h = (h << 4) + *p;
-        const uint32_t g = h & 0xf0000000u;
-        if (g) h ^= g >> 24;
-        h &= ~g;
-    }
-    return h;
-}
-
-/* djb2, which is what `.gnu.hash` is keyed on. */
-static uint32_t gl_gnu_hash(const char *name) {
-    uint32_t h = 5381u;
-    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
-        h = (h * 33u) + *p;
-    }
-    return h;
-}
-
-static const void *gl_sym_addr(const gl_elf64_sym *sym, const char *strtab, const char *name,
-                               uintptr_t bias) {
-    if (sym->st_shndx == 0u || sym->st_value == 0u) return NULL;   /* an import, not a definition */
-    if (obs_strcmp(strtab + sym->st_name, name) != 0) return NULL;
-    return (const void *)(bias + sym->st_value);
-}
-
-/*
- * **What a `DT_` entry holds is not the same on both loaders, so it is told apart rather than
- * assumed.** The standard says these are virtual addresses, and a loader may or may not rewrite
- * them in memory once the image is placed: glibc does - on a host test binary `DT_SYMTAB` reads
- * back as a fully relocated pointer - and the FreeBSD-derived loader this console carries leaves
- * them as linked. Guessing and checking afterwards is not available here, because the wrong
- * guess is a wild pointer that gets dereferenced before anything can check it, which is a fault
- * on the console and was a segfault on the host the first time this ran.
- *
- * An image linked at zero makes the two distinguishable with certainty: a value still holding a
- * link-time address is below where the image was loaded, and a relocated one cannot be.
- */
-static uintptr_t gl_dyn_addr(uint64_t d_val, uintptr_t image) {
-    return (uintptr_t)d_val < image ? image + (uintptr_t)d_val : (uintptr_t)d_val;
-}
-
-/*
- * `image` is where the image starts, which for a payload linked at zero is also the bias every
- * `st_value` needs. `st_value` gets no such treatment as the `DT_` entries: `.dynsym` is never
- * rewritten by a loader, and the same test would misread the symbols that sit above the load
- * address in link-time terms - this image's `.bss` reaches past 0x400000 on its own.
- */
-static const void *gl_dynsym_find(uintptr_t image, const char *name) {
-    const uint32_t *hash = NULL;
-    const uint32_t *gnu = NULL;
-    const gl_elf64_sym *symtab = NULL;
-    const char *strtab = NULL;
-    const uintptr_t bias = image;
-
-    for (const gl_elf64_dyn *d = _DYNAMIC; d->d_tag != GL_DT_NULL; d++) {
-        switch (d->d_tag) {
-        case GL_DT_HASH:     hash   = (const uint32_t *)gl_dyn_addr(d->d_val, image); break;
-        case GL_DT_GNU_HASH: gnu    = (const uint32_t *)gl_dyn_addr(d->d_val, image); break;
-        case GL_DT_SYMTAB:   symtab = (const gl_elf64_sym *)gl_dyn_addr(d->d_val, image); break;
-        case GL_DT_STRTAB:   strtab = (const char *)gl_dyn_addr(d->d_val, image); break;
-        default: break;
-        }
-    }
-    if (!symtab || !strtab) return NULL;
-
-    if (gnu) {
-        const uint32_t nbuckets   = gnu[0];
-        const uint32_t symoffset  = gnu[1];
-        const uint32_t bloom_size = gnu[2];
-        if (nbuckets == 0u) return NULL;
-        /* header, then the Bloom filter in 64-bit words, then the buckets, then the chains. The
-         * filter is only there to reject a miss early, so it is skipped: correctness does not
-         * need it and the lookups here are counted in tens. */
-        const uint32_t *buckets = (const uint32_t *)((const uint64_t *)(gnu + 4) + bloom_size);
-        const uint32_t *chain = buckets + nbuckets;
-        const uint32_t h = gl_gnu_hash(name);
-
-        uint32_t i = buckets[h % nbuckets];
-        if (i < symoffset) return NULL;                     /* empty bucket */
-        for (;;) {
-            const uint32_t c = chain[i - symoffset];
-            /* Bit 0 is the end-of-chain marker rather than part of the hash, so it is masked out
-             * of the comparison on both sides. */
-            if ((c | 1u) == (h | 1u)) {
-                const void *addr = gl_sym_addr(&symtab[i], strtab, name, bias);
-                if (addr) return addr;
-            }
-            if (c & 1u) break;
-            i++;
-        }
-        return NULL;
-    }
-
-    if (hash) {
-        const uint32_t nbucket = hash[0];
-        const uint32_t nchain  = hash[1];      /* the only record of how many symbols there are */
-        if (nbucket == 0u) return NULL;
-        const uint32_t *bucket = hash + 2;
-        const uint32_t *chain  = bucket + nbucket;
-
-        for (uint32_t i = bucket[gl_elf_hash(name) % nbucket]; i != 0u && i < nchain;
-             i = chain[i]) {
-            const void *addr = gl_sym_addr(&symtab[i], strtab, name, bias);
-            if (addr) return addr;
-        }
-    }
-    return NULL;
-}
+#undef OOPS_GL_PROC_ROW
+#undef OOPS_GL_PROC_ROW_SUF
 
 void *oops_gl_get_proc_address(const char *name) {
-    static uintptr_t s_bias;
-    static int s_state;      /* 0 not yet worked out, 1 usable, -1 unusable */
-
-    /*
-     * **GL entry points only.** This walks the payload's whole symbol table, and a resolver that
-     * answered for any name at all would be a general door onto every symbol in the image opened
-     * by whatever string a caller passes. The job is GL, so the prefix is the job's boundary -
-     * and it covers `glu*` and `glut*` as well, which is correct, since a title asking for those
-     * by name is asking the same question.
-     */
-    if (!name || name[0] != 'g' || name[1] != 'l') return NULL;
-
-    if (s_state == 0) {
-        /*
-         * **Proved once, against a function whose address is already known.** Everything above
-         * holds for an image linked at zero, which both the payload and the host test binary
-         * are; nothing here can check that it is still true of some future link. So resolve
-         * `glGetString` and compare it with `glGetString`. If they differ, this answers NULL for
-         * everything - which is what it did before any of this existed, and a safe thing for a
-         * caller to be told - rather than handing back an address arrived at by reasoning that
-         * has stopped being correct.
-         */
-        s_bias = (uintptr_t)__executable_start;
-        s_state = gl_dynsym_find(s_bias, "glGetString") == (const void *)glGetString ? 1 : -1;
+    if (!name) return NULL;
+    for (size_t i = 0; i < sizeof(gl_proc_table) / sizeof(gl_proc_table[0]); i++) {
+        if (obs_strcmp(gl_proc_table[i].name, name) == 0) {
+            return gl_proc_table[i].addr;
+        }
     }
-    if (s_state != 1) return NULL;
-
-    return (void *)gl_dynsym_find(s_bias, name);
+    /* **NULL is an answer, not a failure.** A program probing for an extension it can do without
+     * asks here and takes no for an answer - Neverball does exactly that for shader objects and
+     * framebuffer objects, and draws its own way when told no. */
+    return NULL;
 }
-

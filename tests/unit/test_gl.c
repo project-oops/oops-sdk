@@ -57,6 +57,7 @@ _Static_assert(GL_TEXTURE31 - GL_TEXTURE0 == 31, "the selectors are consecutive"
  * right colour, so the bytes are what say which texels moved. `test_pm4.c` reaches into
  * `agc_internal.h` for the same reason. */
 #include "src/gl/gl_internal.h"
+#include "src/gl/gl_procs.h"
 #include "src/gl/glsl_internal.h"
 #include "tests/test_common.h"
 #include <math.h>
@@ -13058,66 +13059,41 @@ static void test_glsl_emit_mat4_is_column_major(void) {
  */
 static void test_gl_proc_address_resolves_entry_points_by_name(void) {
   /*
-   * **What this can and cannot establish here, stated rather than implied.**
+   * **Every name in the list, checked against the function it names.** The test walks
+   * `OOPS_GL_PROC_LIST` rather than a copy of it, so the two cannot disagree: a row added to the
+   * table is a row checked here, and a row whose spelling is wrong does not compile in either
+   * place. What it cannot catch is an extension added to `gl.h` and never added to the list -
+   * that is the one thing the list asks a person to remember.
    *
-   * The lookup reads the image's *dynamic* symbol table, which is the only one mapped at run
-   * time. A payload is linked `-shared`, so all 11,851 of its globals are in it and every name
-   * below resolves. This test runner is an ordinary executable linked without `-rdynamic`: its
-   * `.dynsym` holds 207 libc imports and nothing of its own, and `glGetString` appears only in
-   * `.symtab`, which is not loaded. Adding `-rdynamic` is a change to `oops-sdk/Makefile`.
-   *
-   * So the positive case is asserted as a consistency rule instead of an absolute one: **each
-   * name either resolves to exactly the right function, or the image exports nothing at all** -
-   * and which of those held is checked, so this cannot quietly become a test that asserts
-   * nothing. The names are listed one at a time because they are the ones Neverball asks for by
-   * string, and the resolution of any one of them is the difference between a port that runs and
-   * a port that faults at `rip = 0`.
+   * This is worth more than it looks. The resolution of any single one of these is the
+   * difference between a port that runs and a port that faults at `rip = 0`, which is how
+   * Neverball failed twice: once because this answered NULL for everything by design, and once
+   * because the answer came from a symbol table the console does not map.
    */
-  const int exports = oops_gl_get_proc_address("glGetString") != NULL;
+#define CHECK_CORE(fn)         ASSERT_EQ(oops_gl_get_proc_address(#fn), (void *)fn);
+#define CHECK_SUFFIXED(fn, s)  ASSERT_EQ(oops_gl_get_proc_address(#fn #s), (void *)fn##s);
+  OOPS_GL_PROC_LIST(CHECK_CORE, CHECK_SUFFIXED)
+#undef CHECK_CORE
+#undef CHECK_SUFFIXED
 
-#define ASSERT_RESOLVES(fn)                                                    \
-  do {                                                                         \
-    void *got = oops_gl_get_proc_address(#fn);                                 \
-    if (exports) { ASSERT_EQ(got, (void *)fn); } else { ASSERT_EQ(got, NULL); } \
-  } while (0)
-
-  ASSERT_RESOLVES(glGetString);
-
-  /* ARB_multitexture and ARB_vertex_buffer_object, both advertised in GL_EXTENSIONS, under the
-   * suffixed spellings a program of that era asks for. */
-  ASSERT_RESOLVES(glActiveTextureARB);
-  ASSERT_RESOLVES(glClientActiveTextureARB);
-  ASSERT_RESOLVES(glGenBuffersARB);
-  ASSERT_RESOLVES(glBindBufferARB);
-  ASSERT_RESOLVES(glBufferDataARB);
-  ASSERT_RESOLVES(glBufferSubDataARB);
-  ASSERT_RESOLVES(glDeleteBuffersARB);
-  ASSERT_RESOLVES(glIsBufferARB);
-
-  /* ARB_point_parameters, under both of its published spellings. */
-  ASSERT_RESOLVES(glPointParameterfARB);
-  ASSERT_RESOLVES(glPointParameterfvARB);
-  ASSERT_RESOLVES(glPointParameterfEXT);
-
-  /* The unsuffixed core spelling is a separate definition rather than an alias, so it has its own
-   * address, and a caller asking for it must get that one. */
-  ASSERT_RESOLVES(glActiveTexture);
-
-#undef ASSERT_RESOLVES
+  /* The suffixed spelling and the core one are separate definitions, not aliases, so they have
+   * different addresses - and a caller asking for one must not be handed the other. */
+  ASSERT_NE((void *)glGenBuffersARB, (void *)glGenBuffers);
+  ASSERT_EQ(oops_gl_get_proc_address("glGenBuffersARB"), (void *)glGenBuffersARB);
+  ASSERT_EQ(oops_gl_get_proc_address("glGenBuffers"), (void *)glGenBuffers);
 
   /* A GL name this GL does not have is NULL, which is what a program probing for an extension it
-   * can do without is asking. Neverball asks for both of these and takes no for an answer; had
-   * they resolved to anything, it would have called them. */
+   * can do without is asking. Neverball asks for all three of these and takes no for an answer;
+   * had they resolved to anything, it would have called them. */
   ASSERT_EQ(oops_gl_get_proc_address("glCreateShaderObjectARB"), NULL);
   ASSERT_EQ(oops_gl_get_proc_address("glStringMarkerGREMEDY"), NULL);
+  ASSERT_EQ(oops_gl_get_proc_address("glGenFramebuffers"), NULL);
 
-  /* **The prefix is the boundary**, and it holds whether or not the image exports anything. The
-   * lookup walks the whole symbol table, so a resolver that answered for any name at all would
-   * be a door onto every symbol in the image, opened by whatever string a caller passed. */
+  /* Core GL 1.1 is linked by symbol and never asked for by name, so it is deliberately not in
+   * the table - and a name that is not GL's at all is certainly not. */
+  ASSERT_EQ(oops_gl_get_proc_address("glBegin"), NULL);
   ASSERT_EQ(oops_gl_get_proc_address("malloc"), NULL);
-  ASSERT_EQ(oops_gl_get_proc_address("oops_gl_get_proc_address"), NULL);
   ASSERT_EQ(oops_gl_get_proc_address(""), NULL);
-  ASSERT_EQ(oops_gl_get_proc_address("g"), NULL);
   ASSERT_EQ(oops_gl_get_proc_address(NULL), NULL);
 }
 
