@@ -482,21 +482,21 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
      * back end that folded them together would give the same answer twice and be right only
      * for a symmetric matrix. */
     if (op == GLSL_TOK_STAR && is_matrix(lt) && !is_matrix(rt)) {
-        const int n = mat_dim(lt);
-        if (b.count == n) {
-            glsl_value_t out = gen_alloc(g, n, node);
-            if (is_bad(out)) return out;
-            glsl_emit_mat_mul_vec(g->code, out.base, a.base, b.base, (uint32_t)n);
-            return out;
+        const int dim = mat_dim(lt);
+        if (b.count == dim) {
+            glsl_value_t mv = gen_alloc(g, dim, node);
+            if (is_bad(mv)) return mv;
+            glsl_emit_mat_mul_vec(g->code, mv.base, a.base, b.base, (uint32_t)dim);
+            return mv;
         }
     }
     if (op == GLSL_TOK_STAR && !is_matrix(lt) && is_matrix(rt)) {
-        const int n = mat_dim(rt);
-        if (a.count == n) {
-            glsl_value_t out = gen_alloc(g, n, node);
-            if (is_bad(out)) return out;
-            glsl_emit_vec_mul_mat(g->code, out.base, a.base, b.base, (uint32_t)n);
-            return out;
+        const int dim = mat_dim(rt);
+        if (a.count == dim) {
+            glsl_value_t vm = gen_alloc(g, dim, node);
+            if (is_bad(vm)) return vm;
+            glsl_emit_vec_mul_mat(g->code, vm.base, a.base, b.base, (uint32_t)dim);
+            return vm;
         }
     }
     if (is_matrix(lt) || is_matrix(rt)) {
