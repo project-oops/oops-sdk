@@ -2106,8 +2106,25 @@ static gl_texture_object_t *gl_gl2_sampler_texture(gl_context_t *ctx,
     if (unit_f < 0.0f || unit_f >= (float)OOPS_GL_MAX_TEXTURE_UNITS) {
         return (gl_texture_object_t *)0;
     }
-    const GLuint id = gl_unit_texture_id(ctx, (GLuint)unit_f);
-    if (id == 0u) return (gl_texture_object_t *)0;
+    /* **A sampler's type picks the target, and `glEnable` has nothing to do with it.**
+     *
+     * `gl_unit_texture_id` answers the fixed-function question - which target this unit is
+     * *enabled* for - and returns nothing when none is. That is right for a pipeline whose
+     * enables decide what happens, and wrong for a program: GL 2.0 samples whatever is bound to
+     * the unit the sampler names, and a shader is not required to call `glEnable(GL_TEXTURE_2D)`
+     * for a `sampler2D` to work. Asking the fixed-function question here left the descriptors
+     * as the zeroes the block was cleared to, and gl2-probe's `texture-sampler` and
+     * `sampler-unit` both sampled 0x00000000 over a full quad.
+     *
+     * Only `sampler2D` is generated, so the target is 2D. Nothing bound is the default texture,
+     * not no texture - GL's texture 0 is a real object - and an incomplete one still samples as
+     * none, which is the half of `gl_unit_texture_id` that does apply. */
+    const gl_tex_unit_t *tu = &ctx->tex_unit[(GLuint)unit_f];
+    const GLuint id = tu->bound_texture_2d ? tu->bound_texture_2d : OOPS_GL_DEFAULT_TEXTURE_2D;
+    {
+        const gl_texture_object_t *probe = gl_lookup_texture(ctx, id);
+        if (!probe || !gl_texture_complete(probe)) return (gl_texture_object_t *)0;
+    }
     for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
         if (ctx->textures[ti].used && ctx->textures[ti].id == id) return &ctx->textures[ti];
     }
