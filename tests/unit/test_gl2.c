@@ -3209,6 +3209,23 @@ static void test_gl2_integers_are_floats_kept_whole(void) {
     ASSERT_NEAR(o[2], -0.3f, 1e-6f);
     ASSERT_NEAR(o[3], 0.3f, 1e-6f);
 
+    /* **A large quotient, because the one correction has a range.** The reciprocal's relative
+     * error is about 2^-23, so the truncated quotient is out by `q * 2^-23` - under one for any
+     * `q` below roughly eight million, which is where a single correction is enough. Above
+     * that the integers themselves stop being exactly representable in a float, so the
+     * representation runs out before the correction does. This pins the working range rather
+     * than an edge nobody reaches: 999999 / 3 is 333333 exactly. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(float(999999 / 3) * 0.000001,\n"
+                    "                      float(1000000 / 8) * 0.000001,\n"
+                    "                      float(-999999 / 3) * 0.000001, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.333333f, 1e-5f);
+    ASSERT_NEAR(o[1], 0.125f, 1e-5f);
+    ASSERT_NEAR(o[2], -0.333333f, 1e-5f);
+
     /* Division by zero answers zero, which is what the reference answers. The language calls it
      * undefined; the two paths still have to agree on something. */
     compile_and_run(ctx, VS_ONE_VARYING,

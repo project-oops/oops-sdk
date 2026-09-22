@@ -2132,7 +2132,13 @@ static void gl_gl2_build_block(gl_context_t *ctx, const gl_program_object_t *pro
          * the texture's own descriptor, since half of it is context state - the same place the
          * fixed-function path puts it. */
         const int ui = prog->hw_tex_uniform[s];
+        /* **The unit is in range because `gl_gl2_sampler_texture` refused it otherwise** - a
+         * sampler set to unit 5 by `glUniform1i` returns no object above, and the `continue`
+         * has already been taken. The bound is re-stated here rather than relied on across two
+         * functions: this indexes a two-element array with a number the application chose, and
+         * a future edit that stopped taking that `continue` would read past it in silence. */
         const GLuint unit = (GLuint)prog->values[prog->uniforms[ui].offset];
+        if (unit >= (GLuint)OOPS_GL_MAX_TEXTURE_UNITS) continue;
         set[10] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[unit], obj));
     }
     if (prog->value_floats > 0 && prog->values) {
