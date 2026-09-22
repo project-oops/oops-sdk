@@ -100,17 +100,36 @@ double trunc(double x) { return (double)truncf((float)x); }
 
 /*
  * Round to nearest, **ties to even** - which is what separates these from `round` above, and
- * what libvorbis's floor and psychoacoustic code assumes. The builtins lower to a single SSE4.1
- * instruction on this target, so writing them out in C would be slower and no more correct.
+ * what libvorbis's floor and psychoacoustic code assumes.
+ *
+ * **`target("sse4.1")` is not an optimisation. Without it these called themselves.**
+ *
+ * The comment here used to say the builtins "lower to a single SSE4.1 instruction on this
+ * target". They lower to `roundsd` only when the compiler is *told* it may emit SSE4.1, and the
+ * baseline for `x86_64` is SSE2. With no instruction to use, clang lowered `__builtin_rint` the
+ * only other way it can: a call to `rint` - from inside `rint`. Twenty-nine bytes of function
+ * that recursed until the stack hit its guard page.
+ *
+ * Neverball found it on the console, one fault after the GL one: thread `SDLAudioP1`, writing
+ * below `rsp`, and a backtrace that was the same address several hundred times. SDL's audio
+ * resampler calls `rint` per sample.
+ *
+ * The attribute enables the feature for these functions alone, so the builtin has its
+ * instruction and lowers inline. It is not a claim about the target beyond what the rest of this
+ * SDK already assumes: oops-gl issues RDNA2 command streams to it, and there is no such console
+ * without SSE4.1.
+ *
+ * `lrint` and `llrint` are left as they are and are not part of this: `cvtsd2si` is SSE2, takes
+ * its rounding from MXCSR already, and is what they were compiling to all along.
  *
  * Unlike `round` and `trunc` beside them, these do not go through a `float` round trip: the
  * builtins have double forms, and narrowing to float first would change the answer for exactly
  * the values a round-to-nearest call is asked about.
  */
-double rint(double x) { return __builtin_rint(x); }
-float rintf(float x) { return __builtin_rintf(x); }
-double nearbyint(double x) { return __builtin_nearbyint(x); }
-float nearbyintf(float x) { return __builtin_nearbyintf(x); }
+__attribute__((target("sse4.1"))) double rint(double x) { return __builtin_rint(x); }
+__attribute__((target("sse4.1"))) float rintf(float x) { return __builtin_rintf(x); }
+__attribute__((target("sse4.1"))) double nearbyint(double x) { return __builtin_nearbyint(x); }
+__attribute__((target("sse4.1"))) float nearbyintf(float x) { return __builtin_nearbyintf(x); }
 long lrint(double x) { return __builtin_lrint(x); }
 long long llrint(double x) { return __builtin_llrint(x); }
 double fmin(double a, double b) { return (a < b) ? a : b; }
@@ -139,12 +158,77 @@ double modf(double x, double *ipart) {
     return (double)frac;
 }
 
-/* x * 2^exp, and its inverse. Built out of the exponent field rather than out of `powf`, which
- * would round twice and lose the exactness that is the whole reason to call these. */
-float ldexpf(float x, int exp_) { return __builtin_ldexpf(x, exp_); }
-double ldexp(double x, int exp_) { return __builtin_ldexp(x, exp_); }
-float frexpf(float x, int *exp_) { return __builtin_frexpf(x, exp_); }
-double frexp(double x, int *exp_) { return __builtin_frexp(x, exp_); }
+/*
+ * x * 2^exp, and its inverse. Built out of the exponent field rather than out of `powf`, which
+ * would round twice and lose the exactness that is the whole reason to call these.
+ *
+ * **Written out, for the reason given above `rint`.** These were `__builtin_ldexp` and
+ * `__builtin_frexp`, and those have no inline lowering on *any* x86-64 - there is no instruction
+ * to give them, so no `target` attribute rescues these the way it does the rounding four. Each
+ * one was a call to itself. libpng's gamma tables and libvorbis both reach `frexp`.
+ *
+ * The scaling below is musl's `scalbn`: three steps rather than one, because a single
+ * `2^exp` cannot be represented once `exp` leaves the exponent range, and doing it in stages
+ * keeps every intermediate finite. Each step is an exact power of two, so the only rounding is
+ * whatever the final multiply owes.
+ */
+typedef union { double d; uint64_t u; } oops_double_bits;
+
+double ldexp(double x, int exp_) {
+    double y = x;
+    if (exp_ > 1023) {
+        y *= 0x1p1023;
+        exp_ -= 1023;
+        if (exp_ > 1023) {
+            y *= 0x1p1023;
+            exp_ -= 1023;
+            if (exp_ > 1023) exp_ = 1023;
+        }
+    } else if (exp_ < -1022) {
+        /* Down in two steps of 2^-969, which stays normal, rather than one that would flush. */
+        y *= 0x1p-1022 * 0x1p53;
+        exp_ += 1022 - 53;
+        if (exp_ < -1022) {
+            y *= 0x1p-1022 * 0x1p53;
+            exp_ += 1022 - 53;
+            if (exp_ < -1022) exp_ = -1022;
+        }
+    }
+    const oops_double_bits scale = { .u = (uint64_t)(0x3ff + exp_) << 52 };
+    return y * scale.d;
+}
+
+double frexp(double x, int *exp_) {
+    oops_double_bits b = { .d = x };
+    int e = (int)((b.u >> 52) & 0x7ffu);
+
+    if (e == 0) {
+        /* Zero stays zero with an exponent of zero; a subnormal is scaled into the normal range
+         * first and the borrowed exponent taken back off. */
+        if (x == 0.0) {
+            if (exp_) *exp_ = 0;
+            return x;
+        }
+        b.d = x * 0x1p64;
+        e = (int)((b.u >> 52) & 0x7ffu) - 64;
+    } else if (e == 0x7ff) {
+        if (exp_) *exp_ = 0;     /* infinity and NaN come back unchanged */
+        return x;
+    }
+
+    if (exp_) *exp_ = e - 1022;
+    b.u = (b.u & ~(0x7ffULL << 52)) | ((uint64_t)1022 << 52);
+    return b.d;   /* the significand, in [0.5, 1) with x's sign */
+}
+
+/* **The float forms go through the double ones, and that is exact rather than convenient.**
+ * Every `float` is a `double`, `frexp`'s result has a `float`'s significand so narrowing it
+ * loses nothing, and `ldexp` on a double cannot overflow for any exponent a `float` result can
+ * survive - so the narrowing at the end is the only rounding, which is the one a correct
+ * `ldexpf` performs anyway. */
+float ldexpf(float x, int exp_) { return (float)ldexp((double)x, exp_); }
+
+float frexpf(float x, int *exp_) { return (float)frexp((double)x, exp_); }
 
 /* ---------------------------------------------------------------------------
  * string
