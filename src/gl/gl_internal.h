@@ -52,6 +52,10 @@
    folded into the unnamed remainder. Here rather than beside the other DCB sizes because the
    context struct below needs it. */
 #define OOPS_GL_FLUSH_SITES 20u
+/* Copies of the textured pixel shader held at once, so a patched variant can be published
+   without waiting for the GPU. The rationale is at OOPS_GL_PS_RING_OFFSET; the count is here
+   because the context struct below sizes an array with it. */
+#define OOPS_GL_PS_RING_SLOTS   6u
 #define OOPS_GL_MAX_BUFFER_OBJECTS 64
 #define OOPS_GL_MAX_QUERY_OBJECTS 64
 /* GL 2.0's generic vertex attribute slots. 16 is the specification's minimum for
@@ -1359,6 +1363,14 @@ typedef struct gl_context {
     /* **A capture is running**: every hookable entry point is written to a byte stream that can
      * be replayed elsewhere - on the host's reference rasteriser, which is the point. See
      * `oops_gl_capture_begin` in GL/gl.h. */
+    /* The textured shader's variant ring - see OOPS_GL_PS_RING_OFFSET. `key` is a hash of the
+     * master's words, `live` says the slot is referenced by a draw already in this batch and so
+     * cannot be rewritten, and `dirty` says the master has been patched since it was hashed. */
+    uint32_t ps_ring_key[OOPS_GL_PS_RING_SLOTS];
+    GLboolean ps_ring_live[OOPS_GL_PS_RING_SLOTS];
+    uint32_t ps_ring_next;
+    uint32_t ps_master_key;
+    GLboolean ps_master_dirty;
     GLboolean capture_active;
     uint32_t hw_flushes;
     const char *hw_flush_site[OOPS_GL_FLUSH_SITES];
@@ -1990,6 +2002,24 @@ static inline uint32_t gl_f32_bits(float f) {
  * 0x300 into the space the textured one left at 0x200, and has 128 words there, 61 used: 64 at
  * 0x300 left three spare once the stipple slot and the second export had taken theirs, which is
  * not room to add anything to. */
+/* **The textured shader's variant ring**, in the payload's unclaimed tail (the GL 2.0 slots end
+ * at 0x6000 and the payload is 0x8000). Six copies of the 0x500-byte shader, each holding one
+ * set of patched words, so a draw binds the variant it needs instead of the one slot being
+ * rewritten underneath draws already queued.
+ *
+ * **This is what Neverball's frame rate was.** Fixed-function state - the texture combine, fog,
+ * the alpha test - is implemented by patching instruction words of a pre-assembled shader in
+ * place. Editing words that queued draws still point at would change what those draws do, so
+ * every edit submitted the frame and waited: measured at **994 of 1003 submits in a frame**,
+ * about half a millisecond each, which is the whole of a 543ms frame. The ring makes an edit
+ * cost a memcpy instead of a round trip, and a variant that is still resident cost nothing at
+ * all - which is the common case, since a program alternates between a few arrangements rather
+ * than inventing new ones.
+ *
+ * The shader is relocatable: it holds no reference to its own address. The one absolute address
+ * in it is the canary's, which is data and is the same for every copy. */
+#define OOPS_GL_PS_RING_OFFSET  0x6000u
+
 #define OOPS_GL_PS_TEX_OFFSET   0x1000u
 #define OOPS_GL_PS_TEX_WORDS    320u
 #define OOPS_GL_PS_UNTEX_OFFSET 0x200u
@@ -3675,6 +3705,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
  * hardware while passing on the host. Only when the words actually change. */
 void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst, const uint32_t *words,
                              size_t n);
+/* Which copy of the textured shader a draw should bind, as a payload offset. */
+uint32_t gl_ps_ring_offset(gl_context_t *ctx);
 /* Every pixel shader out of this core's caches after an edit: the payload is write-combined and
  * the command processor reads what has left the core. */
 void gl_ps_flush_shaders(gl_context_t *ctx);
