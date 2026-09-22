@@ -202,11 +202,24 @@ static size_t g_capture_cap;
 static uint32_t g_capture_count;
 static GLboolean g_capture_overflow;
 
+/* **A ceiling, so a capture fails predictably instead of asking for the machine.**
+ *
+ * An array draw is recorded the way a display list records one - expanded into the
+ * `glBegin`/attribute/`glEnd` sequence it is defined to be equivalent to - which is faithful
+ * and fat: **measured at 144 bytes and 3 commands per vertex**. A frame of twenty thousand
+ * vertices is under 3 MB and one of a hundred thousand is about 14 MB, so this is far above any
+ * frame worth capturing while still being a number rather than "whatever malloc will give". */
+#define GL_CAPTURE_MAX_BYTES (64u * 1024u * 1024u)
+
 static void gl_capture_put(const void *src, size_t n) {
     if (g_capture_overflow) return;
     if (g_capture_len + n > g_capture_cap) {
         size_t grown = g_capture_cap ? g_capture_cap * 2u : 65536u;
         while (grown < g_capture_len + n) grown *= 2u;
+        if (grown > GL_CAPTURE_MAX_BYTES) {
+            g_capture_overflow = GL_TRUE;
+            return;
+        }
         uint8_t *next = (uint8_t *)gl_list_alloc(grown);
         if (!next) {
             /* **Recorded, not ignored.** A capture that quietly stopped part way would be a
