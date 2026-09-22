@@ -3356,10 +3356,27 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
          */
         {
             static GLboolean told_incomplete = GL_FALSE;
-            const GLuint bound0 = gl_unit_texture_id(ctx, 0u);
-            if (!told_incomplete && eff_tex == 0u && bound0 != 0u) {
+            /*
+             * **Read the unit's own enable and binding, not `gl_unit_texture_id`.**
+             *
+             * The first version of this asked whether `gl_effective_texture_id` was zero while
+             * `gl_unit_texture_id(ctx, 0)` was not - and those are the same call: the effective
+             * id *is* unit 0's. The condition could not hold, the branch was dead, and a run
+             * that printed nothing looked like evidence that textures were fine. It was not
+             * evidence of anything.
+             *
+             * Both of those answer zero for "texturing off" and for "on but unusable" alike, so
+             * the only way to tell them apart is the state they are computed from.
+             */
+            const gl_tex_unit_t *u0 = &ctx->tex_unit[0];
+            const GLboolean tex_on = (GLboolean)(u0->cap_texture_2d || u0->cap_texture_3d ||
+                                                 u0->cap_texture_cube_map || u0->cap_texture_1d);
+            const GLuint bound0 = u0->bound_texture_2d;
+            if (!told_incomplete && tex_on && eff_tex == 0u) {
                 told_incomplete = GL_TRUE;
-                const gl_texture_object_t *t0 = gl_lookup_texture(ctx, bound0);
+                const gl_texture_object_t *t0 =
+                    bound0 ? gl_lookup_texture(ctx, bound0)
+                           : gl_lookup_texture(ctx, OOPS_GL_DEFAULT_TEXTURE_2D);
                 gl_tex_view_t v;
                 char msg[160];
                 size_t n = 0;
