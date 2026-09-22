@@ -25,7 +25,33 @@ __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 __attribute__((weak)) int sceSysmoduleLoadModule(uint16_t id);
 
 #define OOPS_KEY_RECORD_BYTES 96
-#define OOPS_KEY_RECORD_FIELDS_CONFIRMED 0
+
+/*
+ * The record's fields, confirmed 2026-09-22 - **by an application, not a capture.**
+ *
+ * This was 0 for as long as the subsystem existed, on the reasoning that the 96-byte size was
+ * measured but the meaning of the bytes was not, so a read would be parsing a guess. That was
+ * right when it was written and had stopped being true without anyone noticing.
+ *
+ * `oops_keyboard_poll_buttons` below reads this same record through the same
+ * `sceKeyboardReadState` call and has never been gated. `oops-apps`' SeaShell has been calling it
+ * in its input loop (`src/oops-utilities/seashell/home_main.c`), and its `decode_keycode` maps
+ * **22 distinct USB HID usage codes** - arrows, WASD, Enter, Escape, Backspace, F1-F3, Page
+ * Up/Down, Q/E, Tab, Space, Pause, Home. Those do not come out of a wrong offset, a wrong stride
+ * or a wrong `connected`/`intercepted`: the navigation would be noise, and it is not.
+ *
+ * So `keycodes` at 0x20, `connected` at 0x10 and `intercepted` at 0x08 are confirmed in the
+ * strongest way available - a shipping application depending on them on this hardware.
+ * `modifiers` at 0x1c is **not**, and is gated separately at `OOPS_KEY_MODIFIERS_CONFIRMED`;
+ * `timestamp_us` and `leds` are read by nothing and reported as zero.
+ *
+ * The cost of the old arrangement, for the record: `oops_keyboard_read` is the only route a
+ * character has into a GLUT, SDL2 or GLFW program, so every port framework in the collection had
+ * a dead keyboard, while the one application that happened to take the button path worked.
+ * (`REQ-20260922T2015Z-b4d7`.)
+ */
+#define OOPS_KEY_RECORD_FIELDS_CONFIRMED 1
+
 #define OOPS_MAX_HW_KEYS 16
 #define OOPS_KEYBOARD_MAX_HANDLES 2
 
@@ -47,7 +73,10 @@ typedef struct {
 } oops_kbd_hw_record_t;
 
 static int s_kbd_handles[OOPS_KEYBOARD_MAX_HANDLES] = {-1, -1};
+/* Held keys as `oops_keyboard_poll_buttons` last saw them. */
 static uint16_t s_kbd_previous_keys[OOPS_KEYBOARD_MAX_HANDLES][OOPS_MAX_HW_KEYS];
+/* And as `oops_keyboard_read` last saw them. Two histories on purpose - see that function. */
+static uint16_t s_kbd_event_keys[OOPS_KEYBOARD_MAX_HANDLES][OOPS_MAX_HW_KEYS];
 static int s_kbd_init_rc = OOPS_KEYBOARD_EUNAVAIL;
 static int s_keyboard_module_loaded = 0;
 
@@ -92,7 +121,9 @@ static uint32_t decode_keycode(uint16_t code) {
     /* PS Button: Pause/Break key and Home key */
     case 72: /* Pause / Break (0x48) */
     case 74: /* Home key (0x4A) */
-      return (1u << 16); /* HOME_BUTTON_PS */
+      /* `oops/input.h` is included above and owns this bit; it was a bare literal here, with a
+       * comment naming a constant private to one application. */
+      return OOPS_BUTTON_BIT16;
 
     /* L1 / R1: Page Up / Page Down, Q / E */
     case 75: /* Page Up (0x4B) */
@@ -246,6 +277,86 @@ int oops_keyboard_init(void) {
   return OOPS_KEYBOARD_OK;
 }
 
+/* One record from a handle, newest first: the polled state if it answers, else the newest sample
+ * from the event queue. 1 when `out` was filled. The same two-step `oops_keyboard_poll_buttons`
+ * uses, factored out so the two readers cannot drift apart. */
+static int kbd_read_record(int handle, oops_kbd_hw_record_t *out) {
+  for (size_t s = 0; s < sizeof(*out); s++) {
+    ((uint8_t *)out)[s] = 0;
+  }
+  if (sceKeyboardReadState &&
+      oops_symbol_is_resolved((const void *)sceKeyboardReadState)) {
+    if (sceKeyboardReadState(handle, out) == 0) {
+      return 1;
+    }
+  }
+  if (sceKeyboardRead && oops_symbol_is_resolved((const void *)sceKeyboardRead)) {
+    oops_kbd_hw_record_t samples[16];
+    for (size_t s = 0; s < sizeof(samples); s++) {
+      ((uint8_t *)samples)[s] = 0;
+    }
+    int count = sceKeyboardRead(handle, samples, 16);
+    if (count > 0) {
+      *out = samples[(count > 16 ? 16 : count) - 1];
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int kbd_usage_present(const uint16_t *keys, uint16_t usage) {
+  for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
+    if (keys[k] == usage) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/*
+ * The modifier mask for an event.
+ *
+ * `modifiers` at 0x1c is the **one field of the record nothing has ever exercised**. SeaShell
+ * validates `keycodes`, `connected` and `intercepted` by using them; it never reads this. So it
+ * is reported as zero rather than decoded, which costs shifted characters and costs nothing
+ * else - a caller sees "no modifier held", which is wrong only in the same direction as a
+ * keyboard with no shift key, never in the direction of a character that was not typed.
+ *
+ * Flip this when `REQ-20260922T1905Z-9c31` lands. The decode below is written against the USB HID
+ * boot-protocol modifier byte (bit 0 LCtrl … bit 7 RGUI), which is what a 96-byte report of this
+ * shape would carry, and it is a prediction until that capture agrees with it.
+ */
+#define OOPS_KEY_MODIFIERS_CONFIRMED 0
+
+static uint8_t kbd_event_modifiers(const oops_kbd_hw_record_t *rec) {
+#if OOPS_KEY_MODIFIERS_CONFIRMED
+  const uint32_t p = rec->modifiers;
+  uint8_t m = 0u;
+  if (p & 0x11u) m |= (uint8_t)OOPS_KMOD_CTRL;  /* left | right */
+  if (p & 0x22u) m |= (uint8_t)OOPS_KMOD_SHIFT;
+  if (p & 0x44u) m |= (uint8_t)OOPS_KMOD_ALT;
+  if (p & 0x88u) m |= (uint8_t)OOPS_KMOD_GUI;
+  return m;
+#else
+  (void)rec;
+  return 0u;
+#endif
+}
+
+/*
+ * Key transitions, by diffing the active-key set against the one this function last saw.
+ *
+ * The platform reports which keys are *down*, not which changed, so the edges are ours to find.
+ * `s_kbd_event_keys` is this function's own history and is deliberately **not**
+ * `s_kbd_previous_keys`: `oops_keyboard_poll_buttons` owns that one, and an application calling
+ * both - SeaShell does - must not have one reader eat the other's edges.
+ *
+ * A handle is emitted whole or not at all. A handle can produce at most `OOPS_MAX_HW_KEYS`
+ * releases plus as many presses, so it is counted before anything is written and skipped if it
+ * will not fit; the next call re-diffs against an unchanged history and reports it then. Emitting
+ * half a handle and advancing the history would drop the remainder silently, which is the one
+ * failure a caller could not see.
+ */
 int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
   if (!out_events || max_events == 0) {
     return OOPS_KEYBOARD_EPARAM;
@@ -253,14 +364,84 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
   if (!OOPS_KEY_RECORD_FIELDS_CONFIRMED) {
     return OOPS_KEYBOARD_ELAYOUT;
   }
+  if (!oops_keyboard_available()) {
+    return OOPS_KEYBOARD_EUNAVAIL;
+  }
+
   int any_valid = 0;
   for (int i = 0; i < OOPS_KEYBOARD_MAX_HANDLES; i++) {
     if (s_kbd_handles[i] >= 0) { any_valid = 1; break; }
   }
-  if (!any_valid || (!sceKeyboardReadState && !sceKeyboardRead)) {
+  if (!any_valid) {
     return OOPS_KEYBOARD_EUNAVAIL;
   }
-  return 0;
+
+  const unsigned int cap =
+      (max_events > OOPS_MAX_KEY_EVENTS) ? (unsigned int)OOPS_MAX_KEY_EVENTS : max_events;
+  unsigned int n = 0u;
+
+  for (int idx = 0; idx < OOPS_KEYBOARD_MAX_HANDLES; idx++) {
+    const int handle = s_kbd_handles[idx];
+    if (handle < 0) {
+      continue;
+    }
+
+    oops_kbd_hw_record_t record;
+    if (!kbd_read_record(handle, &record)) {
+      continue;
+    }
+
+    /* A disconnected keyboard, or one the system has taken, releases everything it was holding
+     * rather than leaving a key stuck down for as long as the overlay is up. */
+    const uint16_t *now = record.keycodes;
+    const uint16_t none[OOPS_MAX_HW_KEYS] = {0};
+    if (!is_usable_sample(&record)) {
+      now = none;
+    }
+
+    unsigned int needed = 0u;
+    for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
+      const uint16_t was = s_kbd_event_keys[idx][k];
+      if (was != 0u && !kbd_usage_present(now, was)) needed++;
+      const uint16_t is = now[k];
+      if (is != 0u && !kbd_usage_present(s_kbd_event_keys[idx], is)) needed++;
+    }
+    if (needed == 0u) {
+      continue;
+    }
+    if (n + needed > cap) {
+      break; /* history untouched: the next call reports this handle whole */
+    }
+
+    const uint8_t mods = kbd_event_modifiers(&record);
+
+    for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
+      const uint16_t was = s_kbd_event_keys[idx][k];
+      if (was != 0u && !kbd_usage_present(now, was)) {
+        out_events[n].usage = was;
+        out_events[n].transition = (uint8_t)OOPS_KEY_UP;
+        out_events[n].modifiers = mods;
+        out_events[n].timestamp = 0u;
+        n++;
+      }
+    }
+    for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
+      const uint16_t is = now[k];
+      if (is != 0u && !kbd_usage_present(s_kbd_event_keys[idx], is)) {
+        out_events[n].usage = is;
+        out_events[n].transition = (uint8_t)OOPS_KEY_DOWN;
+        out_events[n].modifiers = mods;
+        out_events[n].timestamp = 0u;
+        n++;
+      }
+    }
+
+    for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
+      s_kbd_event_keys[idx][k] = now[k];
+    }
+  }
+
+  return (int)n;
 }
 
 uint32_t oops_keyboard_poll_buttons(void) {

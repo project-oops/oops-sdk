@@ -37,7 +37,7 @@
  *     oops_hud_rect(hud, 40, 30, 360, 60, 0xC0101820u);           // a panel behind the text
  *     oops_hud_text(hud, 52, 44, 2, OOPS_COLOR_WHITE, "MESA-CUBE");
  *     oops_hud_end(hud);
- *     ... then oops_gl_present() / glSwapBuffers().
+ *     ... then oops_gfx_present(gfx) / glutSwapBuffers(), whichever the title presents with.
  *
  * `begin` saves the GL state it changes (including the bound program, so a shader title is left as
  * it was) and `end` restores it. Everything between them is in pixel coordinates with the origin

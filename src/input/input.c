@@ -1,4 +1,5 @@
 #include "oops/input.h"
+#include "oops/keyboard.h" /* oops_input_poll folds the keyboard's buttons in - see it */
 #include "oops/system.h"
 #include "pad_layout.h"
 #include <stddef.h>
@@ -159,6 +160,21 @@ int oops_input_init(void) {
   return s_init_rc;
 }
 
+/*
+ * A keyboard's directional and action keys, as pad buttons, for a port-0 poll that found no pad.
+ *
+ * `out_state` is already zeroed when this is called, and `connected` stays 0 on purpose: there is
+ * no pad, and saying otherwise would be a lie a caller could act on. What changes is the return
+ * code - a poll that has buttons to report succeeds, whatever produced them.
+ */
+static int input_keyboard_only(oops_pad_state_t *out_state, uint32_t kbd) {
+  if (kbd == 0u) {
+    return -1;
+  }
+  out_state->buttons = kbd;
+  return 0;
+}
+
 int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
   if (!out_state || port >= OOPS_MAX_PADS)
     return -1;
@@ -167,11 +183,28 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
     ((unsigned char *)out_state)[i] = 0;
   }
 
+  /*
+   * **The keyboard is an input device, so it arrives through the input call.**
+   *
+   * It did not, until 2026-09-22. `oops_keyboard_poll_buttons` decodes arrows, WASD, Enter,
+   * Escape and the rest into `OOPS_BUTTON_*`, and an application wanting both had to know that
+   * and OR the two together by hand. Exactly one did (`REQ-20260922T2015Z-b4d7`), which is what a
+   * second public path to the same capability gets you: it works for whoever found it.
+   *
+   * Port 0 only - a keyboard is not per-port, and folding it into every port would report the
+   * same keypress four times. It costs one `sceKeyboardReadState` per poll, and nothing at all
+   * when no keyboard library resolved, which `oops_keyboard_poll_buttons` checks first.
+   *
+   * An application that still calls `oops_keyboard_poll_buttons` itself is not broken by this -
+   * the bits are the same and OR is idempotent - but the call is now redundant.
+   */
+  const uint32_t kbd = (port == 0u) ? oops_keyboard_poll_buttons() : 0u;
+
   /* Lazy-open port if uninitialized but requested */
   if (s_pad_handles[port] < 0 && (scePadOpen || scePadGetHandle)) {
     if (s_pad_retry_cooldown[port] > 0) {
       s_pad_retry_cooldown[port]--;
-      return -1;
+      return input_keyboard_only(out_state, kbd);
     }
     try_resolve_user_id();
     if (s_user_id >= 0) {
@@ -187,7 +220,7 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
     }
     if (s_pad_handles[port] < 0) {
       s_pad_retry_cooldown[port] = 120; /* retry at most once every 120 frames (~2 seconds) */
-      return -1;
+      return input_keyboard_only(out_state, kbd);
     }
     oops_log_debug("INPUT", "lazy open port %u succeeded, handle=%d", port, s_pad_handles[port]);
   }
@@ -198,7 +231,7 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
     if ((s_unavail_tick++ % 300) == 0) {
       oops_log_debug("INPUT", "poll: port %u unavailable (handle=%d)", port, handle);
     }
-    return -1;
+    return input_keyboard_only(out_state, kbd);
   }
 
   ScePadDataInternal raw;
@@ -226,10 +259,11 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
         }
       }
     }
-    return -1;
+    return input_keyboard_only(out_state, kbd);
   }
 
   oops_input_map_record(out_state, &raw);
+  out_state->buttons |= kbd;
 
   /* Verbose telemetry when buttons change, when non-zero, or periodically */
   static uint32_t s_last_polled_buttons[OOPS_MAX_PADS] = {0};

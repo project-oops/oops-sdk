@@ -88,19 +88,50 @@ static void test_input_trigger_contract(void) {
             -1); /* valid args, gated */
 }
 
-/* Keyboard: with no platform symbols on host, availability is honestly false,
- * init reports unavailable and keeps reporting it, and the read refuses with
- * the layout code rather than fabricating zero events. */
+/*
+ * Keyboard: with no platform symbols on host, availability is honestly false, init reports
+ * unavailable and keeps reporting it, and the read says **why** rather than fabricating zero
+ * events.
+ *
+ * This asserted `OOPS_KEYBOARD_ELAYOUT` until 2026-09-22, when the record layout stopped being
+ * unconfirmed (`src/input/keyboard.c:28` carries the evidence). `ELAYOUT` now means what it
+ * always should have: the fields are a guess. On this host the honest answer is `EUNAVAIL` -
+ * nothing resolved - and a test that still expected `ELAYOUT` would be asserting a refusal
+ * rather than a contract, which is how the old gate outlived its reason.
+ *
+ * The distinction is the point of having both codes: a caller can tell "no reader" from "no
+ * keys", and now also from "cannot parse". Zero events stays reserved for a keyboard that is
+ * present and idle.
+ */
 static void test_input_keyboard_contract(void) {
   ASSERT_EQ(oops_keyboard_available(), 0);
   ASSERT_EQ(oops_keyboard_init(), OOPS_KEYBOARD_EUNAVAIL);
   ASSERT_EQ(oops_keyboard_init(), OOPS_KEYBOARD_EUNAVAIL);
   oops_key_event_t ev[OOPS_MAX_KEY_EVENTS];
-  ASSERT_EQ(oops_keyboard_read(ev, OOPS_MAX_KEY_EVENTS), OOPS_KEYBOARD_ELAYOUT);
+  ASSERT_EQ(oops_keyboard_read(ev, OOPS_MAX_KEY_EVENTS), OOPS_KEYBOARD_EUNAVAIL);
+  /* Argument checks come before any platform question, so they answer the same either way. */
   ASSERT_EQ(oops_keyboard_read(NULL, OOPS_MAX_KEY_EVENTS),
             OOPS_KEYBOARD_EPARAM);
   ASSERT_EQ(oops_keyboard_read(ev, 0), OOPS_KEYBOARD_EPARAM);
+  /* With no keyboard resolved, the button view agrees: no bits, and no crash reaching for a
+   * record that was never filled. */
+  ASSERT_EQ((int)oops_keyboard_poll_buttons(), 0);
   oops_keyboard_close();
+}
+
+/*
+ * `oops_input_poll` folds the keyboard in on port 0 and must stay honest when there is neither.
+ * With nothing resolved on host it still fails, rather than succeeding with a zeroed state
+ * because a keyboard path was consulted.
+ */
+static void test_input_poll_keyboard_fold(void) {
+  oops_pad_state_t st;
+  ASSERT_EQ(oops_input_poll(0, &st), -1);
+  ASSERT_EQ((int)st.buttons, 0);
+  ASSERT_EQ((int)st.connected, 0);
+  /* Ports above 0 never consult the keyboard, so one keypress cannot arrive four times. */
+  ASSERT_EQ(oops_input_poll(1, &st), -1);
+  ASSERT_EQ((int)st.buttons, 0);
 }
 
 /* Mouse: same contract. */
@@ -198,5 +229,6 @@ void run_unit_tests_input(void) {
   RUN_TEST(test_input_batch_bounds);
   RUN_TEST(test_input_trigger_contract);
   RUN_TEST(test_input_keyboard_contract);
+  RUN_TEST(test_input_poll_keyboard_fold);
   RUN_TEST(test_input_mouse_contract);
 }

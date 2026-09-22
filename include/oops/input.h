@@ -25,20 +25,34 @@ extern "C" {
 #define OOPS_BUTTON_CROSS (1u << 14)
 #define OOPS_BUTTON_SQUARE (1u << 15)
 /*
- * Capture-gated and contested. Bit 16 is not in the public ScePad button
- * layout. This SDK holds it unconfirmed; Prosperous (pros-link/src/pad.rs) maps
- * the same bit to Home and its enum claims the bit was confirmed empirically on
- * a target. obSCEne has not settled it - its button-bits probe needs a
- * controller attached and resolved not-possible on the test rig - so which of
- * Create / Home bit 16 carries is genuinely open. Do not bind it as a shell or
- * system button until an obSCEne button-bits sweep with a controller confirms
- * it.
+ * **Bit 16, and it has one name here because it is one bit.**
+ *
+ * It is not in the public ScePad button layout, and which physical button it carries is open.
+ * This SDK held it as Create; Prosperous (`pros-link/src/pad.rs`) maps it to Home and its enum
+ * claims the bit was confirmed empirically on a target. obSCEne has not settled it - its
+ * button-bits probe needs a controller attached, and resolved not-possible on the test rig.
+ *
+ * Until 2026-09-22 this header carried the question and the answer three lines apart: a warning
+ * saying *"do not bind it as a shell or system button"*, immediately followed by
+ * `OOPS_BUTTON_PS` and `OOPS_BUTTON_HOME` defined as exactly that bit with no caveat, and
+ * `src/input/keyboard.c` returning a bare `(1u << 16)` that cited an application's private
+ * constant. Five spellings, one of which forbade what the other four did
+ * (`REQ-20260922T2015Z-b4d7`).
+ *
+ * So: **`OOPS_BUTTON_BIT16` is the name**, deliberately describing the bit rather than a button,
+ * because the bit is what is known. The two aliases below are kept so existing callers still
+ * build, and they carry the same caveat rather than contradicting it. When a sweep settles this,
+ * one of them becomes the name and the others go.
+ *
+ * Binding it is not forbidden - SeaShell binds it to the Control Centre overlay and that is a
+ * reasonable bet - but it is a bet, and a caller should be able to see that from the name.
  */
-#define OOPS_BUTTON_CREATE                                                     \
-  (1u << 16) /* Prospero Create / Orbis Share; bit contested with Prosperous's \
-                Home */
-#define OOPS_BUTTON_PS (1u << 16)   /* PlayStation / Home button (when pad privilege is enabled) */
-#define OOPS_BUTTON_HOME (1u << 16) /* Alias for OOPS_BUTTON_PS */
+#define OOPS_BUTTON_BIT16 (1u << 16)
+/* Prospero Create / Orbis Share - one reading of OOPS_BUTTON_BIT16, not confirmed. */
+#define OOPS_BUTTON_CREATE OOPS_BUTTON_BIT16
+/* PlayStation / Home - the other reading of OOPS_BUTTON_BIT16, equally not confirmed. */
+#define OOPS_BUTTON_PS OOPS_BUTTON_BIT16
+#define OOPS_BUTTON_HOME OOPS_BUTTON_BIT16 /* Alias for OOPS_BUTTON_PS. */
 #define OOPS_BUTTON_TOUCHPAD (1u << 20)
 
 #define OOPS_MAX_PADS 4
