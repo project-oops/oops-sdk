@@ -3705,8 +3705,10 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
  * hardware while passing on the host. Only when the words actually change. */
 void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst, const uint32_t *words,
                              size_t n);
-/* Which copy of the textured shader a draw should bind, as a payload offset. */
+/* Which copy of the textured shader a draw should bind, as a payload offset, and whether
+   binding it would first need the frame submitted to free a slot. */
 uint32_t gl_ps_ring_offset(gl_context_t *ctx);
+GLboolean gl_ps_ring_needs_submit(gl_context_t *ctx);
 /* Every pixel shader out of this core's caches after an edit: the payload is write-combined and
  * the command processor reads what has left the core. */
 void gl_ps_flush_shaders(gl_context_t *ctx);

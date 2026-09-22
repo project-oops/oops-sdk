@@ -2609,44 +2609,74 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
     ctx->hw_frame_active = GL_TRUE;
 }
 
-/* The address a textured draw should bind, as an offset into the payload.
+/* -------------------------------------------------------------------------
+ * The textured shader's variant ring
  *
- * A variant already resident costs nothing: the common case is a program alternating between a
- * few arrangements - Neverball's is the default stage and the two-stage shadow - and those stay
- * in the ring for the whole batch. A variant that is not resident costs one copy of 1280 bytes.
- * Only when every slot is already referenced by a queued draw does this submit, and then the
- * batch is retired and all six are free again. */
+ * Fixed-function state is implemented by patching instruction words of a pre-assembled pixel
+ * shader. The copy at OOPS_GL_PS_TEX_OFFSET is now a master that no draw binds; draws bind a
+ * copy in the ring, and a patched master is published by copying it into a free slot. A variant
+ * that is still resident costs nothing, which is the common case - a program alternates between
+ * a few arrangements rather than inventing new ones - and a new one costs 1280 bytes of memcpy
+ * instead of submitting the frame and waiting for the GPU. See OOPS_GL_PS_RING_OFFSET for what
+ * that was costing.
+ */
+
+/* FNV-1a over the shader's words, recomputed only when a patch has dirtied it. A hash rather
+ * than a comparison because it is asked once per change and matched once per draw, and 1280
+ * bytes of memcmp per draw would replace one performance problem with another. */
+#ifndef OOPS_HOST_BUILD
+static void gl_ps_ring_hash(gl_context_t *ctx) {
+    if (!ctx->ps_master_dirty) return;
+    const uint32_t *const master = (const uint32_t *)((const char *)ctx->gpu_payload +
+                                                      OOPS_GL_PS_TEX_OFFSET);
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0u; i < OOPS_GL_PS_TEX_WORDS; i++) {
+        h ^= master[i];
+        h *= 16777619u;
+    }
+    /* Zero is the "nothing here" key, so a shader hashing to it takes the next value. */
+    ctx->ps_master_key = h ? h : 1u;
+    ctx->ps_master_dirty = GL_FALSE;
+}
+#endif /* the host build binds the master directly and never rings */
+
+/* Whether binding the current variant would need a slot the ring has not got. Asked where the
+ * descriptor ring asks the same question, so a draw's one possible submission is decided before
+ * anything of this draw has been written into the payload or the command buffer. */
+GLboolean gl_ps_ring_needs_submit(gl_context_t *ctx) {
+#ifdef OOPS_HOST_BUILD
+    (void)ctx;
+    return GL_FALSE;
+#else
+    if (!ctx || !ctx->use_hardware || !ctx->gpu_payload) return GL_FALSE;
+    gl_ps_ring_hash(ctx);
+    for (uint32_t i = 0u; i < OOPS_GL_PS_RING_SLOTS; i++) {
+        if (ctx->ps_ring_live[i] && ctx->ps_ring_key[i] == ctx->ps_master_key) return GL_FALSE;
+    }
+    return (GLboolean)(ctx->ps_ring_next >= OOPS_GL_PS_RING_SLOTS);
+#endif
+}
+
+/* The address a textured draw should bind, as an offset into the payload. */
 uint32_t gl_ps_ring_offset(gl_context_t *ctx) {
 #ifdef OOPS_HOST_BUILD
     (void)ctx;
     return OOPS_GL_PS_TEX_OFFSET;
 #else
-    uint32_t *const master = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
-    if (ctx->ps_master_dirty) {
-        /* FNV-1a over the shader's words. A hash rather than a comparison because this is asked
-         * once per change and compared once per draw, and 1280 bytes of memcmp per draw is the
-         * kind of cost that replaces one performance problem with another. */
-        uint32_t h = 2166136261u;
-        for (uint32_t i = 0u; i < OOPS_GL_PS_TEX_WORDS; i++) {
-            h ^= master[i];
-            h *= 16777619u;
-        }
-        /* Zero is the "nothing here" key, so a shader that hashes to it takes the next value.
-           One collision in 2^32 of being wrong about a variant is not a risk worth carrying for
-           the sake of one branch. */
-        ctx->ps_master_key = h ? h : 1u;
-        ctx->ps_master_dirty = GL_FALSE;
-    }
+    const uint32_t *const master = (const uint32_t *)((const char *)ctx->gpu_payload +
+                                                      OOPS_GL_PS_TEX_OFFSET);
+    gl_ps_ring_hash(ctx);
     for (uint32_t i = 0u; i < OOPS_GL_PS_RING_SLOTS; i++) {
         if (ctx->ps_ring_live[i] && ctx->ps_ring_key[i] == ctx->ps_master_key) {
             return OOPS_GL_PS_RING_OFFSET + i * OOPS_GL_PS_TEX_WORDS * 4u;
         }
     }
+    /* **The submission was decided above**, beside the descriptor ring's, which is the one place
+       in a draw where this file submits. By here a slot is free; if it somehow were not, the
+       last one is reused - a draw with a stale variant is wrong in one draw, where overwriting
+       a slot a queued draw is reading is wrong in all of them. */
     if (ctx->ps_ring_next >= OOPS_GL_PS_RING_SLOTS) {
-        /* Every slot is spoken for by a draw already built. The frame runs, and those draws
-           read the variants they were built with; `gl_hw_begin_frame` empties the ring. */
-        gl_hw_flush(ctx);
-        gl_hw_begin_frame(ctx);
+        return OOPS_GL_PS_RING_OFFSET + (OOPS_GL_PS_RING_SLOTS - 1u) * OOPS_GL_PS_TEX_WORDS * 4u;
     }
     const uint32_t slot = ctx->ps_ring_next++;
     const uint32_t off = OOPS_GL_PS_RING_OFFSET + slot * OOPS_GL_PS_TEX_WORDS * 4u;
@@ -2654,9 +2684,8 @@ uint32_t gl_ps_ring_offset(gl_context_t *ctx) {
     /* **And out of this core's caches**, which `gl_ps_flush_shaders` does not do for the ring -
      * it flushes the three fixed shader ranges and knows nothing about these slots. The hazard
      * is the one its own comment names: a payload edit the GPU has not seen flushed is the
-     * previous shader running against this draw's parameters. Only the slot just written, not
-     * the whole ring, because the others have not changed. */
-#if !defined(OOPS_HOST_BUILD) && defined(__x86_64__)
+     * previous shader running against this draw's parameters. Only the slot just written. */
+#if defined(__x86_64__)
     for (size_t p = 0u; p < OOPS_GL_PS_TEX_WORDS * 4u; p += 64u) {
         __builtin_ia32_clflush((const void *)((const char *)ctx->gpu_payload + off + p));
     }
@@ -3795,9 +3824,11 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
             const GLboolean border_moved =
                 (GLboolean)(eff_obj->border_in_table &&
                             memcmp(border, eff_obj->border_hw, 16) != 0);
-            if (border_moved || (moved && ctx->hw_desc_slot >= OOPS_GL_DESC_RING_SLOTS)) {
-                /* The ring is full, or the border changed: the frame runs, and the draws it
-                 * holds sample the descriptors they were built with. */
+            if (border_moved || (moved && ctx->hw_desc_slot >= OOPS_GL_DESC_RING_SLOTS) ||
+                gl_ps_ring_needs_submit(ctx)) {
+                /* The ring is full, or the border changed, or the shader variant this draw
+                 * needs has nowhere to go: the frame runs, and the draws it holds sample the
+                 * descriptors - and bind the shader variants - they were built with. */
                 gl_hw_flush(ctx);
                 gl_hw_begin_frame(ctx);
             } else if (moved) {

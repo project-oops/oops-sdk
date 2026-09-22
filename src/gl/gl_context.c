@@ -1708,16 +1708,32 @@ void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst,
                              const uint32_t *words, size_t n) {
 #ifndef OOPS_HOST_BUILD
     if (!ctx->use_hardware || !ctx->hw_frame_active) return;
-    for (size_t i = 0; i < n; i++) {
-        if (dst[i] != words[i]) {
-            gl_hw_flush(ctx);
-            return;
-        }
+    GLboolean changed = GL_FALSE;
+    for (size_t i = 0; i < n && !changed; i++) {
+        if (dst[i] != words[i]) changed = GL_TRUE;
     }
+    if (!changed) return;
+
+    /* **The textured shader is no longer edited where the GPU reads it.** Its copy at
+     * OOPS_GL_PS_TEX_OFFSET is a master that no draw points at; draws bind a variant in the
+     * ring, and a change is published by copying the master into a fresh slot. So an edit costs
+     * a memcpy rather than submitting the frame and waiting for it - which is what made this
+     * function the origin of 994 of a frame's 1003 submits.
+     *
+     * Everything else patched in place - the untextured shader above all - still has the GPU
+     * reading exactly the words being written, and still has to be synchronised the old way. */
+    const uint32_t *const tex = (const uint32_t *)((const char *)ctx->gpu_payload +
+                                                   OOPS_GL_PS_TEX_OFFSET);
+    if (dst >= tex && dst < tex + OOPS_GL_PS_TEX_WORDS) {
+        ctx->ps_master_dirty = GL_TRUE;
+        return;
+    }
+    gl_hw_flush(ctx);
 #else
     (void)ctx; (void)dst; (void)words; (void)n;
 #endif
 }
+
 
 /* Both pixel shaders out of this core's caches after a patch: the payload is write-combined and
  * the command processor reads what has left the core. The untextured shader sits just below the
