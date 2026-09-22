@@ -96,6 +96,7 @@
  * is that register only from gfx12 and is `SPI_PS_INPUT_CNTL_6` here. */
 #define GL_PS_INPUT_PERSP_CENTER 0x00000002u
 #define GL_PS_INPUT_POS_XYZW     0x00000f00u
+#define GL_PS_INPUT_FRONT_FACE   0x00001000u
 
 static size_t lit_len(const char *s) {
     size_t n = 0;
@@ -320,11 +321,20 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     /* **`gl_FragCoord` needs the block too**, for the viewport height that flips its y - so it
      * joins the two things that already decide whether this shader is handed one. */
     const GLboolean wants_fragcoord = unit_mentions(fs, "gl_FragCoord", 12u);
+    /* `gl_FrontFacing` needs no block - the SPI hands it over in a register of its own. */
+    const GLboolean wants_frontfacing = unit_mentions(fs, "gl_FrontFacing", 14u);
     const GLboolean takes_block =
         (GLboolean)(tex_sets > 0 || p->value_floats > 0 || wants_fragcoord);
     const uint32_t user_sgprs = takes_block ? 2u : 0u;
-    const uint32_t input_ena =
-        GL_PS_INPUT_PERSP_CENTER | (wants_fragcoord ? GL_PS_INPUT_POS_XYZW : 0u);
+    const uint32_t input_ena = GL_PS_INPUT_PERSP_CENTER |
+                               (wants_fragcoord ? GL_PS_INPUT_POS_XYZW : 0u) |
+                               (wants_frontfacing ? GL_PS_INPUT_FRONT_FACE : 0u);
+    /* **Where the front-face register lands, which depends on what else was asked for.** The
+     * SPI packs the enabled inputs in the order Mesa enumerates them, so the face follows the
+     * position when the position is there and sits straight after the barycentrics when it is
+     * not. Computed rather than fixed, because pinning it would mean asking for four registers
+     * of window position that the shader never reads just to keep this one in place. */
+    const uint32_t frontface_vgpr = GL_PS_FRAGPOS_VGPR + (wants_fragcoord ? 4u : 0u);
 
     /* **`m0` first, because every interpolation reads it** - and because a shader that skips it
      * still runs, still exports, and draws a surface speckled with another primitive's
@@ -428,6 +438,36 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                            GL_PS_FRAGPOS_VGPR + 1u);
             glsl_emit_mov(&code, fc.base + 2u, GL_PS_FRAGPOS_VGPR + 2u);
             glsl_emit_mov(&code, fc.base + 3u, GL_PS_FRAGPOS_VGPR + 3u);
+        }
+    }
+
+    /* **`gl_FrontFacing`, which is a sign and not a flag.** The SPI hands over a float that is
+     * positive for a front-facing primitive - Mesa lowers `load_front_face` as `fgt(reg, 0)`
+     * and `load_front_face_fsign` as the register itself, which is what says it is a float and
+     * not a zero/one integer. A back end that treated it as a boolean directly would read a
+     * negative number as true and answer "front" for every fragment.
+     *
+     * A bool here is a float 0.0 or 1.0 like any other, so this is the same compare-and-select
+     * the language's own comparisons use. */
+    if (ok && wants_frontfacing) {
+        const glsl_value_t ff =
+            glsl_gen_declare_input(gen, "gl_FrontFacing", 14u, GLSL_TYPE_BOOL);
+        if (ff.count != 1) {
+            log_say(log, log_size, gen->error ? gen->error : "gl_FrontFacing has no register", 0,
+                    0);
+            ok = GL_FALSE;
+        } else {
+            const uint32_t zero = glsl_gen_scratch(gen);
+            const uint32_t one = glsl_gen_scratch(gen);
+            if (gen->error) {
+                log_say(log, log_size, gen->error, 0, 0);
+                ok = GL_FALSE;
+            } else {
+                glsl_emit_mov_imm(&code, zero, 0x00000000u);
+                glsl_emit_mov_imm(&code, one, 0x3f800000u); /* 1.0f */
+                glsl_emit_cmp(&code, GLSL_VOPC_GT_F32, frontface_vgpr, zero);
+                glsl_emit_cndmask(&code, ff.base, zero, one);
+            }
         }
     }
 

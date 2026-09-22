@@ -2583,6 +2583,79 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
     glContextDestroy(ctx);
 }
 
+static void test_gl2_front_facing_is_a_sign_not_a_flag(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+    uint32_t words[256];
+    uint32_t count = 0u, vgprs = 0u, ena = 0u, usg = 0u;
+    char log[256] = {0};
+
+    /* **The register is a float whose sign is the answer**, not a zero-or-one flag: Mesa lowers
+     * `load_front_face` as `fgt(reg, 0)` and `load_front_face_fsign` as the register itself. So
+     * the prologue compares and selects, and what this pins is that it compares at all - a back
+     * end that moved the register straight into a bool would answer "front" for a negative
+     * number, which is every back-facing fragment. */
+    const GLuint ff = linked_program(
+        VS_ONE_VARYING,
+        "void main() {\n"
+        "  gl_FragColor = gl_FrontFacing ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);\n"
+        "}\n");
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, ff), words, 256u, &count, &vgprs,
+                                          &usg, &ena, log, sizeof(log)),
+              GL_TRUE);
+    /* PERSP_CENTER and FRONT_FACE, and **not** the window position: asking for four registers
+     * of `gl_FragCoord` that this shader never reads would cost the stage its allocation for
+     * nothing. */
+    ASSERT_EQ(ena, 0x00001002u);
+    /* No block either - the face arrives in a register, not through the payload. */
+    ASSERT_EQ(usg, 0u);
+    {
+        /* Somewhere in the prologue there is a float compare against zero. Its opcode is
+         * `GT_F32`, and it is what makes the sign the answer. */
+        GLboolean saw_cmp = GL_FALSE;
+        for (uint32_t i = 0; i < count; i++) {
+            if ((words[i] >> 25) == 0x3eu && ((words[i] >> 17) & 0xffu) == GLSL_VOPC_GT_F32 &&
+                (words[i] & 0x1ffu) == 256u + 2u) { /* v2: straight after the barycentrics */
+                saw_cmp = GL_TRUE;
+                break;
+            }
+        }
+        ASSERT_TRUE(saw_cmp);
+    }
+
+    /* **Both together move the face register**, because the SPI packs what it was asked for in
+     * order: with the position enabled the face follows it, and the compare has to read the
+     * later register. A back end that fixed the face at one number would compare the window's
+     * w against zero here and answer "front" for every fragment in front of the eye. */
+    const GLuint both = linked_program(
+        VS_ONE_VARYING,
+        "void main() {\n"
+        "  float d = gl_FrontFacing ? 1.0 : 0.0;\n"
+        "  gl_FragColor = vec4(d, gl_FragCoord.y, 0.0, 1.0);\n"
+        "}\n");
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, both), words, 256u, &count, &vgprs,
+                                          &usg, &ena, log, sizeof(log)),
+              GL_TRUE);
+    ASSERT_EQ(ena, 0x00001f02u); /* PERSP_CENTER | POS_XYZW | FRONT_FACE */
+    ASSERT_EQ(usg, 2u);          /* and the block, for the height that flips y */
+    {
+        /* v6, not v2: two barycentrics, then x, y, z, w, then the face. The face is the
+         * compare's **src0** - the nine-bit operand, so a VGPR reads as 256 + its number - and
+         * `vsrc1` is the register holding zero. */
+        GLboolean saw_v6 = GL_FALSE;
+        for (uint32_t i = 0; i < count; i++) {
+            if ((words[i] >> 25) == 0x3eu && ((words[i] >> 17) & 0xffu) == GLSL_VOPC_GT_F32 &&
+                (words[i] & 0x1ffu) == 256u + 6u) {
+                saw_v6 = GL_TRUE;
+                break;
+            }
+        }
+        ASSERT_TRUE(saw_v6);
+    }
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_user_functions_are_inlined(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -3317,6 +3390,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
+    RUN_TEST(test_gl2_front_facing_is_a_sign_not_a_flag);
     RUN_TEST(test_gl2_user_functions_are_inlined);
     RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);

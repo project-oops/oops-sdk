@@ -1849,6 +1849,18 @@ glsl_value_t glsl_gen_expression(glsl_gen_t *g, int32_t node) {
     return gen_expr(g, node);
 }
 
+/* One register from the bump allocator, held for the whole shader and bound to no name.
+ *
+ * The prologue needs a constant or two of its own - `gl_FrontFacing` selects between 0.0 and
+ * 1.0, and a select's second operand has to be a register - and those are not variables, so
+ * declaring them would put a name in the table that no GLSL can refer to. Never released,
+ * because the prologue runs once and a register it holds is one the body never sees. */
+uint32_t glsl_gen_scratch(glsl_gen_t *g) {
+    if (!g) return 0u;
+    const glsl_value_t v = gen_alloc(g, 1, GLSL_NO_NODE);
+    return is_bad(v) ? 0u : v.base;
+}
+
 void glsl_gen_reserve(glsl_gen_t *g, uint32_t first) {
     if (!g) return;
     if (first > g->next_vgpr) g->next_vgpr = first;

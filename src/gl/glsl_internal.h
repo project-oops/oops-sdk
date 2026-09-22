@@ -704,6 +704,9 @@ glsl_value_t glsl_gen_declare_input(glsl_gen_t *g, const char *name, size_t len,
  * from, and an allocator that handed one of those out would have the shader compute over the
  * values it was given. */
 void glsl_gen_reserve(glsl_gen_t *g, uint32_t first);
+/* One unnamed register for the prologue's own constants - see the definition. 0 and `g->error`
+ * set when the file is full. */
+uint32_t glsl_gen_scratch(glsl_gen_t *g);
 /* Where a declared name lives. False when nothing of that name has a register. */
 GLboolean glsl_gen_lookup(glsl_gen_t *g, const char *name, size_t len, glsl_value_t *out);
 /* Tells the generator that `name` is a sampler whose descriptors the prologue loaded into set
