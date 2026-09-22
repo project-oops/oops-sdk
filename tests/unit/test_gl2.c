@@ -2396,7 +2396,16 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
                 case 36u: r = floorf(a); break;
                 case 37u: r = powf(2.0f, a); break;                  /* base two */
                 case 39u: r = logf(a) / logf(2.0f); break;           /* base two */
-                case 42u: r = 1.0f / a; break;
+                /* **`v_rcp_f32` is accurate to one unit in the last place, not correctly
+                 * rounded**, and a host divide is correctly rounded - so simulating it as
+                 * `1/a` models something better than the part and hides every bug that lives
+                 * in that gap. The worst case for a truncating consumer is a reciprocal a
+                 * shade low, which turns `7 * rcp(7)` into a hair under 1.0 and `7 / 7` into
+                 * 0, so that is what is modelled: one ULP down, every time.
+                 *
+                 * Deliberately pessimistic rather than random. A simulator that sometimes
+                 * reproduced the hazard would make a test that sometimes passed. */
+                case 42u: r = nextafterf(1.0f / a, (a > 0.0f) ? 0.0f : -3.0e38f); break;
                 case 46u: r = 1.0f / sqrtf(a); break;
                 case 51u: r = sqrtf(a); break;
                 case 53u: r = sinf((float)(2.0 * PI) * a); break;    /* revolutions */
@@ -2852,23 +2861,45 @@ static void test_gl2_integers_are_floats_kept_whole(void) {
         ASSERT_EQ(float_truncs, 0);
     }
 
-    /* **Integer division is refused rather than answered.** There is no divide instruction on
-     * this part and a reciprocal is one unit in the last place out, which the truncation after
-     * it turns into an answer short by one. A back end that generated it anyway would be right
-     * for most divisors, which is the worst of the three possibilities. */
-    const GLuint div = linked_program(
-        VS_ONE_VARYING,
-        "void main() {\n"
-        "  int a = 7;\n"
-        "  gl_FragColor = vec4(float(a / 2), 0.0, 0.0, 1.0);\n"
-        "}\n");
-    uint32_t words[256];
-    uint32_t count = 0u, vgprs = 0u;
-    char log[256] = {0};
-    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, div), words, 256u, &count, &vgprs,
-                                          NULL, NULL, log, sizeof(log)),
-              GL_FALSE);
-    ASSERT_TRUE(strstr(log, "reciprocal") != NULL);
+    /* **Integer division, against a reciprocal that is deliberately a shade low.** The
+     * simulator models `v_rcp_f32` as one unit in the last place below the true value, because
+     * that is the part's accuracy and a host divide's is better - so `a * rcp(a)` lands under
+     * 1.0 and an uncorrected `trunc` gives zero. Every exact case below is one a naive
+     * lowering gets wrong by one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(float(7 / 7), float(49 / 7),\n"
+                    "                      float(100 / 10), float(6 / 3)) * 0.01;\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.01f, 1e-6f);  /* 1, not 0 */
+    ASSERT_NEAR(o[1], 0.07f, 1e-6f);  /* 7, not 6 */
+    ASSERT_NEAR(o[2], 0.10f, 1e-6f);
+    ASSERT_NEAR(o[3], 0.02f, 1e-6f);
+
+    /* **Truncation is toward zero on both signs**, which is C's rule and GLSL's. A lowering
+     * that took the floor gets every negative quotient wrong by one, and only the negative
+     * ones - so the positive arm above would still look right. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(float(7 / 2), float(-7 / 2),\n"
+                    "                      float(7 / -2), float(-7 / -2)) * 0.1;\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.3f, 1e-6f);   /* 3 */
+    ASSERT_NEAR(o[1], -0.3f, 1e-6f);  /* -3, not -4 */
+    ASSERT_NEAR(o[2], -0.3f, 1e-6f);
+    ASSERT_NEAR(o[3], 0.3f, 1e-6f);
+
+    /* Division by zero answers zero, which is what the reference answers. The language calls it
+     * undefined; the two paths still have to agree on something. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  int z = 0;\n"
+                    "  gl_FragColor = vec4(float(5 / z), 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0f, 1e-6f);
 
     glContextDestroy(ctx);
 }

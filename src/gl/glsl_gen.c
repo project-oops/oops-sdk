@@ -474,12 +474,6 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
      * the truncated answer times the divisor has overshot - which is a handful of instructions
      * this does not yet emit. Until it does, the shader is told rather than given an answer
      * that is right for most divisors. */
-    if (int_result && op == GLSL_TOK_SLASH) {
-        return gen_fail(g, "integer division is not generated: there is no divide instruction "
-                           "here and a reciprocal is one unit in the last place out, which "
-                           "truncation turns into an answer short by one", node);
-    }
-
     glsl_value_t a = gen_expr(g, n->a);
     if (is_bad(a)) return a;
     glsl_value_t b = gen_expr(g, n->b);
@@ -520,6 +514,69 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
     const int width = a.count > b.count ? a.count : b.count;
     if (a.count != b.count && a.count != 1 && b.count != 1) {
         return gen_fail(g, "these operand widths do not combine", node);
+    }
+
+    /* **Integer division, with the quotient corrected.**
+     *
+     * There is no divide instruction here, so `a / b` is `a * rcp(b)` and `v_rcp_f32` is
+     * accurate to one unit in the last place. Under a float result that is invisible; under an
+     * integer one the truncation that follows turns a quotient a hair below `n` into `n - 1`,
+     * and `7 / 7` comes out 0. The error is at most one, so one correction settles it: multiply
+     * the truncated answer back by the divisor and compare it against the dividend, once in
+     * each direction. Both corrections cannot apply at once.
+     *
+     * Done on magnitudes with the sign applied at the end, because GLSL truncates toward zero
+     * and a `trunc` on a negative quotient rounds the wrong way. Division by zero answers zero,
+     * which is what `glsl_exec.c` answers - the language calls it undefined and the two paths
+     * still have to agree on something. */
+    if (int_result && op == GLSL_TOK_SLASH) {
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero)) return zero;
+        glsl_value_t one = gen_const(g, 1.0, node);
+        if (is_bad(one)) return one;
+        glsl_value_t out = gen_alloc(g, width, node);
+        if (is_bad(out)) return out;
+        for (int i = 0; i < width; i++) {
+            const uint32_t mark = gen_mark(g);
+            glsl_value_t t = gen_alloc(g, 6, node);
+            if (is_bad(t)) return t;
+            const uint32_t neg = t.base + 0u, absa = t.base + 1u, absb = t.base + 2u;
+            const uint32_t q = t.base + 3u, tmp = t.base + 4u, alt = t.base + 5u;
+            const uint32_t A = comp_of(a, i), B = comp_of(b, i);
+
+            glsl_emit_neg_f32(g->code, neg, A);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, absa, A, neg);
+            glsl_emit_neg_f32(g->code, neg, B);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, absb, B, neg);
+
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, tmp, absb);
+            glsl_emit_mul_f32(g->code, q, absa, tmp);
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_TRUNC_F32, q, q);
+
+            /* One too small: the next quotient up still fits inside the dividend. */
+            glsl_emit_add_f32(g->code, alt, q, one.base);
+            glsl_emit_mul_f32(g->code, tmp, alt, absb);
+            glsl_emit_cmp(g->code, GLSL_VOPC_LE_F32, tmp, absa);
+            glsl_emit_cndmask(g->code, q, q, alt);
+
+            /* One too large: this quotient overshoots it. */
+            glsl_emit_mul_f32(g->code, tmp, q, absb);
+            glsl_emit_sub_f32(g->code, alt, q, one.base);
+            glsl_emit_cmp(g->code, GLSL_VOPC_GT_F32, tmp, absa);
+            glsl_emit_cndmask(g->code, q, q, alt);
+
+            /* The quotient's sign is the sign of the operands' product. */
+            glsl_emit_mul_f32(g->code, tmp, A, B);
+            glsl_emit_neg_f32(g->code, alt, q);
+            glsl_emit_cmp(g->code, GLSL_VOPC_LT_F32, tmp, zero.base);
+            glsl_emit_cndmask(g->code, out.base + (uint32_t)i, q, alt);
+
+            glsl_emit_cmp(g->code, GLSL_VOPC_EQ_F32, B, zero.base);
+            glsl_emit_cndmask(g->code, out.base + (uint32_t)i, out.base + (uint32_t)i,
+                              zero.base);
+            gen_release(g, mark);
+        }
+        return out;
     }
 
     if (op == GLSL_TOK_SLASH) {
@@ -1778,8 +1835,11 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
                 return gen_fail(g, "this unary operator has no verified instruction yet", node);
             }
             const glsl_type_t t = glsl_type_of(g->sema, n->a);
-            if (!is_float_family(t)) {
-                return gen_fail(g, "unary minus is generated for the float family only", node);
+            /* Negating a whole float leaves it whole, so an `int` needs no truncation after it
+             * and goes through the same instruction. A `bool` has no negation in GLSL. */
+            if (!is_float_family(t) && !is_int_family(t)) {
+                return gen_fail(g, "unary minus is generated for the float and int families "
+                                   "only", node);
             }
             glsl_value_t s = gen_expr(g, n->a);
             if (is_bad(s)) return s;
