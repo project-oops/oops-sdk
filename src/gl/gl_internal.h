@@ -902,10 +902,24 @@ typedef struct {
      * also fixes where the SPI puts the primitive mask - and the shader has already moved that
      * register into `m0`. The two answers have to be the same one. */
     uint32_t hw_ps_user_sgprs;
+    /* **Which compiled shader this is, as an identity that is never handed out twice.**
+     *
+     * A program's *name* cannot answer that: `glDeleteProgram` frees it and the next
+     * `glCreateProgram` returns the same number, so two different programs wear it one after
+     * the other. The draw path uploads a compiled shader into the payload's one GL 2.0 slot
+     * only when the slot holds something else, and it asked that question by name - so a suite
+     * that deletes its program every check and builds another had the upload skipped and ran
+     * the *previous* check's pixel shader against this check's draw. Thirteen of gl2-probe's
+     * checks failed that way on 2026-09-22, each with the draw accepted and no GL error,
+     * because from the API's point of view nothing was wrong.
+     *
+     * Issued from `hw_ps_next_serial` at each successful compile and never reused. Zero means
+     * this program has no compiled shader. */
+    uint64_t hw_ps_serial;
     /* **Whether this program's refusal has been said out loud.** Cleared at every link, so a
      * relinked program that is still refused says so again - the source may have changed and
      * the reason with it. On the program rather than the context because program names are
-     * recycled; see the note by `hw_ps_program`. */
+     * recycled; see the note by `hw_ps_serial`. */
     GLboolean hw_ps_logged;
     /* How many four-component parameters this program's varyings occupy, which is what the
      * vertex stage exports and the pixel shader interpolates. Two at minimum, because the
@@ -1240,10 +1254,17 @@ typedef struct gl_context {
      * program per check recycles names constantly, so a context-side marker keyed on the name
      * would swallow the second program's reason for being refused and every one after it that
      * landed on the same number. */
-    /* Which program's compiled pixel shader is in the payload's one GL 2.0 slot, 0 for none. A
-     * frame that draws with one program uploads it once; one that alternates pays an upload and
-     * a cache flush per switch, which is what this measures rather than assumes. */
-    GLuint hw_ps_program;
+    /* **Which compiled pixel shader is in the payload's one GL 2.0 slot**, by the serial issued
+     * below, 0 for none. A frame that draws with one program uploads it once; one that
+     * alternates pays an upload and a cache flush per switch, which is what this measures rather
+     * than assumes.
+     *
+     * By serial and not by name - see `hw_ps_serial` on the program, which carries what asking
+     * by name cost. */
+    uint64_t hw_ps_resident;
+    /* The next serial to issue, so no two compiled shaders are ever confused for each other.
+     * Starts at 1; 0 is "no shader". */
+    uint64_t hw_ps_next_serial;
     /* The depth and stencil surfaces are the GPU's, 64KB_Z_X tiled (see gl_zs_depth_ptr): true
      * once the hardware path is up on the console, never on a host build. */
     GLboolean zs_tiled;
@@ -1811,7 +1832,7 @@ static inline uint32_t gl_f32_bits(float f) {
  * **One slot, not one per program.** A compiled shader lives in the program object and is copied
  * here when a draw needs it, the way a texture's descriptors are copied into their slot. Most
  * frames use one program; a frame that switches between two pays an upload and a cache flush per
- * switch, which is what `hw_ps_program` measures rather than assumes. */
+ * switch, which is what `hw_ps_resident` measures rather than assumes. */
 #define OOPS_GL_PS_GL2_OFFSET 0x3800u
 #define OOPS_GL_PS_GL2_WORDS  512u
 

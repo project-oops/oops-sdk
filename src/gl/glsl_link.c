@@ -522,6 +522,9 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     /* A relink is a new answer, so a program refused again says why again: the source may have
      * changed and the reason with it. */
     p->hw_ps_logged = GL_FALSE;
+    /* The old words are gone, so the old identity goes with them: a relink issues a new serial
+     * below, and the slot uploads again rather than trusting what it holds. */
+    p->hw_ps_serial = 0u;
     p->hw_params = 0u;
     p->hw_ps_log[0] = '\0';
     p->hw_tex_sets = 0;
@@ -644,6 +647,12 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
             p->hw_ps = (uint32_t *)0;
             p->hw_ps_words = 0u;
             p->hw_ps_user_sgprs = 0u;
+        } else {
+            /* **An identity for these words, issued once and never again.** The draw path uses
+             * it to decide whether the payload's one slot already holds them; a name would not
+             * do, because `glDeleteProgram` gives it back. */
+            if (ctx->hw_ps_next_serial == 0u) ctx->hw_ps_next_serial = 1u;
+            p->hw_ps_serial = ctx->hw_ps_next_serial++;
         }
     } else {
         /* No fragment stage: the fixed-function pixel shader in the payload is what runs, and

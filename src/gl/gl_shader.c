@@ -148,6 +148,7 @@ static void program_destroy(gl_program_object_t *p) {
     p->hw_ps_vgprs = 0u;
     p->hw_ps_user_sgprs = 0u;
     p->hw_ps_logged = GL_FALSE;
+    p->hw_ps_serial = 0u;
     p->hw_params = 0u;
     p->hw_ps_log[0] = '\0';
     p->linked = GL_FALSE;

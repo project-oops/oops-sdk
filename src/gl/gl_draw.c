@@ -3786,13 +3786,17 @@ vertices_written:
         if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u) {
             uint32_t *const slot =
                 (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_GL2_OFFSET);
-            if (ctx->hw_ps_program != prog->name) {
+            /* **By serial, because a name is reused and a shader is not.** The slot holds one
+             * compiled shader; asking whether it is this program's by name meant a program that
+             * inherited a freed name was taken for the one that had it before, and its upload
+             * skipped - so the draw ran the earlier program's shader with no error anywhere. */
+            if (ctx->hw_ps_resident != prog->hw_ps_serial) {
                 gl_ps_sync_payload_edit(ctx, slot, prog->hw_ps, prog->hw_ps_words);
                 memcpy(slot, prog->hw_ps, prog->hw_ps_words * sizeof(uint32_t));
                 /* Everything after the shader is left as it was; `s_endpgm` is the last word it
                  * wrote, so nothing beyond it is reachable. */
                 gl_ps_flush_shaders(ctx);
-                ctx->hw_ps_program = prog->name;
+                ctx->hw_ps_resident = prog->hw_ps_serial;
             }
             ps_va = payload_va + OOPS_GL_PS_GL2_OFFSET;
             ps_rsrc2 = 0u;
