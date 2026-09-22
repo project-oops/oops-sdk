@@ -46,7 +46,7 @@
 /* The specification's minimum, which is what this provides. */
 #define OOPS_GL_ATTRIB_STACK_CAPACITY 16
 #define OOPS_GL_CLIENT_ATTRIB_STACK_CAPACITY 16
-#define OOPS_GL_MAX_TEXTURE_OBJECTS 32
+#define OOPS_GL_MAX_TEXTURE_OBJECTS 256
 #define OOPS_GL_MAX_BUFFER_OBJECTS 64
 #define OOPS_GL_MAX_QUERY_OBJECTS 64
 /* GL 2.0's generic vertex attribute slots. 16 is the specification's minimum for
@@ -506,6 +506,12 @@ typedef struct {
     float texgen_object_plane[4][4];
     float texgen_eye_plane[4][4];
     GLboolean texgen_enabled[4];
+    /* **GL_COORD_REPLACE** (ARB_point_sprite, GL 2.0): with GL_POINT_SPRITE enabled, this unit
+     * takes its s and t across the point's own square instead of from the vertex, so a point
+     * becomes a textured sprite. Per unit, set through `glTexEnvi(GL_POINT_SPRITE, ...)` -
+     * which is a third target for glTexEnv beside GL_TEXTURE_ENV and GL_TEXTURE_FILTER_CONTROL,
+     * and the reason that call had to learn one. */
+    GLboolean coord_replace;
 } gl_tex_unit_t;
 
 /* Every unit's texel for one fragment - zero for a unit applying none, which is what a GL_TEXTUREn
@@ -568,6 +574,9 @@ typedef struct {
     /* The smoothing enables: GL_POINT_BIT's, GL_LINE_BIT's and GL_POLYGON_BIT's, and all
      * GL_ENABLE_BIT's. */
     GLboolean cap_point_smooth, cap_line_smooth, cap_polygon_smooth;
+    /* GL_POINT_BIT's too: the sprite enable and which corner its generated t starts from. */
+    GLboolean cap_point_sprite;
+    GLenum point_sprite_origin;
 
     /* GL_POLYGON_STIPPLE_BIT; the enable is GL_POLYGON_BIT's and GL_ENABLE_BIT's */
     GLboolean cap_polygon_stipple;
@@ -1183,6 +1192,17 @@ typedef struct gl_context {
     uint32_t polygon_stipple[32];
 
     GLboolean cap_point_smooth, cap_line_smooth, cap_polygon_smooth;
+    /* **GL_POINT_SPRITE**, and which corner its generated t starts from.
+     *
+     * Neverball is what found this missing: `solid_draw.c` and `part.c` enable it, set
+     * GL_COORD_REPLACE and disable it again on every frame that draws particles, and all six
+     * calls were refused with GL_INVALID_ENUM - 102 of them in one short run, with the particle
+     * system silently falling back to flat untextured squares.
+     *
+     * The origin is GL_UPPER_LEFT by default, which is the specification's default and the
+     * opposite of the window's y. GL_LOWER_LEFT is the other. */
+    GLboolean cap_point_sprite;
+    GLenum point_sprite_origin;
     /* **Antialiasing** (GL_POINT_SMOOTH, GL_LINE_SMOOTH, GL_POLYGON_SMOOTH). The triangles a
      * smooth point or line becomes carry, for the rasteriser, the shape they stand for in screen
      * pixels: a point's centre and radius, or a line's ends and half-width - `aa_ends` false for a
@@ -1291,6 +1311,38 @@ typedef struct gl_context {
      * gate as the submit's other values, so a run costs a line a second, not a line a draw. */
     uint32_t hw_draws_textured;
     uint32_t hw_draws_untextured;
+    /* **Texture names handed out, names refused, and errors raised - cumulative, not per submit.**
+     * These answer the question a port asks before the draw census is worth reading: did the
+     * textures exist at all? `glGenTextures` has a fixed pool here
+     * (`OOPS_GL_MAX_TEXTURE_OBJECTS`) where a desktop GL has 2^32 names, so exhausting it is a
+     * failure mode no program written against a desktop driver expects and none of them check
+     * for - the name comes back 0, the upload goes to the default texture, and the draw samples
+     * whatever was there. A title cannot see that without instrumenting every call site; this
+     * layer sees every one of them for free, so it is the layer that should count.
+     *
+     * Cumulative because they are a lifetime figure - a run's texture working set and its error
+     * total - while the draw counts above are a property of one submit and reset with it. */
+    uint32_t hw_tex_created;
+    uint32_t hw_tex_failed;
+    uint32_t hw_gl_errors;
+    /* What the census last printed for the three above, so it can print them only when they have
+     * moved. The gate they sit behind opens on every submit while frames are not confirming -
+     * which is deliberate, and is also the case where a port most needs the log to itself. Three
+     * unchanging lines per submit there would be three more things burying the title's own
+     * output; printed on change they are silent through a healthy run and impossible to miss in
+     * an unhealthy one, which is the right way round for a counter of failures. */
+    uint32_t hw_tex_created_said;
+    uint32_t hw_tex_failed_said;
+    uint32_t hw_gl_errors_said;
+    /* **The most recent code raised, which `last_error` cannot give.** GL's rule is that the
+     * first error wins and stands until `glGetError` clears it - and a program that never calls
+     * `glGetError` (Neverball does not, anywhere) leaves `last_error` frozen on the first one
+     * forever while hundreds more are raised behind it. A count says how many; this says what
+     * the latest was, and the two together separate one repeating fault from a scatter. */
+    uint32_t hw_gl_error_last;
+    /* The entry point that raised it, from `__func__` at the call site. A pointer to a string
+     * literal in the payload, so it outlives every frame and costs nothing to keep. */
+    const char *hw_gl_error_fn;
     /* The GL 2.0 refusal's "say it once" lives on the program object - `hw_ps_logged` - and not
      * here, because a name is not an identity: `glDeleteProgram` frees it and the next
      * `glCreateProgram` hands the same number out again. A suite that builds and deletes one
@@ -1640,11 +1692,42 @@ static inline gl_context_t *gl_get_ctx(void) {
  * for.
  *
  * glGetError() itself still assigns, because clearing the flag is its job. */
-static inline void gl_record_error(gl_context_t *ctx, GLenum error) {
-    if (ctx && ctx->last_error == GL_NO_ERROR) {
+/* Declared again here, ahead of its first use: the definition lives in `gl_context.c` and the
+   header's own declaration is further down, beside the rest of the logging. */
+void gl_log_line(const char *msg);
+
+static inline void gl_record_error_at(gl_context_t *ctx, GLenum error, const char *fn) {
+    if (!ctx) return;
+    /* Counted on every raise, not only on the one that sets the flag. The flag answers "what
+     * went wrong first"; the count answers "how much went wrong", and a port that never calls
+     * glGetError() - which is most of them, on the path that matters - has no other way to
+     * learn the second. This is the one place every error in this library passes through. */
+    ctx->hw_gl_errors++;
+    ctx->hw_gl_error_last = (uint32_t)error;
+    /* **Which entry point refused, by name.** A code alone is not actionable: this library
+     * raises GL_INVALID_ENUM from dozens of calls, and "90 of them, all 0x500" narrows it to
+     * every one of those dozens. `__func__` at the call site costs a string literal already in
+     * the binary and turns the count into an address. Said once, because the first is the one
+     * that matters and this sits on a path some programs take per frame. */
+    ctx->hw_gl_error_fn = fn;
+    if (ctx->hw_gl_errors == 1u && fn) {
+        char msg[128];
+        size_t n = 0;
+        const char *head = "first GL error raised by ";
+        while (head[n] && n < sizeof(msg) - 40) { msg[n] = head[n]; n++; }
+        size_t m = 0;
+        while (fn[m] && n < sizeof(msg) - 2) { msg[n++] = fn[m++]; }
+        msg[n] = '\0';
+        gl_log_line(msg);
+    }
+    if (ctx->last_error == GL_NO_ERROR) {
         ctx->last_error = error;
     }
 }
+
+/* The name comes from the call site, so the macro has to expand there - `__func__` inside the
+ * inline above would be the inline's own name for every caller in the library. */
+#define gl_record_error(ctx, err) gl_record_error_at((ctx), (err), __func__)
 
 /* -------------------------------------------------------------------------
  * The version an app claimed, and what it gets for claiming it

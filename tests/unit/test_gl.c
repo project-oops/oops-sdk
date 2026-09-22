@@ -1141,8 +1141,14 @@ static void test_gl_unsupported_state_enums_are_refused(void) {
      * GL_ALPHA_TEST and GL_FOG were before it, and GL_LINE_SMOOTH after it. That is this test
      * doing its job again and again: a refusal that stops being a refusal shows up as a failure
      * rather than as silence. GL 1.4's GL_COLOR_SUM stood here until 2026-09-19, and was the
-     * last GL 1.x core enable to go; GL 2.0's GL_POINT_SPRITE is next. */
-    glEnable((GLenum)0x8861u); /* GL_POINT_SPRITE */
+     * last GL 1.x core enable to go; **GL 2.0's GL_POINT_SPRITE stood here until 2026-09-22**,
+     * and went because Neverball asks for it on every frame that draws particles - 102 refusals
+     * in one short run, with the particle system falling back to flat untextured squares and
+     * nothing in the title ever calling glGetError to find out. It is asserted below instead.
+     *
+     * GL_VERTEX_PROGRAM_POINT_SIZE takes its place: GL 2.0's "let the vertex shader write
+     * gl_PointSize", which needs a vertex shader stage that writes it. */
+    glEnable((GLenum)0x8642u); /* GL_VERTEX_PROGRAM_POINT_SIZE */
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     /* GL_CONVOLUTION_1D: the imaging subset, which is optional and not advertised, so refusing
      * it is conformant for good. (GL_DITHER stood here until 2026-09-19; it is on by default in
@@ -1168,6 +1174,28 @@ static void test_gl_unsupported_state_enums_are_refused(void) {
     glEnable(GL_FOG);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glDisable(GL_FOG);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    /* The point sprite, with the per-unit GL_COORD_REPLACE that is the whole point of it and the
+     * third glTexEnv target it arrives on. Neverball issues exactly this trio per frame. */
+    glEnable(GL_POINT_SPRITE);
+    ASSERT_EQ(glIsEnabled(GL_POINT_SPRITE), GL_TRUE);
+    glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_TRUE);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    GLint replace = 0;
+    glGetTexEnviv(GL_POINT_SPRITE, GL_COORD_REPLACE, &replace);
+    ASSERT_EQ(replace, 1);
+    /* GL_UPPER_LEFT by default, and the other corner settable; anything else is an enum error. */
+    GLint origin = 0;
+    glGetIntegerv(GL_POINT_SPRITE_COORD_ORIGIN, &origin);
+    ASSERT_EQ(origin, (GLint)GL_UPPER_LEFT);
+    glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, (GLint)GL_LOWER_LEFT);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, (GLint)GL_NICEST);
+    ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+    glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, (GLint)GL_UPPER_LEFT);
+    glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_FALSE);
+    glDisable(GL_POINT_SPRITE);
+    ASSERT_EQ(glIsEnabled(GL_POINT_SPRITE), GL_FALSE);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
     /* The ones it does have, including a light, still work and raise nothing. */
@@ -6888,8 +6916,16 @@ static void test_gl_point_parameters_and_multi_draw(void) {
   ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
   glPointParameterf(GL_POINT_FADE_THRESHOLD_SIZE, -1.0f);
   ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
-  glPointParameteri((GLenum)0x8CA0u /* GL_POINT_SPRITE_COORD_ORIGIN */, 0x8CA1);
+  /* **The sprite origin is a parameter now, not a refusal** (2026-09-22, with GL_POINT_SPRITE
+     itself). Both corners are values and anything else is still an enum error, which is the half
+     of this assertion worth keeping. */
+  glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, (GLint)GL_LOWER_LEFT);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  glGetFloatv(GL_POINT_SPRITE_COORD_ORIGIN, fv);
+  ASSERT_TRUE(fv[0] == (GLfloat)GL_LOWER_LEFT);
+  glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, (GLint)GL_FASTEST);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+  glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, (GLint)GL_UPPER_LEFT);
   glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, (const GLfloat[3]){1.0f, 0.0f, 0.0f});
   glPointParameterf(GL_POINT_SIZE_MIN, 0.0f);
   glPointSize(1.0f);

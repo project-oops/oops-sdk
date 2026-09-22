@@ -1607,6 +1607,35 @@ static void gl_draw_point_square(gl_context_t *ctx, const gl_mat4_t *inv_mvp,
     gl_aa_stamp(ctx, &c2, half, half, ctx->aa_hw_r);
     gl_aa_stamp(ctx, &c3, -half, half, ctx->aa_hw_r);
 
+    /* **The point sprite's own coordinates** (ARB_point_sprite, GL 2.0). With GL_POINT_SPRITE
+     * enabled, a unit whose GL_COORD_REPLACE is set takes s and t across this square instead of
+     * from the one vertex - which is the whole of what makes a point a sprite, since otherwise
+     * every fragment of it samples the single texel the vertex named.
+     *
+     * The corners above are in NDC, where +y is up: c0 is lower-left, c1 lower-right, c2
+     * upper-right, c3 upper-left. **t runs downward from the upper corners by default**, because
+     * GL_POINT_SPRITE_COORD_ORIGIN is GL_UPPER_LEFT - the opposite of the rest of GL, and the
+     * specification's own choice rather than a mistake here. GL_LOWER_LEFT flips it back.
+     *
+     * r and q are untouched at 0 and 1: the specification generates s and t only. */
+    if (ctx->cap_point_sprite) {
+        const GLboolean upper = (GLboolean)(ctx->point_sprite_origin != GL_LOWER_LEFT);
+        const float t_lo = upper ? 1.0f : 0.0f; /* the two lower corners */
+        const float t_hi = upper ? 0.0f : 1.0f; /* the two upper corners */
+        gl_vertex_t *corner[4] = {&c0, &c1, &c2, &c3};
+        const float s_of[4] = {0.0f, 1.0f, 1.0f, 0.0f};
+        const float t_of[4] = {t_lo, t_lo, t_hi, t_hi};
+        for (GLuint u = 0u; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+            if (!ctx->tex_unit[u].coord_replace) continue;
+            for (int k = 0; k < 4; k++) {
+                corner[k]->tc[u][0] = s_of[k];
+                corner[k]->tc[u][1] = t_of[k];
+                corner[k]->tc[u][2] = 0.0f;
+                corner[k]->tc[u][3] = 1.0f;
+            }
+        }
+    }
+
     const GLenum saved = ctx->prim_raster;
     ctx->prim_raster = GL_POINT;
     gl_draw_triangle_pv(ctx, &c0, &c1, &c2, pv);
@@ -3401,10 +3430,27 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const 
             const GLboolean tex_on = (GLboolean)(u0->cap_texture_2d || u0->cap_texture_3d ||
                                                  u0->cap_texture_cube_map || u0->cap_texture_1d);
             const GLuint bound0 = u0->bound_texture_2d;
-            /* The census this draw contributes to - see the counters' note in gl_internal.h. A
-             * draw that wanted a texture and got none is the interesting half, so count by
-             * `eff_tex` rather than by the enable: a draw with texturing off is neither. */
-            if (tex_on) {
+            /* The census this draw contributes to - see the counters' note in gl_internal.h.
+             *
+             * **Asked of every unit, not of unit 0.** The first version reused `tex_on` above,
+             * which reads unit 0's enables - and `gl_hw_base_unit` exists precisely because unit
+             * 0 is often not the textured one. Neverball's shadow arrangement disables unit 0 and
+             * puts the surface texture on unit 1, so on the draws this census was written to
+             * measure the condition was false and **neither counter moved**. A run reported
+             * `draws-textured: 0` and `draws-untextured: 0` for a screen full of geometry, which
+             * reads as "nothing was drawn" and meant "nothing was asked".
+             *
+             * A draw that wanted a texture and got none is the interesting half, so the split is
+             * by `eff_tex`: a draw with texturing off on every unit is neither. */
+            GLboolean any_tex_on = GL_FALSE;
+            for (GLuint u = 0u; u < OOPS_GL_MAX_TEXTURE_UNITS && !any_tex_on; u++) {
+                const gl_tex_unit_t *tu = &ctx->tex_unit[u];
+                if (tu->cap_texture_2d || tu->cap_texture_3d || tu->cap_texture_cube_map ||
+                    tu->cap_texture_1d) {
+                    any_tex_on = GL_TRUE;
+                }
+            }
+            if (any_tex_on) {
                 if (eff_tex != 0u) ctx->hw_draws_textured++;
                 else ctx->hw_draws_untextured++;
             }

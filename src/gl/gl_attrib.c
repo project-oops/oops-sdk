@@ -93,6 +93,12 @@ void glPushAttrib(GLbitfield mask) {
     e->line_width = ctx->line_width;
     e->cap_line_stipple = ctx->cap_line_stipple;
     e->cap_point_smooth = ctx->cap_point_smooth;
+    /* GL_POINT_BIT's, like the smoothing enable beside it, and GL_ENABLE_BIT's. The sprite
+       origin goes with it: the specification files GL_POINT_SPRITE_COORD_ORIGIN under the same
+       group as the rest of the point state. GL_COORD_REPLACE is per unit and belongs to
+       GL_TEXTURE_BIT instead, saved with the rest of the unit below. */
+    e->cap_point_sprite = ctx->cap_point_sprite;
+    e->point_sprite_origin = ctx->point_sprite_origin;
     e->cap_line_smooth = ctx->cap_line_smooth;
     e->cap_polygon_smooth = ctx->cap_polygon_smooth;
     e->line_stipple_factor = ctx->line_stipple_factor;
@@ -338,6 +344,8 @@ void glPopAttrib(void) {
     if (all_enables || (mask & GL_LINE_BIT)) ctx->cap_line_stipple = e->cap_line_stipple;
     if (all_enables || (mask & GL_POLYGON_BIT)) ctx->cap_polygon_stipple = e->cap_polygon_stipple;
     if (all_enables || (mask & GL_POINT_BIT)) ctx->cap_point_smooth = e->cap_point_smooth;
+    if (all_enables || (mask & GL_POINT_BIT)) ctx->cap_point_sprite = e->cap_point_sprite;
+    if (mask & GL_POINT_BIT) ctx->point_sprite_origin = e->point_sprite_origin;
     if (all_enables || (mask & GL_LINE_BIT)) ctx->cap_line_smooth = e->cap_line_smooth;
     if (all_enables || (mask & GL_POLYGON_BIT)) ctx->cap_polygon_smooth = e->cap_polygon_smooth;
     if (mask & GL_POLYGON_STIPPLE_BIT) {
@@ -528,6 +536,11 @@ void glPopAttrib(void) {
             tu->bound_texture_2d = s->bound_texture_2d;
             tu->bound_texture_3d = s->bound_texture_3d;
             tu->bound_texture_cube = s->bound_texture_cube;
+            /* GL_COORD_REPLACE is per unit and part of the texture environment, so it belongs to
+               this group rather than to GL_POINT_BIT beside the sprite enable. The save above
+               copies the whole unit and so already had it; without this the pop kept whatever the
+               pushed code left set. */
+            tu->coord_replace = s->coord_replace;
             /* **The bound textures' own parameters come back too**, as Mesa restores them - this
              * restored the bindings alone until 2026-09-19, so a routine that pushed
              * GL_TEXTURE_BIT, set GL_CLAMP on the caller's texture and popped left the caller's

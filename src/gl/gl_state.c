@@ -394,6 +394,7 @@ void glEnable(GLenum cap) {
         case GL_TEXTURE_3D:     gl_tu(ctx)->cap_texture_3d = GL_TRUE; break;
         case GL_TEXTURE_CUBE_MAP: gl_tu(ctx)->cap_texture_cube_map = GL_TRUE; break;
         case GL_POINT_SMOOTH:   ctx->cap_point_smooth = GL_TRUE; break;
+        case GL_POINT_SPRITE:   ctx->cap_point_sprite = GL_TRUE; break;
         case GL_LINE_SMOOTH:    ctx->cap_line_smooth = GL_TRUE; break;
         case GL_POLYGON_SMOOTH: ctx->cap_polygon_smooth = GL_TRUE; break;
         case GL_FOG:            ctx->cap_fog = GL_TRUE; break;
@@ -472,6 +473,7 @@ void glDisable(GLenum cap) {
         case GL_TEXTURE_3D:     gl_tu(ctx)->cap_texture_3d = GL_FALSE; break;
         case GL_TEXTURE_CUBE_MAP: gl_tu(ctx)->cap_texture_cube_map = GL_FALSE; break;
         case GL_POINT_SMOOTH:   ctx->cap_point_smooth = GL_FALSE; break;
+        case GL_POINT_SPRITE:   ctx->cap_point_sprite = GL_FALSE; break;
         case GL_LINE_SMOOTH:    ctx->cap_line_smooth = GL_FALSE; break;
         case GL_POLYGON_SMOOTH: ctx->cap_polygon_smooth = GL_FALSE; break;
         case GL_FOG:            ctx->cap_fog = GL_FALSE; break;
@@ -531,6 +533,7 @@ GLboolean glIsEnabled(GLenum cap) {
         case GL_TEXTURE_3D:     return gl_tu(ctx)->cap_texture_3d;
         case GL_TEXTURE_CUBE_MAP: return gl_tu(ctx)->cap_texture_cube_map;
         case GL_POINT_SMOOTH:   return ctx->cap_point_smooth;
+        case GL_POINT_SPRITE:   return ctx->cap_point_sprite;
         case GL_LINE_SMOOTH:    return ctx->cap_line_smooth;
         case GL_POLYGON_SMOOTH: return ctx->cap_polygon_smooth;
         case GL_FOG:            return ctx->cap_fog;
@@ -886,6 +889,17 @@ void glPointParameterfv(GLenum pname, const GLfloat *params) {
             else if (pname == GL_POINT_SIZE_MAX) ctx->point_size_max = params[0];
             else ctx->point_fade_threshold = params[0];
             return;
+        /* GL 2.0's fifth parameter, now that point sprites exist here to need it. Only the two
+         * corners are values; anything else is an enum error, as it is for the pname itself. */
+        case GL_POINT_SPRITE_COORD_ORIGIN: {
+            const GLenum e = (GLenum)(GLint)params[0];
+            if (e != GL_LOWER_LEFT && e != GL_UPPER_LEFT) {
+                gl_record_error(ctx, GL_INVALID_ENUM);
+                return;
+            }
+            ctx->point_sprite_origin = e;
+            return;
+        }
         default:
             gl_record_error(ctx, GL_INVALID_ENUM);
             return;
@@ -1372,6 +1386,10 @@ static void gl_tex_env_target_set(gl_context_t *ctx, GLenum target, GLenum pname
         gl_tex_env_set(ctx, pname, p);
     } else if (target == GL_TEXTURE_FILTER_CONTROL && pname == GL_TEXTURE_LOD_BIAS) {
         gl_tu(ctx)->tex_lod_bias = p[0];
+    } else if (target == GL_POINT_SPRITE && pname == GL_COORD_REPLACE) {
+        /* The third target. A boolean, so anything non-zero is true - the specification takes it
+         * as a GLboolean and Mesa compares against zero rather than against GL_TRUE. */
+        gl_tu(ctx)->coord_replace = (GLboolean)(p[0] != 0.0f);
     } else {
         gl_record_error(ctx, GL_INVALID_ENUM);
     }
@@ -1463,6 +1481,12 @@ void glGetTexEnviv(GLenum target, GLenum pname, GLint *params) {
         params[0] = (GLint)gl_tu(ctx)->tex_lod_bias;
         return;
     }
+    /* The setter learned a third target, so this has to as well - a query that refuses what the
+     * matching set accepts is the disagreement `glTexEnvfv` above was already fixed for once. */
+    if (target == GL_POINT_SPRITE && pname == GL_COORD_REPLACE) {
+        params[0] = gl_tu(ctx)->coord_replace ? 1 : 0;
+        return;
+    }
     if (target != GL_TEXTURE_ENV) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
@@ -1493,6 +1517,10 @@ void glGetTexEnvfv(GLenum target, GLenum pname, GLfloat *params) {
     if (!ctx || !params) return;
     if (target == GL_TEXTURE_FILTER_CONTROL && pname == GL_TEXTURE_LOD_BIAS) {
         params[0] = gl_tu(ctx)->tex_lod_bias;
+        return;
+    }
+    if (target == GL_POINT_SPRITE && pname == GL_COORD_REPLACE) {
+        params[0] = gl_tu(ctx)->coord_replace ? 1.0f : 0.0f;
         return;
     }
     if (target != GL_TEXTURE_ENV) {
@@ -2365,6 +2393,8 @@ void glGetIntegerv(GLenum pname, GLint *params) {
         case GL_POINT_SIZE_MIN:           params[0] = gl_round_to_int(ctx->point_size_min); break;
         case GL_POINT_SIZE_MAX:           params[0] = gl_round_to_int(ctx->point_size_max); break;
         case GL_POINT_FADE_THRESHOLD_SIZE: params[0] = gl_round_to_int(ctx->point_fade_threshold); break;
+        /* An enum, so it reads back as itself rather than through the rounding above. */
+        case GL_POINT_SPRITE_COORD_ORIGIN: params[0] = (GLint)ctx->point_sprite_origin; break;
         case GL_POINT_DISTANCE_ATTENUATION:
             for (int i = 0; i < 3; i++) params[i] = gl_round_to_int(ctx->point_atten[i]);
             break;
@@ -2642,6 +2672,7 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
         case GL_POINT_SIZE_MIN: params[0] = ctx->point_size_min; break;
         case GL_POINT_SIZE_MAX: params[0] = ctx->point_size_max; break;
         case GL_POINT_FADE_THRESHOLD_SIZE: params[0] = ctx->point_fade_threshold; break;
+        case GL_POINT_SPRITE_COORD_ORIGIN: params[0] = (GLfloat)ctx->point_sprite_origin; break;
         case GL_POINT_DISTANCE_ATTENUATION:
             for (int i = 0; i < 3; i++) params[i] = ctx->point_atten[i];
             break;
@@ -3593,9 +3624,31 @@ void glGenTextures(GLsizei n, GLuint *textures) {
         if (tex) {
             textures[i] = next_id;
             gl_pack_descriptors(tex);
+            ctx->hw_tex_created++;
             next_id++;
         } else {
+            /* **Running out of names is silent on a desktop driver, so nothing checks for it.**
+             * A real GL has 2^32 texture names and this has `OOPS_GL_MAX_TEXTURE_OBJECTS`, so
+             * exhaustion is a failure mode unique to this implementation - and until now it was
+             * reported the way the specification allows and no program reads: a zero in the
+             * output array. A port then binds 0, uploads into the default texture, draws, and
+             * gets flat surfaces with no error anywhere. That is a day of looking in the wrong
+             * place, and it costs three lines to make it say so.
+             *
+             * GL_OUT_OF_MEMORY is the right code: the specification has no "out of names"
+             * because it does not anticipate a fixed pool, and out-of-memory is the general
+             * arm for an implementation that cannot satisfy a request. The log line is what
+             * actually gets read, though, because the same programs that ignore the zero also
+             * never call glGetError(). Once per context - after that the count carries it. */
             textures[i] = 0;
+            ctx->hw_tex_failed++;
+            if (ctx->hw_tex_failed == 1u) {
+                gl_log_line("glGenTextures has no names left: this GL has a fixed pool where a "
+                            "desktop driver has 2^32, and a name of 0 is what a caller past the "
+                            "end receives - it will upload into the default texture and draw "
+                            "untextured. Raise OOPS_GL_MAX_TEXTURE_OBJECTS");
+            }
+            gl_record_error(ctx, GL_OUT_OF_MEMORY);
         }
     }
 }

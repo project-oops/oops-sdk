@@ -384,7 +384,47 @@ void gl_hw_flush(gl_context_t *ctx) {
         gl_klog_val("frames-confirmed", (uint64_t)ctx->hw_frames_confirmed);
         gl_klog_val("canary-vs", (uint64_t)ctx->canary_vs);
         gl_klog_val("canary-ps", (uint64_t)ctx->canary_ps);
+        gl_klog_val("draws-textured", (uint64_t)ctx->hw_draws_textured);
+        gl_klog_val("draws-untextured", (uint64_t)ctx->hw_draws_untextured);
+        /* Cumulative, unlike the pair above, and **printed only when they have moved** - see the
+         * declarations for why. Read them before the draw counts: `tex-failed` non-zero makes the
+         * draw census meaningless, because the textures those draws wanted were never created. */
+        if (ctx->hw_tex_created != ctx->hw_tex_created_said) {
+            gl_klog_val("tex-created", (uint64_t)ctx->hw_tex_created);
+            ctx->hw_tex_created_said = ctx->hw_tex_created;
+        }
+        if (ctx->hw_tex_failed != ctx->hw_tex_failed_said) {
+            gl_klog_val("tex-failed", (uint64_t)ctx->hw_tex_failed);
+            ctx->hw_tex_failed_said = ctx->hw_tex_failed;
+        }
+        if (ctx->hw_gl_errors != ctx->hw_gl_errors_said) {
+            gl_klog_val("gl-errors", (uint64_t)ctx->hw_gl_errors);
+            /* Beside the count, because a count alone cannot be acted on: 0x500 is an enum a
+             * call did not expect, 0x502 is a call made in the wrong state, and they send you
+             * to different places. `first` is what `glGetError` would return if anything ever
+             * asked it. */
+            gl_klog_val("gl-error-last", (uint64_t)ctx->hw_gl_error_last);
+            gl_klog_val("gl-error-first", (uint64_t)ctx->last_error);
+            /* And the entry point the latest one came from, which is what a reader acts on. */
+            if (ctx->hw_gl_error_fn) {
+                char msg[128];
+                size_t n = 0;
+                const char *head = "gl-error-from: ";
+                while (head[n] && n < sizeof(msg) - 40) { msg[n] = head[n]; n++; }
+                size_t m = 0;
+                while (ctx->hw_gl_error_fn[m] && n < sizeof(msg) - 2) {
+                    msg[n++] = ctx->hw_gl_error_fn[m++];
+                }
+                msg[n] = '\0';
+                gl_log_line(msg);
+            }
+            ctx->hw_gl_errors_said = ctx->hw_gl_errors;
+        }
     }
+    /* Reset whether or not this submit reported them, so a reported pair is one submit's own
+     * count and not everything since the last time the gate happened to open. */
+    ctx->hw_draws_textured = 0u;
+    ctx->hw_draws_untextured = 0u;
 
     if (ctx->hw_dump_pending) {
         gl_klog_val("oracle-submit-rc", (uint64_t)(uint32_t)rc);
@@ -798,6 +838,8 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->point_size_min = 0.0f;
     ctx->point_size_max = (float)OOPS_GL_MAX_POINT_LINE_SIZE;
     ctx->point_fade_threshold = 1.0f;
+    /* The specification's default, and the opposite of every other y in GL. */
+    ctx->point_sprite_origin = GL_UPPER_LEFT;
     ctx->point_atten[0] = 1.0f;
     ctx->point_atten[1] = 0.0f;
     ctx->point_atten[2] = 0.0f;
