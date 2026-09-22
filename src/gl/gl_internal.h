@@ -2725,7 +2725,34 @@ static inline GLuint gl_unit_texture_id(const gl_context_t *ctx, GLuint unit) {
     }
     if (id == 0u) return 0u;
     const gl_texture_object_t *tex = gl_lookup_texture(ctx, id);
-    return (tex && gl_texture_complete(tex)) ? id : 0u;
+    if (tex && gl_texture_complete(tex)) return id;
+
+    /*
+     * **Texturing is on, a texture is bound, and it is being ignored.**
+     *
+     * GL requires exactly that (3.8.10, and the note above `gl_texture_complete`), so this is
+     * not an error and nothing is recorded. It is also indistinguishable, on screen, from a port
+     * whose textures never loaded at all: every surface draws in its material colour with the
+     * lighting correct and no detail. Neverball's title screen looked precisely like this, and
+     * two test suites that both pass - gl1-probe's texture checks on hardware, and the pinned
+     * libpng decoding all 292 of its PNGs - between them said nothing about it, because neither
+     * covers the join.
+     *
+     * So it is said once. Once per translation unit that inlines this, which is a handful of
+     * lines rather than one per fragment, and enough to turn a silent class of bug into a named
+     * one for the next port as well as this one.
+     */
+    {
+        void gl_log_line(const char *msg); /* declared below; needed here, above its prototype */
+        static GLboolean told = GL_FALSE;
+        if (!told) {
+            told = GL_TRUE;
+            gl_log_line("texturing is enabled and the bound texture is incomplete, so it is "
+                        "ignored and the fragment takes its untextured colour - the usual cause "
+                        "is a base level that was never uploaded");
+        }
+    }
+    return 0u;
 }
 
 /* **Depth and stencil at a window pixel, for the CPU** - `y` counting up from the bottom, as GL's
