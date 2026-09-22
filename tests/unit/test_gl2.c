@@ -3439,6 +3439,37 @@ static void test_gl2_user_functions_are_inlined(void) {
                     attr, o);
     ASSERT_NEAR(o[0], x + x, 1e-6f);
 
+    /* **A call gives its registers back.** An inlined call's parameters and body temporaries are
+     * live only while the body is being generated; keeping them costs one copy of the helper's
+     * locals per call site, and a shader with a handful of calls is then refused for a budget it
+     * never needed at any one moment. Ten calls to a helper with three locals is the shape - it
+     * stays near one call's cost, and without the release it climbs past ten times it. */
+    {
+        gl_context_t *cc = (gl_context_t *)ctx;
+        const GLuint many = linked_program(
+            VS_ONE_VARYING,
+            "varying vec4 vin;\n"
+            "float h(float a) { float b = a * 2.0; float c = b + 1.0; return c * 0.5; }\n"
+            "void main() {\n"
+            "  float t = h(vin.x) + h(vin.y) + h(vin.z) + h(vin.w) + h(vin.x)\n"
+            "          + h(vin.y) + h(vin.z) + h(vin.w) + h(vin.x) + h(vin.y);\n"
+            "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+            "}\n");
+        uint32_t wm[512];
+        uint32_t nm = 0u, vm = 0u;
+        char lm[256] = {0};
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(cc, many), wm, 512u, &nm, &vm,
+                                              NULL, NULL, lm, sizeof(lm)),
+                  GL_TRUE);
+        /* **Measured, not guessed: 50 with the release and 77 without it.** The remainder is
+         * not the calls - it is the ten results and the sum's own temporaries, which are all
+         * genuinely live at once - so this pins the improvement rather than an ideal. A
+         * threshold between the two catches the release going away again; 136 is what the
+         * stage allocates, and both numbers are under it, so the release is register pressure
+         * and not a shader that would have been refused. */
+        ASSERT_TRUE(vm < 64u);
+    }
+
     /* **Not tested here: a user function that hides a built-in of the same name.** GLSL 1.10
      * allows it and the generator would inline the user's, because it looks for a definition in
      * this shader before it reaches the built-in table. The front end does not get that far -

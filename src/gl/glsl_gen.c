@@ -1669,6 +1669,14 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
         if (is_bad(out)) return out;
     }
 
+    /* **Everything the call allocates from here is given back at the end**, which for an
+     * inlined call is the whole of its parameters and its body's temporaries. Without this each
+     * call site keeps its registers for the life of the shader, so ten calls to one helper cost
+     * ten copies of its locals - and a shader is refused for a budget it never actually needed
+     * at any one moment. The result is allocated *above* this mark so it survives, because it
+     * is the one thing the caller goes on to read. */
+    const uint32_t call_mark = gen_mark(g);
+
     const int vars_before = g->var_count;
     glsl_scope_push(g->sema);
     g->inline_depth++;
@@ -1787,6 +1795,9 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
     g->inline_depth--;
     glsl_scope_pop(g->sema);
     g->var_count = vars_before;
+    /* After the writeback, which read the parameters' registers, and after the return move,
+     * which wrote the caller's. Nothing below is live. */
+    gen_release(g, call_mark);
     if (g->error) { glsl_value_t none; none.base = 0u; none.count = 0; return none; }
     return out;
 }
