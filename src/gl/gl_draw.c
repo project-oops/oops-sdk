@@ -3986,17 +3986,19 @@ vertices_written:
         /* Emit dynamic Depth Control, Blending, Cull Mode, and Color Target Mask state */
         /* **The command stream's cursor, taken after every payload edit above and not before.**
          *
-         * Copying a compiled pixel shader into the payload submits the frame first, because the
-         * GPU may not yet have read the words being overwritten (`gl_ps_sync_payload_edit`) -
-         * and a submit resets `dcb_words`. A cursor read before that points past the end of a
-         * stream that has already gone, so the draw written through it sits beyond whatever the
-         * new stream contains, with the gap between filled by the previous frame's words.
+         * Copying a compiled pixel shader into the payload can submit the frame first, because
+         * the GPU may not yet have read the words being overwritten
+         * (`gl_ps_sync_payload_edit`) - and a submit resets `dcb_words`. A cursor read before
+         * that points past the end of a stream that has already gone, so the draw written
+         * through it sits beyond whatever the new stream contains, with the gap between filled
+         * by the previous frame's words.
          *
-         * That is one lost draw per newly bound program, which is invisible in an app that
-         * binds one and keeps it - gl2-cube loses a triangle on its first frame and spins on -
-         * and is exactly half of every quad in a suite that binds a different program per check
-         * and draws two triangles with it. gl2-probe measured `drawn=3876` where the rect is
-         * 7752 pixels, eleven times over.
+         * **A submit resets two counters, and this is only one of them.** `hw_vbo_cursor` goes
+         * back to zero as well, which is why the shader copy also has to happen before this
+         * triangle takes its place in the vertex ring - see the copy, up by the ring check.
+         * Moving this cursor alone changed nothing measurable: gl2-probe reported the same
+         * `drawn 3876` against a 7752-pixel rect before and after, because the lost triangle
+         * was the vertex ring's and not this. Both are needed and neither is sufficient.
          *
          * Nothing between the old position and here touches `dw`, which is what makes moving it
          * a move rather than a rewrite. */

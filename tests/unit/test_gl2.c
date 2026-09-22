@@ -3292,6 +3292,37 @@ static void test_gl2_front_facing_is_a_sign_not_a_flag(void) {
         ASSERT_TRUE(saw_v6);
     }
 
+    /* **All three at once**, which is the combination the packing makes fragile: `gl_FragDepth`
+     * asks for the window position as well, so a shader naming it and the face - but not
+     * `gl_FragCoord` - still has the face at v6 rather than v2. A back end that keyed the
+     * offset on `gl_FragCoord` alone reads the position's w as the face here, which is positive
+     * for everything in front of the eye and so answers "front" for every fragment.
+     *
+     * It is also run below, so the simulator's liveness check sees it. */
+    {
+        const GLuint both2 = linked_program(
+            VS_ONE_VARYING,
+            "void main() {\n"
+            "  gl_FragDepth = 0.5;\n"
+            "  gl_FragColor = vec4(gl_FrontFacing ? 1.0 : 0.0, 0.0, 0.0, 1.0);\n"
+            "}\n");
+        uint32_t w3[256];
+        uint32_t n3 = 0u, v3 = 0u, e3 = 0u, u3 = 0u;
+        char l3[256] = {0};
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, both2), w3, 256u, &n3, &v3,
+                                              &u3, &e3, l3, sizeof(l3)),
+                  GL_TRUE);
+        ASSERT_EQ(e3, 0x00001f02u); /* PERSP_CENTER | POS_XYZW | FRONT_FACE */
+        GLboolean face_at_v6 = GL_FALSE;
+        for (uint32_t i = 0; i < n3; i++) {
+            if ((w3[i] >> 25) == 0x3eu && ((w3[i] >> 17) & 0xffu) == GLSL_VOPC_GT_F32 &&
+                (w3[i] & 0x1ffu) == 256u + 6u) {
+                face_at_v6 = GL_TRUE;
+            }
+        }
+        ASSERT_TRUE(face_at_v6);
+    }
+
     /* **And run, not only inspected.** The simulator fills exactly the registers
      * `input_ena` asked for and refuses to read any other, so this arm fails if the prologue
      * reaches for the face at the wrong number - which is the failure the packing invites,
@@ -3314,6 +3345,16 @@ static void test_gl2_front_facing_is_a_sign_not_a_flag(void) {
     ASSERT_NEAR(o[0], 1.0f, 1e-6f);
     ASSERT_NEAR(o[1], SIM_VIEWPORT_H - SIM_FRAG_Y, 1e-6f);
     ASSERT_NEAR(o[2], SIM_FRAG_X, 1e-6f);
+
+    /* The face beside `gl_FragDepth` and without `gl_FragCoord` - the shape above, run, so the
+     * simulator's liveness check sees whether anything reads a register the SPI never filled. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  gl_FragDepth = 0.5;\n"
+                    "  gl_FragColor = vec4(gl_FrontFacing ? 1.0 : 0.0, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f);
 
     glContextDestroy(ctx);
 }
