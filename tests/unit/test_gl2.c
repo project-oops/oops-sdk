@@ -3937,6 +3937,27 @@ static void test_gl2_compiled_discard_kills_the_lane_for_good(void) {
     ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, NESTED_KEY, both, o), GL_FALSE);
     ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, NESTED_KEY, one, o), GL_TRUE);
 
+    /* **A discard with an `else` after it**, which is where the order of the two instructions
+     * the discard emits stops being a detail.
+     *
+     * The `else` is `exec = saved & ~exec`, and a discard has just set `exec` to zero - so that
+     * reads `saved & ~0`, which is `saved` entire. It is only correct because the discard took
+     * the lane out of `saved` *first*. Drop that step and a discarded lane reappears in the
+     * `else`, runs it, and is live again at the `if`'s restore: the shader then exports a
+     * colour for a fragment it threw away, and the wrong one at that.
+     *
+     * One lane, so this is two runs: the lane that discards must not survive, and the lane that
+     * does not must come out with the else's value and not the earlier one. */
+    const char *const ELSE_KEY =
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  gl_FragColor = vec4(0.125);\n"
+        "  if (vin.x > 0.5) { discard; } else { gl_FragColor = vec4(0.75); }\n"
+        "}\n";
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, ELSE_KEY, hi, o), GL_FALSE);
+    ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, ELSE_KEY, lo, o), GL_TRUE);
+    ASSERT_NEAR(o[0], 0.75f, 1e-6f);
+
     /* An unconditional one, which kills the lane whatever the inputs are. */
     ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING,
                               "varying vec4 vin;\n"
