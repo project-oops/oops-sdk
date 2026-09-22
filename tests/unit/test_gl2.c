@@ -2666,6 +2666,110 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
     glContextDestroy(ctx);
 }
 
+static void test_gl2_loops_are_unrolled_when_the_count_is_known(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* 1+2+3+4+5 = 15, which is a sum no single iteration produces - so a loop that ran once,
+     * or ran with the counter stuck, gives a different answer rather than a near one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 1; i <= 5; i++) { total += float(i); }\n"
+                    "  gl_FragColor = vec4(total * 0.01, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.15f, 1e-6f);
+
+    /* Counting down, and a step that is not one - the trip count is computed the way the
+     * reference runs the loop, test then body then step, so an off-by-one shows up as a
+     * different sum. 10 + 8 + 6 + 4 + 2 = 30. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 10; i > 0; i -= 2) { total += float(i); }\n"
+                    "  gl_FragColor = vec4(total * 0.01, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.30f, 1e-6f);
+
+    /* A condition that is false at the start runs the body no times, which an unroller that
+     * always emitted one copy would get wrong. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 7.0;\n"
+                    "  for (int i = 0; i < 0; i++) { total = 0.0; }\n"
+                    "  gl_FragColor = vec4(total * 0.1, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.7f, 1e-6f);
+
+    /* The counter is a fresh value each trip, so a body that assigns to it does not carry the
+     * change into the next one - the loop's own step decides that, as the language says. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 0; i < 3; i++) { int j = i; j = j + 10; total += float(j); }\n"
+                    "  gl_FragColor = vec4(total * 0.01, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.33f, 1e-6f); /* 10 + 11 + 12 */
+
+    glContextDestroy(ctx);
+}
+
+/* The loops that are refused, each by name. A generator that branched instead of unrolling
+ * would take all of these - and would hang the part on the first one whose condition never
+ * goes false, which is why they are refusals and not a different lowering. */
+static void test_gl2_the_back_end_refuses_the_loops_it_cannot_unroll(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+    uint32_t words[256];
+    uint32_t count = 0u, vgprs = 0u;
+    char log[256] = {0};
+
+    static const struct { const char *fs; const char *wants; } cases[] = {
+        /* More trips than the unroller writes out - and the count is why, not the shape. */
+        {"void main() {\n"
+         "  float t = 0.0;\n"
+         "  for (int i = 0; i < 1000; i++) { t += 1.0; }\n"
+         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+         "}\n",
+         "unrolls"},
+        /* A bound that is not known when the shader is compiled. */
+        {"uniform float lim;\n"
+         "void main() {\n"
+         "  float t = 0.0;\n"
+         "  for (int i = 0; float(i) < lim; i++) { t += 1.0; }\n"
+         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+         "}\n",
+         "constant"},
+        /* `break` needs a mask carried through the rest of the loop. */
+        {"void main() {\n"
+         "  float t = 0.0;\n"
+         "  for (int i = 0; i < 4; i++) { if (t > 1.0) break; t += 1.0; }\n"
+         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+         "}\n",
+         "break"},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const GLuint prog = linked_program(VS_ONE_VARYING, cases[i].fs);
+        log[0] = '\0';
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, prog), words, 256u, &count,
+                                              &vgprs, NULL, NULL, log, sizeof(log)),
+                  GL_FALSE);
+        if (strstr(log, cases[i].wants) == NULL) {
+            printf("\n    case %d: expected a message about '%s', got '%s'\n", (int)i,
+                   cases[i].wants, log);
+        }
+        ASSERT_TRUE(strstr(log, cases[i].wants) != NULL);
+    }
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_derivatives_are_quad_reads_under_whole_quad_mode(void) {
     void *ctx = gl2_context();
     gl_context_t *c = (gl_context_t *)ctx;
@@ -3942,6 +4046,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
+    RUN_TEST(test_gl2_loops_are_unrolled_when_the_count_is_known);
+    RUN_TEST(test_gl2_the_back_end_refuses_the_loops_it_cannot_unroll);
     RUN_TEST(test_gl2_derivatives_are_quad_reads_under_whole_quad_mode);
     RUN_TEST(test_gl2_frag_depth_exports_before_the_colour);
     RUN_TEST(test_gl2_vector_relationals_reduce_a_bvec);

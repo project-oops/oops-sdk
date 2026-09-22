@@ -1995,6 +1995,177 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
  * Statements
  * ------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------
+ * `for`, unrolled
+ *
+ * **There is no branch in anything this generator emits, and a loop does not change that.** A
+ * `for` whose trip count is known when the shader is compiled is written out iteration by
+ * iteration, with the induction variable a constant in each - so the body meets the same
+ * instruction selection as any other straight-line code and nothing new has to be true about
+ * the machine.
+ *
+ * The alternative is a real backward branch, and the reason not to reach for it yet is the
+ * failure mode: a loop whose condition never goes false on some lane does not draw the wrong
+ * colour, it hangs the GPU, and that is the one failure this repository cannot afford to guess
+ * at. An unrolled loop cannot hang. What it can do is not fit, and that is a message.
+ *
+ * So the loops that are generated are the ones real shaders mostly have - a constant count of
+ * taps, of samples, of octaves - and the ones that are refused are refused by name with their
+ * trip count in the message.
+ * ------------------------------------------------------------------------- */
+
+/* A compile-time constant, or false. Only what a loop header needs: a literal, or a negated
+ * one. Anything else is a loop whose count this cannot know. */
+static GLboolean const_of(const glsl_gen_t *g, int32_t node, double *out) {
+    if (node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (n->kind == GLSL_NODE_INTCONST || n->kind == GLSL_NODE_FLOATCONST) {
+        *out = n->value;
+        return GL_TRUE;
+    }
+    if (n->kind == GLSL_NODE_UNARY && n->op == GLSL_TOK_MINUS) {
+        double inner = 0.0;
+        if (!const_of(g, n->a, &inner)) return GL_FALSE;
+        *out = -inner;
+        return GL_TRUE;
+    }
+    return GL_FALSE;
+}
+
+/* Whether `node` is the identifier `name`. */
+static GLboolean is_name(const glsl_gen_t *g, int32_t node, const char *name, size_t len) {
+    if (node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (n->kind != GLSL_NODE_IDENTIFIER || n->length != len) return GL_FALSE;
+    for (size_t i = 0; i < len; i++) {
+        if (n->text[i] != name[i]) return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+#define GLSL_GEN_MAX_UNROLL 64
+
+static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
+    const glsl_node_t *n = &g->ast->nodes[node];
+
+    /* The initialiser has to declare the induction variable with a constant. `for (i = 0; ...)`
+     * over a variable declared outside is a different shape and is not read here. */
+    if (n->a == GLSL_NO_NODE || g->ast->nodes[n->a].kind != GLSL_NODE_DECL) {
+        (void)gen_fail(g, "a loop is unrolled only when its initialiser declares the counter - "
+                          "`for (int i = 0; ...)` - because that is what makes the trip count "
+                          "knowable here", node);
+        return GL_FALSE;
+    }
+    const glsl_node_t *decl = &g->ast->nodes[n->a];
+    const glsl_type_t ind_t = glsl_type_from_token(decl->type_tok);
+    double start = 0.0;
+    if (!const_of(g, decl->a, &start)) {
+        (void)gen_fail(g, "a loop's counter has to start at a constant for the trip count to "
+                          "be known when the shader is compiled", node);
+        return GL_FALSE;
+    }
+
+    /* The condition: the counter against a constant. */
+    if (n->b == GLSL_NO_NODE || g->ast->nodes[n->b].kind != GLSL_NODE_BINARY) {
+        (void)gen_fail(g, "a loop's condition has to compare the counter with a constant", node);
+        return GL_FALSE;
+    }
+    const glsl_node_t *cond = &g->ast->nodes[n->b];
+    double limit = 0.0;
+    if (!is_name(g, cond->a, decl->text, decl->length) || !const_of(g, cond->b, &limit)) {
+        (void)gen_fail(g, "a loop's condition has to be the counter compared with a constant, "
+                          "in that order", node);
+        return GL_FALSE;
+    }
+
+    /* The step: `i++`, `i--`, or `i += k`. */
+    double step = 0.0;
+    if (n->c == GLSL_NO_NODE) {
+        (void)gen_fail(g, "a loop with no increment has no trip count this can know", node);
+        return GL_FALSE;
+    }
+    {
+        const glsl_node_t *inc = &g->ast->nodes[n->c];
+        if ((inc->kind == GLSL_NODE_POSTFIX || inc->kind == GLSL_NODE_UNARY) &&
+            is_name(g, inc->a, decl->text, decl->length)) {
+            step = (inc->op == GLSL_TOK_INC) ? 1.0 : (inc->op == GLSL_TOK_DEC ? -1.0 : 0.0);
+        } else if (inc->kind == GLSL_NODE_ASSIGN &&
+                   is_name(g, inc->a, decl->text, decl->length)) {
+            double k = 0.0;
+            if (const_of(g, inc->b, &k)) {
+                if (inc->op == GLSL_TOK_ADD_ASSIGN) step = k;
+                else if (inc->op == GLSL_TOK_SUB_ASSIGN) step = -k;
+            }
+        }
+        if (step == 0.0) {
+            (void)gen_fail(g, "a loop's increment has to move the counter by a constant - `i++`,"
+                              " `i--` or `i += k` - and by something other than nothing", node);
+            return GL_FALSE;
+        }
+    }
+
+    /* **The trip count, counted the way the reference runs it**: test, then body, then step. */
+    int trips = 0;
+    for (double v = start; trips <= GLSL_GEN_MAX_UNROLL; v += step) {
+        GLboolean go;
+        switch (cond->op) {
+            case GLSL_TOK_LT: go = (GLboolean)(v < limit); break;
+            case GLSL_TOK_LE: go = (GLboolean)(v <= limit); break;
+            case GLSL_TOK_GT: go = (GLboolean)(v > limit); break;
+            case GLSL_TOK_GE: go = (GLboolean)(v >= limit); break;
+            case GLSL_TOK_NE: go = (GLboolean)(v != limit); break;
+            default:
+                (void)gen_fail(g, "a loop's condition is compared with <, <=, >, >= or != here",
+                               node);
+                return GL_FALSE;
+        }
+        if (!go) break;
+        trips++;
+    }
+    if (trips > GLSL_GEN_MAX_UNROLL) {
+        (void)gen_fail(g, "this loop runs more times than the generator unrolls, and a loop is "
+                          "unrolled rather than branched because a branch that never goes false "
+                          "hangs the part rather than drawing the wrong colour", node);
+        return GL_FALSE;
+    }
+
+    /* `break` and `continue` would each need a mask carried through the rest of the loop, which
+     * is the same thing an early `return` needs and is refused for the same reason. Checked
+     * before anything is emitted. */
+    for (int32_t i = 0; i < g->ast->count; i++) {
+        const glsl_node_t *b = &g->ast->nodes[i];
+        if (b->kind == GLSL_NODE_BREAK || b->kind == GLSL_NODE_CONTINUE) {
+            (void)gen_fail(g, "`break` and `continue` are not generated: each needs the exec "
+                              "mask carried through the rest of the loop, which this generator "
+                              "does not do", node);
+            return GL_FALSE;
+        }
+    }
+
+    /* Out it goes, one copy per trip, with the counter a fresh constant each time. The scope is
+     * the loop's - `for (int i = ...)` ends with it - and each body gets its own on top. */
+    const int vars_before = g->var_count;
+    glsl_scope_push(g->sema);
+    if (!glsl_declare(g->sema, decl->text, decl->length, ind_t, GL_FALSE)) {
+        g->sema->error = (const char *)0;
+    }
+    double v = start;
+    for (int t = 0; t < trips && !g->error; t++, v += step) {
+        const uint32_t mark = gen_mark(g);
+        glsl_value_t iv = gen_alloc(g, 1, node);
+        if (is_bad(iv)) break;
+        glsl_emit_mov_imm(g->code, iv.base, float_bits((float)v));
+        const int vars_here = g->var_count;
+        if (!gen_declare(g, decl->text, decl->length, ind_t, iv, node)) break;
+        (void)glsl_gen_stmt(g, n->d);
+        g->var_count = vars_here;
+        gen_release(g, mark);
+    }
+    glsl_scope_pop(g->sema);
+    g->var_count = vars_before;
+    return (GLboolean)(g->error == (const char *)0);
+}
+
 GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
     if (g->error) return GL_FALSE;
     if (node == GLSL_NO_NODE) return GL_TRUE;
@@ -2151,6 +2322,9 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
             glsl_emit_exec_clear(g->code);
             return GL_TRUE;
         }
+        case GLSL_NODE_FOR:
+            return gen_for(g, node);
+
         case GLSL_NODE_RETURN:
             /* **A return reaching here is one that is not the last statement of a function
              * body.** `gen_call_user` generates the trailing one itself, into the caller's
