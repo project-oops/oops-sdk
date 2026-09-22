@@ -1363,6 +1363,9 @@ typedef struct gl_context {
     /* The entry point that raised it, from `__func__` at the call site. A pointer to a string
      * literal in the payload, so it outlives every frame and costs nothing to keep. */
     const char *hw_gl_error_fn;
+    /* The enum or value the latest refusal was about, where its site passed one. */
+    uint32_t hw_gl_error_val;
+    GLboolean hw_gl_error_has_val;
     /* The GL 2.0 refusal's "say it once" lives on the program object - `hw_ps_logged` - and not
      * here, because a name is not an identity: `glDeleteProgram` frees it and the next
      * `glCreateProgram` hands the same number out again. A suite that builds and deletes one
@@ -1716,7 +1719,42 @@ static inline gl_context_t *gl_get_ctx(void) {
    header's own declaration is further down, beside the rest of the logging. */
 void gl_log_line(const char *msg);
 
+/* Appends "0x" and `v` in hex to `buf` at `n`, and returns the new length. */
+static inline size_t gl_msg_hex(char *buf, size_t cap, size_t n, uint32_t v) {
+    if (n + 3u >= cap) return n;
+    buf[n++] = ' ';
+    buf[n++] = '0';
+    buf[n++] = 'x';
+    int top = 28;
+    while (top > 0 && ((v >> top) & 0xfu) == 0u) top -= 4;
+    while (top >= 0 && n < cap - 1u) {
+        const uint8_t d = (uint8_t)((v >> top) & 0xfu);
+        buf[n++] = (char)(d < 10u ? ('0' + d) : ('a' + d - 10u));
+        top -= 4;
+    }
+    return n;
+}
+
+/* **The value that was refused, when the call site knows it.**
+ *
+ * `gl_record_error` names the entry point, which turned "102 errors, all 0x500" into
+ * "glEnable" in one run - and then still needed a cross-reference against the port's source to
+ * learn *which* capability. The refusal sites have the offending enum in a local variable at
+ * that moment, so passing it closes the last gap: the log says `glEnable 0x8861` and there is
+ * nothing left to look up.
+ *
+ * `val` is a GLenum at almost every site and an index or a bitfield at a couple, so it prints as
+ * hex and the reader takes it in context. Sites that genuinely have no single culprit keep
+ * using `gl_record_error`. */
+static inline void gl_record_error_val_at(gl_context_t *ctx, GLenum error, uint32_t val,
+                                          GLboolean have_val, const char *fn);
+
 static inline void gl_record_error_at(gl_context_t *ctx, GLenum error, const char *fn) {
+    gl_record_error_val_at(ctx, error, 0u, GL_FALSE, fn);
+}
+
+static inline void gl_record_error_val_at(gl_context_t *ctx, GLenum error, uint32_t val,
+                                          GLboolean have_val, const char *fn) {
     if (!ctx) return;
     /* Counted on every raise, not only on the one that sets the flag. The flag answers "what
      * went wrong first"; the count answers "how much went wrong", and a port that never calls
@@ -1730,13 +1768,26 @@ static inline void gl_record_error_at(gl_context_t *ctx, GLenum error, const cha
      * the binary and turns the count into an address. Said once, because the first is the one
      * that matters and this sits on a path some programs take per frame. */
     ctx->hw_gl_error_fn = fn;
+    ctx->hw_gl_error_val = have_val ? val : 0u;
+    ctx->hw_gl_error_has_val = have_val;
     if (ctx->hw_gl_errors == 1u && fn) {
         char msg[128];
         size_t n = 0;
-        const char *head = "first GL error raised by ";
-        while (head[n] && n < sizeof(msg) - 40) { msg[n] = head[n]; n++; }
+        const char *head = "first GL error ";
+        while (head[n] && n < sizeof(msg) - 64) { msg[n] = head[n]; n++; }
+        n = gl_msg_hex(msg, sizeof(msg), n, (uint32_t)error);
+        const char *mid = " raised by ";
+        size_t k = 0;
+        while (mid[k] && n < sizeof(msg) - 48) { msg[n++] = mid[k++]; }
         size_t m = 0;
-        while (fn[m] && n < sizeof(msg) - 2) { msg[n++] = fn[m++]; }
+        while (fn[m] && n < sizeof(msg) - 16) { msg[n++] = fn[m++]; }
+        /* The value it refused, so the line is the whole answer and not half of one. */
+        if (have_val) {
+            const char *tail = " on";
+            size_t j = 0;
+            while (tail[j] && n < sizeof(msg) - 14) { msg[n++] = tail[j++]; }
+            n = gl_msg_hex(msg, sizeof(msg), n, val);
+        }
         msg[n] = '\0';
         gl_log_line(msg);
     }
@@ -1748,6 +1799,10 @@ static inline void gl_record_error_at(gl_context_t *ctx, GLenum error, const cha
 /* The name comes from the call site, so the macro has to expand there - `__func__` inside the
  * inline above would be the inline's own name for every caller in the library. */
 #define gl_record_error(ctx, err) gl_record_error_at((ctx), (err), __func__)
+/* The same, where the site knows what it is refusing. Prefer it: a refusal that names its own
+   value is the difference between one run and two. */
+#define gl_record_error_val(ctx, err, val) \
+    gl_record_error_val_at((ctx), (err), (uint32_t)(val), GL_TRUE, __func__)
 
 /* -------------------------------------------------------------------------
  * The version an app claimed, and what it gets for claiming it

@@ -423,6 +423,9 @@ void gl_hw_flush_at(gl_context_t *ctx, const char *fn) {
              * asked it. */
             gl_klog_val("gl-error-last", (uint64_t)ctx->hw_gl_error_last);
             gl_klog_val("gl-error-first", (uint64_t)ctx->last_error);
+            if (ctx->hw_gl_error_has_val) {
+                gl_klog_val("gl-error-on", (uint64_t)ctx->hw_gl_error_val);
+            }
             /* And the entry point the latest one came from, which is what a reader acts on. */
             if (ctx->hw_gl_error_fn) {
                 char msg[128];

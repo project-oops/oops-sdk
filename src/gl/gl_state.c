@@ -432,8 +432,13 @@ void glEnable(GLenum cap) {
          * returned clean while the feature stayed off, so the render was wrong with no error
          * anywhere to say why. The cases above and GL_LIGHT0..7 are the whole of what exists
          * (D008); everything else says so - and glIsEnabled answers from the same list, or the
-         * two disagree. */
-        default: gl_record_error(ctx, GL_INVALID_ENUM); break;
+         * two disagree.
+         *
+         * **The refusal carries the capability**, because the name of the call is only half an
+         * answer: GL_POINT_SPRITE was found here by a log that said `glEnable` and then needed
+         * the port's source read to learn which enable it meant. `glEnable 0x8861` needs
+         * nothing read. */
+        default: gl_record_error_val(ctx, GL_INVALID_ENUM, cap); break;
     }
 }
 
@@ -500,7 +505,7 @@ void glDisable(GLenum cap) {
             ctx->cap_alpha_test = GL_FALSE;
             gl_ps_patch_alpha_test(ctx);
             break;
-        default: gl_record_error(ctx, GL_INVALID_ENUM); break;
+        default: gl_record_error_val(ctx, GL_INVALID_ENUM, cap); break;
     }
 }
 
@@ -1373,7 +1378,10 @@ static void gl_tex_env_set(gl_context_t *ctx, GLenum pname, const GLfloat *p) {
         default:
             break;
     }
-    gl_record_error(ctx, GL_INVALID_ENUM);
+    /* The pname, not the value: the switch above is on the parameter name, and a pname this
+       does not keep is the common refusal. A value it does not accept for a pname it does
+       lands here too, and the pname is still the more useful half. */
+    gl_record_error_val(ctx, GL_INVALID_ENUM, pname);
 }
 
 /* The two targets: GL_TEXTURE_ENV, and GL 1.4's GL_TEXTURE_FILTER_CONTROL, whose one parameter is
@@ -1391,7 +1399,7 @@ static void gl_tex_env_target_set(gl_context_t *ctx, GLenum target, GLenum pname
          * as a GLboolean and Mesa compares against zero rather than against GL_TRUE. */
         gl_tu(ctx)->coord_replace = (GLboolean)(p[0] != 0.0f);
     } else {
-        gl_record_error(ctx, GL_INVALID_ENUM);
+        gl_record_error_val(ctx, GL_INVALID_ENUM, target);
     }
 }
 
