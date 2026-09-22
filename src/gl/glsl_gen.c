@@ -128,9 +128,7 @@ static glsl_gen_var_t *gen_declare(glsl_gen_t *g, const char *name, size_t len,
  * Types this stage will generate for
  * ------------------------------------------------------------------------- */
 
-/* The float family, and nothing else. `int` and `bool` are refused rather than run through the
- * float instructions: `v_add_f32` on a pair of integers is not integer addition, and the result
- * would be wrong in a way no test on the host would see. */
+/* The float family. `bool` is its own thing below; `int` is a float that is kept whole. */
 static GLboolean is_float_family(glsl_type_t t) {
     switch (t) {
         case GLSL_TYPE_FLOAT:
@@ -166,9 +164,34 @@ static GLboolean is_bool_family(glsl_type_t t) {
     return (t == GLSL_TYPE_BOOL) ? GL_TRUE : GL_FALSE;
 }
 
+/*
+ * **An `int` is a float that is kept whole**, which is the reference's representation and
+ * therefore the one this has to match.
+ *
+ * `glsl_exec.c` holds every value in a `float v[16]` and writes `(float)(int)x` after an
+ * integer operation; this writes the same arithmetic and a `v_trunc_f32` after it. That is not
+ * a shortcut taken for convenience - GLSL 1.10 requires only that an integer hold 16 bits and
+ * explicitly allows an implementation to store one in a float - and it is the only
+ * representation under which the console and the host can agree, which is what the whole
+ * arrangement is for.
+ *
+ * What it cannot do is arithmetic that overflows 24 bits of mantissa, where a float stops being
+ * able to count. The reference has the same ceiling, so the two still agree; they are simply
+ * both wrong about numbers no fragment shader has.
+ */
+static GLboolean is_int_family(glsl_type_t t) {
+    switch (t) {
+        case GLSL_TYPE_INT:
+        case GLSL_TYPE_IVEC2: case GLSL_TYPE_IVEC3: case GLSL_TYPE_IVEC4:
+            return GL_TRUE;
+        default:
+            return GL_FALSE;
+    }
+}
+
 /* Everything this stage has a register for. */
 static GLboolean is_generated(glsl_type_t t) {
-    return (is_float_family(t) || is_bool_family(t)) ? GL_TRUE : GL_FALSE;
+    return (is_float_family(t) || is_bool_family(t) || is_int_family(t)) ? GL_TRUE : GL_FALSE;
 }
 
 /* The bits of a float literal, without punning through a pointer.
@@ -416,9 +439,26 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
 
     const glsl_type_t lt = glsl_type_of(g->sema, n->a);
     const glsl_type_t rt = glsl_type_of(g->sema, n->b);
-    if (!is_float_family(lt) || !is_float_family(rt)) {
-        return gen_fail(g, "only float, vec and mat arithmetic is generated; int and bool have "
-                           "no verified instruction here", node);
+    const GLboolean int_result = (GLboolean)(is_int_family(lt) && is_int_family(rt));
+    if ((!is_float_family(lt) && !is_int_family(lt)) ||
+        (!is_float_family(rt) && !is_int_family(rt))) {
+        return gen_fail(g, "only float, vec, mat and int arithmetic is generated; bool has no "
+                           "verified instruction here", node);
+    }
+    /* **Integer division is refused, and the reason is the reciprocal.** There is no float
+     * divide on this part: `a / b` is `a * rcp(b)`, and `v_rcp_f32` is accurate to one unit in
+     * the last place. That is invisible under a float result and decisive under an integer one,
+     * where the truncation that follows turns a result a hair below `n` into `n - 1`. `7 / 7`
+     * coming out 0 is the shape of it.
+     *
+     * Getting this right means a quotient fixup - one multiply and a compare to check whether
+     * the truncated answer times the divisor has overshot - which is a handful of instructions
+     * this does not yet emit. Until it does, the shader is told rather than given an answer
+     * that is right for most divisors. */
+    if (int_result && op == GLSL_TOK_SLASH) {
+        return gen_fail(g, "integer division is not generated: there is no divide instruction "
+                           "here and a reciprocal is one unit in the last place out, which "
+                           "truncation turns into an answer short by one", node);
     }
 
     glsl_value_t a = gen_expr(g, n->a);
@@ -464,6 +504,19 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
     if (is_bad(out)) return out;
     for (int i = 0; i < width; i++) {
         gen_binop_component(g, op, out.base + (uint32_t)i, comp_of(a, i), comp_of(b, i));
+    }
+    /* **An integer result is kept whole**, which is what makes an int an int here: the
+     * reference writes `(float)(int)x` after an integer operation and this writes the
+     * instruction that does the same thing. Addition, subtraction and multiplication of whole
+     * floats are already whole, so this is not correcting them - it is the one place the
+     * representation is stated, and it costs an instruction on operations that are exact
+     * anyway rather than leaving the invariant to hold by luck. `v_trunc_f32` rounds toward
+     * zero, which is the direction C and GLSL both take. */
+    if (int_result) {
+        for (int i = 0; i < width; i++) {
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_TRUNC_F32, out.base + (uint32_t)i,
+                              out.base + (uint32_t)i);
+        }
     }
     return out;
 }
@@ -568,9 +621,13 @@ static glsl_value_t gen_construct(glsl_gen_t *g, glsl_type_t target, int32_t fir
     int args = 0, supplied = 0;
     for (int32_t a = first_arg; a != GLSL_NO_NODE; a = g->ast->nodes[a].sibling) {
         const glsl_type_t at = glsl_type_of(g->sema, a);
-        if (!is_float_family(at)) {
-            return gen_fail(g, "only float, vec and mat constructor arguments are generated",
-                            node);
+        /* An `int` argument needs no conversion: it is already a whole float in a register, so
+         * `float(i)` is a move and `vec3(i, x, y)` packs it like any other component. A `bool`
+         * is 0.0 or 1.0 and would behave the same, but GLSL's `float(b)` is a conversion this
+         * has not been asked for yet, so it stays refused and named. */
+        if (!is_float_family(at) && !is_int_family(at)) {
+            return gen_fail(g, "only float, vec, mat and int constructor arguments are "
+                               "generated", node);
         }
         supplied += glsl_type_components(at);
         args++;

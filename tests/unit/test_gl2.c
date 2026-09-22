@@ -2583,6 +2583,100 @@ static void test_gl2_frag_coord_comes_from_the_window_position(void) {
     glContextDestroy(ctx);
 }
 
+static void test_gl2_integers_are_floats_kept_whole(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **The representation is the reference's**: an int is a float and every integer operation
+     * is followed by a truncation towards zero, which is what `glsl_exec.c` writes as
+     * `(float)(int)x`. These are exact in a float, so what the arm proves is that the values
+     * arrive at all - int locals are generated now, where they were refused. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  int a = 7;\n"
+                    "  int b = 3;\n"
+                    "  gl_FragColor = vec4(float(a + b), float(a - b), float(a * b), 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 10.0f, 1e-6f);
+    ASSERT_NEAR(o[1], 4.0f, 1e-6f);
+    ASSERT_NEAR(o[2], 21.0f, 1e-6f);
+
+    /* **Where truncation is the whole answer.** `int(7.9)` is 7 and `int(-7.9)` is -7 - toward
+     * zero, not toward minus infinity - so a lowering that reached for `floor` gets the second
+     * one wrong and only the second one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(float(int(7.9)), float(int(-7.9)),\n"
+                    "                      float(int(2.5) * int(3.5)), 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 7.0f, 1e-6f);
+    ASSERT_NEAR(o[1], -7.0f, 1e-6f);
+    ASSERT_NEAR(o[2], 6.0f, 1e-6f); /* 2 * 3, not 8.75 */
+
+    gl_context_t *c = (gl_context_t *)ctx;
+    uint32_t w2[256];
+    uint32_t n2 = 0u, vg = 0u;
+    char lg[256] = {0};
+
+    /* **The truncation after an integer operation is asserted on the instructions, not on the
+     * value**, because on these values it changes nothing: addition, subtraction and
+     * multiplication of whole floats are whole already. It is emitted so the representation
+     * holds by construction rather than by luck, and the only way to see it is to look. The
+     * float arm below is the control - the same expression with a float type emits none. */
+    {
+        const GLuint ip = linked_program(
+            VS_ONE_VARYING,
+            "void main() { int a = 7; int b = 3; gl_FragColor = vec4(float(a * b)); }\n");
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, ip), w2, 256u, &n2, &vg, NULL,
+                                              NULL, lg, sizeof(lg)),
+                  GL_TRUE);
+        int truncs = 0;
+        for (uint32_t i = 0; i < n2; i++) {
+            if ((w2[i] >> 25) == 0x3fu && ((w2[i] >> 9) & 0xffu) == GLSL_VOP1_TRUNC_F32) {
+                truncs++;
+            }
+        }
+        ASSERT_TRUE(truncs > 0);
+
+        const GLuint fp = linked_program(
+            VS_ONE_VARYING,
+            "void main() { float a = 7.0; float b = 3.0; gl_FragColor = vec4(a * b); }\n");
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, fp), w2, 256u, &n2, &vg, NULL,
+                                              NULL, lg, sizeof(lg)),
+                  GL_TRUE);
+        int float_truncs = 0;
+        for (uint32_t i = 0; i < n2; i++) {
+            if ((w2[i] >> 25) == 0x3fu && ((w2[i] >> 9) & 0xffu) == GLSL_VOP1_TRUNC_F32) {
+                float_truncs++;
+            }
+        }
+        ASSERT_EQ(float_truncs, 0);
+    }
+
+    /* **Integer division is refused rather than answered.** There is no divide instruction on
+     * this part and a reciprocal is one unit in the last place out, which the truncation after
+     * it turns into an answer short by one. A back end that generated it anyway would be right
+     * for most divisors, which is the worst of the three possibilities. */
+    const GLuint div = linked_program(
+        VS_ONE_VARYING,
+        "void main() {\n"
+        "  int a = 7;\n"
+        "  gl_FragColor = vec4(float(a / 2), 0.0, 0.0, 1.0);\n"
+        "}\n");
+    uint32_t words[256];
+    uint32_t count = 0u, vgprs = 0u;
+    char log[256] = {0};
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, div), words, 256u, &count, &vgprs,
+                                          NULL, NULL, log, sizeof(log)),
+              GL_FALSE);
+    ASSERT_TRUE(strstr(log, "reciprocal") != NULL);
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_front_facing_is_a_sign_not_a_flag(void) {
     void *ctx = gl2_context();
     gl_context_t *c = (gl_context_t *)ctx;
@@ -3390,6 +3484,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_runaway_shader_is_stopped);
     RUN_TEST(test_gl2_pixel_shader_encodings_match_the_assembler);
     RUN_TEST(test_gl2_frag_coord_comes_from_the_window_position);
+    RUN_TEST(test_gl2_integers_are_floats_kept_whole);
     RUN_TEST(test_gl2_front_facing_is_a_sign_not_a_flag);
     RUN_TEST(test_gl2_user_functions_are_inlined);
     RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
