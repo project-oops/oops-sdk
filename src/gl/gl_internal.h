@@ -1378,6 +1378,10 @@ typedef struct gl_context {
      * Guessing which half dominates has been wrong twice - the submit count looked like the
      * whole frame and was 60% of it - so it is measured at the one place submits happen. */
     uint64_t hw_flush_ns;
+    /* And the nanoseconds inside the draw path, with the triangles that spent them - so the
+     * CPU's share of a frame can be split between this library and the program above it. */
+    uint64_t hw_draw_ns;
+    uint32_t hw_draw_calls;
     const char *hw_flush_site[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_site_n[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_unnamed;
@@ -2963,7 +2967,22 @@ static inline size_t gl_tex_chain_layout(GLsizei w, GLsizei h, int levels, size_
     return gl_tex_chain_layout_3d(w, h, 1, levels, offsets, pitches);
 }
 
+/* **Slot `id - 1` first, then the scan.**
+ *
+ * `glGenTextures` hands out the lowest free name and `gl_find_or_create_texture` takes the
+ * lowest free slot, so a texture called `n` is in slot `n - 1` unless deletion has shuffled
+ * things - which makes the guess right almost always and wrong harmlessly, since the same
+ * `used && id ==` test that ends the scan also validates it. No cache, so nothing to
+ * invalidate when a texture is created, deleted or renamed.
+ *
+ * This is on the draw path about eleven times per draw, and Neverball issues roughly eighteen
+ * thousand draws a frame - so the scan was up to fifty million comparisons a frame, and
+ * `OOPS_GL_MAX_TEXTURE_OBJECTS` going from 32 to 256 had just made it eight times worse. */
 static inline const gl_texture_object_t *gl_lookup_texture(const gl_context_t *ctx, GLuint id) {
+    if (id != 0u && id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS) {
+        const gl_texture_object_t *t = &ctx->textures[id - 1u];
+        if (t->used && t->id == id) return t;
+    }
     for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
         if (ctx->textures[i].used && ctx->textures[i].id == id) return &ctx->textures[i];
     }

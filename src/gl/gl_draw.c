@@ -3,6 +3,9 @@
  */
 
 #include "gl_internal.h"
+#ifndef OOPS_HOST_BUILD
+#include "oops/time.h" /* the draw path is timed - see hw_draw_ns */
+#endif
 
 /* -------------------------------------------------------------------------
  * What this subset will draw, and how it refuses the rest
@@ -3079,8 +3082,36 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
 /* One triangle, whose flat-shaded colour is `pv`'s - which may be one of its own vertices or not:
  * a quad's first triangle takes the quad's fourth vertex, and an expanded line's corners take
  * the line's endpoint. See gl_assemble. */
+static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
+                                     const gl_vertex_t *v1, const gl_vertex_t *v2,
+                                     const gl_vertex_t *pv);
+
+/* **Timed, so a slow frame can be blamed on the right code.** Subtracting the submit time from
+ * the frame time leaves the CPU's share - but that share is the *whole* CPU, this library and
+ * the program both, and a port doing its own physics and scene work every frame is not a
+ * bystander. This counts only what is spent inside the draw path, which is the difference
+ * between "oops-gl is slow" and "something is slow".
+ *
+ * Two clock reads per triangle is real - about 0.9ms across the eighteen thousand a Neverball
+ * frame draws, half a per cent of a 219ms frame - and worth paying once to find out where the
+ * other 197 went. */
 static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0, const gl_vertex_t *v1,
                                 const gl_vertex_t *v2, const gl_vertex_t *pv) {
+#ifdef OOPS_HOST_BUILD
+    gl_draw_triangle_pv_body(ctx, v0, v1, v2, pv);
+#else
+    const uint64_t t0 = oops_time_get_ns();
+    gl_draw_triangle_pv_body(ctx, v0, v1, v2, pv);
+    if (ctx) {
+        ctx->hw_draw_ns += oops_time_get_ns() - t0;
+        ctx->hw_draw_calls++;
+    }
+#endif
+}
+
+static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
+                                     const gl_vertex_t *v1, const gl_vertex_t *v2,
+                                     const gl_vertex_t *pv) {
     if (!ctx || !v0 || !v1 || !v2) return;
 
     gl_update_mvp(ctx);

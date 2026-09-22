@@ -3158,6 +3158,11 @@ static void gl_buffer_release(void *p);
 
 static gl_texture_object_t *gl_find_texture(gl_context_t *ctx, GLuint id) {
     if (!ctx || id == 0) return NULL;
+    /* Slot `id - 1` first, for the reason `gl_lookup_texture` gives at length. */
+    if (id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS) {
+        gl_texture_object_t *t = &ctx->textures[id - 1u];
+        if (t->used && t->id == id) return t;
+    }
     for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
         if (ctx->textures[i].used && ctx->textures[i].id == id) {
             return &ctx->textures[i];
