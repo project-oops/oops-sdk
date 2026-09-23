@@ -541,23 +541,44 @@ void gl_ps_build_textured(uint32_t *ps_tex, uint64_t canary_gpu) {
     uint32_t *const pro = ps_tex + GL_PS_STIPPLE_SLOT + GL_PS_STIPPLE_WORDS;
     pro[ 0] = 0xbe90037eu; /* s_mov_b32 s16, exec_lo */
     pro[ 1] = 0xbefe097eu; /* s_wqm_b32 exec_lo, exec_lo */
+    /* **Every p1 first, then every p2** - the order LLVM emits for the same shader and the
+     * opposite of what this did.
+     *
+     * `v_interp_p2_f32` reads the register `v_interp_p1_f32` wrote, and llc separates each pair
+     * by three unrelated instructions rather than putting them back to back:
+     *
+     *     v_interp_p1_f32 v2, v0, attr0.x      v_interp_p2_f32 v2, v1, attr0.x
+     *     v_interp_p1_f32 v3, v0, attr0.y      v_interp_p2_f32 v3, v1, attr0.y
+     *     v_interp_p1_f32 v4, v0, attr0.z  ->  v_interp_p2_f32 v4, v1, attr0.z
+     *     v_interp_p1_f32 v0, v0, attr0.w      v_interp_p2_f32 v0, v1, attr0.w
+     *
+     * This emitted `p1 x, p2 x, p1 y, p2 y, ...`, with every p2 immediately behind the p1 whose
+     * result it reads. A read that arrives before the write has landed is wrong per *lane*, and
+     * the port's fault is per lane: on the console a replayed frame comes back with even pixel
+     * columns black and odd ones full green, red identical across each pair and green and blue
+     * not - which is v4 surviving while v5 and v6 do not, and those are the second and third
+     * interpolations of the four.
+     *
+     * The same seventeen instructions in a different order, so every slot after this is where it
+     * was and nothing that patches them has to know. */
     pro[ 2] = 0xc8080400u; /* v_interp_p1_f32 v2, v0, attr1.x (s) */
-    pro[ 3] = 0xc8090401u; /* v_interp_p2_f32 v2, v1, attr1.x */
-    pro[ 4] = 0xc80c0500u; /* v_interp_p1_f32 v3, v0, attr1.y (t) */
-    pro[ 5] = 0xc80d0501u; /* v_interp_p2_f32 v3, v1, attr1.y */
-    pro[ 6] = 0xc8300700u; /* v_interp_p1_f32 v12, v0, attr1.w (q) */
-    pro[ 7] = 0xc8310701u; /* v_interp_p2_f32 v12, v1, attr1.w */
-    pro[ 8] = 0x7e18550cu; /* v_rcp_f32 v12, v12 */
-    pro[ 9] = 0x10041902u; /* v_mul_f32 v2, v2, v12 (s/q) */
-    pro[10] = 0x10061903u; /* v_mul_f32 v3, v3, v12 (t/q) */
-    pro[11] = 0xc8200000u; /* v_interp_p1_f32 v8, v0, attr0.x (R) */
+    pro[ 3] = 0xc80c0500u; /* v_interp_p1_f32 v3, v0, attr1.y (t) */
+    pro[ 4] = 0xc8300700u; /* v_interp_p1_f32 v12, v0, attr1.w (q) */
+    pro[ 5] = 0xc8200000u; /* v_interp_p1_f32 v8, v0, attr0.x (R) */
+    pro[ 6] = 0xc8240100u; /* v_interp_p1_f32 v9, v0, attr0.y (G) */
+    pro[ 7] = 0xc8280200u; /* v_interp_p1_f32 v10, v0, attr0.z (B) */
+    pro[ 8] = 0xc82c0300u; /* v_interp_p1_f32 v11, v0, attr0.w (A) */
+    pro[ 9] = 0xc8090401u; /* v_interp_p2_f32 v2, v1, attr1.x */
+    pro[10] = 0xc80d0501u; /* v_interp_p2_f32 v3, v1, attr1.y */
+    pro[11] = 0xc8310701u; /* v_interp_p2_f32 v12, v1, attr1.w */
     pro[12] = 0xc8210001u; /* v_interp_p2_f32 v8, v1, attr0.x */
-    pro[13] = 0xc8240100u; /* v_interp_p1_f32 v9, v0, attr0.y (G) */
-    pro[14] = 0xc8250101u; /* v_interp_p2_f32 v9, v1, attr0.y */
-    pro[15] = 0xc8280200u; /* v_interp_p1_f32 v10, v0, attr0.z (B) */
-    pro[16] = 0xc8290201u; /* v_interp_p2_f32 v10, v1, attr0.z */
-    pro[17] = 0xc82c0300u; /* v_interp_p1_f32 v11, v0, attr0.w (A) */
-    pro[18] = 0xc82d0301u; /* v_interp_p2_f32 v11, v1, attr0.w */
+    pro[13] = 0xc8250101u; /* v_interp_p2_f32 v9, v1, attr0.y */
+    pro[14] = 0xc8290201u; /* v_interp_p2_f32 v10, v1, attr0.z */
+    pro[15] = 0xc82d0301u; /* v_interp_p2_f32 v11, v1, attr0.w */
+    /* The divide last, because it reads what the interpolation above produced. */
+    pro[16] = 0x7e18550cu; /* v_rcp_f32 v12, v12 */
+    pro[17] = 0x10041902u; /* v_mul_f32 v2, v2, v12 (s/q) */
+    pro[18] = 0x10061903u; /* v_mul_f32 v3, v3, v12 (t/q) */
     pro[19] = 0xf40c0100u; /* s_load_dwordx8 s[4:11], s[0:1], 0x00 */
     pro[20] = 0xfa000000u;
     pro[21] = 0xf4080300u; /* s_load_dwordx4 s[12:15], s[0:1], 0x20 */
