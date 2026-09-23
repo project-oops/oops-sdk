@@ -481,22 +481,83 @@ long double strtold(const char *s, char **end) { return (long double)strtod(s, e
  * honest answer and not a placeholder - a payload is launched rather than spawned, and NULL is
  * what a caller would get from a shell that exported nothing.
  */
-char *getenv(const char *name) {
-  (void)name;
-  return (char *)0;
+/* **The environment starts empty and a payload may fill it.**
+ *
+ * Nothing is inherited - that part of the old note is still true and is why this begins with no
+ * entries. What changed on 2026-09-23 is that `setenv` now keeps what it is given instead of
+ * dropping it, because there is one variable a payload genuinely knows and a POSIX program
+ * genuinely needs: `HOME`. A title mounts its savedata, which is the only writable directory it
+ * has, and exports the mount point; ports then find it the way they already look for it, with
+ * no patch to their own sources. Neverball's `pick_home_path` asks `getenv("HOME")` and falls
+ * back to the read-only package directory, so with this unset it asked for a player name on
+ * every launch and correctly failed to keep it.
+ *
+ * Fixed storage rather than the heap: this runs before a title's own initialisation and is not
+ * worth a malloc that has to be got right during start-up. Sixteen names is far more than the
+ * handful a port sets, and a name that does not fit is refused rather than truncated - a
+ * silently shortened `HOME` would be a path to somewhere else. */
+#define OOPS_ENV_MAX      16
+#define OOPS_ENV_NAME_MAX 32
+#define OOPS_ENV_VAL_MAX  192
+
+static char s_env_name[OOPS_ENV_MAX][OOPS_ENV_NAME_MAX];
+static char s_env_val[OOPS_ENV_MAX][OOPS_ENV_VAL_MAX];
+static int s_env_used[OOPS_ENV_MAX];
+
+static int oops_env_find(const char *name) {
+  for (int i = 0; i < OOPS_ENV_MAX; i++) {
+    if (!s_env_used[i]) continue;
+    const char *a = s_env_name[i];
+    const char *b = name;
+    while (*a && *a == *b) { a++; b++; }
+    if (*a == '\0' && *b == '\0') return i;
+  }
+  return -1;
 }
 
-/* The other half. Nothing to write into, so the write is dropped and `getenv` goes on saying
-   the name is unset - consistent, which is the most that can be offered here. */
+char *getenv(const char *name) {
+  if (!name || name[0] == '\0') return (char *)0;
+  const int at = oops_env_find(name);
+  return at >= 0 ? s_env_val[at] : (char *)0;
+}
+
 int setenv(const char *name, const char *value, int overwrite) {
-  (void)name;
-  (void)value;
-  (void)overwrite;
+  if (!name || name[0] == '\0' || !value) return -1;
+  /* An '=' in a name is what separates a name from a value everywhere else, so a name carrying
+     one could never be looked up again. */
+  for (const char *p = name; *p; p++) {
+    if (*p == '=') return -1;
+  }
+
+  int at = oops_env_find(name);
+  if (at >= 0 && !overwrite) return 0;
+  if (at < 0) {
+    for (int i = 0; i < OOPS_ENV_MAX && at < 0; i++) {
+      if (!s_env_used[i]) at = i;
+    }
+    if (at < 0) return -1; /* full */
+  }
+
+  size_t n = 0;
+  while (name[n]) n++;
+  size_t v = 0;
+  while (value[v]) v++;
+  if (n >= OOPS_ENV_NAME_MAX || v >= OOPS_ENV_VAL_MAX) return -1;
+
+  for (size_t i = 0; i <= n; i++) s_env_name[at][i] = name[i];
+  for (size_t i = 0; i <= v; i++) s_env_val[at][i] = value[i];
+  s_env_used[at] = 1;
   return 0;
 }
 
 int unsetenv(const char *name) {
-  (void)name;
+  if (!name || name[0] == '\0') return -1;
+  const int at = oops_env_find(name);
+  if (at >= 0) {
+    s_env_used[at] = 0;
+    s_env_name[at][0] = '\0';
+    s_env_val[at][0] = '\0';
+  }
   return 0;
 }
 

@@ -56,7 +56,17 @@
    without waiting for the GPU. The rationale is at OOPS_GL_PS_RING_OFFSET; the count is here
    because the context struct below sizes an array with it. */
 #define OOPS_GL_PS_RING_SLOTS   6u
-#define OOPS_GL_MAX_BUFFER_OBJECTS 64
+/* **64 until 2026-09-23, which a real level ran out of.** Neverball allocates two buffer objects
+ * per mesh - a vertex buffer and an index buffer, `share/solid_draw.c:363-369` - and a mesh is a
+ * body crossed with a material, so a level is tens of them and the menu's background level is
+ * still loaded while the next one arrives. `glGenBuffers` did what it should: handed back 0 for
+ * the names it could not make and raised GL_OUT_OF_MEMORY. Upstream did what most programs do
+ * with that, which is not look; it then passed a *byte offset* to glVertexPointer with no buffer
+ * bound, which GL defines as a client pointer, and the array reader dereferenced address 8.
+ *
+ * 1024 is 40 KB of context and no longer costs a search: `gl_array_base` indexes this table
+ * directly. */
+#define OOPS_GL_MAX_BUFFER_OBJECTS 1024
 #define OOPS_GL_MAX_QUERY_OBJECTS 64
 /* GL 2.0's generic vertex attribute slots. 16 is the specification's minimum for
  * GL_MAX_VERTEX_ATTRIBS, so a program that asks the limit and packs to it gets what it asked

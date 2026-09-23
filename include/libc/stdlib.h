@@ -100,28 +100,29 @@ unsigned long long strtoull(const char *s, char **end, int base);
 long double strtold(const char *s, char **end);
 
 /*
- * **`getenv` always answers NULL, and that is the truth rather than a stub** (2026-09-21).
+ * **The environment starts empty, and a payload may fill it** (2026-09-21, extended 2026-09-23).
  *
- * A payload is launched by the system, not spawned from a shell: there is no environment block
- * to read, so every variable is unset - which is exactly what NULL means and exactly what a
- * desktop returns for a name nobody exported. A caller branching on it takes its default path,
- * which is the behaviour it would get from a clean shell.
+ * A payload is launched by the system, not spawned from a shell, so nothing is inherited and
+ * every name begins unset - which is exactly what NULL means and exactly what a desktop returns
+ * for a name nobody exported. A caller branching on it takes its default path, which is the
+ * behaviour it would get from a clean shell. FreeType asked for it first (`ftinit.c` reads
+ * `FREETYPE_PROPERTIES`), and sdl12-compat's `SDL12COMPAT_getenv_unsafe` had already had to
+ * patch around its absence.
  *
- * FreeType asked for it first (`ftinit.c` reads `FREETYPE_PROPERTIES`), and sdl12-compat's
- * `SDL12COMPAT_getenv_unsafe` had already had to patch around its absence - the same two-shim
- * pattern that moved `errno` down here.
+ * `setenv` used to drop what it was given, on the reasoning that there was no block to write
+ * into. There is now, because of the one variable a payload genuinely knows and a POSIX program
+ * genuinely needs: **`HOME`**. Savedata is the only writable directory a title has, and a title
+ * that mounts it and exports the mount point lets every port find its own way there - no patch
+ * to the port's sources, because looking at `HOME` is what they already do. Neverball is the
+ * case that asked: `pick_home_path` reads it and otherwise falls back to the read-only package
+ * directory, so its `config_save` had nowhere to go and it asked for a player name every launch.
+ *
+ * Sixteen names, 32 characters each, 192 for a value, in fixed storage - this is used during
+ * start-up and is not worth a malloc that has to work that early. A name or value that does not
+ * fit is refused rather than truncated, because a silently shortened `HOME` is a path to
+ * somewhere else entirely. `unsetenv` returns 0 for a name that was never set, as POSIX says.
  */
 char *getenv(const char *name);
-
-/*
- * The other half, and the same answer. There is no environment block to write into, so a value
- * set here is dropped rather than half-kept - and `getenv` will go on reporting the name unset,
- * which is at least consistent. Both return 0 for "did what was asked", because refusing would
- * abort callers over a setting that changes nothing either way.
- *
- * libjpeg-turbo asked for it: its `PUTENV_S` wrapper is a `static inline` in a header every one
- * of its sources includes, so it has to compile whether or not anything calls it.
- */
 int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
 

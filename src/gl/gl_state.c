@@ -4502,19 +4502,39 @@ static GLuint *gl_buffer_binding(gl_context_t *ctx, GLenum target) {
 
 const uint8_t *gl_array_base(const gl_context_t *ctx, const gl_client_array_t *a) {
     if (!ctx || !a) return NULL;
-    if (a->buffer == 0u) return (const uint8_t *)a->pointer;
+    if (a->buffer == 0u) {
+        /* **An offset with no buffer bound is not an address, and dereferencing it faults.**
+         * With a buffer bound `pointer` holds a byte offset; with none, GL says it is a client
+         * pointer and this has to honour that. But a program that ignored a failed
+         * `glGenBuffers` - Neverball, 2026-09-23 - binds 0 and then passes its offsets anyway,
+         * and the first page is never mapped, so what arrives here is a small integer and the
+         * array reader took a SIGSEGV on address 8 rather than drawing anything.
+         *
+         * Treating that as "no array" gives the draw its default attribute instead, which is
+         * wrong on screen and diagnosable off it: `glGenBuffers` has already raised
+         * GL_OUT_OF_MEMORY, and a log with that error and a strange-looking frame is a better
+         * place to start than a fault address. No real client array lives in the first page. */
+        if ((uintptr_t)a->pointer != 0u && (uintptr_t)a->pointer < 4096u) return NULL;
+        return (const uint8_t *)a->pointer;
+    }
 
     /* **The name is resolved now, not when the pointer was set.** glBufferData may have
      * replaced the storage since - respecifying a buffer every frame is ordinary - so an
      * address captured at glVertexPointer time would be stale.
      *
-     * Walked here rather than through gl_find_buffer so this can take a const context: the
-     * draw path's vertex fetch has one, and it has no business being handed a mutable one. */
-    for (int i = 0; i < OOPS_GL_MAX_BUFFER_OBJECTS; i++) {
-        const gl_buffer_object_t *buf = &ctx->buffers[i];
-        if (!buf->used || buf->id != a->buffer) continue;
-        if (!buf->data) return NULL;
-        return (const uint8_t *)buf->data + (uintptr_t)a->pointer;
+     * **Indexed, not searched.** `glGenBuffers` is the only thing that creates a buffer and it
+     * names slot `i` as `i + 1`; `glBindBuffer` refuses a name it did not hand out, so the name
+     * is the slot and always has been. This walked all 1024 entries per array per vertex until
+     * 2026-09-23, which is why the table could not grow. The identity is still checked rather
+     * than assumed, so a future creator that breaks it fails a draw instead of reading the
+     * wrong buffer. */
+    const GLuint id = a->buffer;
+    if (id >= 1u && id <= (GLuint)OOPS_GL_MAX_BUFFER_OBJECTS) {
+        const gl_buffer_object_t *buf = &ctx->buffers[id - 1u];
+        if (buf->used && buf->id == id) {
+            if (!buf->data) return NULL;
+            return (const uint8_t *)buf->data + (uintptr_t)a->pointer;
+        }
     }
     return NULL; /* the buffer was deleted out from under the array */
 }

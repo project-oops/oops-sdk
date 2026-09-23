@@ -402,6 +402,7 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
     }
 
     if (rc == 0) {
+        int waited = 0;
         for (int iter = 0; iter < 100000; iter++) {
 #if defined(__x86_64__)
             __builtin_ia32_clflush((const void *)ctx->fence);
@@ -409,9 +410,33 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
             if (fence_w[0] == 0xbeefcafeu && (fence_w[2] != 0u || fence_w[3] != 0u)) {
                 break;
             }
+            waited = iter + 1;
             if (sceKernelUsleep) {
                 sceKernelUsleep(10);
             }
+        }
+
+        /* **A submit the GPU never finishes used to be silent, and silence is the worst thing
+         * this can be.** The bound above is a hundred thousand ten-microsecond sleeps, so a
+         * stalled submit costs a second and then carries on as though nothing happened; a title
+         * that submits twenty-seven times a frame - Neverball does - spends twenty-seven seconds
+         * on a frame and looks, from the outside and in the log, exactly like a hang. No fault
+         * is raised, no GL error is set, and the per-frame block below never prints because it
+         * runs after every submit of the frame has returned. The log simply stops.
+         *
+         * That is what a frozen title looked like on 2026-09-23, and working out that the GPU
+         * had stopped retiring rather than the game having stopped stepping took a reading of
+         * this function rather than of the log, which is backwards. So it says so now: what the
+         * fence held, what the timestamp held, which submit it was and how long it waited.
+         *
+         * It cannot flood - each line costs the second it took to earn. */
+        if (waited >= 99999) {
+            gl_klog_val("fence-timeout-after-us", (uint64_t)waited * 10u);
+            gl_klog_val("fence-timeout-fence", (uint64_t)fence_w[0]);
+            gl_klog_val("fence-timeout-ts-lo", (uint64_t)fence_w[2]);
+            gl_klog_val("fence-timeout-ts-hi", (uint64_t)fence_w[3]);
+            gl_klog_val("fence-timeout-submit", (uint64_t)ctx->hw_flushes);
+            gl_klog_val("fence-timeout-frames-ok", (uint64_t)ctx->hw_frames_confirmed);
         }
     }
 

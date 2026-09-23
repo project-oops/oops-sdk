@@ -3,10 +3,13 @@
 #include "oops/target.h"
 #include "oops/freestd.h"
 #include "oops/fs.h"
+#include "oops/sysmodule.h" /* the lazy-loaded set, made resident before the sandbox escape */
 #include "oops/time.h"
 #include <stdarg.h>
 #ifdef OOPS_HOST_BUILD
 #include <unistd.h>
+#include <fcntl.h>
+#include <time.h>
 #endif
 
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
@@ -566,6 +569,9 @@ const char *oops_log_get_app_id(void) {
 }
 
 static oops_log_level_t s_log_level = OOPS_LOG_INFO;
+static int s_disk_sink_fd = -1;
+static int s_disk_sink_ts_fd = -1;
+static char s_disk_sink_path[128] = {0};
 
 void oops_log_set_level(oops_log_level_t level) {
   s_log_level = level;
@@ -637,12 +643,24 @@ void oops_klog_level(oops_log_level_t level, const char *tag, const char *msg) {
 #ifndef OOPS_HOST_BUILD
   (void)sys_call(SYS_klog, 7, (long)buf, 0, 0, 0, 0);
   (void)sys_call(SYS_write, 1, (long)buf, (long)pos, 0, 0, 0);
+  if (s_disk_sink_fd >= 0) {
+    (void)sys_call(SYS_write, s_disk_sink_fd, (long)buf, (long)pos, 0, 0, 0);
+  }
+  if (s_disk_sink_ts_fd >= 0) {
+    (void)sys_call(SYS_write, s_disk_sink_ts_fd, (long)buf, (long)pos, 0, 0, 0);
+  }
 #else
   for (size_t i = 0; i < sizeof(s_host_last_klog) - 1 && buf[i] != '\0'; i++) {
     s_host_last_klog[i] = buf[i];
     s_host_last_klog[i + 1] = '\0';
   }
   fputs(buf, stderr);
+  if (s_disk_sink_fd >= 0) {
+    (void)write(s_disk_sink_fd, buf, pos);
+  }
+  if (s_disk_sink_ts_fd >= 0) {
+    (void)write(s_disk_sink_ts_fd, buf, pos);
+  }
 #endif
 }
 
@@ -683,6 +701,111 @@ void oops_kprintf(const char *tag, const char *fmt, ...) {
   oops_klog_level(OOPS_LOG_INFO, tag, buf);
 }
 
+int oops_log_enable_disk_sink(const char *app_name, int archive_timestamped) {
+  if (s_disk_sink_fd >= 0 || s_disk_sink_ts_fd >= 0) {
+    oops_log_close_disk_sink();
+  }
+
+  const char *app_id = app_name;
+  if (!app_id || app_id[0] == '\0') {
+    app_id = oops_log_get_app_id();
+  }
+  if (!app_id || app_id[0] == '\0') {
+    app_id = "default";
+  }
+
+  char dir[256];
+  if (oops_fs_get_storage_dir(OOPS_STORAGE_PREFER_USB, dir, sizeof(dir)) != 0) {
+    return -1;
+  }
+
+  char path[256];
+  (void)oops_snprintf(path, sizeof(path), "%s/latest.log", dir);
+
+#ifndef OOPS_HOST_BUILD
+  /* 0x0601 = O_WRONLY(0x1) | O_CREAT(0x200) | O_TRUNC(0x400) */
+  long fd = sys_call(SYS_open, (long)path, 0x0601, 0666, 0, 0, 0);
+  if (fd < 0) {
+    return -1;
+  }
+  s_disk_sink_fd = (int)fd;
+#else
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd < 0) {
+    return -1;
+  }
+  s_disk_sink_fd = fd;
+#endif
+
+  size_t plen = obs_strlen(path);
+  if (plen + 1 < sizeof(s_disk_sink_path)) {
+    for (size_t i = 0; i <= plen; i++) {
+      s_disk_sink_path[i] = path[i];
+    }
+  } else {
+    s_disk_sink_path[0] = '\0';
+  }
+
+  if (archive_timestamped) {
+    uint64_t ts = 0;
+#ifndef OOPS_HOST_BUILD
+    struct {
+      int64_t sec;
+      long nsec;
+    } tspec;
+    if (sys_call(SYS_clock_gettime, 0, (long)&tspec, 0, 0, 0, 0) == 0 && tspec.sec > 0) {
+      ts = (uint64_t)tspec.sec;
+    }
+#else
+    time_t now = time(NULL);
+    if (now > 0) {
+      ts = (uint64_t)now;
+    }
+#endif
+    if (ts > 0) {
+      char ts_path[256];
+      (void)oops_snprintf(ts_path, sizeof(ts_path), "%s/log-%lu.txt", dir, (unsigned long)ts);
+#ifndef OOPS_HOST_BUILD
+      long ts_fd = sys_call(SYS_open, (long)ts_path, 0x0601, 0666, 0, 0, 0);
+      if (ts_fd >= 0) {
+        s_disk_sink_ts_fd = (int)ts_fd;
+      }
+#else
+      int ts_fd = open(ts_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+      if (ts_fd >= 0) {
+        s_disk_sink_ts_fd = ts_fd;
+      }
+#endif
+    }
+  }
+
+  return 0;
+}
+
+const char *oops_log_get_disk_sink_path(void) {
+  return (s_disk_sink_fd >= 0 && s_disk_sink_path[0] != '\0') ? s_disk_sink_path : NULL;
+}
+
+void oops_log_close_disk_sink(void) {
+  if (s_disk_sink_fd >= 0) {
+#ifndef OOPS_HOST_BUILD
+    (void)sys_call(SYS_close, s_disk_sink_fd, 0, 0, 0, 0, 0);
+#else
+    (void)close(s_disk_sink_fd);
+#endif
+    s_disk_sink_fd = -1;
+  }
+  if (s_disk_sink_ts_fd >= 0) {
+#ifndef OOPS_HOST_BUILD
+    (void)sys_call(SYS_close, s_disk_sink_ts_fd, 0, 0, 0, 0, 0);
+#else
+    (void)close(s_disk_sink_ts_fd);
+#endif
+    s_disk_sink_ts_fd = -1;
+  }
+  s_disk_sink_path[0] = '\0';
+}
+
 /* ------------------------------------------------------------------ */
 /* Sandbox escape via decoupled daemon handshake                        */
 /* ------------------------------------------------------------------ */
@@ -703,6 +826,47 @@ void oops_kprintf(const char *tag, const char *fmt, ...) {
  */
 int oops_system_escape_sandbox(void) {
 #ifndef OOPS_HOST_BUILD
+  /*
+   * **Everything this SDK loads on demand is loaded first, because after the escape nothing can
+   * be.**
+   *
+   * The daemon moves this process out of its randomised namespace - the one whose libraries a
+   * crash dump names `/5DzF14NgCB/common/lib/...`, with a different prefix every boot. Modules
+   * already resident keep working; a module the process asks for *afterwards* is looked for
+   * along a path it no longer has, and the call into it raises
+   * `0xa0020101 PRX_NOT_RESOLVED_FUNCTION`.
+   *
+   * That is not a theoretical ordering hazard. Neverball mounted its savedata before starting
+   * SDL on 2026-09-23, which reached this through `oops_savedata_mount`'s fallback, and the
+   * title then died inside `PROSPERO_VideoInit` - a few calls past an `oops_gfx_create` that had
+   * just succeeded - on `oops_keyboard_init`, whose first act is to load module 0x0106. No fault
+   * in the graphics it had just brought up, no GL error, just a title that exited before its
+   * first frame and a log that stopped.
+   *
+   * The eight below are every module this SDK loads lazily - `audiodec.c`, `keyboard.c`,
+   * `mouse.c`, `netctl.c`, `dialog.c` twice, `savedata.c` and `videodec.c`. Loading all of them
+   * costs a title that wanted one writable directory some resident memory it may never use, and
+   * that is the cheaper side of the trade by a distance: the alternative is the first use of any
+   * of them killing the process, at a call site with no connection to the escape that caused it.
+   *
+   * **A module added to that list and not added here will fail the same way.** There is no way
+   * to catch it at build time, so it is written down instead: anything reached through
+   * `oops_sysmodule_load` on first use belongs in this list.
+   */
+  {
+    static const uint16_t needed[] = {
+        OOPS_SYSMODULE_KEYBOARD,       OOPS_SYSMODULE_MOUSE,
+        OOPS_SYSMODULE_SAVE_DATA,      OOPS_SYSMODULE_NET_CTL,
+        OOPS_SYSMODULE_IME_DIALOG,     OOPS_SYSMODULE_MESSAGE_DIALOG,
+        OOPS_SYSMODULE_AUDIO_DEC,      OOPS_SYSMODULE_VIDEODEC,
+    };
+    for (unsigned i = 0; i < sizeof(needed) / sizeof(needed[0]); i++) {
+      /* Already-resident is success and costs nothing; a refusal is not fatal here - it only
+         means that one module is no better off than it would have been without this. */
+      (void)oops_sysmodule_load(needed[i]);
+    }
+  }
+
   /* Resolve current PID */
   pid_t my_pid = (pid_t)sys_call(SYS_getpid, 0, 0, 0, 0, 0, 0);
   if (my_pid <= 0) {
@@ -716,7 +880,7 @@ int oops_system_escape_sandbox(void) {
     return -1;
   }
 
-  /* Build sockaddr_in for 127.0.0.1:9069 (FreeBSD / PS5 ABI) */
+  /* Build sockaddr_in for 127.0.0.1:9069 (FreeBSD / Prospero ABI) */
   char sockaddr[16];
   sockaddr[0] = 16;      /* sin_len = sizeof(struct sockaddr_in) */
   sockaddr[1] = 2;       /* sin_family = AF_INET (2) */
@@ -863,96 +1027,16 @@ void oops_system_park_until_closed(void) {
 #endif
 }
 
-/* -------------------------------------------------------------------------
- * Being suspended without being killed for it
+/* Suspend cooperation (pump the system event queue, drain the GPU, reach a suspend point) is an
+ * opt-in translation unit, `suspend.c`, linked only by the big-app titles that service it. The
+ * real functions live there and carry a weak `sceSystemServiceReceiveEvent` reference; a binary
+ * that never suspends - a probe, a headless utility, the plain GL cubes - does not link it and
+ * does not have to claim that symbol.
  *
- * The dashboard's Close and rest-mode do not only signal a title; the kernel then suspends the
- * process asynchronously and gives it **100 seconds to reach a suspend point**. A title that
- * never does is killed with `0xa0d0c00f CPU_FAULT_SUSPENDPOINT_TIMEOUT_IN_SUSPEND_ASYNC`, "No
- * suspendPoint for 100sec" - the CPU sibling of the GPU fault `0xa0d0c00c`.
- *
- * This is a **different mechanism from the close signal** above and both are needed: the signal
- * is the cooperative request to stop, this is the kernel freezing what is left. A title can
- * handle the first perfectly and still die of the second.
- *
- * # What a homebrew title does not get
- *
- * The two surfaces a licensed title would use are absent here, measured rather than assumed
- * (obSCEne `141-suspend`, 2026-09-23, FW 12.40):
- *
- *   - `sceSystemServiceDeclareReadyForSuspend` and its Enable/Disable notification pair -
- *     `libSceSystemServiceSuspend` does not load, and the symbols are ENOENT at every standard
- *     path. This is the call whose entire job is to say "freeze me now", and it is not here.
- *   - The `sceApplication` lifecycle in `libSceSysCore` - nought of six resolved, and gated on
- *     an SDK version this title does not claim (ESDKVERSION).
- *
- * So neither is referenced, even weakly. What is reachable is the event pump
- * (`sceSystemServiceReceiveEvent`, `GetStatus`) and the GPU's own suspend point.
- *
- * # What is assumed about the event pump, precisely
- *
- * **Its arity and its event layout are not measured**, and this project does not invent either
- * (D008; orbistoun refuses to declare the same call for the same reason - D311). So the call is
- * made in the narrowest shape that needs neither:
- *
- *   - one out-pointer to a buffer far larger than any plausible event, zeroed;
- *   - **the return value alone is read** - zero meaning an event was taken, anything else
- *     meaning stop. No field of the event is interpreted, no "no event pending" constant is
- *     guessed, and no event type is compared against a number nobody has measured.
- *
- * That is enough for the only thing wanted here: emptying the queue so the process is servicing
- * it rather than ignoring it. What the events *say* is a separate question and stays unanswered
- * until something measures it.
- *
- * The residual assumption is the arity - that it takes one argument. If it takes more, the extra
- * registers hold whatever they held. That is the one unmeasured thing left, it is named here
- * rather than buried, and the call is guarded by `oops_symbol_is_resolved` so a build where the
- * symbol is absent never reaches it.
- */
-__attribute__((weak)) int sceSystemServiceReceiveEvent(void *event);
-
-static void (*s_suspend_drain)(void);
-
-void oops_system_set_suspend_drain(void (*drain)(void)) { s_suspend_drain = drain; }
-
-int oops_system_pump_events(void) {
-#ifdef OOPS_HOST_BUILD
-  return 0;
-#else
-  if (!oops_symbol_is_resolved((const void *)&sceSystemServiceReceiveEvent)) {
-    return 0;
-  }
-  /* Far larger than any event structure this could be handed, so a callee writing its own size
-     cannot run off the end of it. Zeroed each time: a partially written event must not be read
-     as the tail of the last one, even though nothing here reads it at all. */
-  unsigned char event[512];
-  int taken = 0;
-  /* Bounded. A queue that answers "took one" forever is a broken queue, and spinning in it is
-     the failure this function exists to prevent rather than a way to serve it. */
-  for (int i = 0; i < 64; i++) {
-    for (size_t b = 0; b < sizeof(event); b++) {
-      event[b] = 0;
-    }
-    if (sceSystemServiceReceiveEvent(event) != 0) {
-      break;
-    }
-    taken++;
-  }
-  return taken;
-#endif
-}
-
-void oops_system_prepare_for_suspend(void) {
-  /* The queue first: an event still owed to the process is the process still being asked
-     something. */
-  (void)oops_system_pump_events();
-  /* Then the GPU. **This is the arm obSCEne could not settle from an inert probe** - it emitted
-     `gpu-drain-required / needs-live-suspend` and said so - that an unretired submission holds
-     the process out of suspend. The drain is whatever the renderer registered; oops-gl registers
-     one that submits and waits on its end-of-pipe fence, bounded and sleeping, which is the wait
-     it already uses everywhere else. A renderer that registered nothing simply has nothing in
-     flight to wait for. */
-  if (s_suspend_drain) {
-    s_suspend_drain();
-  }
-}
+ * These weak no-ops stand in when it is absent, so `gl_context.c`, `glut.c` and the SDL backend
+ * can call the sequence unconditionally: a title that links `suspend.c` gets the strong versions
+ * there (they override these), and everything else gets a harmless no-op that references nothing.
+ * That is the whole opt-in: list `src/system/suspend.c` to be suspendable, omit it to not be. */
+__attribute__((weak)) void oops_system_set_suspend_drain(void (*drain)(void)) { (void)drain; }
+__attribute__((weak)) int oops_system_pump_events(void) { return 0; }
+__attribute__((weak)) void oops_system_prepare_for_suspend(void) {}
