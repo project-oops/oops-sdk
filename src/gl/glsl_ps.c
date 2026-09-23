@@ -571,6 +571,40 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         }
     }
 
+    /*
+     * **`gl_PointCoord`, interpolated from the texture parameter** (since 2026-09-23).
+     *
+     * It is texture coordinate 0's interpolant - the point expansion writes the sprite
+     * coordinate into `tc[0]`, the vertex assembly copies that unit's set into the texture
+     * parameter, and the part's own name for the same substitution is
+     * `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`.
+     *
+     * **Parameter 1, and the link is what makes that a constant rather than a guess.** A program
+     * reading `gl_PointCoord` is refused if it has a vertex shader, so the vertex always takes
+     * the fixed-function layout - position, then the colour at parameter 0, then the texture
+     * parameter at 1 (`gl_draw.c`'s `memcpy(v + 32, uvs[k], 16)`). With a vertex shader the
+     * parameters are the program's own varyings and 1 would mean something else entirely, which
+     * is exactly why that case is not allowed to reach here.
+     *
+     * Without this the front end knew the name, the interpreter had a value for it and the
+     * linker had an opinion about it, and the console had no register - which is what the
+     * hardware said, in as many words: "this name has no register". The host passed throughout,
+     * because the host *is* the interpreter.
+     */
+    if (ok && p->hw_reads_point_coord) {
+        const glsl_value_t home =
+            glsl_gen_declare_input(gen, "gl_PointCoord", 13u, GLSL_TYPE_VEC2);
+        if (home.count != 2) {
+            log_say(log, log_size, gen->error ? gen->error : "gl_PointCoord has no register", 0,
+                    0);
+            ok = GL_FALSE;
+        } else {
+            for (int c = 0; c < 2; c++) {
+                glsl_emit_interp_pair(&code, home.base + (uint32_t)c, 1u, (uint32_t)c);
+            }
+        }
+    }
+
     /* ---------------------------------------------------------------------
      * The shader's own globals - `const float pi = 3.14159;` and the rest.
      *
