@@ -1385,6 +1385,9 @@ typedef struct gl_context {
     /* And, inside that, the per-draw shader patching - the block that rebuilds its words and
      * compares them against the payload on every draw whether or not anything changed. */
     uint64_t hw_patch_ns;
+    /* And the command words themselves, so the rest of a draw can be attributed to the texture
+     * and descriptor preparation that sits between the two. */
+    uint64_t hw_dcb_ns;
     const char *hw_flush_site[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_site_n[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_unnamed;

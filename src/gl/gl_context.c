@@ -1502,6 +1502,8 @@ void glSwapBuffers(void) {
         /* Of the draw time above, how much went on rebuilding shader words that were usually
            already right. */
         gl_klog_val("patch-us-this-frame", ctx->hw_patch_ns / 1000u);
+        gl_klog_val("dcb-us-this-frame", ctx->hw_dcb_ns / 1000u);
+        ctx->hw_dcb_ns = 0u;
         ctx->hw_flush_ns = 0u;
         ctx->hw_draw_ns = 0u;
         ctx->hw_draw_calls = 0u;

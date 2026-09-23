@@ -4287,6 +4287,15 @@ vertices_written:
          *
          * Nothing between the old position and here touches `dw`, which is what makes moving it
          * a move rather than a rewrite. */
+        /* **The command words themselves, timed apart from the setup before them.** Of a
+         * triangle's 5.9us on hardware, 1.6 is the shader patching and 4.3 is everything after
+         * it - and 43 dwords of command buffer cannot be 4.3us, so the cost is either in
+         * preparing the texture and its descriptors above, or in these writes. One timer
+         * separates the two and decides whether the answer is batching draws or something in
+         * the texture path. */
+#ifndef OOPS_HOST_BUILD
+        const uint64_t dcb_t0 = oops_time_get_ns();
+#endif
         uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
 
         uint32_t cur_depth_ctrl = gl_compute_db_depth_control(ctx);
@@ -4597,6 +4606,9 @@ vertices_written:
 
         ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
         ctx->triangles_drawn++;
+#ifndef OOPS_HOST_BUILD
+        ctx->hw_dcb_ns += oops_time_get_ns() - dcb_t0;
+#endif
         return;
     }
 
