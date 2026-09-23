@@ -553,14 +553,25 @@ void gl_ps_build_textured(uint32_t *ps_tex, uint64_t canary_gpu) {
      *     v_interp_p1_f32 v0, v0, attr0.w      v_interp_p2_f32 v0, v1, attr0.w
      *
      * This emitted `p1 x, p2 x, p1 y, p2 y, ...`, with every p2 immediately behind the p1 whose
-     * result it reads. A read that arrives before the write has landed is wrong per *lane*, and
-     * the port's fault is per lane: on the console a replayed frame comes back with even pixel
-     * columns black and odd ones full green, red identical across each pair and green and blue
-     * not - which is v4 surviving while v5 and v6 do not, and those are the second and third
-     * interpolations of the four.
+     * result it reads.
      *
-     * The same seventeen instructions in a different order, so every slot after this is where it
-     * was and nothing that patches them has to know. */
+     * **This is housekeeping, not a fix, and it was briefly mistaken for one.** The seven p1s
+     * write seven distinct registers and each p2 reads its own, so the two orders are the same
+     * program and reordering them cannot change a result. It was reordered while chasing a
+     * per-lane fault in a port, on the reasoning that a read landing before its write would be
+     * wrong per lane - and then reported as having "measurably changed the output", on a
+     * comparison of two pixels that were *already* wrong for an unrelated reason. Comparing two
+     * corrupted lanes and calling the difference evidence is not a measurement.
+     *
+     * The fault was blending: a blend whose result combines both terms is correct at one pixel
+     * in every 2x2 quad on this part, and obSCEne's own sweep of it (`REQ-20260923T2015Z-5b8e`,
+     * resolved) found an unblended draw clean at all 4,096 pixels of its region - geometry,
+     * rasteriser, viewport and shader export included. The interpolation prologue was never in
+     * it.
+     *
+     * Kept because matching the reference is worth having on its own, and reverting a no-op is
+     * a change for no reason. The same seventeen instructions in a different order, so every
+     * slot after this is where it was and nothing that patches them has to know. */
     pro[ 2] = 0xc8080400u; /* v_interp_p1_f32 v2, v0, attr1.x (s) */
     pro[ 3] = 0xc80c0500u; /* v_interp_p1_f32 v3, v0, attr1.y (t) */
     pro[ 4] = 0xc8300700u; /* v_interp_p1_f32 v12, v0, attr1.w (q) */
