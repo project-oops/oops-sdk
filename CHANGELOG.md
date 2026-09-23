@@ -96,6 +96,29 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **`texture1D`, `texture1DProj`, `shadow1D` and `shadow1DProj`** (2026-09-23), which completes
+  the set: **every texture lookup a fragment shader may call is now generated.**
+
+  These were refused the day before with "not a different kind of thing, only an unwired one -
+  so it is refused rather than written blind". That was the wrong call, and the fact that
+  settles it was in this repository rather than on a console: `glTexImage1D` stores `width, 1`,
+  one row, and `gl_state.c`'s descriptor builder special-cases only 3D and cube - so a
+  `GL_TEXTURE_1D` gets **TYPE 9, the 2D descriptor**.
+
+  That makes the lowering determined rather than guessable. A 1D lookup is a **2D** sample with
+  a zero beside the coordinate; sampling `dim:SQ_RSRC_IMG_1D` would tell the hardware something
+  its own descriptor does not say. The zero has to be written rather than left - the sampler
+  reads a `t` either way - and the test checks it is there rather than whatever the allocator
+  held.
+
+  The projective divide was corrected while here. It divided as many components as the *address*
+  takes; it now divides as many as sit ahead of the divisor, which is the reference's own rule
+  and the only one right for every form at once - one component for a 1D, two for a 2D, three
+  for a volume, and a shadow's reference along with them.
+
+  What is refused now is the explicit-level family, `texture2DLod` and its kin - and by the
+  front end rather than here, which is correct: in GLSL 1.10 they exist only in a vertex shader.
+
 - **`shadow2D` and `shadow2DProj`** (2026-09-23), which compare rather than return a texel -
   the last GLSL lookup this back end was missing above one dimension.
 

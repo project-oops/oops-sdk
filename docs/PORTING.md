@@ -53,9 +53,10 @@ instructions, the draw path binds them, and obSCEne's `REQ-20260921T1615Z-4e77` 
 arriving bit for bit, and its uniform block loading intact.
 
 **What a compiled fragment shader can do** is arithmetic on floats and integers, swizzle reads
-and writes, constructors, the built-in library, file-scope `const`s, uniforms, `texture2D`
-`texture2DProj`, `textureCube`, `texture3D`, `texture3DProj`, `shadow2D` and `shadow2DProj`
-through up to two samplers, comparisons, `?:`, `if`/`else`, `discard`,
+and writes, constructors, the built-in library, file-scope `const`s, uniforms, **every texture
+lookup a fragment shader may call** - `texture1D`, `texture2D`, `texture3D`, `textureCube`,
+their `Proj` forms, and `shadow1D`/`shadow2D` with theirs - through up to two samplers,
+comparisons, `?:`, `if`/`else`, `discard`,
 **local arrays**, **the whole of square-matrix arithmetic** (`m * v`, `v * m`, `m * m`, matrix
 with scalar, componentwise, and `matrixCompMult`, `transpose` and `outerProduct`), user-defined
 functions - inlined, since there is no call instruction here, and with **early `return`** - and
@@ -118,8 +119,15 @@ component, clamped to [0, 1] as GL 1.4 requires, and the one value that comes ba
 parameter is a per-texture choice made after the shader is compiled, so `GL_INTENSITY` and
 `GL_ALPHA` get luminance and a log line rather than a colour nobody can account for.
 
-What it still cannot: the one-dimensional lookups - `texture1D` and `shadow1D`. Not a different
-kind of thing, only an unwired one. A
+**`texture1D`, `texture1DProj`, `shadow1D` and `shadow1DProj`** are generated too, and the
+reason they are worth a sentence is that they are **not** `dim:SQ_RSRC_IMG_1D`. `glTexImage1D`
+stores one row of a 2D image, and the descriptor this SDK builds for it says TYPE 9 - the 2D
+one - so a 1D lookup is a 2D sample with a zero beside the coordinate. Telling the hardware 1D
+would say something the descriptor does not.
+
+So every lookup a fragment shader may call is generated. The explicit-level forms
+(`texture2DLod` and its family) are refused by the front end rather than here, which is right:
+in GLSL 1.10 they exist only in a vertex shader. A
 shader the back end will not take is refused with a sentence naming what is missing, and still
 runs on the software path - the draw is what fails, with `GL_INVALID_OPERATION`, rather than
 quietly drawing something else. A GL 1.x port is unaffected: it never binds a program.
@@ -235,7 +243,7 @@ part, so the quotient is computed from a reciprocal and then corrected, which is
 | An array index the shader computes at run time | An array is a run of registers and a register file cannot be indexed by a running value. **An unrolled loop's counter counts as known**, so `for (int i = 0; i < 4; i++) total += w[i];` is fine - it is a uniform or a varying used as an index that is not |
 | Whole-array assignment, or an array as a value | Elements, one at a time. GLSL 1.10 has no array-valued expressions either |
 | A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
-| `texture1D`, `shadow1D` and their `Proj` forms | Everything two-dimensional and up is generated - `texture2D`, `texture2DProj`, `textureCube`, `texture3D`, `texture3DProj`, `shadow2D`, `shadow2DProj`. The 1D family is not a different kind of thing, only one nothing here has sampled from a program - so it is refused rather than written blind |
+| `texture2DLod` and the other explicit-level forms | Refused by the front end, not the back one: in GLSL 1.10 they exist only in a vertex shader, and the message says so. Every lookup a fragment shader *may* call is generated |
 | `GL_DEPTH_TEXTURE_MODE` other than `GL_LUMINANCE` | A comparison returns one value and GL spreads it by that parameter. The compiled path emits the default spread, `(v, v, v, 1)`; the mode is a per-texture choice made after the shader is compiled, so the other two get luminance and one log line |
 | A cube map whose six faces are not all there | GL does not sample an incomplete cube either (2.1, 3.8.10). The draw is untextured rather than reading a descriptor that points at nothing |
 | A matrix with a vector that is not its width | `m * v`, `v * m` and `m * m` are generated at every square size, as are a matrix with a scalar and two matrices componentwise. `m4 * v3` is none of those, and treating it as componentwise would compute something that is not a product at all |

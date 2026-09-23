@@ -2105,32 +2105,21 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
      * generated: each reads a descriptor obSCEne has measured on this part, and the shadow pair
      * needed one instruction - `image_sample_c` - whose register order was measured too.
      *
-     * A 1D texture is not a different kind of thing, only an unwired one: nothing in this
-     * suite has ever sampled one from a program, so it is refused rather than written blind.
+     * **There is no longer a refused lookup to list here.** Every form a fragment shader may
+     * call is generated, and the two families that used to be named are gone for different
+     * reasons: 1D was never a different kind of thing, only unwired - a 1D texture is a 2D
+     * image one row high and is *described* to the hardware as TYPE 9, so its lookup is a 2D
+     * sample with a zero beside the coordinate - and the explicit-level forms are rejected by
+     * the front end, which is right: `texture2DLod` exists only in a vertex shader in GLSL
+     * 1.10, and it says so.
      *
-     * Not here: a `samplerCube` sampled through `texture2D`, or the other way round. The back
-     * end checks it - two address registers where the hardware reads three would leave the
+     * Also not here: a `samplerCube` sampled through `texture2D`, or any other mismatch. The
+     * back end checks it - two address registers where the hardware reads three would leave the
      * third holding whatever the allocator last put there - but the semantic stage types a
      * lookup by its sampler and refuses the mismatch first ("must be its own sampler type"), so
      * no shader can carry one that far and a case here would be testing the front end by
      * proxy. */
     gl_context_t *c = (gl_context_t *)ctx;
-    static const char *const REFUSED_LOOKUPS[] = {
-        "uniform sampler1D s;\nvarying vec2 uv;\n"
-        "void main() { gl_FragColor = texture1D(s, uv.x); }\n",
-    };
-    for (size_t i = 0; i < sizeof(REFUSED_LOOKUPS) / sizeof(REFUSED_LOOKUPS[0]); i++) {
-        memset(log, 0, sizeof(log));
-        const GLuint p = linked_program(
-            "attribute vec3 pos;\n"
-            "varying vec2 uv;\n"
-            "void main() { uv = pos.xy; gl_Position = vec4(pos, 1.0); }\n",
-            REFUSED_LOOKUPS[i]);
-        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, p), words, 256u, &count, &vgprs,
-                                              NULL, NULL, log, sizeof(log)),
-                  GL_FALSE);
-        ASSERT_TRUE(log[0] != '\0');
-    }
 
     /* **And a third sampler**, which is one more than a draw carries descriptor sets for. The
      * message names the number rather than saying "too many", because the number is the thing
@@ -5172,6 +5161,41 @@ static void test_gl2_compiled_texture_lookups_reach_the_right_set(void) {
     ASSERT_NEAR(o[0], 0.125f, tol);
     ASSERT_NEAR(o[1], 0.375f, tol);
     ASSERT_NEAR(o[2], 0.5f, tol);     /* 1.0 / 2.0 - the slice is divided too */
+
+    /* **A 1D lookup is a 2D sample with a zero beside the coordinate**, because a 1D texture is
+     * one row of a 2D image and is described to the hardware as exactly that. The simulator
+     * reports the two address registers, so the zero is visible rather than assumed: a
+     * lowering that left `t` unwritten would report whatever the allocator had, and one that
+     * sampled `dim:SQ_RSRC_IMG_1D` would be telling the hardware something the descriptor does
+     * not say. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler1D ramp;\n"
+                    "varying vec4 vin;\n"
+                    "void main() { gl_FragColor = texture1D(ramp, vin.x); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);   /* the one coordinate */
+    ASSERT_NEAR(o[1], 0.0f, tol);    /* and the zero the descriptor still reads */
+
+    /* Its projective form divides the one coordinate by the last component, whichever width
+     * arrived - `vec2` divides by `t` and `vec4` by `q`, which is the same rule the 2D pair
+     * follow. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler1D ramp;\n"
+                    "varying vec4 vin;\n"
+                    "void main() { gl_FragColor = texture1DProj(ramp, vec2(vin.x, 2.0)); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.125f, tol);
+    ASSERT_NEAR(o[1], 0.0f, tol);
+
+    /* And the 1D shadow, where the address is the reference, the coordinate and the zero. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler1DShadow depth;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = shadow1D(depth, vec3(vin.x, 0.0, 0.25));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, tol);    /* 0.25 <= 0.5 */
 
     /* **A shadow lookup compares instead of returning a texel**, and the reference it compares
      * is the coordinate's *third* component handed over as the sampler's *first* address

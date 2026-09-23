@@ -849,6 +849,13 @@ typedef struct {
          * because a shadow sampler's dim is still 2D; what changes is the instruction, the
          * mask, and that the coordinate carries a reference. */
         GLboolean shadow;
+        /* **A 1D texture is a 2D image one row high**, which is how `glTexImage1D` stores it
+         * and what `gl_state.c` describes to the hardware - TYPE 9, the 2D one, because the
+         * descriptor builder special-cases only 3D and cube. So its `dim` is 2D as well, and
+         * this is what remembers that the coordinate is one component with a zero beside it.
+         * Sampling it with `dim:SQ_RSRC_IMG_1D` would tell the hardware something the
+         * descriptor does not say. */
+        GLboolean oned;
     } samplers[GLSL_GEN_MAX_TEX_SETS];
     int sampler_count;
     const char *error;    /* the **first** failure, which stops everything after it */
@@ -879,7 +886,7 @@ GLboolean glsl_gen_lookup(glsl_gen_t *g, const char *name, size_t len, glsl_valu
  * through something the draw path never filled in. */
 /* `dim` is one of the `GLSL_IMG_DIM_*` above - what this sampler's lookups will carry. */
 GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set,
-                                   uint32_t dim, GLboolean shadow);
+                                   uint32_t dim, GLboolean shadow, GLboolean oned);
 
 /* -------------------------------------------------------------------------
  * A compiled unit

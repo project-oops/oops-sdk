@@ -2161,6 +2161,8 @@ static gl_texture_object_t *gl_gl2_sampler_texture(gl_context_t *ctx,
         id = tu->bound_texture_cube ? tu->bound_texture_cube : OOPS_GL_DEFAULT_TEXTURE_CUBE;
     } else if (st == GL_SAMPLER_3D) {
         id = tu->bound_texture_3d ? tu->bound_texture_3d : OOPS_GL_DEFAULT_TEXTURE_3D;
+    } else if (st == GL_SAMPLER_1D || st == GL_SAMPLER_1D_SHADOW) {
+        id = tu->bound_texture_1d ? tu->bound_texture_1d : OOPS_GL_DEFAULT_TEXTURE_1D;
     } else {
         id = tu->bound_texture_2d ? tu->bound_texture_2d : OOPS_GL_DEFAULT_TEXTURE_2D;
     }
