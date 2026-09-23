@@ -4220,8 +4220,15 @@ vertices_written:
                not the master, which the GPU never reads. See OOPS_GL_PS_RING_OFFSET. */
             ps_va = payload_va + gl_ps_ring_offset(ctx);
             ps_rsrc2 = 0x00000004u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor table. 0x2 loads one SGPR and the primitive mask lands in s1 (measured 2026-09-14) */
-            for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
-                if (ctx->textures[ti].used && ctx->textures[ti].id == eff_tex) {
+            /* **By slot, not by sweep.** This searched the whole table for a matching id on
+               every draw - the same cost `gl_lookup_texture` was carrying, and missed here when
+               that one was fixed. `break` kept it to the matching index rather than all 256, but
+               `gl_texture_object_t` is large enough that striding even part of the table evicts
+               what the rest of the draw wants. */
+            {
+                gl_texture_object_t *const hit = gl_texture_slot(ctx, eff_tex);
+                const int ti = hit ? (int)(hit - ctx->textures) : -1;
+                if (hit) {
                     uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload +
                                                 gl_hw_desc_slot_offset(ctx->hw_desc_slot));
                     memcpy(dt, ctx->textures[ti].img_desc, 32);
@@ -4240,7 +4247,7 @@ vertices_written:
                     __builtin_ia32_clflush((const void *)dt);
                     __builtin_ia32_clflush((const void *)bt);
 #endif
-                    break;
+                    /* the lookup above already found the one entry; nothing to break out of */
                 }
             }
             /* **The second unit's pair**, one stride along the table, where tex-prolog2.s loads
@@ -4249,8 +4256,9 @@ vertices_written:
              * it is a branch over itself then. */
             if (unit1) {
                 const GLuint id1 = gl_unit_texture_id(ctx, 1u);
-                for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
-                    if (!ctx->textures[ti].used || ctx->textures[ti].id != id1) continue;
+                gl_texture_object_t *const hit1 = gl_texture_slot(ctx, id1);
+                const int ti = hit1 ? (int)(hit1 - ctx->textures) : -1;
+                if (hit1) {
                     gl_tex_hw_prepare(ctx, &ctx->textures[ti]);
                     if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
                     uint32_t *dt1 = (uint32_t *)((char *)ctx->gpu_payload +
@@ -4263,7 +4271,7 @@ vertices_written:
 #if defined(__x86_64__)
                     __builtin_ia32_clflush((const void *)dt1);
 #endif
-                    break;
+                    /* the lookup above already found the one entry; nothing to break out of */
                 }
             }
         }

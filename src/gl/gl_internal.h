@@ -2984,6 +2984,20 @@ static inline size_t gl_tex_chain_layout(GLsizei w, GLsizei h, int levels, size_
  * This is on the draw path about eleven times per draw, and Neverball issues roughly eighteen
  * thousand draws a frame - so the scan was up to fifty million comparisons a frame, and
  * `OOPS_GL_MAX_TEXTURE_OBJECTS` going from 32 to 256 had just made it eight times worse. */
+/* The writable form of `gl_lookup_texture`, for the draw path's own scans. Same rule: slot
+   `id - 1` first, then the sweep that validates it. */
+static inline gl_texture_object_t *gl_texture_slot(gl_context_t *ctx, GLuint id) {
+    if (!ctx || id == 0u) return (gl_texture_object_t *)0;
+    if (id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS) {
+        gl_texture_object_t *t = &ctx->textures[id - 1u];
+        if (t->used && t->id == id) return t;
+    }
+    for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
+        if (ctx->textures[i].used && ctx->textures[i].id == id) return &ctx->textures[i];
+    }
+    return (gl_texture_object_t *)0;
+}
+
 static inline const gl_texture_object_t *gl_lookup_texture(const gl_context_t *ctx, GLuint id) {
     if (id != 0u && id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS) {
         const gl_texture_object_t *t = &ctx->textures[id - 1u];
