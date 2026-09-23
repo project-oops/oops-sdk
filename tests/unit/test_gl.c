@@ -13569,8 +13569,13 @@ static void test_glsl_gen_refuses_what_it_cannot_encode(void) {
   glsl_gen_of("v3<v3");
   ASSERT_TRUE(g_glsl_gen.error != NULL);
 
-  /* Matrix arithmetic beyond mat4 * vec4. */
+  /* **A matrix with a vector that is not its width.** `m4 * v4` is a product and `m4 * f` is a
+   * broadcast; `m4 * v3` is neither, and treating it as componentwise would compute something
+   * that is not a product at all rather than say so. `m4 * m4` is generated now - n of the
+   * matrix-vector products, one per column. */
   glsl_gen_of("m4*m4");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+  glsl_gen_of("m4*v3");
   ASSERT_TRUE(g_glsl_gen.error != NULL);
 
   /* **A built-in with no instruction is refused by name.** `sin` is generated - a multiply and
@@ -13703,6 +13708,134 @@ static void test_glsl_gen_allocates_registers_for_statements(void) {
 #undef GSRC0
 #undef GV1OP
 
+/* **The eight descriptor words had no test at all.** They are what the sampler is told about a
+ * texture - where it starts, how wide it is, how far apart its rows are - and every one of them
+ * is arithmetic that runs identically on a host. Until now the only way to find out what a
+ * texture's descriptor came out as was to put a build on the console and read a log, which is
+ * both slow and only available when the console is.
+ *
+ * The widths are the ones a real port produces: 97 of Neverball's 292 images have a width that
+ * is not a multiple of 64, and its `back/` strips - the ones that draw the corrupted background -
+ * are 4 and 16 pixels wide. 64 is here as the control, being the width at which the custom pitch
+ * is supposed to go quiet.
+ *
+ * The field encodings are checked against Mesa's, which is the reference implementation for this
+ * silicon: WIDTH_LO is two bits at bit 30 of word 1 and WIDTH_HI fourteen at bit 0 of word 2
+ * (`S_00A004_WIDTH_LO`/`S_00A008_WIDTH_HI`, ac_descriptors.c:519-522), and the custom pitch is
+ * `DEPTH(pitch - 1) | PITCH_MSB((pitch - 1) >> 13)` (`ac_set_mutable_tex_desc_fields`, :707-712). */
+static void test_gl_texture_descriptor_describes_the_image_it_was_given(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  (void)glGetError();
+
+  static const GLsizei widths[] = {4, 16, 64, 100};
+  for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+    const GLsizei w = widths[i];
+    const GLsizei h = 8;
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    /* Each row a different value, so a row read from the wrong place is a wrong number rather
+     * than a coincidence. Blue carries the column for the same reason. */
+    static GLubyte img[256 * 8 * 4];
+    for (GLsizei y = 0; y < h; y++) {
+      for (GLsizei x = 0; x < w; x++) {
+        GLubyte *t = img + (((size_t)y * (size_t)w) + (size_t)x) * 4u;
+        t[0] = (GLubyte)(y + 1); t[1] = 0; t[2] = (GLubyte)(x + 1); t[3] = 255;
+      }
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    const gl_texture_object_t *stored = test_find_texture(ctx, tex);
+    ASSERT_TRUE(stored != NULL && stored->pixels != NULL);
+
+    /* The pitch addrlib gives a linear surface: 256 bytes, which at four bytes a texel is 64. */
+    const uint32_t want_pitch = ((uint32_t)w + 63u) & ~63u;
+    ASSERT_EQ(stored->pitch, want_pitch);
+
+    /* The size the sampler will read back out of the words. */
+    const uint32_t got_w = ((((stored->img_desc[2] & 0x3fffu) << 2) |
+                             ((stored->img_desc[1] >> 30) & 3u))) + 1u;
+    const uint32_t got_h = ((stored->img_desc[2] >> 14) & 0x3fffu) + 1u;
+    ASSERT_EQ(got_w, (uint32_t)w);
+    ASSERT_EQ(got_h, (uint32_t)h);
+
+    /* WORD4. Inert when the rows are exactly as wide as the image, the pitch otherwise. */
+    if (want_pitch > (uint32_t)w) {
+      const uint32_t p1 = want_pitch - 1u;
+      ASSERT_EQ(stored->img_desc[4], (p1 & 0x1fffu) | (((p1 >> 13) & 1u) << 13));
+    } else {
+      ASSERT_EQ(stored->img_desc[4], 0u);
+    }
+
+    /* And the bytes are where the descriptor says they are - row y at `pitch` texels, not `w`.
+     * A texture whose rows were written at width stride while the sampler reads them at pitch
+     * stride is exactly the skewed, banded surface a wrong pitch draws. */
+    const GLubyte *p = (const GLubyte *)stored->pixels;
+    for (GLsizei y = 0; y < h; y++) {
+      const GLubyte *row = p + ((size_t)y * (size_t)stored->pitch) * 4u;
+      ASSERT_EQ(row[0], (GLubyte)(y + 1));
+      ASSERT_EQ(row[2], (GLubyte)1);
+      /* The padding past the image is the sampler's to read whenever it filters near the right
+       * edge, and nothing writes it but the zeroing. */
+      if (want_pitch > (uint32_t)w) {
+        ASSERT_EQ(row[(size_t)w * 4u + 0u], (GLubyte)0);
+      }
+    }
+
+    glDeleteTextures(1, &tex);
+  }
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
+/* **A three-byte source read as four is a colour cast, not a crash.** Neverball's level art
+ * arrives as PNGs, many of them 24-bit, while its text arrives from the font rasteriser as RGBA -
+ * so a GL_RGB expansion that lost a byte somewhere would corrupt exactly the textures that look
+ * wrong on the console and spare exactly the one that looks right. That is a specific enough
+ * story to be worth refuting rather than believing, and it refutes on a host. */
+static void test_gl_rgb_upload_expands_to_opaque_rgba(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  (void)glGetError();
+
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+
+  /* Four texels, three bytes each, every channel distinguishable from every other. */
+  static const GLubyte rgb[4 * 3] = {
+    10, 20, 30,
+    40, 50, 60,
+    70, 80, 90,
+    100, 110, 120,
+  };
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 4, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  const gl_texture_object_t *stored = test_find_texture(ctx, tex);
+  ASSERT_TRUE(stored != NULL && stored->pixels != NULL);
+  const GLubyte *p = (const GLubyte *)stored->pixels;
+  for (int i = 0; i < 4; i++) {
+    ASSERT_EQ(p[i * 4 + 0], rgb[i * 3 + 0]);
+    ASSERT_EQ(p[i * 4 + 1], rgb[i * 3 + 1]);
+    ASSERT_EQ(p[i * 4 + 2], rgb[i * 3 + 2]);
+    /* Alpha is 1 for a base format with no alpha of its own (GL 2.1, table 3.15). A zero here
+     * is an invisible texture under GL_MODULATE with blending on. */
+    ASSERT_EQ(p[i * 4 + 3], 255);
+  }
+
+  glDeleteTextures(1, &tex);
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 void run_unit_tests_gl(void) {
     TEST_SUITE_BEGIN("Fixed-function 3D instrument (oops-gl)");
     RUN_TEST(test_gl_context_lifecycle);
@@ -13741,6 +13874,8 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_display_list_records_what_gl_compiles);
     RUN_TEST(test_gl_display_list_recursion_is_bounded);
     RUN_TEST(test_gl_tex_sub_image_updates_only_its_rectangle);
+    RUN_TEST(test_gl_texture_descriptor_describes_the_image_it_was_given);
+    RUN_TEST(test_gl_rgb_upload_expands_to_opaque_rgba);
     RUN_TEST(test_gl_pixel_store_alignment_moves_the_rows);
     RUN_TEST(test_gl_tex_image_refuses_a_format_it_cannot_convert);
     RUN_TEST(test_gl_read_pixels_flips_to_gl_orientation);
