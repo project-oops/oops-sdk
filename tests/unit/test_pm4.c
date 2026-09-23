@@ -2476,6 +2476,15 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
   uint32_t ps_in = last_context_reg(w, n, 0x1b6u); /* SPI_PS_IN_CONTROL */
   ASSERT_NE(ps_in, REG_ABSENT);
   ASSERT_EQ(ps_in & 0x3fu, 2u); /* NUM_INTERP = 2: colour and texcoord, and nothing else */
+  /*
+   * **PS_W32_EN, bit 15, because the generated shaders are wave32 and the hardware is not told
+   * so by the code.** Clear, the pixel shader is dispatched wave64 and `exec_lo` narrows half
+   * the wave: every `if`, `break` and `discard` is then honoured in the first four rows of each
+   * 8x8 wave footprint and ignored in the second four. That is what gl2-probe measured as
+   * alternating four-row bands across the whole region, and nothing without exec-masked control
+   * flow can see it - which is why it survived so long.
+   */
+  ASSERT_EQ((ps_in >> 15) & 0x1u, 1u);
 
   /* PERSP_CENTER_ENA and nothing else. Enabling POS_Z here - which is what fog would need -
    * adds VGPRs *before* the ones the pixel shader already reads, so the colour it currently
@@ -4418,7 +4427,10 @@ static void test_pm4_gl_two_unit_draw_binds_the_fourth_parameter(void) {
   const uint64_t vs4 = ((uint64_t)(uintptr_t)payload + OOPS_GL_VS_P4_OFFSET) >> 8;
   ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0x88u), (uint32_t)vs4);
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b1u), 0x6u); /* SPI_VS_OUT_CONFIG */
-  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b6u), 0x4u); /* SPI_PS_IN_CONTROL */
+  /* SPI_PS_IN_CONTROL: the interpolant count *and* PS_W32_EN (bit 15), which selects the wave
+   * width the generated shaders are written for. The register is written whole, so a draw that
+   * changes the parameter count must not drop the width with it - which is what this asserts. */
+  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b6u), 0x8000u | 0x4u);
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x194u), 0x3u); /* SPI_PS_INPUT_CNTL_3 */
 
   /* An 80-byte vertex, the second unit's coordinate at offset 64 with q defaulted to 1. */
@@ -4547,7 +4559,7 @@ static void test_pm4_gl_colour_sum_takes_the_third_parameter(void) {
   TRI();
   ASSERT_EQ(ctx->hw_params, 2u);
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x193u), 0u);
-  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b6u), 2u);
+  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b6u), 0x8000u | 2u); /* with PS_W32_EN */
   ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0xc8u), (uint32_t)(pv >> 8));
   ASSERT_EQ(ctx->hw_vbo_cursor, 144u);
   for (size_t i = 0; i < GL_PS_SUM_WORDS; i++) {
@@ -4562,7 +4574,7 @@ static void test_pm4_gl_colour_sum_takes_the_third_parameter(void) {
   ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0xc8u), (uint32_t)((pv + OOPS_GL_VS_P3_OFFSET) >> 8));
   ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0x88u), (uint32_t)((pv + OOPS_GL_VS_P3_OFFSET) >> 8));
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b1u), 4u);
-  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b6u), 3u);
+  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b6u), 0x8000u | 3u); /* with PS_W32_EN */
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x193u), 2u);
   ASSERT_EQ(ps_tex[GL_PS_SUM_SLOT_TEX], 0xc8300800u);      /* v_interp_p1_f32 v12, v0, attr2.x */
   ASSERT_EQ(ps_tex[GL_PS_SUM_SLOT_TEX + 6], 0xd5038004u);  /* v_add_f32_e64 v4, v4, v12 clamp */

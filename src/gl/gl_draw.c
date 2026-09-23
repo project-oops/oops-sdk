@@ -12,6 +12,33 @@
 #include <stdlib.h>
 #endif
 
+/*
+ * **The pixel shader runs wave32, and the hardware has to be told so.**
+ *
+ * Every shader this back end generates uses `exec_lo` and `vcc_lo` - the wave32 mask registers -
+ * and `tools/shader/README.md` says so as a standing rule for the assembled words. The hardware
+ * does not infer the width from the code: `SPI_PS_IN_CONTROL.PS_W32_EN` selects it, and with the
+ * bit clear the pixel shader is dispatched wave64 while the code masks 32 lanes.
+ *
+ * **What that looks like is half a correct picture.** A wave64 pixel shader covers 8x8 pixels as
+ * two 8x4 halves; lanes 0..31 are the first four rows and 32..63 the second. `s_and_saveexec_b32`
+ * on `exec_lo` narrows only the first half, so the second half runs every masked branch
+ * unconditionally. gl2-probe measured exactly that: a constant-valued shader whose `if` should
+ * add 0.25 once added it eight times, in alternating bands of four scan rows, x-independent,
+ * across 24 bands with no exception - and the only pixels that departed from the pattern were
+ * along the quad's triangle seam, where coverage makes the mask partial anyway.
+ *
+ * Nothing without exec-masked control flow could see it, which is why this survived: a shader
+ * with no `if`, `break` or `discard` gives the same answer at either width, and those are the
+ * arms that had always passed.
+ *
+ * Bit 15, `S_0286D8_PS_W32_EN`, gated gfx10/gfx103 in
+ * `mesa/src/amd/common/amdgfxregs.h:12411`; radv sets it from the shader's own wave size at
+ * `mesa/src/amd/vulkan/radv_shader.c:2008`. It must be set everywhere this register is written,
+ * because it is written whole.
+ */
+#define GL_SPI_PS_W32_EN 0x00008000u
+
 /* -------------------------------------------------------------------------
  * What this subset will draw, and how it refuses the rest
  *
@@ -2620,7 +2647,8 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x1b3u, 0x00000002u}, /* SPI_PS_INPUT_ENA: PERSP_CENTER_ENA (patched: the stipple) */
         {0x1b4u, 0x00000002u}, /* SPI_PS_INPUT_ADDR: PERSP_CENTER_ENA (patched: the stipple) */
         {0x1b5u, 0x00000001u}, /* SPI_INTERP_CONTROL_0: FLAT_SHADE_ENA (no parameter is flagged flat) */
-        {0x1b6u, 0x00000002u}, /* SPI_PS_IN_CONTROL: NUM_INTERP=2 */
+        /* SPI_PS_IN_CONTROL: NUM_INTERP=2, and PS_W32_EN - see GL_SPI_PS_W32_EN. */
+        {0x1b6u, GL_SPI_PS_W32_EN | 0x00000002u},
         /* **`SPI_BARYC_CNTL` must be zero, and `FRONT_FACE_ALL_BITS` is why.**
          *
          * Bit 24 chooses what the SPI puts in the face register. Set, it is an integer mask -
@@ -2963,7 +2991,11 @@ static void gl_hw_emit_param_count(gl_context_t *ctx, uint32_t **dw_ptr, uint32_
      * retired with both canaries). SPI_PS_INPUT_CNTL_3 is 0x194 (Mesa
      * src/amd/registers/gfx103.json:4203), the slot after the third parameter's. */
     const uint32_t out_config = (params >= 4u) ? 0x6u : (params == 3u) ? 0x4u : 0x2u;
-    const uint32_t in_control = (params >= 4u) ? 0x4u : (params == 3u) ? 0x3u : 0x2u;
+    /* PS_W32_EN rides along with the interpolant count, because this register is written whole
+     * and dropping the bit here would put the pixel shader back into wave64 the moment a draw
+     * changed how many parameters it interpolates. */
+    const uint32_t in_control = GL_SPI_PS_W32_EN |
+                                ((params >= 4u) ? 0x4u : (params == 3u) ? 0x3u : 0x2u);
     *dw++ = 0xc0016900u; *dw++ = 0x1b1u; *dw++ = out_config;                      /* VS_OUT_CONFIG */
     *dw++ = 0xc0016900u; *dw++ = 0x1b6u; *dw++ = in_control;                      /* PS_IN_CONTROL */
     *dw++ = 0xc0016900u; *dw++ = 0x193u; *dw++ = (params >= 3u) ? 0x2u : 0x0u;    /* PS_INPUT_CNTL_2 */
