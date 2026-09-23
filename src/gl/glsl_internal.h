@@ -566,6 +566,23 @@ void glsl_emit_s_cmp_ge_u32_imm(glsl_code_t *c, uint32_t sreg, uint32_t imm);
 #define GLSL_MIMG_SAMPLE    32u
 #define GLSL_MIMG_SAMPLE_LZ 39u
 
+/* **The cube face selection, which is four instructions and not arithmetic.** The hardware
+ * turns a direction into a face and a place on it: `v_cubeid_f32` names the face,
+ * `v_cubesc_f32` and `v_cubetc_f32` give the two coordinates on it, and `v_cubema_f32` gives
+ * twice the major axis to divide them by. All four read x, y and z at once, which is why they
+ * are VOP3 - there is no two-operand form to reach them through.
+ *
+ * Opcodes from `tools/shader/tex-cube.s`: 0xd5440013, 0xd5450014, 0xd5460015, 0xd5470016, the
+ * opcode being bits 25:16. That is the sequence ACO emits and the one the ISA documents. */
+#define GLSL_VOP3_CUBEID_F32 0x144u
+#define GLSL_VOP3_CUBESC_F32 0x145u
+#define GLSL_VOP3_CUBETC_F32 0x146u
+#define GLSL_VOP3_CUBEMA_F32 0x147u
+/* A VOP3 source names the whole operand space, so a VGPR is 256 plus its number. */
+#define GLSL_VOP3_VGPR(n) (256u + (n))
+void glsl_emit_vop3(glsl_code_t *c, uint32_t op, uint32_t vdst, uint32_t src0, uint32_t src1,
+                    uint32_t src2);
+
 /* The `dim` field, bits 5:3 of the first word. */
 #define GLSL_IMG_DIM_1D   0u
 #define GLSL_IMG_DIM_2D   1u
@@ -812,6 +829,11 @@ typedef struct {
         const char *name;
         size_t name_len;
         uint32_t set;
+        /* **Which lookup this sampler answers to.** The descriptor decides how the hardware
+         * reads the memory and the shader decides what it hands the sampler, and the two have
+         * to be the same shape: a cube takes three address registers where a 2D takes two. So
+         * `texture2D` on a `samplerCube` is refused rather than sampled with the wrong dim. */
+        GLboolean cube;
     } samplers[GLSL_GEN_MAX_TEX_SETS];
     int sampler_count;
     const char *error;    /* the **first** failure, which stops everything after it */
@@ -840,7 +862,8 @@ GLboolean glsl_gen_lookup(glsl_gen_t *g, const char *name, size_t len, glsl_valu
 /* Tells the generator that `name` is a sampler whose descriptors the prologue loaded into set
  * `set`. A `texture2D` on any other name is refused, which is what stops a shader sampling
  * through something the draw path never filled in. */
-GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set);
+GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set,
+                                   GLboolean cube);
 
 /* -------------------------------------------------------------------------
  * A compiled unit

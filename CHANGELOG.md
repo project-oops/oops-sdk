@@ -96,6 +96,30 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **`textureCube` in a compiled shader** (2026-09-23). **The descriptor half has been there
+  since the fixed-function path learnt cube maps**: the six faces upload as one array, the
+  descriptor carries TYPE 0xb, and obSCEne measured a cube sampled on this part and reported the
+  face its texel came from (`-6c80`). What was missing was that a `samplerCube` never got a
+  descriptor set, so the GL 2.0 path had nowhere to put it.
+
+  The face selection is four instructions and not arithmetic: `v_cubeid_f32` names the face,
+  `v_cubesc_f32` and `v_cubetc_f32` give the place on it, `v_cubema_f32` gives twice the major
+  axis, and the shader divides and biases by a half to land in [0, 1]. All four read x, y and z
+  at once, which is why they are VOP3 - **the first VOP3 this back end emits**, and the reason
+  it needed an encoder at all. Words from `tools/shader/tex-cube.s`, assembled: the four share a
+  second dword and differ only in the opcode, which is exactly where an off-by-one would hide,
+  so the encoder test pins all eight.
+
+  `|ma|` is `max(ma, -ma)` rather than VOP3's absolute-value modifier, so nothing beyond the
+  four opcodes needed verifying. The direction is not normalised and must not be: scaling all
+  three components leaves the face and the place on it alone, which is why a direction works as
+  a coordinate at all - there is a test that samples `(1, 0.5, 0)` and `(2, 1, 0)` and requires
+  the same answer.
+
+  A `samplerCube` sampled through `texture2D` would hand two address registers where the
+  hardware reads three. The back end refuses it; the semantic stage gets there first, so no
+  shader can carry one that far.
+
 - **`asin`, `acos`, `atan` and `refract`** (2026-09-23), which were refused on the grounds that
   "a polynomial of unmeasured accuracy is not generated in their place".
 

@@ -624,7 +624,15 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
             const glsl_node_t *n = &fs->ast.nodes[d];
             if (n->kind != GLSL_NODE_DECL || n->qualifier != GLSL_TOK_KW_UNIFORM) continue;
             for (int i = 0; i < p->uniform_count; i++) {
-                if (p->uniforms[i].type != GL_SAMPLER_2D) continue;
+                /* **A cube sampler takes a set too, since 2026-09-23.** The descriptor side has
+                 * been there since the fixed-function path learnt cube maps - the faces upload
+                 * as one array and the descriptor carries TYPE 0xb, measured on hardware by
+                 * obSCEne's `-6c80` - so what was missing was only that a `samplerCube` never
+                 * got a set to be loaded into. */
+                if (p->uniforms[i].type != GL_SAMPLER_2D &&
+                    p->uniforms[i].type != GL_SAMPLER_CUBE) {
+                    continue;
+                }
                 if (!name_eq(p->uniforms[i].name, lit_len(p->uniforms[i].name), n->text,
                              n->length)) {
                     continue;

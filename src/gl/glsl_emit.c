@@ -490,6 +490,20 @@ GLboolean glsl_patch_branch_here(glsl_code_t *c, uint32_t at) {
 /* SOPC: `101111110 op[22:16] ssrc1[15:8] ssrc0[7:0]`, the scalar compare that sets SCC.
  * Verified from `s_cmp_ge_u32 s20, 0x100` = 0xbf09ff14 followed by the literal 0x00000100, and
  * `s_cmp_lg_u32 s20, 0` = 0xbf078014 where the 0 rides in the operand as inline constant 0x80. */
+/* VOP3: `110101 op[25:16] ... vdst[7:0]`, then `src0[8:0] src1[17:9] src2[26:18]`. Verified from
+ * `tools/shader/tex-cube.s`, where `v_cubeid_f32 v19, v16, v17, v18` assembles to 0xd5440013
+ * followed by 0x044a2310 - the three operands being 0x110, 0x111 and 0x112, which is 256 plus
+ * the register number, because a VOP3 source names the whole operand space and not just a VGPR.
+ *
+ * **Three sources is why these need VOP3 at all.** The face selection reads x, y and z at once;
+ * there is no two-operand form of it, and no way to reach it from a library that only ever
+ * emitted VOP1 and VOP2. */
+void glsl_emit_vop3(glsl_code_t *c, uint32_t op, uint32_t vdst, uint32_t src0, uint32_t src1,
+                    uint32_t src2) {
+    put(c, (0x35u << 26) | ((op & 0x3ffu) << 16) | (vdst & 0xffu));
+    put(c, (src0 & 0x1ffu) | ((src1 & 0x1ffu) << 9) | ((src2 & 0x1ffu) << 18));
+}
+
 void glsl_emit_sopc(glsl_code_t *c, uint32_t op, uint32_t ssrc0, uint32_t ssrc1) {
     put(c, (0x17eu << 23) | ((op & 0x7fu) << 16) | ((ssrc1 & 0xffu) << 8) | (ssrc0 & 0xffu));
 }

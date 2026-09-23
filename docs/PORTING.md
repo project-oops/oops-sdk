@@ -96,7 +96,14 @@ reference's loop. They differ only by the reciprocal: there is no divide instruc
 true divide becomes `v_rcp_f32` and a multiply, and the tests hold the pair to 1e-5 for it.
 `refract` is generated too, zero vector and all.
 
-What it still cannot: the cube, volume and shadow texture lookups. A
+**`textureCube` samples a cube map**, with the hardware doing the face selection: the direction
+picks an axis by its largest component and a face by that component's sign, and the other two
+components become the place on it. The direction is not normalised and must not be - scaling all
+three leaves the face and the place alone, which is the whole reason a direction works as a
+coordinate. Bind the cube to the unit the sampler names as usual; the six faces have to be
+complete, as GL requires of any cube map it samples.
+
+What it still cannot: the volume and shadow texture lookups. A
 shader the back end will not take is refused with a sentence naming what is missing, and still
 runs on the software path - the draw is what fails, with `GL_INVALID_OPERATION`, rather than
 quietly drawing something else. A GL 1.x port is unaffected: it never binds a program.
@@ -212,7 +219,8 @@ part, so the quotient is computed from a reciprocal and then corrected, which is
 | An array index the shader computes at run time | An array is a run of registers and a register file cannot be indexed by a running value. **An unrolled loop's counter counts as known**, so `for (int i = 0; i < 4; i++) total += w[i];` is fine - it is a uniform or a varying used as an index that is not |
 | Whole-array assignment, or an array as a value | Elements, one at a time. GLSL 1.10 has no array-valued expressions either |
 | A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
-| `textureCube`, `texture3D`, the shadow forms | `texture2D` and `texture2DProj` are generated - the second is the first with a divide in front, which is arithmetic that was already here. The others are each a different lookup rather than the same one with a flag: a cube's coordinate is a direction the hardware resolves to a face, a volume's is three components against a descriptor of its own, and a shadow's compares rather than returns |
+| `texture3D`, the shadow forms | `texture2D`, `texture2DProj` and `textureCube` are generated. These two are not, and each is a different lookup rather than the same one with a flag: a volume's coordinate is three components against a descriptor of its own, and a shadow's compares rather than returns |
+| A cube map whose six faces are not all there | GL does not sample an incomplete cube either (2.1, 3.8.10). The draw is untextured rather than reading a descriptor that points at nothing |
 | A matrix with a vector that is not its width | `m * v`, `v * m` and `m * m` are generated at every square size, as are a matrix with a scalar and two matrices componentwise. `m4 * v3` is none of those, and treating it as componentwise would compute something that is not a product at all |
 | More than 16 floats of varyings, more than 32 floats of uniforms, more than two samplers | Each is refused with its own number in the message, so you know what to cut to |
 

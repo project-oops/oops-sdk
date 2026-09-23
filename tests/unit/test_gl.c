@@ -13076,6 +13076,28 @@ static void test_glsl_emit_matches_the_assembler(void) {
   ASSERT_EQ(words[7], 0xbefe030fu); /* s_mov_b32 exec_lo, s15 */
   ASSERT_EQ(words[8], 0xbefe0380u); /* s_mov_b32 exec_lo, 0 */
 
+  /* **The cube face selection**, which is the only VOP3 this back end emits. Words from
+   * `tools/shader/tex-cube.s`, whose four instructions all take the same three sources - so the
+   * second dword is identical across them and the opcode is the whole difference, which is
+   * exactly the shape an off-by-one in the opcode table would hide in. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_vop3(&c, GLSL_VOP3_CUBEID_F32, 19u, GLSL_VOP3_VGPR(16u), GLSL_VOP3_VGPR(17u),
+                 GLSL_VOP3_VGPR(18u));
+  glsl_emit_vop3(&c, GLSL_VOP3_CUBESC_F32, 20u, GLSL_VOP3_VGPR(16u), GLSL_VOP3_VGPR(17u),
+                 GLSL_VOP3_VGPR(18u));
+  glsl_emit_vop3(&c, GLSL_VOP3_CUBETC_F32, 21u, GLSL_VOP3_VGPR(16u), GLSL_VOP3_VGPR(17u),
+                 GLSL_VOP3_VGPR(18u));
+  glsl_emit_vop3(&c, GLSL_VOP3_CUBEMA_F32, 22u, GLSL_VOP3_VGPR(16u), GLSL_VOP3_VGPR(17u),
+                 GLSL_VOP3_VGPR(18u));
+  ASSERT_EQ(words[0], 0xd5440013u); /* v_cubeid_f32 v19, v16, v17, v18 */
+  ASSERT_EQ(words[1], 0x044a2310u); /*   ...the three sources, 256 plus the register number */
+  ASSERT_EQ(words[2], 0xd5450014u); /* v_cubesc_f32 v20, ... */
+  ASSERT_EQ(words[3], 0x044a2310u);
+  ASSERT_EQ(words[4], 0xd5460015u); /* v_cubetc_f32 v21, ... */
+  ASSERT_EQ(words[5], 0x044a2310u);
+  ASSERT_EQ(words[6], 0xd5470016u); /* v_cubema_f32 v22, ... */
+  ASSERT_EQ(words[7], 0x044a2310u);
+
   /* **Branches, which only a loop needs.** The layout below is `tools/shader/branch.s`
    * instruction for instruction, so every word here is one clang produced rather than one this
    * encoder and this test agree about.

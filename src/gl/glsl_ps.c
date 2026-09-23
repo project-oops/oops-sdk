@@ -293,7 +293,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     const int tex_sets = p->hw_tex_sets;
     for (int s = 0; ok && s < tex_sets; s++) {
         const gl_uniform_t *u = &p->uniforms[p->hw_tex_uniform[s]];
-        if (!glsl_gen_declare_sampler(gen, u->name, lit_len(u->name), (uint32_t)s)) {
+        if (!glsl_gen_declare_sampler(gen, u->name, lit_len(u->name), (uint32_t)s,
+                                      (GLboolean)(u->type == GL_SAMPLER_CUBE))) {
             log_say(log, log_size, gen->error ? gen->error : "a sampler has no set", 0, 0);
             ok = GL_FALSE;
         }

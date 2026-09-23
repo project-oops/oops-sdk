@@ -2100,16 +2100,19 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
 
-    /* **Refused, not guessed at.** `texture2D` and `texture2DProj` are generated - the second
-     * is the first with a divide in front of it, which is arithmetic this already had. The rest
-     * of section 8.7 is not, and each is refused rather than sampled through the 2D path: a
-     * cube's coordinate is a direction the hardware resolves to a face and a volume's is three
-     * components against a descriptor of its own. Close enough to look interchangeable,
-     * different enough to draw the wrong thing. */
+    /* **Refused, not guessed at.** `texture2D`, `texture2DProj` and `textureCube` are
+     * generated. A volume lookup is not: three components against a descriptor of its own, and
+     * nothing here has measured that one. Close enough to the cube to look interchangeable,
+     * different enough to draw the wrong thing.
+     *
+     * Not here: a `samplerCube` sampled through `texture2D`, or the other way round. The back
+     * end checks it - two address registers where the hardware reads three would leave the
+     * third holding whatever the allocator last put there - but the semantic stage types a
+     * lookup by its sampler and refuses the mismatch first ("must be its own sampler type"), so
+     * no shader can carry one that far and a case here would be testing the front end by
+     * proxy. */
     gl_context_t *c = (gl_context_t *)ctx;
     static const char *const REFUSED_LOOKUPS[] = {
-        "uniform samplerCube s;\nvarying vec2 uv;\n"
-        "void main() { gl_FragColor = textureCube(s, vec3(uv, 1.0)); }\n",
         "uniform sampler3D s;\nvarying vec2 uv;\n"
         "void main() { gl_FragColor = texture3D(s, vec3(uv, 1.0)); }\n",
     };
@@ -2338,9 +2341,10 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
             const uint32_t vaddr = w1 & 0xffu;
             const uint32_t srsrc = ((w1 >> 16) & 0x1fu) * 4u;
             const uint32_t ssamp = ((w1 >> 21) & 0x1fu) * 4u;
+            const uint32_t dim = (x >> 3) & 0x7u;
             ASSERT_EQ((x >> 18) & 0x7fu, 32u);           /* image_sample, not _lz */
             ASSERT_EQ((x >> 8) & 0xfu, 0xfu);            /* all four channels */
-            ASSERT_EQ((x >> 3) & 0x7u, 1u);              /* 2D */
+            ASSERT_TRUE(dim == 1u || dim == 3u);         /* 2D or cube */
             /* The sampler's four registers sit eight above the image's eight - the layout
              * `glsl_internal.h` sets out and the prologue loads into. */
             ASSERT_EQ(ssamp, srsrc + 8u);
@@ -2354,7 +2358,11 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
             if (s->exec) {
                 s->v[vdata + 0u] = s->v[vaddr];
                 s->v[vdata + 1u] = s->v[vaddr + 1u];
-                s->v[vdata + 2u] = (float)set;
+                /* **A cube reports the face instead of the set.** Its third address register is
+                 * the face the direction resolved to, which is the thing worth reading back -
+                 * a wrong face is the failure a cube lookup has that a 2D one does not, and it
+                 * would otherwise be invisible behind a texel that only carried u and v. */
+                s->v[vdata + 2u] = (dim == 3u) ? s->v[vaddr + 2u] : (float)set;
                 s->v[vdata + 3u] = 1.0f;
             }
             for (uint32_t k = 0; k < 4u; k++) s->vpending[vdata + k] = GL_TRUE;
@@ -2554,6 +2562,47 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
                 sim_set_mask(s, sdst, (GLboolean)(a && !b));
             } else {
                 ASSERT_TRUE(0);
+            }
+            continue;
+        }
+        /* **VOP3, which here is only the cube face selection.** Three sources at once is what
+         * puts these in VOP3 at all, and the four of them are the whole of what this back end
+         * emits in that encoding - so an opcode arriving here that is not one of them is a
+         * change this simulator has not been told about, and says so rather than guessing.
+         *
+         * The mapping is the ISA's: the largest component picks the axis, its sign picks which
+         * of the pair, and the other two become `sc` and `tc` with the signs that keep every
+         * face oriented the same way round. `ma` is twice the major axis, which is why the
+         * shader divides by `2|ma|` rather than by `|ma|`. */
+        if ((x >> 26) == 0x35u) {
+            const uint32_t op = (x >> 16) & 0x3ffu;
+            const uint32_t vdst = x & 0xffu;
+            const uint32_t w1 = w[++i];
+            const float X = s->v[(w1 & 0x1ffu) - 256u];
+            const float Y = s->v[((w1 >> 9) & 0x1ffu) - 256u];
+            const float Z = s->v[((w1 >> 18) & 0x1ffu) - 256u];
+            const float ax = X < 0.0f ? -X : X;
+            const float ay = Y < 0.0f ? -Y : Y;
+            const float az = Z < 0.0f ? -Z : Z;
+            float id, sc, tc, ma;
+            if (az >= ax && az >= ay) {
+                ma = 2.0f * Z; id = (Z < 0.0f) ? 5.0f : 4.0f;
+                sc = (Z < 0.0f) ? -X : X; tc = -Y;
+            } else if (ay >= ax) {
+                ma = 2.0f * Y; id = (Y < 0.0f) ? 3.0f : 2.0f;
+                sc = X; tc = (Y < 0.0f) ? -Z : Z;
+            } else {
+                ma = 2.0f * X; id = (X < 0.0f) ? 1.0f : 0.0f;
+                sc = (X < 0.0f) ? Z : -Z; tc = -Y;
+            }
+            if (s->exec) {
+                switch (op) {
+                    case 0x144u: s->v[vdst] = id; break;
+                    case 0x145u: s->v[vdst] = sc; break;
+                    case 0x146u: s->v[vdst] = tc; break;
+                    case 0x147u: s->v[vdst] = ma; break;
+                    default: ASSERT_TRUE(0); break;
+                }
             }
             continue;
         }
@@ -5024,6 +5073,43 @@ static void test_gl2_compiled_texture_lookups_reach_the_right_set(void) {
                     attr, o);
     ASSERT_NEAR(o[0], 0.0625f, tol);
     ASSERT_NEAR(o[1], 0.1875f, tol);
+
+    /* **A cube lookup hands over three address registers, and the third is the face.**
+     *
+     * The direction picks an axis by its largest component and a face by that component's sign,
+     * and the other two become the place on it. `+X` is face 0 dead centre; `-Z` is face 5, and
+     * a lowering that lost the sign would give 4. The simulator reports the face where a 2D
+     * sample reports the descriptor set, because a wrong face is the failure a cube has that a
+     * 2D does not - and behind a texel carrying only u and v it would be invisible. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform samplerCube tex;\n"
+                    "void main() { gl_FragColor = textureCube(tex, vec3(1.0, 0.0, 0.0)); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, tol);   /* dead centre of the face ... */
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.0f, tol);   /* ... which is +X, face 0 */
+
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform samplerCube tex;\n"
+                    "void main() { gl_FragColor = textureCube(tex, vec3(0.0, 0.0, -1.0)); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[2], 5.0f, tol);   /* -Z, not +Z */
+
+    /* **Off-centre, and not normalised.** A direction is a direction: scaling all three
+     * components leaves the face and the place on it alone, so `(2, 1, 0)` must land exactly
+     * where `(1, 0.5, 0)` does. `tc` is `-y`, so a positive y moves v *down* - and a lowering
+     * that dropped that sign gives 0.625 instead of 0.375. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform samplerCube tex;\n"
+                    "void main() {\n"
+                    "  vec4 a = textureCube(tex, vec3(1.0, 0.5, 0.0));\n"
+                    "  vec4 b = textureCube(tex, vec3(2.0, 1.0, 0.0));\n"
+                    "  gl_FragColor = vec4(a.y, b.y, a.z, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.375f, tol);
+    ASSERT_NEAR(o[1], 0.375f, tol); /* the same, because the direction is the same */
+    ASSERT_NEAR(o[2], 0.0f, tol);
 
     /* **A zero divisor answers zero, not an infinity.** The language calls it undefined and the
      * reference picks zero; the two paths agreeing is worth the compare and the select. A

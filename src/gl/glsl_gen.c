@@ -1220,10 +1220,13 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
      * guard is written here rather than borrowed.
      */
     const GLboolean tex_proj = nm_is(nm, len, "texture2DProj");
-    if (nm_is(nm, len, "texture2D") || tex_proj) {
+    const GLboolean tex_cube = nm_is(nm, len, "textureCube");
+    if (nm_is(nm, len, "texture2D") || tex_proj || tex_cube) {
         if (argc_of(g, first_arg) != 2) {
-            return gen_fail(g, tex_proj ? "texture2DProj takes a sampler and a vec3 or vec4"
-                                        : "texture2D takes a sampler and a vec2",
+            return gen_fail(g, tex_cube ? "textureCube takes a sampler and a vec3"
+                                        : (tex_proj
+                                               ? "texture2DProj takes a sampler and a vec3 or vec4"
+                                               : "texture2D takes a sampler and a vec2"),
                             node);
         }
         const glsl_node_t *sn = &g->ast->nodes[first_arg];
@@ -1233,10 +1236,12 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         }
         uint32_t set = 0u;
         GLboolean found = GL_FALSE;
+        GLboolean samp_cube = GL_FALSE;
         for (int i = 0; i < g->sampler_count; i++) {
             if (g->samplers[i].name_len == sn->length &&
                 nm_is(sn->text, sn->length, g->samplers[i].name)) {
                 set = g->samplers[i].set;
+                samp_cube = g->samplers[i].cube;
                 found = GL_TRUE;
                 break;
             }
@@ -1245,18 +1250,73 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
             return gen_fail(g, "this name is not a sampler the draw path loads descriptors for",
                             node);
         }
+        /* **The lookup and the sampler have to be the same shape.** The descriptor decides how
+         * the hardware walks the memory - a cube's six faces are one array under TYPE 0xb - and
+         * the shader decides how many address registers it hands over. Sampling a cube through
+         * the 2D path would send two registers where three are read, and the third would be
+         * whatever the allocator last left there. */
+        if (samp_cube != tex_cube) {
+            return gen_fail(g, samp_cube ? "a samplerCube is sampled with textureCube"
+                                         : "textureCube takes a samplerCube",
+                            node);
+        }
         const int32_t coord_node = g->ast->nodes[first_arg].sibling;
         const glsl_type_t ct = glsl_type_of(g->sema, coord_node);
-        if (tex_proj ? (ct != GLSL_TYPE_VEC3 && ct != GLSL_TYPE_VEC4)
-                     : (ct != GLSL_TYPE_VEC2)) {
-            return gen_fail(g, tex_proj ? "texture2DProj's coordinate is a vec3 or a vec4"
-                                        : "texture2D's coordinate is a vec2",
+        if (tex_cube ? (ct != GLSL_TYPE_VEC3)
+                     : (tex_proj ? (ct != GLSL_TYPE_VEC3 && ct != GLSL_TYPE_VEC4)
+                                 : (ct != GLSL_TYPE_VEC2))) {
+            return gen_fail(g, tex_cube ? "textureCube's coordinate is a vec3 direction"
+                                        : (tex_proj
+                                               ? "texture2DProj's coordinate is a vec3 or a vec4"
+                                               : "texture2D's coordinate is a vec2"),
                             node);
         }
         glsl_value_t uv = gen_expr(g, coord_node);
         if (is_bad(uv)) return uv;
-        if (uv.count != (tex_proj ? (ct == GLSL_TYPE_VEC4 ? 4 : 3) : 2)) {
+        if (uv.count != (tex_cube ? 3 : (tex_proj ? (ct == GLSL_TYPE_VEC4 ? 4 : 3) : 2))) {
             return gen_fail(g, "this texture coordinate is not the width its type says", node);
+        }
+        /*
+         * **A cube's coordinate is a direction, and the hardware turns it into a face.**
+         *
+         * Four instructions do the selection - `v_cubeid_f32` names the face, `v_cubesc_f32`
+         * and `v_cubetc_f32` give the place on it, `v_cubema_f32` gives twice the major axis -
+         * and the shader divides by that and biases by a half to land in [0, 1]. The sampler
+         * then takes three address registers: u, v and the face. That is the sequence ACO
+         * emits, and `tools/shader/tex-cube.s` is the assembled copy these words come from.
+         *
+         * **The direction is not normalised and must not be**: scaling all three components
+         * leaves the face and the place on it alone, which is exactly why a direction works as
+         * a coordinate. `|ma|` is `max(ma, -ma)` rather than the VOP3 absolute-value modifier,
+         * so no encoding is needed beyond the four above.
+         */
+        if (tex_cube) {
+            glsl_value_t half = gen_const(g, 0.5, node);
+            if (is_bad(half)) return half;
+            glsl_value_t t = gen_alloc(g, 4, node);
+            if (is_bad(t)) return t;
+            const uint32_t sc = t.base + 0u, tc = t.base + 1u;
+            const uint32_t ma = t.base + 2u, neg = t.base + 3u;
+            const uint32_t X = GLSL_VOP3_VGPR(uv.base + 0u);
+            const uint32_t Y = GLSL_VOP3_VGPR(uv.base + 1u);
+            const uint32_t Z = GLSL_VOP3_VGPR(uv.base + 2u);
+            /* The three address registers, allocated as one run because `image_sample` reads
+             * them consecutively from `vaddr`. */
+            glsl_value_t addr = gen_alloc(g, 3, node);
+            if (is_bad(addr)) return addr;
+            glsl_emit_vop3(g->code, GLSL_VOP3_CUBEID_F32, addr.base + 2u, X, Y, Z);
+            glsl_emit_vop3(g->code, GLSL_VOP3_CUBESC_F32, sc, X, Y, Z);
+            glsl_emit_vop3(g->code, GLSL_VOP3_CUBETC_F32, tc, X, Y, Z);
+            glsl_emit_vop3(g->code, GLSL_VOP3_CUBEMA_F32, ma, X, Y, Z);
+            glsl_emit_neg_f32(g->code, neg, ma);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, ma, neg, ma);   /* |ma| */
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, ma, ma);
+            glsl_emit_mul_f32(g->code, ma, half.base, ma);                /* 1 / (2 |ma|) */
+            glsl_emit_mov(g->code, addr.base + 0u, half.base);
+            glsl_emit_fmac_f32(g->code, addr.base + 0u, sc, ma);          /* u */
+            glsl_emit_mov(g->code, addr.base + 1u, half.base);
+            glsl_emit_fmac_f32(g->code, addr.base + 1u, tc, ma);          /* v */
+            uv = addr;
         }
         if (tex_proj) {
             const uint32_t q = uv.base + (uint32_t)(uv.count - 1);
@@ -1286,8 +1346,9 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         glsl_value_t out = gen_alloc(g, 4, node);
         if (is_bad(out)) return out;
         const uint32_t srsrc = GLSL_GEN_TEX_SGPR_BASE + set * GLSL_GEN_TEX_SGPR_STRIDE;
-        glsl_emit_image_sample(g->code, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_2D, out.base, uv.base,
-                               srsrc, srsrc + 8u);
+        glsl_emit_image_sample(g->code, GLSL_MIMG_SAMPLE,
+                               tex_cube ? GLSL_IMG_DIM_CUBE : GLSL_IMG_DIM_2D, out.base,
+                               uv.base, srsrc, srsrc + 8u);
         /* **A sample is not in order with what follows it.** Without this the next instruction
          * reads the destination before the texture unit has written it, which is the same
          * hazard `s_waitcnt lgkmcnt(0)` covers for the uniform block - and obSCEne measured
@@ -1296,10 +1357,10 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         return out;
     }
     if (nm_prefix(nm, len, "texture") || nm_prefix(nm, len, "shadow")) {
-        return gen_fail(g, "only texture2D and texture2DProj are generated; the cube, volume "
-                           "and shadow lookups each need something this has not measured - a "
-                           "cube's coordinate is a direction the hardware resolves to a face, "
-                           "a volume's is three components against a 3D descriptor, and a "
+        return gen_fail(g, "texture2D, texture2DProj and textureCube are generated; the volume "
+                           "and shadow lookups each need something this has not measured - "
+                           "a volume's coordinate is three components against a 3D descriptor, "
+                           "and a "
                            "shadow's compares rather than returns", node);
     }
 
@@ -3364,7 +3425,8 @@ void glsl_gen_reserve(glsl_gen_t *g, uint32_t first) {
     if (g->next_vgpr > g->high_water) g->high_water = g->next_vgpr;
 }
 
-GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set) {
+GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set,
+                                   GLboolean cube) {
     if (!g) return GL_FALSE;
     if (g->sampler_count >= GLSL_GEN_MAX_TEX_SETS) {
         (void)gen_fail(g, "more samplers than the draw path carries descriptor sets for",
@@ -3374,13 +3436,15 @@ GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, 
     g->samplers[g->sampler_count].name = name;
     g->samplers[g->sampler_count].name_len = len;
     g->samplers[g->sampler_count].set = set;
+    g->samplers[g->sampler_count].cube = cube;
     g->sampler_count++;
     /* **And into the semantic stage, which is what types the lookup.** `texture2D(s, uv)` is
      * resolved by rule from its argument types, so a `s` the symbol table has never heard of
      * makes the whole call `GLSL_TYPE_ERROR` - and then `vec3(texture2D(...))` is refused for
      * having an argument that is not a float or a vector, which is a true sentence about a
      * false premise and sends the reader to the wrong place entirely. */
-    if (!glsl_declare(g->sema, name, len, GLSL_TYPE_SAMPLER2D, GL_FALSE)) {
+    if (!glsl_declare(g->sema, name, len,
+                      cube ? GLSL_TYPE_SAMPLERCUBE : GLSL_TYPE_SAMPLER2D, GL_FALSE)) {
         g->sema->error = (const char *)0; /* already declared is the caller having done it */
     }
     /* **Sampling is what puts the shader in whole-quad mode**, and it is decided here rather

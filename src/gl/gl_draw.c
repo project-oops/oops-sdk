@@ -2148,14 +2148,28 @@ static gl_texture_object_t *gl_gl2_sampler_texture(gl_context_t *ctx,
      * as the zeroes the block was cleared to, and gl2-probe's `texture-sampler` and
      * `sampler-unit` both sampled 0x00000000 over a full quad.
      *
-     * Only `sampler2D` is generated, so the target is 2D. Nothing bound is the default texture,
-     * not no texture - GL's texture 0 is a real object - and an incomplete one still samples as
-     * none, which is the half of `gl_unit_texture_id` that does apply. */
+     * **The uniform's own type is what picks the target**, since 2026-09-23: a `samplerCube`
+     * takes the unit's cube binding and a `sampler2D` its 2D one, and they are different
+     * bindings on the same unit. Nothing bound is the default texture, not no texture - GL's
+     * texture 0 is a real object - and an incomplete one still samples as none, which is the
+     * half of `gl_unit_texture_id` that does apply. */
     const gl_tex_unit_t *tu = &ctx->tex_unit[(GLuint)unit_f];
-    const GLuint id = tu->bound_texture_2d ? tu->bound_texture_2d : OOPS_GL_DEFAULT_TEXTURE_2D;
+    const GLboolean want_cube = (GLboolean)(prog->uniforms[ui].type == GL_SAMPLER_CUBE);
+    const GLuint id = want_cube
+                          ? (tu->bound_texture_cube ? tu->bound_texture_cube
+                                                    : OOPS_GL_DEFAULT_TEXTURE_CUBE)
+                          : (tu->bound_texture_2d ? tu->bound_texture_2d
+                                                  : OOPS_GL_DEFAULT_TEXTURE_2D);
     {
         const gl_texture_object_t *probe = gl_lookup_texture(ctx, id);
         if (!probe || !gl_texture_complete(probe)) return (gl_texture_object_t *)0;
+        /* **A cube whose six faces have not all arrived has no array to sample.** The
+         * fixed-function path draws such a texture untextured rather than reading a descriptor
+         * that points at nothing; the same applies here, and a shader that samples it gets
+         * whatever the descriptors last held - which is what `NULL` from here means. */
+        if (want_cube && probe->cube_hw_dim <= 0 && !probe->cube) {
+            return (gl_texture_object_t *)0;
+        }
     }
     for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
         if (ctx->textures[ti].used && ctx->textures[ti].id == id) return &ctx->textures[ti];
