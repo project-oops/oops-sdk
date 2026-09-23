@@ -2058,20 +2058,52 @@ static GLboolean gl_ps_patch_tex_env_body(gl_context_t *ctx);
  * answer has to be remembered at every one of them; a wrapper cannot miss one. */
 GLboolean gl_ps_patch_tex_env(gl_context_t *ctx) {
     if (!ctx || !ctx->gpu_payload) return GL_TRUE;
-    __typeof__(ctx->ps_env_sig) sig;
-    memset(&sig, 0, sizeof(sig));
-    sig.base_unit = gl_hw_base_unit(ctx);
+
+    /* **Compared in place, and the texture's name is not one of the inputs.**
+     *
+     * The first version of this guard built a signature struct and compared it whole, and it
+     * cost 16ms a frame more than it saved - measured, 34ms of patching became 50ms. Two
+     * reasons, both worth writing down because they are the difference between a cache and a
+     * tax:
+     *
+     * - **It keyed on the texture name.** The body reads the name only to reach
+     *   `gl_tex_sample_format`, so two textures of the same base format assemble identical
+     *   words - and a program that switches texture per material, which is every program,
+     *   changed the key on nearly every draw. The guard almost never hit and the rebuild
+     *   happened anyway, with the key-building added on top.
+     * - **It copied to compare.** Two `gl_combine_t` structs and a `memset` of the whole
+     *   signature, on the path whose whole purpose was to be cheaper than the work it skips.
+     *
+     * So: the stored fields are compared where they lie, short-circuiting on the first
+     * difference, and written only when one has actually moved. */
+    const GLuint base_unit = gl_hw_base_unit(ctx);
+    GLenum fmt[2];
+    for (GLuint u = 0u; u < 2u; u++) {
+        fmt[u] = (u < OOPS_GL_MAX_TEXTURE_UNITS)
+                     ? gl_tex_sample_format(gl_lookup_texture(ctx, gl_unit_texture_id(ctx, u)))
+                     : (GLenum)0;
+    }
+    GLboolean same = ctx->ps_env_sig_valid;
+    if (same && ctx->ps_env_sig.base_unit != base_unit) same = GL_FALSE;
+    for (GLuint u = 0u; same && u < 2u && u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        const gl_tex_unit_t *tu = &ctx->tex_unit[u];
+        if (ctx->ps_env_sig.fmt[u] != fmt[u] ||
+            ctx->ps_env_sig.mode[u] != tu->tex_env_mode ||
+            memcmp(&ctx->ps_env_sig.cb[u], &tu->combine, sizeof(tu->combine)) != 0 ||
+            memcmp(ctx->ps_env_sig.col[u], tu->tex_env_color, sizeof(tu->tex_env_color)) != 0) {
+            same = GL_FALSE;
+        }
+    }
+    if (same) return ctx->ps_env_sig_result;
+
+    ctx->ps_env_sig.base_unit = base_unit;
     for (GLuint u = 0u; u < 2u && u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
-        sig.tex[u] = gl_unit_texture_id(ctx, u);
-        sig.fmt[u] = gl_tex_sample_format(gl_lookup_texture(ctx, sig.tex[u]));
-        sig.mode[u] = ctx->tex_unit[u].tex_env_mode;
-        sig.cb[u] = ctx->tex_unit[u].combine;
-        for (int k = 0; k < 4; k++) sig.col[u][k] = ctx->tex_unit[u].tex_env_color[k];
+        const gl_tex_unit_t *tu = &ctx->tex_unit[u];
+        ctx->ps_env_sig.fmt[u] = fmt[u];
+        ctx->ps_env_sig.mode[u] = tu->tex_env_mode;
+        ctx->ps_env_sig.cb[u] = tu->combine;
+        memcpy(ctx->ps_env_sig.col[u], tu->tex_env_color, sizeof(tu->tex_env_color));
     }
-    if (ctx->ps_env_sig_valid && memcmp(&sig, &ctx->ps_env_sig, sizeof(sig)) == 0) {
-        return ctx->ps_env_sig_result;
-    }
-    ctx->ps_env_sig = sig;
     ctx->ps_env_sig_valid = GL_TRUE;
     ctx->ps_env_sig_result = gl_ps_patch_tex_env_body(ctx);
     return ctx->ps_env_sig_result;

@@ -1401,7 +1401,10 @@ typedef struct gl_context {
      * removes the question. */
     struct {
         GLuint base_unit;
-        GLuint tex[2];
+        /* **Not the texture names.** The body reads a name only to reach its sample format, so
+           two textures of one base format assemble the same words - and keying on the name made
+           this guard miss on nearly every draw of a program that switches texture per material,
+           which cost 16ms a frame rather than saving any. */
         GLenum fmt[2];
         GLenum mode[2];
         gl_combine_t cb[2];
