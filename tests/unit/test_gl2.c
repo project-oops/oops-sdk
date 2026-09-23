@@ -15,6 +15,7 @@
 #include "oops/display.h"
 #include "src/gl/gl_internal.h"
 #include "src/gl/glsl_internal.h"
+#include "oops/math.h"
 #include "tests/test_common.h"
 #include <math.h>
 
@@ -5084,29 +5085,118 @@ static void test_gl2_compiled_texture_lookups_reach_the_right_set(void) {
     glContextDestroy(ctx);
 }
 
-static void test_gl2_the_back_end_refuses_by_name(void) {
-    void *ctx = gl2_context();
-    gl_context_t *c = (gl_context_t *)ctx;
-    uint32_t words[256];
-    uint32_t count = 0u, vgprs = 0u;
+/*
+ * **The inverse trigonometric functions, measured against the reference rather than trusted.**
+ *
+ * These were refused because "a polynomial of unmeasured accuracy is not generated". The
+ * objection was to a polynomial chosen *here*; the one now emitted is the one `oops_atan2f`
+ * already ships, and the software rasteriser answers every `atan` in this SDK through that
+ * function. So the expected values below are computed by calling it - not by a second
+ * approximation that would have to be right for this test to mean anything.
+ *
+ * **The tolerance is 1e-5 and it is the reciprocal's.** There is no divide instruction on this
+ * part, so `min/max` is `v_rcp_f32` and a multiply, good to one unit in the last place where
+ * the reference does a true divide. Everything else - the coefficients, the reduction, the
+ * order of the quadrant fixups - is identical, so this is the whole of the difference.
+ */
+static float ref_asin(float x) {
+    if (x <= -1.0f) return -1.57079632679489661923f;
+    if (x >= 1.0f) return 1.57079632679489661923f;
+    return oops_atan2f(x, oops_sqrtf(1.0f - x * x));
+}
 
-    /* **The refusals say which function stopped the shader.** A back end that approximated
-     * `atan` with a polynomial nobody measured would compile, run, and be wrong in a way no
-     * host test could see - so it refuses, and the message names the thing to go and measure. */
-    static const char *const REFUSED[] = {
-        "void main() { gl_FragColor = vec4(atan(1.0), 0.0, 0.0, 1.0); }\n",
-        "void main() { gl_FragColor = vec4(asin(0.5), 0.0, 0.0, 1.0); }\n",
-        "void main() { gl_FragColor = vec4(acos(0.5), 0.0, 0.0, 1.0); }\n",
-        "void main() { gl_FragColor = vec4(refract(vec3(1.0), vec3(0.0, 1.0, 0.0), 0.5), 1.0); }\n",
-    };
-    for (size_t i = 0; i < sizeof(REFUSED) / sizeof(REFUSED[0]); i++) {
-        char log[256] = {0};
-        const GLuint prog = linked_program(VS_ONE_VARYING, REFUSED[i]);
-        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, prog), words, 256u, &count,
-                                              &vgprs, NULL, NULL, log, sizeof(log)),
-                  GL_FALSE);
-        ASSERT_TRUE(log[0] != '\0');
+static void test_gl2_the_inverse_trig_agrees_with_the_reference(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float tol = 1e-5f;
+
+    /* **Across the reduction's seam and both sides of it.** `|y| > |x|` swaps which of the two
+     * is the numerator, so 1.0 is the value that has to come out right from either direction,
+     * and the signs cover all four quadrant fixups. */
+    static const float XS[] = {-8.0f,  -1.5f, -1.0f, -0.6f, -0.25f, 0.0f,
+                               0.25f,  0.6f,  1.0f,  1.5f,  8.0f};
+    for (size_t i = 0; i < sizeof(XS) / sizeof(XS[0]); i++) {
+        const float attr[4][4] = {{XS[i], 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        compile_and_run(ctx, VS_ONE_VARYING,
+                        "varying vec4 vin;\n"
+                        "void main() { gl_FragColor = vec4(atan(vin.x), 0.0, 0.0, 1.0); }\n",
+                        attr, o);
+        ASSERT_NEAR(o[0], oops_atan2f(XS[i], 1.0f), tol);
     }
+
+    /* `asin` and `acos`, including **outside the domain**: the language and the reference both
+     * answer the endpoint, where an unclamped `sqrt(1 - x*x)` is not a number. */
+    for (size_t i = 0; i < sizeof(XS) / sizeof(XS[0]); i++) {
+        const float attr[4][4] = {{XS[i], 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        compile_and_run(ctx, VS_ONE_VARYING,
+                        "varying vec4 vin;\n"
+                        "void main() {\n"
+                        "  gl_FragColor = vec4(asin(vin.x), acos(vin.x), 0.0, 1.0);\n"
+                        "}\n",
+                        attr, o);
+        ASSERT_NEAR(o[0], ref_asin(XS[i]), tol);
+        ASSERT_NEAR(o[1], 1.57079632679489661923f - ref_asin(XS[i]), tol);
+    }
+
+    /* **Two-argument `atan`, which is the one that needs the quadrants.** `atan(y, x)` and
+     * `atan(y/x)` differ everywhere `x` is negative, so a lowering that quietly used the
+     * one-argument form would pass the sweep above and fail here. */
+    static const float YS2[] = {1.0f, 1.0f, -1.0f, -1.0f, 0.0f,  1.0f, 0.0f};
+    static const float XS2[] = {1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 0.0f};
+    for (size_t i = 0; i < sizeof(YS2) / sizeof(YS2[0]); i++) {
+        const float attr[4][4] = {
+            {YS2[i], XS2[i], 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        compile_and_run(ctx, VS_ONE_VARYING,
+                        "varying vec4 vin;\n"
+                        "void main() {\n"
+                        "  gl_FragColor = vec4(atan(vin.x, vin.y), 0.0, 0.0, 1.0);\n"
+                        "}\n",
+                        attr, o);
+        ASSERT_NEAR(o[0], oops_atan2f(YS2[i], XS2[i]), tol);
+    }
+
+    glContextDestroy(ctx);
+}
+
+/* **`refract`, where the interesting half is the ray that does not refract at all.**
+ *
+ * Total internal reflection returns the zero vector - the specification's own wording, and
+ * something a shader leans on to darken a grazing angle. The lowering computes both arms and
+ * selects, so the square root of a negative is produced and then discarded: a `v_cndmask` moves
+ * a register rather than evaluating anything, and the NaN goes with the arm it belongs to.
+ */
+static void test_gl2_refract_returns_zero_under_total_internal_reflection(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float tol = 1e-6f;
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* Straight down onto a flat surface with eta 0.5: d = -1, k = 1 - 0.25*(1-1) = 1, so the
+     * ray bends and the answer is `0.5*I - (0.5*(-1) + 1)*N` = (0, -1, 0) for I = (0,-1,0). */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  vec3 r = refract(vec3(0.0, -1.0, 0.0), vec3(0.0, 1.0, 0.0), 0.5);\n"
+                    "  gl_FragColor = vec4(r * 0.5 + 0.5, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, tol);
+    ASSERT_NEAR(o[1], 0.0f, tol);   /* -1 encoded as 0 */
+    ASSERT_NEAR(o[2], 0.5f, tol);
+
+    /* **A grazing ray with eta 2.0, which is total internal reflection**: d is near zero, so
+     * `k = 1 - 4*(1 - d*d)` is negative and the whole vector is zero. Encoded the same way, so
+     * zero comes back as 0.5 in every channel - and a lowering that let the NaN through would
+     * give something that is not 0.5 and not anything else either. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  vec3 i = normalize(vec3(1.0, -0.05, 0.0));\n"
+                    "  vec3 r = refract(i, vec3(0.0, 1.0, 0.0), 2.0);\n"
+                    "  gl_FragColor = vec4(r * 0.5 + 0.5, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.5f, tol);
 
     glContextDestroy(ctx);
 }
@@ -5174,7 +5264,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_globals_are_in_scope);
     RUN_TEST(test_gl2_compiled_texture_lookups_reach_the_right_set);
     RUN_TEST(test_gl2_a_realistic_shader_compiles_and_computes);
-    RUN_TEST(test_gl2_the_back_end_refuses_by_name);
+    RUN_TEST(test_gl2_the_inverse_trig_agrees_with_the_reference);
+    RUN_TEST(test_gl2_refract_returns_zero_under_total_internal_reflection);
     RUN_TEST(test_gl2_separate_stencil_and_blend_state);
     RUN_TEST(test_gl2_separate_blend_equation_blends);
     RUN_TEST(test_gl2_draw_buffers);

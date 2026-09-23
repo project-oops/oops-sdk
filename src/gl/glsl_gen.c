@@ -1199,19 +1199,6 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
     const char *const nm = callee->text;
     const size_t len = callee->length;
 
-    /* The names that are real GLSL and have no instruction here. Named one at a time, because
-     * "this built-in has no instruction selection" over a call to `atan` reads as a gap in the
-     * compiler, which is what it is - and the alternative, a polynomial of somebody's choosing,
-     * would read as working. */
-    if (nm_is(nm, len, "asin") || nm_is(nm, len, "acos") || nm_is(nm, len, "atan")) {
-        return gen_fail(g, "the inverse trigonometric functions have no instruction on this "
-                           "part, and a polynomial of unmeasured accuracy is not generated in "
-                           "their place", node);
-    }
-    if (nm_is(nm, len, "refract")) {
-        return gen_fail(g, "refract needs a square root of a value that may be negative and a "
-                           "select on it, which this has no lowering for yet", node);
-    }
     /* `texture2D` is generated; the rest of section 8.7 is not. Each of the others needs
      * something this has no measurement for - a cube's coordinate is a direction the hardware
      * resolves to a face, a volume's is three components, a `Proj` form divides by its last,
@@ -1730,6 +1717,210 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
     if (nm_is(nm, len, "dot")) {
         if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
         return gen_dot(g, arg[0], arg[1], node);
+    }
+
+    /*
+     * **`atan`, and `asin` and `acos` built on it - the same polynomial the reference uses.**
+     *
+     * These were refused, and the reason given was that the only lowering is "a polynomial
+     * whose accuracy nobody here has measured". That was true of a polynomial chosen here and
+     * false of the one already shipping: `oops_atan2f` in `src/math/math.c` reduces to [0, 1]
+     * and evaluates a minimax cubic in `a*a`, and the software rasteriser answers every `atan`
+     * in this SDK through it. Emitting the *same* coefficients and the same reduction is not an
+     * approximation anybody has to take on trust - it is the two paths computing one function,
+     * the way `m * m` matches `glsl_exec.c`'s loop rather than merely agreeing with it.
+     *
+     * The reduction, from that function verbatim:
+     *
+     *     a = min(|y|, |x|) / max(|y|, |x|)
+     *     r = ((-0.0464964749 s + 0.15931422) s - 0.327622764) s a + a,   s = a*a
+     *     if (|y| > |x|) r = pi/2 - r
+     *     if (x < 0)     r = pi - r
+     *     if (y < 0)     r = -r
+     *
+     * **The quadrant fixups are selects, not branches**, which is what makes this one straight
+     * run of instructions per component. And `x == 0` needs no case of its own: it falls out of
+     * the reduction as `a = 0, r = 0`, then `|y| > |x|` turns it into pi/2 and the sign of `y`
+     * finishes it - exactly what the reference's early return spells out. Only `x` and `y` both
+     * zero needs help, because the divide is 0/0; the guard below answers 0, as it does.
+     *
+     * Where the two paths can still differ is that divide: there is no divide instruction here,
+     * so `min/max` is a reciprocal and a multiply, good to one unit in the last place. The
+     * tests allow 1e-5 for it and say so.
+     */
+    if (nm_is(nm, len, "atan") || nm_is(nm, len, "asin") || nm_is(nm, len, "acos")) {
+        const GLboolean is_atan = nm_is(nm, len, "atan");
+        if (is_atan ? (argc != 1 && argc != 2) : (argc != 1)) {
+            return gen_fail(g, "wrong number of arguments", node);
+        }
+        const int n = arg[0].count;
+
+        /* `asin(x)` is `atan2(x, sqrt(1 - x*x))` and `acos(x)` is `pi/2 - asin(x)`, which is
+         * how `glsl_exec.c` defines both. The argument is clamped to [-1, 1] first: outside it
+         * `1 - x*x` is negative and its square root is not a number, where the language and the
+         * reference both answer the endpoint. */
+        glsl_value_t y = arg[0];
+        glsl_value_t x;
+        glsl_value_t k_one = gen_const(g, 1.0, node);
+        if (is_bad(k_one)) return k_one;
+        glsl_value_t k_neg1 = gen_const(g, -1.0, node);
+        if (is_bad(k_neg1)) return k_neg1;
+        if (is_atan) {
+            if (argc == 2) {
+                if (arg[1].count != n) {
+                    return gen_fail(g, "atan's two arguments have to be the same width", node);
+                }
+                x = arg[1];
+            } else {
+                /* One-argument `atan(y)` is `atan2(y, 1)`, which is what the reference does. */
+                x = gen_alloc(g, n, node);
+                if (is_bad(x)) return x;
+                for (int c = 0; c < n; c++) glsl_emit_mov(g->code, x.base + (uint32_t)c,
+                                                          k_one.base);
+            }
+        } else {
+            glsl_value_t cl = gen_alloc(g, n, node);
+            if (is_bad(cl)) return cl;
+            x = gen_alloc(g, n, node);
+            if (is_bad(x)) return x;
+            for (int c = 0; c < n; c++) {
+                const uint32_t d = cl.base + (uint32_t)c, q = x.base + (uint32_t)c;
+                glsl_emit_vop2_op(g->code, GLSL_VOP2_MIN_F32, d, comp_of(arg[0], c),
+                                  k_one.base);
+                glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, d, d, k_neg1.base);
+                /* 1 - x*x, which the clamp has just made non-negative. */
+                glsl_emit_mul_f32(g->code, q, d, d);
+                glsl_emit_sub_f32(g->code, q, k_one.base, q);
+                glsl_emit_vop1_op(g->code, GLSL_VOP1_SQRT_F32, q, q);
+            }
+            y = cl;
+        }
+
+        glsl_value_t c3 = gen_const(g, -0.0464964749, node);
+        if (is_bad(c3)) return c3;
+        glsl_value_t c2 = gen_const(g, 0.15931422, node);
+        if (is_bad(c2)) return c2;
+        glsl_value_t c1 = gen_const(g, -0.327622764, node);
+        if (is_bad(c1)) return c1;
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero)) return zero;
+        glsl_value_t hpi = gen_const(g, 1.57079632679489661923, node);
+        if (is_bad(hpi)) return hpi;
+        glsl_value_t pi = gen_const(g, 3.14159265358979323846, node);
+        if (is_bad(pi)) return pi;
+
+        glsl_value_t out = gen_alloc(g, n, node);
+        if (is_bad(out)) return out;
+        for (int c = 0; c < n; c++) {
+            const uint32_t mark = gen_mark(g);
+            glsl_value_t t = gen_alloc(g, 8, node);
+            if (is_bad(t)) return t;
+            const uint32_t ax = t.base + 0u, ay = t.base + 1u, mn = t.base + 2u;
+            const uint32_t mx = t.base + 3u, a = t.base + 4u, s = t.base + 5u;
+            const uint32_t p = t.base + 6u, u = t.base + 7u;
+            const uint32_t X = comp_of(x, c), Y = comp_of(y, c);
+            const uint32_t r = out.base + (uint32_t)c;
+
+            glsl_emit_neg_f32(g->code, ax, X);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, ax, ax, X);
+            glsl_emit_neg_f32(g->code, ay, Y);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, ay, ay, Y);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MIN_F32, mn, ax, ay);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, mx, ax, ay);
+            /* **Both zero is the one case the reduction cannot do**: the reciprocal of zero is
+             * an infinity and `0 * inf` is not a number. The reference answers 0 there. */
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, a, mx);
+            glsl_emit_mul_f32(g->code, a, mn, a);
+            glsl_emit_cmp(g->code, GLSL_VOPC_NEQ_F32, mx, zero.base);
+            glsl_emit_cndmask(g->code, a, zero.base, a);
+
+            glsl_emit_mul_f32(g->code, s, a, a);
+            glsl_emit_mov(g->code, p, c2.base);
+            glsl_emit_fmac_f32(g->code, p, c3.base, s);   /* c2 + c3 s */
+            glsl_emit_mov(g->code, u, c1.base);
+            glsl_emit_fmac_f32(g->code, u, p, s);         /* c1 + (c2 + c3 s) s */
+            glsl_emit_mul_f32(g->code, u, u, s);          /* ( ... ) s */
+            glsl_emit_mov(g->code, r, a);
+            glsl_emit_fmac_f32(g->code, r, u, a);         /* a + ( ... ) s a */
+
+            /* `|y| > |x|` reflects about pi/4, `x < 0` about pi/2, `y < 0` about zero - in that
+             * order, because each is defined on the result of the one before it. */
+            glsl_emit_sub_f32(g->code, p, hpi.base, r);
+            glsl_emit_cmp(g->code, GLSL_VOPC_GT_F32, ay, ax);
+            glsl_emit_cndmask(g->code, r, r, p);
+            glsl_emit_sub_f32(g->code, p, pi.base, r);
+            glsl_emit_cmp(g->code, GLSL_VOPC_LT_F32, X, zero.base);
+            glsl_emit_cndmask(g->code, r, r, p);
+            glsl_emit_neg_f32(g->code, p, r);
+            glsl_emit_cmp(g->code, GLSL_VOPC_LT_F32, Y, zero.base);
+            glsl_emit_cndmask(g->code, r, r, p);
+            gen_release(g, mark);
+        }
+        if (nm_is(nm, len, "acos")) {
+            for (int c = 0; c < n; c++) {
+                glsl_emit_sub_f32(g->code, out.base + (uint32_t)c, hpi.base,
+                                  out.base + (uint32_t)c);
+            }
+        }
+        return out;
+    }
+
+    /*
+     * **`refract`, which is the specification's formula and a select for the rest.**
+     *
+     *     k = 1 - eta^2 (1 - dot(N, I)^2)
+     *     k < 0  ->  the zero vector          (total internal reflection)
+     *     else   ->  eta I - (eta dot(N, I) + sqrt(k)) N
+     *
+     * It was refused for needing "a square root of a value that may be negative", and that is
+     * the whole difficulty - but it is a select and not a branch, and the square root of a
+     * negative only has to be *not used* rather than not taken. `sqrt(k)` for negative `k` is
+     * not a number, and a `v_cndmask` that discards it discards the NaN with it: the select
+     * moves a register, it does not evaluate anything. So both arms are computed and the sign
+     * of `k` picks, which is what this back end does everywhere else.
+     */
+    if (nm_is(nm, len, "refract")) {
+        if (argc != 3) return gen_fail(g, "refract takes I, N and eta", node);
+        const int n = arg[0].count;
+        if (arg[1].count != n) {
+            return gen_fail(g, "refract's I and N have to be the same width", node);
+        }
+        if (arg[2].count != 1) return gen_fail(g, "refract's eta is a scalar", node);
+        glsl_value_t d = gen_dot(g, arg[1], arg[0], node);   /* dot(N, I) */
+        if (is_bad(d)) return d;
+        glsl_value_t one = gen_const(g, 1.0, node);
+        if (is_bad(one)) return one;
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero)) return zero;
+        glsl_value_t t = gen_alloc(g, 3, node);
+        if (is_bad(t)) return t;
+        const uint32_t e2 = t.base + 0u, k = t.base + 1u, sc = t.base + 2u;
+        const uint32_t eta = arg[2].base;
+        glsl_emit_mul_f32(g->code, e2, eta, eta);            /* eta^2 */
+        glsl_emit_mul_f32(g->code, k, d.base, d.base);       /* d^2 */
+        glsl_emit_sub_f32(g->code, k, one.base, k);          /* 1 - d^2 */
+        glsl_emit_mul_f32(g->code, k, e2, k);                /* eta^2 (1 - d^2) */
+        glsl_emit_sub_f32(g->code, k, one.base, k);          /* k */
+        glsl_emit_vop1_op(g->code, GLSL_VOP1_SQRT_F32, sc, k);
+        glsl_emit_fmac_f32(g->code, sc, eta, d.base);        /* sqrt(k) + eta d */
+        glsl_value_t out = gen_alloc(g, n, node);
+        if (is_bad(out)) return out;
+        /* `k >= 0` once, outside the loop: the comparison writes `vcc` and nothing between the
+         * components disturbs it, so every component selects on the same answer - which it must,
+         * because total internal reflection is a property of the ray and not of a component. */
+        glsl_emit_cmp(g->code, GLSL_VOPC_GE_F32, k, zero.base);
+        for (int c = 0; c < n; c++) {
+            const uint32_t mark = gen_mark(g);
+            glsl_value_t v = gen_alloc(g, 1, node);
+            if (is_bad(v)) return v;
+            glsl_emit_mul_f32(g->code, v.base, eta, comp_of(arg[0], c));   /* eta I */
+            glsl_emit_neg_f32(g->code, out.base + (uint32_t)c, sc);
+            glsl_emit_fmac_f32(g->code, v.base, out.base + (uint32_t)c,
+                               comp_of(arg[1], c));                        /* - ( ... ) N */
+            glsl_emit_cndmask(g->code, out.base + (uint32_t)c, zero.base, v.base);
+            gen_release(g, mark);
+        }
+        return out;
     }
 
     /*

@@ -87,8 +87,16 @@ GLSL requires every path to return and the trailing one is what catches the lane
 return took. A `return` in `main` is refused: there is no call to hand the lanes back at, and
 the export that retires the wave runs after the body.
 
-What it still cannot: the projective, cube, volume and shadow texture lookups, and the inverse
-trigonometric functions, where the only lowering is a polynomial of somebody's choosing. A
+**`asin`, `acos` and `atan` are generated, and whose polynomial it is matters.** There is no
+instruction for them on this part; what there is, is `oops_atan2f` in this SDK's own maths
+library, which every `atan` on the software path already answers through. The compiled path
+emits that function's coefficients and that function's range reduction, so the two are computing
+one function rather than two that agree - the same discipline as `m * m` matching the
+reference's loop. They differ only by the reciprocal: there is no divide instruction, so one
+true divide becomes `v_rcp_f32` and a multiply, and the tests hold the pair to 1e-5 for it.
+`refract` is generated too, zero vector and all.
+
+What it still cannot: the cube, volume and shadow texture lookups. A
 shader the back end will not take is refused with a sentence naming what is missing, and still
 runs on the software path - the draw is what fails, with `GL_INVALID_OPERATION`, rather than
 quietly drawing something else. A GL 1.x port is unaffected: it never binds a program.
@@ -204,10 +212,8 @@ part, so the quotient is computed from a reciprocal and then corrected, which is
 | An array index the shader computes at run time | An array is a run of registers and a register file cannot be indexed by a running value. **An unrolled loop's counter counts as known**, so `for (int i = 0; i < 4; i++) total += w[i];` is fine - it is a uniform or a varying used as an index that is not |
 | Whole-array assignment, or an array as a value | Elements, one at a time. GLSL 1.10 has no array-valued expressions either |
 | A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
-| `asin`, `acos`, `atan`, `refract` | No instruction on this part, and a polynomial of unmeasured accuracy is not written in their place. Each is refused **by name**, so you are told which one |
 | `textureCube`, `texture3D`, the shadow forms | `texture2D` and `texture2DProj` are generated - the second is the first with a divide in front, which is arithmetic that was already here. The others are each a different lookup rather than the same one with a flag: a cube's coordinate is a direction the hardware resolves to a face, a volume's is three components against a descriptor of its own, and a shadow's compares rather than returns |
 | A matrix with a vector that is not its width | `m * v`, `v * m` and `m * m` are generated at every square size, as are a matrix with a scalar and two matrices componentwise. `m4 * v3` is none of those, and treating it as componentwise would compute something that is not a product at all |
-| `inverse`, `determinant` | `matrixCompMult`, `transpose` and `outerProduct` **are** generated. These two are not: both are real arithmetic rather than a shuffle, and neither has been written and measured here yet |
 | More than 16 floats of varyings, more than 32 floats of uniforms, more than two samplers | Each is refused with its own number in the message, so you know what to cut to |
 
 Everything above is refused **by name with a line and column**, not as a general failure. If a

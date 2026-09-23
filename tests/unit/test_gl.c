@@ -13578,12 +13578,15 @@ static void test_glsl_gen_refuses_what_it_cannot_encode(void) {
   glsl_gen_of("m4*v3");
   ASSERT_TRUE(g_glsl_gen.error != NULL);
 
-  /* **A built-in with no instruction is refused by name.** `sin` is generated - a multiply and
-   * `v_sin_f32` - and `atan` is not, because there is no instruction for it and the only
-   * lowering is a polynomial whose accuracy nobody here has measured. A generator that split
-   * that difference would be one whose output is wrong on hardware and right on the host. */
+  /* **`atan` is generated now, and the reason is whose polynomial it is.** There is still no
+   * instruction for it; what changed is that the coefficients are not somebody's choice made
+   * here but the ones `oops_atan2f` already ships, which is what the software rasteriser answers
+   * every `atan` in this SDK through. The two paths compute one function rather than two that
+   * agree - see the lowering in `glsl_gen.c`. */
   glsl_gen_of("atan(f)");
-  ASSERT_TRUE(g_glsl_gen.error != NULL);
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
+  glsl_gen_of("asin(f)");
+  ASSERT_TRUE(g_glsl_gen.error == NULL);
 
   /* A texture lookup needs descriptors handed to the shader, which the compiled path has not
    * wired up. Refused on the name before the arguments are looked at, which is why this needs

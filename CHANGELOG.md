@@ -96,6 +96,34 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **`asin`, `acos`, `atan` and `refract`** (2026-09-23), which were refused on the grounds that
+  "a polynomial of unmeasured accuracy is not generated in their place".
+
+  **That objection was to a polynomial chosen here, and the one now emitted is not.**
+  `oops_atan2f` in `src/math/math.c` already carries a minimax cubic and a reduction to [0, 1],
+  and the software rasteriser answers every `atan` in this SDK through it. The compiled path
+  emits those coefficients and that reduction, so the two paths compute one function rather than
+  two that agree - the same discipline as `m * m` matching `glsl_exec.c`'s loop. `asin` is
+  `atan2(x, sqrt(1 - x*x))` over a clamped argument and `acos` is `pi/2` minus it, which is how
+  the reference defines both.
+
+  The quadrant fixups are selects rather than branches, so it is one straight run per component.
+  `x == 0` needs no case of its own - it falls out of the reduction as `a = 0`, and `|y| > |x|`
+  and the sign of `y` finish it - and only `x` and `y` both zero needs a guard, because that
+  divide is `0/0`.
+
+  **Measured rather than asserted**: the tests compare against `oops_atan2f` itself across the
+  reduction's seam and all four quadrants, to **1e-5**, and that tolerance is the reciprocal's.
+  There is no divide instruction here, so one true divide becomes `v_rcp_f32` and a multiply,
+  good to a unit in the last place; everything else is identical, so that is the whole of the
+  difference.
+
+  `refract` was refused for "a square root of a value that may be negative and a select on it".
+  Both arms are computed and the sign of `k` selects, so the square root of a negative is
+  produced and discarded - a `v_cndmask` moves a register rather than evaluating anything, and
+  the NaN leaves with the arm it belongs to. Total internal reflection returns the zero vector,
+  which is the specification's wording and what a shader leans on to darken a grazing angle.
+
 - **`texture2DProj`** (2026-09-23), which is `texture2D` with a divide in front of it and needed
   no new encoding. The coordinate is divided by its **last component**, and which component that
   is depends on the form rather than the vector's width: the `vec4` form divides by `w` and
