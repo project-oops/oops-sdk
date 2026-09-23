@@ -827,6 +827,21 @@ void oops_log_close_disk_sink(void) {
 int oops_system_escape_sandbox(void) {
 #ifndef OOPS_HOST_BUILD
   /*
+   * **This takes `/app0` with it. A title that reads its own package must not call this.**
+   *
+   * Measured on 2026-09-23 with a probe either side of the call: `/app0/eboot.bin` exists
+   * before and does not exist after. `/app0` is the package mounted *inside* the sandbox, so
+   * leaving the sandbox leaves it behind - and a title whose data, textures, models and themes
+   * all live there is left running with none of them. Neverball did exactly that: a black
+   * screen, `Failure to open "classic" theme file`, a window at the default size because even
+   * its config had gone, and a thousand draw calls a frame of geometry with no assets on it.
+   * Nothing faults, so there is nothing to find except an absence.
+   *
+   * What it is for is reaching `/data` and the storage outside the package, and a title that
+   * wants somewhere to write should look at `/app0` first: it is writable, which is not
+   * obvious, and it is the reason the five candidate paths a title usually probes all refuse -
+   * they name the package from outside, where the process cannot see it.
+   *
    * **Everything this SDK loads on demand is loaded first, because after the escape nothing can
    * be.**
    *
