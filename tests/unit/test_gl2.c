@@ -2099,14 +2099,14 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
 
-    /* **Refused, not guessed at.** `texture2D` is generated; the rest of section 8.7 is not,
-     * and each one is refused rather than sampled through the 2D path. A cube's coordinate is a
-     * direction the hardware resolves to a face and a `Proj` form divides by its last - close
-     * enough to look interchangeable, different enough to draw the wrong thing. */
+    /* **Refused, not guessed at.** `texture2D` and `texture2DProj` are generated - the second
+     * is the first with a divide in front of it, which is arithmetic this already had. The rest
+     * of section 8.7 is not, and each is refused rather than sampled through the 2D path: a
+     * cube's coordinate is a direction the hardware resolves to a face and a volume's is three
+     * components against a descriptor of its own. Close enough to look interchangeable,
+     * different enough to draw the wrong thing. */
     gl_context_t *c = (gl_context_t *)ctx;
     static const char *const REFUSED_LOOKUPS[] = {
-        "uniform sampler2D s;\nvarying vec2 uv;\n"
-        "void main() { gl_FragColor = texture2DProj(s, vec3(uv, 1.0)); }\n",
         "uniform samplerCube s;\nvarying vec2 uv;\n"
         "void main() { gl_FragColor = textureCube(s, vec3(uv, 1.0)); }\n",
         "uniform sampler3D s;\nvarying vec2 uv;\n"
@@ -4998,6 +4998,45 @@ static void test_gl2_compiled_texture_lookups_reach_the_right_set(void) {
     ASSERT_NEAR(o[1], 0.75f, tol);
     ASSERT_NEAR(o[2], 0.0f, tol);    /* ... through set 0 */
     ASSERT_NEAR(o[3], 1.0f, tol);
+
+    /* **`texture2DProj` is the same lookup with a divide in front**, by the coordinate's last
+     * component - and because this simulator's texel *is* the coordinate, the division is
+     * visible in the answer rather than inferred. 0.25/2 and 0.75/2. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler2D tex;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = texture2DProj(tex, vec3(vin.x, vin.y, 2.0));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.125f, tol);
+    ASSERT_NEAR(o[1], 0.375f, tol);
+
+    /* **The vec4 form divides by `w` and ignores `z`**, which is the specification's rule and
+     * not "the last component of the vector" - a 99.0 in `z` must change nothing. 0.25/4. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler2D tex;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = texture2DProj(tex, vec4(vin.x, vin.y, 99.0, 4.0));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0625f, tol);
+    ASSERT_NEAR(o[1], 0.1875f, tol);
+
+    /* **A zero divisor answers zero, not an infinity.** The language calls it undefined and the
+     * reference picks zero; the two paths agreeing is worth the compare and the select. A
+     * reciprocal left unguarded gives `inf`, and `inf * 0.25` is `inf` rather than anything a
+     * texture unit can clamp into a sensible texel. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler2D tex;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = texture2DProj(tex, vec3(vin.x, vin.y, 0.0));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0f, tol);
+    ASSERT_NEAR(o[1], 0.0f, tol);
 
     /* **Two samplers take two sets, in declaration order.** A shader that sampled both through
      * set 0 would read one texture twice - which looks like a texture-binding bug and is a

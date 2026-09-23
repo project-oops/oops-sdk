@@ -96,6 +96,17 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **`texture2DProj`** (2026-09-23), which is `texture2D` with a divide in front of it and needed
+  no new encoding. The coordinate is divided by its **last component**, and which component that
+  is depends on the form rather than the vector's width: the `vec4` form divides by `w` and
+  ignores `z`, where the `vec3` form divides by `z`. There is a test with `99.0` sitting in `z`
+  for exactly that.
+
+  The divide answers **zero** on a zero divisor rather than an infinity. The language calls it
+  undefined and `glsl_exec.c` picks zero, so the compiled path picks zero too - the two agreeing
+  is worth a compare and a select. Ordinary `/` here does not guard that way, so the guard is
+  written at the lookup rather than borrowed from it.
+
 - **Square-matrix arithmetic, all of it** (2026-09-23): `m * m`, a matrix with a scalar either
   way round, two matrices componentwise, and the built-ins `matrixCompMult`, `transpose` and
   `outerProduct`. Only `m * v` and `v * m` were generated before.

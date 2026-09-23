@@ -54,11 +54,11 @@ arriving bit for bit, and its uniform block loading intact.
 
 **What a compiled fragment shader can do** is arithmetic on floats and integers, swizzle reads
 and writes, constructors, the built-in library, file-scope `const`s, uniforms, `texture2D`
-through up to two samplers, comparisons, `?:`, `if`/`else`, `discard`, **local arrays**,
-**the whole of square-matrix arithmetic** - `m * v`, `v * m`, `m * m`, matrix with scalar,
-componentwise, and `matrixCompMult`, `transpose` and `outerProduct` -
-user-defined functions - inlined, since there is no call instruction here, and with **early
-`return`** - and **`for` loops, including `break` and `continue`**.
+and `texture2DProj` through up to two samplers, comparisons, `?:`, `if`/`else`, `discard`,
+**local arrays**, **the whole of square-matrix arithmetic** (`m * v`, `v * m`, `m * m`, matrix
+with scalar, componentwise, and `matrixCompMult`, `transpose` and `outerProduct`), user-defined
+functions - inlined, since there is no call instruction here, and with **early `return`** - and
+**`for` loops, including `break` and `continue`**.
 
 A loop is unrolled where the trip count allows and branched where it does not, and a branched
 one carries a trip guard: a counter that ends it after the number of trips the compiler counted,
@@ -205,7 +205,7 @@ part, so the quotient is computed from a reciprocal and then corrected, which is
 | Whole-array assignment, or an array as a value | Elements, one at a time. GLSL 1.10 has no array-valued expressions either |
 | A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
 | `asin`, `acos`, `atan`, `refract` | No instruction on this part, and a polynomial of unmeasured accuracy is not written in their place. Each is refused **by name**, so you are told which one |
-| `textureCube`, `texture3D`, the `Proj` and shadow forms | Only `texture2D` is generated. The others are each a different lookup rather than the same one with a flag |
+| `textureCube`, `texture3D`, the shadow forms | `texture2D` and `texture2DProj` are generated - the second is the first with a divide in front, which is arithmetic that was already here. The others are each a different lookup rather than the same one with a flag: a cube's coordinate is a direction the hardware resolves to a face, a volume's is three components against a descriptor of its own, and a shadow's compares rather than returns |
 | A matrix with a vector that is not its width | `m * v`, `v * m` and `m * m` are generated at every square size, as are a matrix with a scalar and two matrices componentwise. `m4 * v3` is none of those, and treating it as componentwise would compute something that is not a product at all |
 | `inverse`, `determinant` | `matrixCompMult`, `transpose` and `outerProduct` **are** generated. These two are not: both are real arithmetic rather than a shuffle, and neither has been written and measured here yet |
 | More than 16 floats of varyings, more than 32 floats of uniforms, more than two samplers | Each is refused with its own number in the message, so you know what to cut to |

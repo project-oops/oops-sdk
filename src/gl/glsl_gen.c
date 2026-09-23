@@ -1218,9 +1218,26 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
      * and a shadow lookup compares rather than returns. The dimension is one field in the
      * instruction (`tools/shader/gl2-fragment.s` pins all four), so these are a short step
      * rather than a different problem - but a step nobody has taken. */
-    if (nm_is(nm, len, "texture2D")) {
+    /*
+     * **`texture2D` and `texture2DProj`, which are the same lookup with a divide in front.**
+     *
+     * A projective lookup divides the coordinate by its **last component**, and which component
+     * that is depends on the form and not on the vector's width: `texture2DProj(s, vec4)`
+     * divides by `w` and ignores `z`, where `texture2DProj(s, vec3)` divides by `z`. Taking
+     * "the last of what was passed" is right for both only because the specification defines
+     * the vec4 form that way - `glsl_exec.c` says the same thing at its own copy of this.
+     *
+     * The divide answers **zero** rather than an infinity when the divisor is zero. The
+     * language calls it undefined; the reference picks zero, and the two paths agreeing is
+     * worth two instructions. Ordinary `/` in this back end does not guard that way, so the
+     * guard is written here rather than borrowed.
+     */
+    const GLboolean tex_proj = nm_is(nm, len, "texture2DProj");
+    if (nm_is(nm, len, "texture2D") || tex_proj) {
         if (argc_of(g, first_arg) != 2) {
-            return gen_fail(g, "texture2D takes a sampler and a vec2", node);
+            return gen_fail(g, tex_proj ? "texture2DProj takes a sampler and a vec3 or vec4"
+                                        : "texture2D takes a sampler and a vec2",
+                            node);
         }
         const glsl_node_t *sn = &g->ast->nodes[first_arg];
         if (sn->kind != GLSL_NODE_IDENTIFIER) {
@@ -1243,12 +1260,38 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         }
         const int32_t coord_node = g->ast->nodes[first_arg].sibling;
         const glsl_type_t ct = glsl_type_of(g->sema, coord_node);
-        if (ct != GLSL_TYPE_VEC2) {
-            return gen_fail(g, "texture2D's coordinate is a vec2", node);
+        if (tex_proj ? (ct != GLSL_TYPE_VEC3 && ct != GLSL_TYPE_VEC4)
+                     : (ct != GLSL_TYPE_VEC2)) {
+            return gen_fail(g, tex_proj ? "texture2DProj's coordinate is a vec3 or a vec4"
+                                        : "texture2D's coordinate is a vec2",
+                            node);
         }
         glsl_value_t uv = gen_expr(g, coord_node);
         if (is_bad(uv)) return uv;
-        if (uv.count != 2) return gen_fail(g, "texture2D's coordinate is a vec2", node);
+        if (uv.count != (tex_proj ? (ct == GLSL_TYPE_VEC4 ? 4 : 3) : 2)) {
+            return gen_fail(g, "this texture coordinate is not the width its type says", node);
+        }
+        if (tex_proj) {
+            const uint32_t q = uv.base + (uint32_t)(uv.count - 1);
+            glsl_value_t zero = gen_const(g, 0.0, node);
+            if (is_bad(zero)) return zero;
+            glsl_value_t rcp = gen_alloc(g, 1, node);
+            if (is_bad(rcp)) return rcp;
+            glsl_value_t inv = gen_alloc(g, 1, node);
+            if (is_bad(inv)) return inv;
+            glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, rcp.base, q);
+            glsl_emit_cmp(g->code, GLSL_VOPC_NEQ_F32, q, zero.base);
+            /* `d = vcc ? s1 : s0`, so the **false** value comes first: a zero divisor takes the
+             * zero rather than the reciprocal's infinity. */
+            glsl_emit_cndmask(g->code, inv.base, zero.base, rcp.base);
+            /* Into its own pair, after the coordinate, so the two multiplies cannot read a
+             * component one of them has already overwritten. */
+            glsl_value_t st = gen_alloc(g, 2, node);
+            if (is_bad(st)) return st;
+            glsl_emit_mul_f32(g->code, st.base + 0u, uv.base + 0u, inv.base);
+            glsl_emit_mul_f32(g->code, st.base + 1u, uv.base + 1u, inv.base);
+            uv = st;
+        }
 
         /* **The sample's four registers are allocated after the coordinate**, so they cannot
          * overlap it - `image_sample` reads `vaddr` and writes `vdata`, and an overlap would
@@ -1266,8 +1309,11 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         return out;
     }
     if (nm_prefix(nm, len, "texture") || nm_prefix(nm, len, "shadow")) {
-        return gen_fail(g, "only texture2D is generated; the projective, cube, volume and "
-                           "shadow lookups each need something this has not measured", node);
+        return gen_fail(g, "only texture2D and texture2DProj are generated; the cube, volume "
+                           "and shadow lookups each need something this has not measured - a "
+                           "cube's coordinate is a direction the hardware resolves to a face, "
+                           "a volume's is three components against a 3D descriptor, and a "
+                           "shadow's compares rather than returns", node);
     }
 
     /* The arguments, left to right. Evaluated once each and into registers that outlive the
