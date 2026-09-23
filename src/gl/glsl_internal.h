@@ -565,6 +565,12 @@ void glsl_emit_s_cmp_ge_u32_imm(glsl_code_t *c, uint32_t sreg, uint32_t imm);
  * GL 1.4's LOD bias unused. The textured fixed-function shader found that on 2026-09-19. */
 #define GLSL_MIMG_SAMPLE    32u
 #define GLSL_MIMG_SAMPLE_LZ 39u
+/* **The comparing form**, which returns one value rather than a texel: the sampler's own
+ * `DEPTH_COMPARE_FUNC` is applied per texel against a reference the shader hands over as the
+ * **first** address register, ahead of s and t. From `tools/shader/tex-shadow.s`, where
+ * `image_sample_c ... dmask:0x1` is 0xf0a00108 - and the register order is not read off the ISA
+ * alone: obSCEne's `-b4e1` reports `VADDR v[2:4] with ref_z in v2 at position 0`. */
+#define GLSL_MIMG_SAMPLE_C  40u
 
 /* **The cube face selection, which is four instructions and not arithmetic.** The hardware
  * turns a direction into a face and a place on it: `v_cubeid_f32` names the face,
@@ -592,6 +598,9 @@ void glsl_emit_vop3(glsl_code_t *c, uint32_t op, uint32_t vdst, uint32_t src0, u
 /* `srsrc` and `ssamp` are the **first SGPR** of the descriptor group; the encoder divides by
  * four. `vaddr` is the first of a consecutive run holding the coordinate, `vdata` the first of
  * the four the sample returns. */
+void glsl_emit_image_sample_masked(glsl_code_t *c, uint32_t opcode, uint32_t dim, uint32_t dmask,
+                                   uint32_t vdata, uint32_t vaddr, uint32_t srsrc,
+                                   uint32_t ssamp);
 void glsl_emit_image_sample(glsl_code_t *c, uint32_t opcode, uint32_t dim, uint32_t vdata,
                             uint32_t vaddr, uint32_t srsrc, uint32_t ssamp);
 void glsl_emit_s_waitcnt_vm(glsl_code_t *c);
@@ -836,6 +845,10 @@ typedef struct {
          * descriptor built a different way. So `texture2D` on a `samplerCube` is refused rather
          * than sampled with the wrong dim. */
         uint32_t dim;
+        /* Whether it compares rather than returns - a `sampler2DShadow`. Separate from `dim`
+         * because a shadow sampler's dim is still 2D; what changes is the instruction, the
+         * mask, and that the coordinate carries a reference. */
+        GLboolean shadow;
     } samplers[GLSL_GEN_MAX_TEX_SETS];
     int sampler_count;
     const char *error;    /* the **first** failure, which stops everything after it */
@@ -866,7 +879,7 @@ GLboolean glsl_gen_lookup(glsl_gen_t *g, const char *name, size_t len, glsl_valu
  * through something the draw path never filled in. */
 /* `dim` is one of the `GLSL_IMG_DIM_*` above - what this sampler's lookups will carry. */
 GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set,
-                                   uint32_t dim);
+                                   uint32_t dim, GLboolean shadow);
 
 /* -------------------------------------------------------------------------
  * A compiled unit

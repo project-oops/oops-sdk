@@ -352,12 +352,23 @@ void glsl_emit_s_waitcnt_lgkm(glsl_code_t *c) {
  * is right rather than self-consistent is `image_sample_lz` at opcode 39, which assembles to
  * `0xf09c0f08 0x00610402`: the two words `tex-prolog.s` records as what the textured pixel
  * shader used to carry. */
-void glsl_emit_image_sample(glsl_code_t *c, uint32_t opcode, uint32_t dim, uint32_t vdata,
-                            uint32_t vaddr, uint32_t srsrc, uint32_t ssamp) {
-    const uint32_t dmask = 0xfu;    /* all four channels: a vec4 result */
-    put(c, (0x3cu << 26) | ((opcode & 0x7fu) << 18) | (dmask << 8) | ((dim & 0x7u) << 3));
+/* **`dmask` says how many registers come back**, and a comparison returns one where a texel
+ * returns four. From `tools/shader/tex-shadow.s`: `image_sample_c v4, v[16:18], ... dmask:0x1`
+ * assembles to 0xf0a00108, against the plain sample's 0xf0800f08 - the opcode and the mask
+ * being the whole difference. */
+void glsl_emit_image_sample_masked(glsl_code_t *c, uint32_t opcode, uint32_t dim, uint32_t dmask,
+                                   uint32_t vdata, uint32_t vaddr, uint32_t srsrc,
+                                   uint32_t ssamp) {
+    put(c, (0x3cu << 26) | ((opcode & 0x7fu) << 18) | ((dmask & 0xfu) << 8) |
+              ((dim & 0x7u) << 3));
     put(c, (((ssamp / 4u) & 0x1fu) << 21) | (((srsrc / 4u) & 0x1fu) << 16) |
               ((vdata & 0xffu) << 8) | (vaddr & 0xffu));
+}
+
+void glsl_emit_image_sample(glsl_code_t *c, uint32_t opcode, uint32_t dim, uint32_t vdata,
+                            uint32_t vaddr, uint32_t srsrc, uint32_t ssamp) {
+    /* All four channels: a vec4 result. */
+    glsl_emit_image_sample_masked(c, opcode, dim, 0xfu, vdata, vaddr, srsrc, ssamp);
 }
 
 /* `s_waitcnt vmcnt(0)` - the wait a sample needs before anything reads what it returned. A

@@ -54,8 +54,8 @@ arriving bit for bit, and its uniform block loading intact.
 
 **What a compiled fragment shader can do** is arithmetic on floats and integers, swizzle reads
 and writes, constructors, the built-in library, file-scope `const`s, uniforms, `texture2D`
-`texture2DProj`, `textureCube`, `texture3D` and `texture3DProj` through up to two samplers,
-comparisons, `?:`, `if`/`else`, `discard`,
+`texture2DProj`, `textureCube`, `texture3D`, `texture3DProj`, `shadow2D` and `shadow2DProj`
+through up to two samplers, comparisons, `?:`, `if`/`else`, `discard`,
 **local arrays**, **the whole of square-matrix arithmetic** (`m * v`, `v * m`, `m * m`, matrix
 with scalar, componentwise, and `matrixCompMult`, `transpose` and `outerProduct`), user-defined
 functions - inlined, since there is no call instruction here, and with **early `return`** - and
@@ -110,8 +110,16 @@ descriptor is `TYPE 0xa` with the last slice in its fourth word, which obSCEne m
 part alongside the cube (`-6c80`). `texture3DProj` divides all three by `w`, where the 2D form
 divides two.
 
-What it still cannot: the shadow lookups, which are different in kind - they compare against a
-reference rather than returning a texel. A
+**`shadow2D` and `shadow2DProj` compare rather than return a texel.** The comparison is the
+sampler's - `GL_TEXTURE_COMPARE_FUNC` is already in its descriptor - and what the shader adds is
+the reference and the instruction that hands it over. The reference is the coordinate's third
+component, clamped to [0, 1] as GL 1.4 requires, and the one value that comes back is spread
+`(v, v, v, 1)`: the **`GL_LUMINANCE`** form, which is `GL_DEPTH_TEXTURE_MODE`'s default. That
+parameter is a per-texture choice made after the shader is compiled, so `GL_INTENSITY` and
+`GL_ALPHA` get luminance and a log line rather than a colour nobody can account for.
+
+What it still cannot: the one-dimensional lookups - `texture1D` and `shadow1D`. Not a different
+kind of thing, only an unwired one. A
 shader the back end will not take is refused with a sentence naming what is missing, and still
 runs on the software path - the draw is what fails, with `GL_INVALID_OPERATION`, rather than
 quietly drawing something else. A GL 1.x port is unaffected: it never binds a program.
@@ -227,7 +235,8 @@ part, so the quotient is computed from a reciprocal and then corrected, which is
 | An array index the shader computes at run time | An array is a run of registers and a register file cannot be indexed by a running value. **An unrolled loop's counter counts as known**, so `for (int i = 0; i < 4; i++) total += w[i];` is fine - it is a uniform or a varying used as an index that is not |
 | Whole-array assignment, or an array as a value | Elements, one at a time. GLSL 1.10 has no array-valued expressions either |
 | A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
-| The shadow forms | `texture2D`, `texture2DProj`, `textureCube`, `texture3D` and `texture3DProj` are generated. A shadow lookup is different in kind: it compares against a reference rather than returning a texel, through `image_sample_c` and a compare function in the sampler. The hardware side of that **is** measured; the shader side is not written |
+| `texture1D`, `shadow1D` and their `Proj` forms | Everything two-dimensional and up is generated - `texture2D`, `texture2DProj`, `textureCube`, `texture3D`, `texture3DProj`, `shadow2D`, `shadow2DProj`. The 1D family is not a different kind of thing, only one nothing here has sampled from a program - so it is refused rather than written blind |
+| `GL_DEPTH_TEXTURE_MODE` other than `GL_LUMINANCE` | A comparison returns one value and GL spreads it by that parameter. The compiled path emits the default spread, `(v, v, v, 1)`; the mode is a per-texture choice made after the shader is compiled, so the other two get luminance and one log line |
 | A cube map whose six faces are not all there | GL does not sample an incomplete cube either (2.1, 3.8.10). The draw is untextured rather than reading a descriptor that points at nothing |
 | A matrix with a vector that is not its width | `m * v`, `v * m` and `m * m` are generated at every square size, as are a matrix with a scalar and two matrices componentwise. `m4 * v3` is none of those, and treating it as componentwise would compute something that is not a product at all |
 | More than 16 floats of varyings, more than 32 floats of uniforms, more than two samplers | Each is refused with its own number in the message, so you know what to cut to |

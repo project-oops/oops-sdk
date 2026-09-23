@@ -1223,17 +1223,26 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
     const GLboolean tex_cube = nm_is(nm, len, "textureCube");
     const GLboolean tex_3d = nm_is(nm, len, "texture3D");
     const GLboolean tex_3dproj = nm_is(nm, len, "texture3DProj");
-    if (nm_is(nm, len, "texture2D") || tex_proj || tex_cube || tex_3d || tex_3dproj) {
+    const GLboolean tex_shadow = nm_is(nm, len, "shadow2D");
+    const GLboolean tex_shadowproj = nm_is(nm, len, "shadow2DProj");
+    if (nm_is(nm, len, "texture2D") || tex_proj || tex_cube || tex_3d || tex_3dproj ||
+        tex_shadow || tex_shadowproj) {
         /* The dim the lookup's *name* asks for; the sampler's has to match it below. */
+        const GLboolean want_shadow = (GLboolean)(tex_shadow || tex_shadowproj);
         const uint32_t want_dim = tex_cube ? GLSL_IMG_DIM_CUBE
                                            : ((tex_3d || tex_3dproj) ? GLSL_IMG_DIM_3D
                                                                      : GLSL_IMG_DIM_2D);
-        /* How many components the coordinate carries, and how many of them the sampler reads.
-         * A projective form carries one more than it samples - the divisor - and a cube carries
-         * three that become three, the third being the face rather than a coordinate. */
-        const int coord_w = tex_cube ? 3 : (tex_3dproj ? 4 : (tex_3d ? 3 : (tex_proj ? 0 : 2)));
-        const int addr_w = (tex_cube || tex_3d || tex_3dproj) ? 3 : 2;
-        const GLboolean projective = (GLboolean)(tex_proj || tex_3dproj);
+        /* How many components the coordinate carries, and how many registers the sampler reads.
+         * A projective form carries one more than it samples - the divisor - a cube carries
+         * three that become three, the third being the face rather than a coordinate, and a
+         * shadow carries three that become three as well: s, t, and the reference. */
+        const int coord_w = (tex_cube || tex_3d || tex_shadow)
+                                ? 3
+                                : ((tex_3dproj || tex_shadowproj) ? 4 : (tex_proj ? 0 : 2));
+        const int addr_w =
+            (tex_cube || tex_3d || tex_3dproj || want_shadow) ? 3 : 2;
+        const GLboolean projective =
+            (GLboolean)(tex_proj || tex_3dproj || tex_shadowproj);
         if (argc_of(g, first_arg) != 2) {
             return gen_fail(g, "a texture lookup takes a sampler and a coordinate", node);
         }
@@ -1245,11 +1254,13 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         uint32_t set = 0u;
         GLboolean found = GL_FALSE;
         uint32_t samp_dim = GLSL_IMG_DIM_2D;
+        GLboolean samp_shadow = GL_FALSE;
         for (int i = 0; i < g->sampler_count; i++) {
             if (g->samplers[i].name_len == sn->length &&
                 nm_is(sn->text, sn->length, g->samplers[i].name)) {
                 set = g->samplers[i].set;
                 samp_dim = g->samplers[i].dim;
+                samp_shadow = g->samplers[i].shadow;
                 found = GL_TRUE;
                 break;
             }
@@ -1264,10 +1275,10 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
          * many address registers it hands over. Sampling a cube through the 2D path would send
          * two registers where three are read, and the third would be whatever the allocator
          * last left there. */
-        if (samp_dim != want_dim) {
+        if (samp_dim != want_dim || samp_shadow != want_shadow) {
             return gen_fail(g, "this lookup does not match its sampler's type: texture2D takes "
-                               "a sampler2D, textureCube a samplerCube and texture3D a "
-                               "sampler3D", node);
+                               "a sampler2D, textureCube a samplerCube, texture3D a sampler3D "
+                               "and shadow2D a sampler2DShadow", node);
         }
         const int32_t coord_node = g->ast->nodes[first_arg].sibling;
         const glsl_type_t ct = glsl_type_of(g->sema, coord_node);
@@ -1356,12 +1367,56 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
             uv = st;
         }
 
+        /*
+         * **A shadow lookup's reference comes first**, ahead of s and t.
+         *
+         * That order is not read off the ISA alone - obSCEne's `-b4e1` reports the VADDR range
+         * as `v[2:4] with ref_z in v2 at position 0` - and getting it wrong would sample at the
+         * reference and compare against a texture coordinate, which is a picture rather than an
+         * error.
+         *
+         * **The reference is clamped to [0, 1]**, low end first, which is GL 1.4 (3.8.14) and
+         * the order `tools/shader/tex-shadow.s` follows softpipe in. The comparison itself is
+         * the sampler's: `DEPTH_COMPARE_FUNC` in its word 0 already carries
+         * `GL_TEXTURE_COMPARE_FUNC`, so what the shader adds is the reference and the `_c` form
+         * of the instruction that hands it over.
+         */
+        if (want_shadow) {
+            glsl_value_t zero = gen_const(g, 0.0, node);
+            if (is_bad(zero)) return zero;
+            glsl_value_t one = gen_const(g, 1.0, node);
+            if (is_bad(one)) return one;
+            glsl_value_t addr = gen_alloc(g, 3, node);
+            if (is_bad(addr)) return addr;
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, addr.base + 0u, zero.base,
+                              uv.base + 2u);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MIN_F32, addr.base + 0u, one.base,
+                              addr.base + 0u);
+            glsl_emit_mov(g->code, addr.base + 1u, uv.base + 0u);
+            glsl_emit_mov(g->code, addr.base + 2u, uv.base + 1u);
+            uv = addr;
+        }
+
         /* **The sample's four registers are allocated after the coordinate**, so they cannot
          * overlap it - `image_sample` reads `vaddr` and writes `vdata`, and an overlap would
          * have it read back what it had just written for the second component. */
         glsl_value_t out = gen_alloc(g, 4, node);
         if (is_bad(out)) return out;
         const uint32_t srsrc = GLSL_GEN_TEX_SGPR_BASE + set * GLSL_GEN_TEX_SGPR_STRIDE;
+        if (want_shadow) {
+            /* **One value comes back, not four** - `dmask:0x1` - and GL spreads it by the
+             * texture's `GL_DEPTH_TEXTURE_MODE`. This emits the `GL_LUMINANCE` spread,
+             * `(v, v, v, 1)`, which is that parameter's default; the other two modes are a
+             * per-texture choice made after the shader is compiled, and the draw path says so
+             * when it sees one. */
+            glsl_emit_image_sample_masked(g->code, GLSL_MIMG_SAMPLE_C, GLSL_IMG_DIM_2D, 0x1u,
+                                          out.base, uv.base, srsrc, srsrc + 8u);
+            glsl_emit_s_waitcnt_vm(g->code);
+            glsl_emit_mov(g->code, out.base + 1u, out.base + 0u);
+            glsl_emit_mov(g->code, out.base + 2u, out.base + 0u);
+            glsl_emit_mov_imm(g->code, out.base + 3u, float_bits(1.0f));
+            return out;
+        }
         glsl_emit_image_sample(g->code, GLSL_MIMG_SAMPLE, want_dim, out.base, uv.base, srsrc,
                                srsrc + 8u);
         /* **A sample is not in order with what follows it.** Without this the next instruction
@@ -3441,7 +3496,7 @@ void glsl_gen_reserve(glsl_gen_t *g, uint32_t first) {
 }
 
 GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set,
-                                   uint32_t dim) {
+                                   uint32_t dim, GLboolean shadow) {
     if (!g) return GL_FALSE;
     if (g->sampler_count >= GLSL_GEN_MAX_TEX_SETS) {
         (void)gen_fail(g, "more samplers than the draw path carries descriptor sets for",
@@ -3452,6 +3507,7 @@ GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, 
     g->samplers[g->sampler_count].name_len = len;
     g->samplers[g->sampler_count].set = set;
     g->samplers[g->sampler_count].dim = dim;
+    g->samplers[g->sampler_count].shadow = shadow;
     g->sampler_count++;
     /* **And into the semantic stage, which is what types the lookup.** `texture2D(s, uv)` is
      * resolved by rule from its argument types, so a `s` the symbol table has never heard of
@@ -3459,10 +3515,11 @@ GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, 
      * having an argument that is not a float or a vector, which is a true sentence about a
      * false premise and sends the reader to the wrong place entirely. */
     if (!glsl_declare(g->sema, name, len,
-                      dim == GLSL_IMG_DIM_CUBE
-                          ? GLSL_TYPE_SAMPLERCUBE
-                          : (dim == GLSL_IMG_DIM_3D ? GLSL_TYPE_SAMPLER3D
-                                                    : GLSL_TYPE_SAMPLER2D),
+                      shadow ? GLSL_TYPE_SAMPLER2DSHADOW
+                             : (dim == GLSL_IMG_DIM_CUBE
+                                    ? GLSL_TYPE_SAMPLERCUBE
+                                    : (dim == GLSL_IMG_DIM_3D ? GLSL_TYPE_SAMPLER3D
+                                                              : GLSL_TYPE_SAMPLER2D)),
                       GL_FALSE)) {
         g->sema->error = (const char *)0; /* already declared is the caller having done it */
     }

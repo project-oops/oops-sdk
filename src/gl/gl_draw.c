@@ -2174,6 +2174,18 @@ static gl_texture_object_t *gl_gl2_sampler_texture(gl_context_t *ctx,
         if (want_cube && probe->cube_hw_dim <= 0 && !probe->cube) {
             return (gl_texture_object_t *)0;
         }
+        /* **A comparison returns one value and GL spreads it by `GL_DEPTH_TEXTURE_MODE`**,
+         * which is the texture's choice and is made after the shader was compiled. The compiled
+         * path emits the `GL_LUMINANCE` spread - that parameter's default - so a texture asking
+         * for `GL_INTENSITY` or `GL_ALPHA` gets luminance and is told once, rather than getting
+         * a colour nobody can account for. */
+        if (st == GL_SAMPLER_2D_SHADOW && probe->depth_mode != GL_LUMINANCE &&
+            !ctx->hw_depth_mode_logged) {
+            gl_log_line("a compiled shadow lookup spreads its comparison as GL_LUMINANCE: "
+                        "GL_DEPTH_TEXTURE_MODE is a per-texture choice and the shader is "
+                        "compiled once");
+            ctx->hw_depth_mode_logged = GL_TRUE;
+        }
     }
     for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
         if (ctx->textures[ti].used && ctx->textures[ti].id == id) return &ctx->textures[ti];

@@ -2100,12 +2100,13 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
 
-    /* **The lookups that are refused are the shadow forms, and only those.** `texture2D`,
-     * `texture2DProj`, `textureCube`, `texture3D` and `texture3DProj` are all generated: each
-     * reads a descriptor obSCEne has measured on this part, and none of them needed an
-     * instruction beyond the sample itself. A shadow lookup is different in kind - it compares
-     * against a reference rather than returning a texel, through `image_sample_c` and a
-     * `DEPTH_COMPARE_FUNC` in the sampler - so it is refused rather than approximated.
+    /* **What is left refused is the one-dimensional family.** `texture2D`, `texture2DProj`,
+     * `textureCube`, `texture3D`, `texture3DProj`, `shadow2D` and `shadow2DProj` are all
+     * generated: each reads a descriptor obSCEne has measured on this part, and the shadow pair
+     * needed one instruction - `image_sample_c` - whose register order was measured too.
+     *
+     * A 1D texture is not a different kind of thing, only an unwired one: nothing in this
+     * suite has ever sampled one from a program, so it is refused rather than written blind.
      *
      * Not here: a `samplerCube` sampled through `texture2D`, or the other way round. The back
      * end checks it - two address registers where the hardware reads three would leave the
@@ -2115,8 +2116,8 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
      * proxy. */
     gl_context_t *c = (gl_context_t *)ctx;
     static const char *const REFUSED_LOOKUPS[] = {
-        "uniform sampler2DShadow s;\nvarying vec2 uv;\n"
-        "void main() { gl_FragColor = shadow2D(s, vec3(uv, 0.5)); }\n",
+        "uniform sampler1D s;\nvarying vec2 uv;\n"
+        "void main() { gl_FragColor = texture1D(s, uv.x); }\n",
     };
     for (size_t i = 0; i < sizeof(REFUSED_LOOKUPS) / sizeof(REFUSED_LOOKUPS[0]); i++) {
         memset(log, 0, sizeof(log));
@@ -2344,8 +2345,12 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
             const uint32_t srsrc = ((w1 >> 16) & 0x1fu) * 4u;
             const uint32_t ssamp = ((w1 >> 21) & 0x1fu) * 4u;
             const uint32_t dim = (x >> 3) & 0x7u;
-            ASSERT_EQ((x >> 18) & 0x7fu, 32u);           /* image_sample, not _lz */
-            ASSERT_EQ((x >> 8) & 0xfu, 0xfu);            /* all four channels */
+            const uint32_t mimg_op = (x >> 18) & 0x7fu;
+            const uint32_t dmask = (x >> 8) & 0xfu;
+            /* `image_sample` returns a texel in four registers; `image_sample_c` compares and
+             * returns one. Never `_lz`, which would give up the mip chain and the LOD bias. */
+            ASSERT_TRUE(mimg_op == 32u || mimg_op == 40u);
+            ASSERT_EQ(dmask, (mimg_op == 40u) ? 0x1u : 0xfu);
             ASSERT_TRUE(dim == 1u || dim == 2u || dim == 3u); /* 2D, volume or cube */
             /* The sampler's four registers sit eight above the image's eight - the layout
              * `glsl_internal.h` sets out and the prologue loads into. */
@@ -2357,6 +2362,16 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
              * That is not a real filter and does not need to be: what these tests check is that
              * the right coordinate reached the right descriptor set, and a texel derived from
              * both says so in one value. */
+            /* **A comparing sample returns the comparison, in one register.** The stored depth
+             * is 0.5 and the function is less-or-equal, which is the fixture obSCEne measured
+             * this against - a reference either side of 0.5 came back 0xffffffff and
+             * 0xff000000. The reference is the **first** address register, so a lowering that
+             * put it last would compare against `s` and this would read 0 where 1 is due. */
+            if (mimg_op == 40u) {
+                if (s->exec) s->v[vdata] = (s->v[vaddr] <= 0.5f) ? 1.0f : 0.0f;
+                for (int k = 0; k < 1; k++) s->vpending[vdata + (uint32_t)k] = GL_TRUE;
+                continue;
+            }
             if (s->exec) {
                 s->v[vdata + 0u] = s->v[vaddr];
                 s->v[vdata + 1u] = s->v[vaddr + 1u];
@@ -5157,6 +5172,62 @@ static void test_gl2_compiled_texture_lookups_reach_the_right_set(void) {
     ASSERT_NEAR(o[0], 0.125f, tol);
     ASSERT_NEAR(o[1], 0.375f, tol);
     ASSERT_NEAR(o[2], 0.5f, tol);     /* 1.0 / 2.0 - the slice is divided too */
+
+    /* **A shadow lookup compares instead of returning a texel**, and the reference it compares
+     * is the coordinate's *third* component handed over as the sampler's *first* address
+     * register. The simulator stores depth 0.5 and compares less-or-equal, which is the fixture
+     * obSCEne measured against - so 0.25 passes and 0.75 fails.
+     *
+     * **The register order is the thing this is really for.** A lowering that left the
+     * reference in place would compare `s` against the stored depth: here `s` is 0.25, so the
+     * passing case would still pass and only the failing one would give it away. Both are
+     * checked for that reason. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler2DShadow depth;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = shadow2D(depth, vec3(vin.x, vin.y, 0.25));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, tol);   /* 0.25 <= 0.5 */
+    ASSERT_NEAR(o[1], 1.0f, tol);   /* GL_LUMINANCE spreads it across rgb ... */
+    ASSERT_NEAR(o[2], 1.0f, tol);
+    ASSERT_NEAR(o[3], 1.0f, tol);   /* ... with alpha 1 */
+
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler2DShadow depth;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = shadow2D(depth, vec3(vin.x, vin.y, 0.75));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0f, tol);   /* 0.75 > 0.5, and `s` is 0.25 - so this is the order test */
+    ASSERT_NEAR(o[3], 1.0f, tol);
+
+    /* **The reference is clamped to [0, 1]** before it is compared, which GL 1.4 requires. An
+     * unclamped -1 compares less-or-equal just as 0 does, so the clamp is invisible here; 2.0
+     * is the one that shows it, clamping to 1.0 and still failing against 0.5. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler2DShadow depth;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = shadow2D(depth, vec3(vin.x, vin.y, -1.0));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, tol);
+
+    /* And the projective form divides the reference by `q` along with s and t. 0.5/2 is 0.25,
+     * which passes where the undivided 0.5... also passes - so the divisor is 4, making the
+     * reference 0.125 and `s` 0.0625, and only a divided reference gives 1 here while an
+     * undivided 0.5 sits exactly on the boundary. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler2DShadow depth;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = shadow2DProj(depth, vec4(vin.x, vin.y, 3.0, 4.0));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0f, tol);   /* 3/4 = 0.75 > 0.5 */
 
     /* **A zero divisor answers zero, not an infinity.** The language calls it undefined and the
      * reference picks zero; the two paths agreeing is worth the compare and the select. A

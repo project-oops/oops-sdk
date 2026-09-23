@@ -1313,6 +1313,10 @@ typedef struct gl_context {
     GLboolean hw_cube_logged; /* and a cube-mapped one */
     GLboolean hw_env_logged; /* and one for an environment the pixel shader cannot combine */
     GLboolean hw_unit_logged; /* and one for a texture unit above 0, which the console leaves out */
+    /* And one for a compiled shadow lookup whose texture is not `GL_LUMINANCE`: the spread a
+     * comparison's single value takes is that texture's choice, made after the shader was
+     * compiled, and the compiled path emits the default. */
+    GLboolean hw_depth_mode_logged;
     /* **A census of the frame's draws, by whether one sampled a texture at all.** The one-shot
      * lines above say *that* something was drawn untextured, never *how much*, and a port whose
      * surfaces come out flat needs the proportion: a handful of untextured draws among hundreds

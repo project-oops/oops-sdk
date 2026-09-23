@@ -297,7 +297,10 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                                  ? GLSL_IMG_DIM_CUBE
                                  : ((u->type == GL_SAMPLER_3D) ? GLSL_IMG_DIM_3D
                                                                : GLSL_IMG_DIM_2D);
-        if (!glsl_gen_declare_sampler(gen, u->name, lit_len(u->name), (uint32_t)s, dim)) {
+        /* A shadow sampler's dim is still 2D; what differs is that it compares. */
+        const GLboolean shadow = (GLboolean)(u->type == GL_SAMPLER_2D_SHADOW);
+        if (!glsl_gen_declare_sampler(gen, u->name, lit_len(u->name), (uint32_t)s, dim,
+                                      shadow)) {
             log_say(log, log_size, gen->error ? gen->error : "a sampler has no set", 0, 0);
             ok = GL_FALSE;
         }

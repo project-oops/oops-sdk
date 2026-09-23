@@ -13076,6 +13076,17 @@ static void test_glsl_emit_matches_the_assembler(void) {
   ASSERT_EQ(words[7], 0xbefe030fu); /* s_mov_b32 exec_lo, s15 */
   ASSERT_EQ(words[8], 0xbefe0380u); /* s_mov_b32 exec_lo, 0 */
 
+  /* **The comparing sample**, which differs from the plain one in its opcode and its mask:
+   * a comparison returns one value where a texel returns four. Words from
+   * `tools/shader/tex-shadow.s`, where `image_sample_c v4, v[16:18], s[4:11], s[12:15]
+   * dmask:0x1 dim:SQ_RSRC_IMG_2D` assembles to 0xf0a00108 0x00610410 - against the plain
+   * sample's 0xf0800f08, which is already pinned below. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_image_sample_masked(&c, GLSL_MIMG_SAMPLE_C, GLSL_IMG_DIM_2D, 0x1u, 4u, 16u, 4u,
+                                12u);
+  ASSERT_EQ(words[0], 0xf0a00108u);
+  ASSERT_EQ(words[1], 0x00610410u);
+
   /* **The cube face selection**, which is the only VOP3 this back end emits. Words from
    * `tools/shader/tex-cube.s`, whose four instructions all take the same three sources - so the
    * second dword is identical across them and the opcode is the whole difference, which is

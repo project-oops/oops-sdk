@@ -631,7 +631,8 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
                  * got a set to be loaded into. */
                 if (p->uniforms[i].type != GL_SAMPLER_2D &&
                     p->uniforms[i].type != GL_SAMPLER_CUBE &&
-                    p->uniforms[i].type != GL_SAMPLER_3D) {
+                    p->uniforms[i].type != GL_SAMPLER_3D &&
+                    p->uniforms[i].type != GL_SAMPLER_2D_SHADOW) {
                     continue;
                 }
                 if (!name_eq(p->uniforms[i].name, lit_len(p->uniforms[i].name), n->text,

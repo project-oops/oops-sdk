@@ -96,6 +96,31 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **`shadow2D` and `shadow2DProj`** (2026-09-23), which compare rather than return a texel -
+  the last GLSL lookup this back end was missing above one dimension.
+
+  **The comparison is the sampler's, not the shader's.** `DEPTH_COMPARE_FUNC` in the sampler's
+  word 0 already carries `GL_TEXTURE_COMPARE_FUNC`, so what the shader adds is the reference and
+  `image_sample_c`, the form that hands it over. One instruction, from
+  `tools/shader/tex-shadow.s`: 0xf0a00108, the opcode and a `dmask` of 1 being the whole
+  difference from the plain sample - a comparison returns one value where a texel returns four.
+
+  **The reference is the first address register, ahead of s and t**, and that is measured rather
+  than read off the ISA: obSCEne's `-b4e1` reports the VADDR range as `v[2:4] with ref_z in v2
+  at position 0`. Getting it the other way round would sample at the reference and compare
+  against a texture coordinate, which is a picture rather than an error - so the tests check
+  both a passing and a failing comparison, because with `s` below the stored depth the passing
+  case looks right either way and only the failing one gives it away.
+
+  The reference is clamped to [0, 1] before the comparison (GL 1.4, 3.8.14), low end first as
+  softpipe does it.
+
+  **`GL_DEPTH_TEXTURE_MODE` is where this stops being exact.** The single value GL spreads by
+  that parameter, and it is a per-texture choice made after the shader is compiled. The compiled
+  path emits the `GL_LUMINANCE` spread, `(v, v, v, 1)`, which is its default; a texture asking
+  for `GL_INTENSITY` or `GL_ALPHA` gets luminance and one log line from the draw path, rather
+  than a colour nobody can account for.
+
 - **`texture3D` and `texture3DProj`** (2026-09-23), which needed no new instruction at all: a
   volume takes its three coordinates straight through, and `image_sample` already carried a dim.
   That is exactly what separates it from the cube it sits one bit away from in the encoding -
