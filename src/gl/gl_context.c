@@ -2047,7 +2047,37 @@ static void gl_ps_env_write(gl_context_t *ctx, size_t slot, const uint32_t *word
     gl_ps_flush_shaders(ctx);
 }
 
+static GLboolean gl_ps_patch_tex_env_body(gl_context_t *ctx);
+
+/* **The guard, in front of the work.** `gl_ps_patch_tex_env` runs on every draw and assembles
+ * up to 64 words of GPU machine code before comparing them with the payload - a large share of
+ * 34ms in a 218ms frame, nearly all of it rebuilding what was already there. If none of its
+ * inputs have moved since the last draw, neither have its outputs.
+ *
+ * Wrapped rather than guarded inline because the body returns from several places and the
+ * answer has to be remembered at every one of them; a wrapper cannot miss one. */
 GLboolean gl_ps_patch_tex_env(gl_context_t *ctx) {
+    if (!ctx || !ctx->gpu_payload) return GL_TRUE;
+    __typeof__(ctx->ps_env_sig) sig;
+    memset(&sig, 0, sizeof(sig));
+    sig.base_unit = gl_hw_base_unit(ctx);
+    for (GLuint u = 0u; u < 2u && u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        sig.tex[u] = gl_unit_texture_id(ctx, u);
+        sig.fmt[u] = gl_tex_sample_format(gl_lookup_texture(ctx, sig.tex[u]));
+        sig.mode[u] = ctx->tex_unit[u].tex_env_mode;
+        sig.cb[u] = ctx->tex_unit[u].combine;
+        for (int k = 0; k < 4; k++) sig.col[u][k] = ctx->tex_unit[u].tex_env_color[k];
+    }
+    if (ctx->ps_env_sig_valid && memcmp(&sig, &ctx->ps_env_sig, sizeof(sig)) == 0) {
+        return ctx->ps_env_sig_result;
+    }
+    ctx->ps_env_sig = sig;
+    ctx->ps_env_sig_valid = GL_TRUE;
+    ctx->ps_env_sig_result = gl_ps_patch_tex_env_body(ctx);
+    return ctx->ps_env_sig_result;
+}
+
+static GLboolean gl_ps_patch_tex_env_body(gl_context_t *ctx) {
     if (!ctx || !ctx->gpu_payload) return GL_TRUE;
 
     /* Unit 0's stage: its texel is the sample in v4..v7, and GL_PREVIOUS at unit 0 is the

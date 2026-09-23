@@ -1388,6 +1388,27 @@ typedef struct gl_context {
     /* And the command words themselves, so the rest of a draw can be attributed to the texture
      * and descriptor preparation that sits between the two. */
     uint64_t hw_dcb_ns;
+    /* **Everything `gl_ps_patch_tex_env` reads, so it can tell in twenty cycles that it has
+     * nothing to do.** It runs on every draw and assembles up to 64 words of GPU machine code
+     * before comparing them with the payload - measured at a large share of 34ms a frame, on a
+     * 218ms frame, almost all of it rebuilding what was already there.
+     *
+     * A signature rather than a dirty flag: a flag has to be set by everything that could
+     * matter and is wrong the day somebody adds a source it forgot, while this is wrong only if
+     * an input is missing from the struct - and the inputs are enumerable, which is why they are
+     * listed out rather than hashed from somewhere vague. The env colour is here because
+     * `gl_tex_env_as_combine` may read it; a superset costs a few bytes of comparison and
+     * removes the question. */
+    struct {
+        GLuint base_unit;
+        GLuint tex[2];
+        GLenum fmt[2];
+        GLenum mode[2];
+        gl_combine_t cb[2];
+        float col[2][4];
+    } ps_env_sig;
+    GLboolean ps_env_sig_valid;
+    GLboolean ps_env_sig_result;
     const char *hw_flush_site[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_site_n[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_unnamed;
