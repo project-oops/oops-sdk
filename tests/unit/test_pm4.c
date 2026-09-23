@@ -71,7 +71,7 @@ static int oops_pm4_validate_stream(const uint32_t *words, size_t word_count,
   while (idx < word_count) {
     uint32_t header = words[idx];
 
-    /* PS5 libSceAgc single-dword prefetch NOP pad (measured on hardware, D565) */
+    /* Prospero libSceAgc single-dword prefetch NOP pad (measured on hardware, D565) */
     if (header == 0xffff1000u) {
       report->nop_count++;
       report->total_packets++;
@@ -2399,9 +2399,10 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
    *
    * Asserted by name as well as by value: the whole-register check below catches a regression,
    * but prints two integers. This says which bit moved. */
-  ASSERT_EQ((cb_info >> 16) & 0x1u, 0u); /* BLEND_BYPASS clear  */
-  ASSERT_EQ((cb_info >> 15) & 0x1u, 1u); /* BLEND_CLAMP set     */
-  ASSERT_EQ(cb_info, 0x000088a8u);
+  ASSERT_EQ((cb_info >> 16) & 0x1u, 0u); /* BLEND_BYPASS clear    */
+  ASSERT_EQ((cb_info >> 15) & 0x1u, 1u); /* BLEND_CLAMP set       */
+  ASSERT_EQ((cb_info >> 7) & 0x1u, 0u);  /* LINEAR_GENERAL clear  */
+  ASSERT_EQ(cb_info, 0x00008828u);
 
   /* Record: "PA_CL_VPORT_YSCALE negative for GL's upward NDC y". Asserted as the sign bit of
    * the float rather than an exact value, because the magnitude is half the height and that
@@ -4566,8 +4567,9 @@ static void test_pm4_gl_colour_sum_takes_the_third_parameter(void) {
   ASSERT_EQ(ps_tex[GL_PS_SUM_SLOT_TEX], 0xc8300800u);      /* v_interp_p1_f32 v12, v0, attr2.x */
   ASSERT_EQ(ps_tex[GL_PS_SUM_SLOT_TEX + 6], 0xd5038004u);  /* v_add_f32_e64 v4, v4, v12 clamp */
   ASSERT_EQ(ps_tex[GL_PS_SUM_SLOT_TEX + 7], 0x00021904u);
-  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX], 0xf800180fu);        /* the export, after fog */
-  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 2], 0xbf810000u);
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX], 0x5e080b04u);        /* the packs and export, after fog */
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 2], 0xf8001c0fu);
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 4], 0xbf810000u);
   /* This triangle starts where the first ended, its vertices 64 bytes apart. The primary colour
    * is not summed into on the CPU: the shader adds after the texture. */
   ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0x8cu), 144u);
@@ -4842,16 +4844,19 @@ static void test_pm4_gl_front_buffer_targets(void) {
                                                       OOPS_GL_PS_UNTEX_OFFSET);
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x327u), (uint32_t)(front >> 8));
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x391u), (uint32_t)(front >> 40));
-  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x32bu), 0x000088a8u);
+  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x32bu), 0x00008828u);
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x08eu), 0x000000ffu);
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x08fu), 0x000000ffu);
-  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1c5u), 0x00000099u);
-  /* Two exports, `done` on the second only - the first would end the wave otherwise. */
-  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX], 0xf800100fu);
-  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 2u], 0xf800181fu);
-  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 4u], 0xbf810000u);
-  ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX], 0xf800100fu);
-  ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX + 2u], 0xf800181fu);
+  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1c5u), 0x00000044u);
+  /* The two packs, then two exports with `done` on the second only - the first would end the
+     wave otherwise. Both exports read the same pair of packed registers. */
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX], 0x5e080b04u);
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 1u], 0x5e0a0f06u);
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 2u], 0xf800140fu);
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 4u], 0xf8001c1fu);
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 6u], 0xbf810000u);
+  ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX + 2u], 0xf800140fu);
+  ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX + 4u], 0xf8001c1fu);
 
   /* **And it blends there too** (since 2026-09-21). Blending is per target on this part - one
    * CB_BLENDn_CONTROL each, `R_028780_CB_BLEND0_CONTROL + i * 4` in radeonsi's own loop - and
@@ -4888,11 +4893,11 @@ static void test_pm4_gl_front_buffer_targets(void) {
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x32bu), 0u);
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x08eu), 0x0000000fu);
   ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x08fu), 0x0000000fu);
-  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1c5u), 0x00000009u);
-  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX], 0xf800180fu);
-  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 2u], 0xbf810000u);
-  ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX], 0xf800180fu);
-  ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX + 2u], 0xbf810000u);
+  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1c5u), 0x00000004u);
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 2u], 0xf8001c0fu);
+  ASSERT_EQ(ps_tex[GL_PS_EXPORT_TEX + 4u], 0xbf810000u);
+  ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX + 2u], 0xf8001c0fu);
+  ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX + 4u], 0xbf810000u);
   #undef TRI
 
   /* A CPU write makes the CP's copy stale. The copy here holds a sentinel. After glDrawPixels
@@ -5060,11 +5065,12 @@ static void test_pm4_gl_textured_shader_samples_with_lod_and_divides_q(void) {
   gl_ps_build_textured(ps, 0x0000000123456700ull);
   static const uint32_t prolog[28] = {
     0xbe90037eu, 0xbefe097eu,                         /* s_mov_b32 s16, exec_lo; s_wqm_b32 */
-    0xc8080400u, 0xc8090401u, 0xc80c0500u, 0xc80d0501u, /* s, t */
-    0xc8300700u, 0xc8310701u, 0x7e18550cu,             /* q, and its reciprocal */
+    0xc8080400u, 0xc80c0500u, 0xc8300700u,             /* v_interp_p1: s, t, q */
+    0xc8200000u, 0xc8240100u, 0xc8280200u, 0xc82c0300u, /* v_interp_p1: R, G, B, A */
+    0xc8090401u, 0xc80d0501u, 0xc8310701u,             /* v_interp_p2: s, t, q */
+    0xc8210001u, 0xc8250101u, 0xc8290201u, 0xc82d0301u, /* v_interp_p2: R, G, B, A */
+    0x7e18550cu,                                       /* v_rcp_f32 v12, v12 */
     0x10041902u, 0x10061903u,                          /* s/q, t/q */
-    0xc8200000u, 0xc8210001u, 0xc8240100u, 0xc8250101u, /* the colour */
-    0xc8280200u, 0xc8290201u, 0xc82c0300u, 0xc82d0301u,
     0xf40c0100u, 0xfa000000u, 0xf4080300u, 0xfa000020u, /* the descriptors */
     0xbf8cc07fu,
   };
@@ -5093,8 +5099,9 @@ static void test_pm4_gl_textured_shader_samples_with_lod_and_divides_q(void) {
   ASSERT_EQ(ps[GL_PS_COMBINE_SLOT_TEX + 4], gl_ps_s_branch(GL_PS_COMBINE_WORDS - 5u));
   ASSERT_EQ(ps[GL_PS_FOG_SLOT_TEX], 0xbf800000u);
   ASSERT_EQ(ps[GL_PS_ALPHA_SLOT_TEX], 0xbf800000u);
-  ASSERT_EQ(ps[GL_PS_ALPHA_SLOT_TEX + 4], 0xf800180fu);
-  ASSERT_EQ(ps[GL_PS_ALPHA_SLOT_TEX + 6], 0xbf810000u);
+  ASSERT_EQ(ps[GL_PS_ALPHA_SLOT_TEX + 4], 0x5e080b04u); /* the packs, then the export */
+  ASSERT_EQ(ps[GL_PS_ALPHA_SLOT_TEX + 6], 0xf8001c0fu);
+  ASSERT_EQ(ps[GL_PS_ALPHA_SLOT_TEX + 8], 0xbf810000u);
 
   /* The vertex: s and t as given, q in w - and a q of 0 as 1, gl_q_inv's rule. */
   oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);

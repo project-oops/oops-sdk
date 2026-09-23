@@ -2313,12 +2313,68 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
          * and depth passed. Mesa derives the two bits together and never sets this combination -
          * mesa/src/amd/common/ac_descriptors.c:1426-1438 sets blend_clamp for NORM/SRGB and
          * blend_bypass *only* for UINT/SINT or the 8_24/24_8/X24_8_32_FLOAT formats, clearing
-         * blend_clamp when it does. An 8_8_8_8 UNORM target gets clamp=1, bypass=0. */
-        {0x31cu, 0x000088a8u},
+         * blend_clamp when it does. An 8_8_8_8 UNORM target gets clamp=1, bypass=0.
+         *
+         * **LINEAR_GENERAL (bit 7) was cleared here on 2026-09-23, and it did not fix the
+         * blending fault** - the counts below are identical with it set and with it clear, so
+         * nothing in this file should be read as saying it was the cause. It is clear because
+         * it describes the surface a second time and disagrees with the first: on this
+         * generation linear is said in `CB_COLOR0_ATTRIB3.COLOR_SW_MODE`, set below, and Mesa
+         * sets bit 7 on no generation from gfx6 to gfx11 - `S_028C70_LINEAR_GENERAL` appears
+         * nowhere in radeonsi or radv, and the only `LINEAR_GENERAL` in that tree is r600's
+         * unrelated array-mode enum and addrlib's `ADDR_SW_LINEAR_GENERAL`, a *different*
+         * swizzle mode from `ADDR_SW_LINEAR`. Matching the reference costs nothing and removes
+         * a contradiction; it buys nothing either, and is recorded here so the next person does
+         * not spend a hardware run rediscovering that.
+         *
+         * **What is measured** is that the blender's arithmetic is right and its result is
+         * deposited wrong. `blend-factor-matrix` draws eight factor pairs; every pair that
+         * engages the blender comes back with the base lane of each 2x2 quad byte-exact and the
+         * other three carrying the correct numbers in the wrong bytes, over six colours:
+         *
+         *     factors                  wrong   x,y even    x even,y odd  x odd
+         *     GL_ONE, GL_ONE            2304   ff cc b3 cc  ff cc b3 00  ff cc ff 00
+         *     GL_SRC_ALPHA, GL_ZERO     2304   10 26 13 06  ff 26 13 60  ff 06 10 60
+         *     GL_ZERO, GL_SRC_ALPHA     1536   40 0d 1a 2d  ff 0d 1a 24  ff 2d 40 24
+         *     GL_SRC_ALPHA, GL_ONE      2304   ff 59 79 b8  ff 59 79 5c  ff b8 ff 5c
+         *     GL_SRC_ALPHA, GL_1_M_S_A  2304   cf 4d 60 8c  ff 4d 60 41  ff 8c cf 41
+         *     GL_ZERO, GL_ONE              0   - the optimiser discards this one
+         *     GL_ONE, GL_ZERO              0   - the optimiser makes this a plain write
+         *
+         * The two that pass are the two `SX_MRT0_BLEND_OPT` can eliminate, so they never reach
+         * the blender at all. Read the rest as bytes in memory, `[B, G, R, A]`:
+         *
+         *   - the base lane of each quad is written whole and is byte-exact;
+         *   - the other three receive **only the middle two bytes**. Byte 0 comes back holding
+         *     something that is neither the result nor the destination and that changes between
+         *     runs, and byte 3 comes back still holding the destination's alpha;
+         *   - in the two x-odd lanes those middle bytes carry the result's bytes 3 and 0 rather
+         *     than 1 and 2 - the word rotated by two - while the x-even, y-odd lane carries 1
+         *     and 2, in place.
+         *
+         * **The arithmetic was never wrong**, which is why a week of blend registers -
+         * `SX_BLEND_OPT_EPSILON`, `SX_BLEND_OPT_CONTROL`, `SX_MRT0_BLEND_OPT`,
+         * `CB_BLEND0_CONTROL` - moved the count by nothing or by everything and never by a
+         * pixel. It was never a blend register: the blender computes, and three quarters of
+         * what it computes is deposited as a partial write in the wrong place. */
+        {0x31cu, 0x00008828u},
         {0x31du, 0x00000000u}, /* CB_COLOR0_ATTRIB */
         {0x31eu, 0x00000000u}, /* CB_COLOR0_DCC_CONTROL: disabled */
         {0x3b0u, 0},           /* CB_COLOR0_ATTRIB2 (patched: extent) */
-        {0x3b8u, 0x08c00000u}, /* CB_COLOR0_ATTRIB3: COLOR_SW_MODE=LINEAR (patched to OOPS_GL_RX_ATTRIB3 on the scanout path). 0x08c6c000 - agc_draw.c's value, whose source no log records - carries 64KB_R_X and streaked this linear buffer when it was used here */
+        /* CB_COLOR0_ATTRIB3: COLOR_SW_MODE=LINEAR, RESOURCE_TYPE=2D (patched to
+         * OOPS_GL_RX_ATTRIB3 on the scanout path). 0x08c6c000 - agc_draw.c's value, whose
+         * source no log records - carries 64KB_R_X and streaked this linear buffer when it was
+         * used here.
+         *
+         * **RESOURCE_TYPE (bits 25:24) said 1D until 2026-09-23.** A render target is a 2D
+         * surface and Mesa says so: ac_surface.c:2739-2744 reaches `ADDR_RSRC_TEX_1D` only for
+         * a texture the caller declared 1D on a generation after gfx9, and everything else is
+         * `ADDR_RSRC_TEX_2D`, which is `RADEON_RESOURCE_2D` = 1 (ac_surface.h:145). A 1D
+         * resource has no second dimension for the colour block to derive a row stride from,
+         * which is the shape of the blending fault documented at CB_COLOR0_INFO above: the
+         * base lane of each 2x2 quad lands correctly and the three that need a neighbouring
+         * address do not. */
+        {0x3b8u, 0x09c00000u},
         /* **The second colour target**, which glDrawBuffer(GL_FRONT_AND_BACK) needs and which
          * this path did without until 2026-09-20. Patched below from `ctx->fb_also`, and left
          * unbound - INFO 0, and out of both masks - when GL names one buffer. Offsets from Mesa
@@ -2333,6 +2389,52 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x32du, 0x00000000u}, /* CB_COLOR1_DCC_CONTROL: disabled */
         {0x3b1u, 0},           /* CB_COLOR1_ATTRIB2 (patched: extent) */
         {0x3b9u, 0},           /* CB_COLOR1_ATTRIB3 (patched: colour 0's swizzle) */
+
+        /* **The rest of each colour target's block, which nothing here had ever written.**
+         *
+         * Mesa emits fourteen consecutive registers per target from CB_COLOR0_BASE
+         * (si_state.c:2777-2792, the GFX10 arm) and then four more - the _EXT halves and the
+         * two ATTRIBs. This set six of them and left the other eight, plus two of the four
+         * _EXT registers, holding whatever the process before us put there. On a console that
+         * is not a theoretical concern: the system compositor drives the same colour block, and
+         * a context register nothing writes is a context register somebody else wrote.
+         *
+         * CMASK, FMASK and DCC are the colour block's metadata surfaces, and a metadata base
+         * left pointing at a stranger's allocation is read whenever anything decides the
+         * surface is compressed. This target has no metadata, so all of them are zero, which is
+         * what Mesa emits for a surface without them. The two CLEAR_WORDs are the fast-clear
+         * colour and are zero for the same reason. The three holes Mesa emits as zero are here
+         * too, so the block this writes is the block the reference writes rather than a subset
+         * of it with gaps at the addresses that decide whether a write is a plain one.
+         *
+         * Offsets: the per-target stride is 0xf dwords, so colour 1 is colour 0 plus 0xf; the
+         * _EXT registers are one dword apart (R_028E60 CMASK_BASE_EXT = 0x398, R_028E80
+         * FMASK_BASE_EXT = 0x3a0, R_028EA0 DCC_BASE_EXT = 0x3a8). */
+        {0x319u, 0x00000000u}, /* hole, as Mesa emits it */
+        {0x31au, 0x00000000u}, /* hole */
+        {0x31fu, 0x00000000u}, /* CB_COLOR0_CMASK: no metadata surface */
+        {0x320u, 0x00000000u}, /* hole */
+        {0x321u, 0x00000000u}, /* CB_COLOR0_FMASK: no metadata surface */
+        {0x322u, 0x00000000u}, /* hole */
+        {0x323u, 0x00000000u}, /* CB_COLOR0_CLEAR_WORD0 */
+        {0x324u, 0x00000000u}, /* CB_COLOR0_CLEAR_WORD1 */
+        {0x325u, 0x00000000u}, /* CB_COLOR0_DCC_BASE */
+        {0x398u, 0x00000000u}, /* CB_COLOR0_CMASK_BASE_EXT */
+        {0x3a0u, 0x00000000u}, /* CB_COLOR0_FMASK_BASE_EXT */
+        {0x3a8u, 0x00000000u}, /* CB_COLOR0_DCC_BASE_EXT */
+        {0x328u, 0x00000000u}, /* hole */
+        {0x329u, 0x00000000u}, /* hole */
+        {0x32eu, 0x00000000u}, /* CB_COLOR1_CMASK */
+        {0x32fu, 0x00000000u}, /* hole */
+        {0x330u, 0x00000000u}, /* CB_COLOR1_FMASK */
+        {0x331u, 0x00000000u}, /* hole */
+        {0x332u, 0x00000000u}, /* CB_COLOR1_CLEAR_WORD0 */
+        {0x333u, 0x00000000u}, /* CB_COLOR1_CLEAR_WORD1 */
+        {0x334u, 0x00000000u}, /* CB_COLOR1_DCC_BASE */
+        {0x399u, 0x00000000u}, /* CB_COLOR1_CMASK_BASE_EXT */
+        {0x3a1u, 0x00000000u}, /* CB_COLOR1_FMASK_BASE_EXT */
+        {0x3a9u, 0x00000000u}, /* CB_COLOR1_DCC_BASE_EXT */
+
         {0x109u, 0x00000000u}, /* CB_DCC_CONTROL: disabled */
         {0x202u, 0x00cc0010u}, /* CB_COLOR_CONTROL: CB_NORMAL, ROP3_COPY (patched: glLogicOp) */
         {0x08eu, 0x0000000fu}, /* CB_TARGET_MASK (patched) */
@@ -2385,7 +2487,34 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x1d5u, 0x00000000u}, /* SX_PS_DOWNCONVERT: none */
         {0x1d6u, 0x00000000u}, /* SX_BLEND_OPT_EPSILON */
         {0x1d7u, 0x00000000u}, /* SX_BLEND_OPT_CONTROL */
-        {0x1d8u, 0x00000000u}, /* SX_MRT0_BLEND_OPT: OPT_COMB_NONE both halves */
+        /*
+         * **RB+'s hints, all written and all zero, which is deliberate and not yet finished.**
+         *
+         * `SX_MRT0_BLEND_OPT`'s four operand fields take `SX_BLEND_OPT`, whose 0 is
+         * `PRESERVE_NONE_IGNORE_ALL` - the most aggressive hint the register has - while its two
+         * `_COMB_FCN` fields take `SX_OPT_COMB_FCN`, where 0 is `OPT_COMB_NONE`. Fields are
+         * `COLOR_SRC_OPT` [0,2], `COLOR_DST_OPT` [4,6], `COLOR_COMB_FCN` [8,10], `ALPHA_SRC_OPT`
+         * [16,18], `ALPHA_DST_OPT` [20,22], `ALPHA_COMB_FCN` [24,26]
+         * (`mesa/src/amd/registers/gfx10.json:14940-14948`), enum at :535-545. So zero is not
+         * "no optimisation"; it is a strong claim, and radeonsi derives the right one per target
+         * from the blend's own factors (`si_state.c:461-464`, `:478-486`).
+         *
+         * **Three values were tried against the blending fault and all three measured the same**
+         * - 0, `0x00110011` (`PRESERVE_ALL_IGNORE_NONE`) and `0x00770077`
+         * (`PRESERVE_NONE_IGNORE_NONE`), each leaving three quarters of a blended region wrong -
+         * because none of them was what was wrong. The fault was the export format, and
+         * `gl_ps_patch_export` in gl_context.c has the account. Zero is back because it is what
+         * `test_pm4_gl_rbplus_blend_opt_is_written_off` describes: every one of 0x1d5..0x1d9
+         * written, and written off, rather than left holding another process's state.
+         *
+         * **What is still owed here** is the derivation. With the export format right, RB+ can
+         * also down-convert - `SX_PS_DOWNCONVERT` set to `SX_RT_EXPORT_8_8_8_8`, which
+         * `ac_formats.c:860-879` allows only for an fp16 export, which this now is. That is a
+         * performance path, not a correctness one, and it wants these registers derived from the
+         * blend state and emitted beside `CB_BLEND0_CONTROL` rather than written once as
+         * constants in a frame's opening block.
+         */
+        {0x1d8u, 0x00000000u}, /* SX_MRT0_BLEND_OPT */
         {0x1d9u, 0x00000000u}, /* SX_MRT1_BLEND_OPT */
         {0x200u, 0x00000000u}, /* DB_DEPTH_CONTROL (patched) */
         {0x201u, 0x00010000u}, /* DB_EQAA */
@@ -2482,7 +2611,11 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
         {0x1c2u, 0x00000001u}, /* SPI_SHADER_IDX_FORMAT */
         {0x1c3u, 0x00000004u}, /* SPI_SHADER_POS_FORMAT: POS0 = 4COMP */
         {0x1c4u, 0x00000000u}, /* SPI_SHADER_Z_FORMAT: no Z export */
-        {0x1c5u, 0x00000009u}, /* SPI_SHADER_COL_FORMAT: COL0 = 32_ABGR (patched: COL1 too) */
+        /* SPI_SHADER_COL_FORMAT: COL0 = FP16_ABGR (patched: COL1 too). 32_ABGR until
+           2026-09-23 - Mesa's ac_choose_spi_color_formats requires the half-float format for an
+           8_8_8_8 target wherever RB+ is allowed, which is every part this runs on, and the
+           mismatch is what broke blending. gl_ps_patch_export carries the whole account. */
+        {0x1c5u, 0x00000004u},
         {0x1b3u, 0x00000002u}, /* SPI_PS_INPUT_ENA: PERSP_CENTER_ENA (patched: the stipple) */
         {0x1b4u, 0x00000002u}, /* SPI_PS_INPUT_ADDR: PERSP_CENTER_ENA (patched: the stipple) */
         {0x1b5u, 0x00000001u}, /* SPI_INTERP_CONTROL_0: FLAT_SHADE_ENA (no parameter is flagged flat) */
@@ -2584,8 +2717,9 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
             if (also_gpu) val |= val << 4;
         } else if (reg == 0x08fu || reg == 0x1c5u) {
             /* The shader exports to MRT1 as well (gl_ps_patch_export), so both the mask and the
-             * export format carry a second copy: 0xff and 0x99, the values `-3f62` drew with. */
-            val = also_gpu ? (reg == 0x08fu ? 0x000000ffu : 0x00000099u) : val;
+             * export format carry a second copy: 0xff, and 0x44 for the two half-float exports
+             * (0x99 when they were two 32-bit ones, which `-3f62` drew with). */
+            val = also_gpu ? (reg == 0x08fu ? 0x000000ffu : 0x00000044u) : val;
         } else if (reg == 0x1b3u || reg == 0x1b4u) {
             /* A stippled draw needs the fragment's window position: POS_X_FLOAT_ENA (bit 8) and
              * POS_Y_FLOAT_ENA (bit 9) beside PERSP_CENTER_ENA, which puts POS_X in v2 and POS_Y
@@ -2600,13 +2734,13 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
             /* Colour 0's format, or unbound. An unbound target is out of both masks as well; the
              * format is zeroed too so that a mask edit alone cannot start writing memory the
              * base register does not name. */
-            val = also_gpu ? 0x000088a8u : 0u;
+            val = also_gpu ? 0x00008828u : 0u;
         } else if (reg == 0x3b1u) {
             val = OOPS_AGC_CB_COLOR_ATTRIB2(w, h);
         } else if (reg == 0x3b9u) {
             /* The same swizzle as colour 0: both buffers are the same kind of surface, linear
              * here and 64KB_R_X on the scanout path. */
-            val = ctx->hw_rx ? OOPS_GL_RX_ATTRIB3 : 0x08c00000u;
+            val = ctx->hw_rx ? OOPS_GL_RX_ATTRIB3 : 0x09c00000u;
         }
         *dw++ = 0xc0016900u;
         *dw++ = reg;

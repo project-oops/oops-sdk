@@ -281,12 +281,35 @@ void glsl_emit_export_mrtz(glsl_code_t *c, uint32_t reg) {
     put(c, reg & 0xffu);
 }
 
+/* **Four floats are packed into two registers first**, because an 8_8_8_8 target on a part with
+ * RB+ requires the half-float export format and not the 32-bit one. Mesa's
+ * `ac_choose_spi_color_formats` (amd/common/ac_shader_util.c:672-693) calls these "required
+ * values for RB+", and RB+ is allowed on every GFX10_3 part (ac_gpu_info.c:1117-1125).
+ *
+ * Exporting four 32-bit floats instead was correct-looking and wrong: an unblended draw landed
+ * byte for byte, and a blended one had its result - computed correctly - scattered in two-byte
+ * slices across RB+'s sixteen-byte transaction, the first four bytes in place and the other
+ * twelve not. `gl_ps_patch_export` in gl_context.c carries the full account and the measurement
+ * that closed it; this is the same repair for the compiled path, and both have to stay in step
+ * with `SPI_SHADER_COL_FORMAT`, which is 4 (`FP16_ABGR`) in gl_draw.c's frame table.
+ *
+ * The sequence is Mesa's (`ac_nir_lower_ps_late.c:479-506`): pack (R,G) and (B,A) with
+ * `pack_half_2x16_rtz_split`, enable all four channels, and set the compressed flag on anything
+ * below GFX11. `v_cvt_pkrtz_f16_f32_e32` is VOP2 opcode 0x2f, so the word is `0x5e000000 | vdst
+ * << 17 | vsrc1 << 9 | (256 + vsrc0)` - LLVM's encoding for gfx1030, not a hand derivation. */
 void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base) {
-    const uint32_t en = 0xfu;      /* all four channels */
+    const uint32_t en = 0xfu;      /* all four channels, in two packed registers */
     const uint32_t target = 0u;    /* MRT0 */
-    put(c, (0x3eu << 26) | en | (target << 4) | (1u << 11) | (1u << 12));
-    put(c, ((base + 0u) & 0xffu) | (((base + 1u) & 0xffu) << 8) |
-              (((base + 2u) & 0xffu) << 16) | (((base + 3u) & 0xffu) << 24));
+    const uint32_t r = (base + 0u) & 0xffu, g = (base + 1u) & 0xffu;
+    const uint32_t b = (base + 2u) & 0xffu, a = (base + 3u) & 0xffu;
+
+    /* The packs land in the first two of the four, which the export then reads. Nothing runs
+       after the export, so overwriting the colour it was given costs nothing. */
+    put(c, 0x5e000000u | (r << 17) | (g << 9) | (256u + r)); /* v_cvt_pkrtz_f16_f32 r, r, g */
+    put(c, 0x5e000000u | (g << 17) | (a << 9) | (256u + b)); /* v_cvt_pkrtz_f16_f32 g, b, a */
+
+    put(c, (0x3eu << 26) | en | (target << 4) | (1u << 10) | (1u << 11) | (1u << 12));
+    put(c, r | (g << 8));
 }
 
 /* -------------------------------------------------------------------------

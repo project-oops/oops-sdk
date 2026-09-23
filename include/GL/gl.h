@@ -2398,6 +2398,15 @@ void *oops_gl_get_proc_address(const char *name);
  * Replay executes the stream against the current context through the same executor display
  * lists use, so a capture cannot drift from a list. It returns the number of commands run,
  * which is the count in the header unless the stream was truncated. */
+/* **Draw into a linear colour target instead of the scanout buffers in place.**
+ *
+ * The scanout path draws a frame where it will be shown, in the display's 64KB_R_X swizzle; the
+ * linear path draws a plain buffer and has it tiled into place at the swap. The first is faster
+ * and is the default. Call this before creating a context to take the second; afterwards the
+ * target is already chosen and this does nothing.
+ */
+void oops_gl_set_linear_target(GLboolean on);
+
 void oops_gl_capture_begin(void);
 void oops_gl_capture_end(void);
 const void *oops_gl_capture_data(size_t *out_bytes, unsigned *out_calls);

@@ -2002,17 +2002,30 @@ static void test_gl2_pixel_shader_encodings_match_the_assembler(void) {
     ASSERT_EQ(words[8], 0xc8500e00u); /* v_interp_p1_f32 v20, v0, attr3.z */
     ASSERT_EQ(words[9], 0xc8510e01u);
 
-    /* The export. Two dwords: the first carries `done` and `vm`, the second the four registers
-     * as four bytes. */
+    /* The export. Four dwords since 2026-09-23: two `v_cvt_pkrtz_f16_f32` that pack the four
+     * floats into two registers, then the export itself - the first of its dwords carrying
+     * `compr`, `done` and `vm`, the second the two packed registers as two bytes. An 8_8_8_8
+     * target on a part with RB+ requires the half-float format, and the four-float export this
+     * used to emit is what broke blending; glsl_emit_export_mrt0 carries the account. */
     glsl_code_init(&c, words, 64);
     glsl_emit_export_mrt0(&c, 4u);
-    ASSERT_EQ(c.count, 2u);
-    ASSERT_EQ(words[0], 0xf800180fu); /* exp mrt0 ... done vm */
-    ASSERT_EQ(words[1], 0x07060504u); /* v4, v5, v6, v7 */
+    ASSERT_EQ(c.count, 4u);
+    ASSERT_EQ(words[0], 0x5e080b04u); /* v_cvt_pkrtz_f16_f32 v4, v4, v5 */
+    ASSERT_EQ(words[1], 0x5e0a0f06u); /* v_cvt_pkrtz_f16_f32 v5, v6, v7 */
+    ASSERT_EQ(words[2], 0xf8001c0fu); /* exp mrt0 ... done compr vm */
+    ASSERT_EQ(words[3], 0x00000504u); /* v4, v5 */
+
+    /* **From v0, this is LLVM's own output, word for word.** `llc -mcpu=gfx1030` on the pair of
+     * `llvm.amdgcn.cvt.pkrtz` feeding `llvm.amdgcn.exp.compr.v2f16` assembles to
+     * `[0x00,0x03,0x00,0x5e]`, `[0x02,0x07,0x02,0x5e]` and
+     * `[0x0f,0x1c,0x00,0xf8],[0x00,0x01,0x00,0x00]`. The encodings here were taken from it
+     * rather than derived, and this is the case that says so. */
     glsl_code_init(&c, words, 64);
     glsl_emit_export_mrt0(&c, 0u);
-    ASSERT_EQ(words[0], 0xf800180fu);
-    ASSERT_EQ(words[1], 0x03020100u);
+    ASSERT_EQ(words[0], 0x5e000300u); /* v_cvt_pkrtz_f16_f32 v0, v0, v1 */
+    ASSERT_EQ(words[1], 0x5e020702u); /* v_cvt_pkrtz_f16_f32 v1, v2, v3 */
+    ASSERT_EQ(words[2], 0xf8001c0fu);
+    ASSERT_EQ(words[3], 0x00000100u); /* v0, v1 */
 
     /* The one-operand instructions. */
     glsl_code_init(&c, words, 64);
@@ -2143,11 +2156,14 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
     /* The epilogue, whatever the body did in between: the colour into v4..v7, the export, and
      * `s_endpgm`. */
     ASSERT_EQ(words[count - 1u], 0xbf810000u); /* s_endpgm */
-    ASSERT_EQ(words[count - 2u], 0x07060504u); /* v4, v5, v6, v7 */
-    ASSERT_EQ(words[count - 3u], 0xf800180fu); /* exp mrt0 ... done vm */
+    ASSERT_EQ(words[count - 2u], 0x00000504u); /* v4, v5 - the two packed registers */
+    ASSERT_EQ(words[count - 3u], 0xf8001c0fu); /* exp mrt0 ... done compr vm */
+    ASSERT_EQ(words[count - 4u], 0x5e0a0f06u); /* v_cvt_pkrtz_f16_f32 v5, v6, v7 */
+    ASSERT_EQ(words[count - 5u], 0x5e080b04u); /* v_cvt_pkrtz_f16_f32 v4, v4, v5 */
     for (uint32_t i = 0; i < 4u; i++) {
-        /* v_mov_b32 v4+i, <colour>+i - the opcode and destination are what matter here. */
-        const uint32_t w = words[count - 7u + i];
+        /* v_mov_b32 v4+i, <colour>+i - the opcode and destination are what matter here. Two
+           words further back than it used to be, for the two packing instructions above. */
+        const uint32_t w = words[count - 9u + i];
         ASSERT_EQ(w >> 25, 0x3fu);                   /* VOP1 */
         ASSERT_EQ((w >> 17) & 0xffu, 4u + i);        /* into v4..v7 */
         ASSERT_EQ((w >> 9) & 0xffu, 1u);             /* v_mov_b32 */
@@ -2312,7 +2328,42 @@ typedef struct {
      * `SPI_PS_INPUT_ENA` the compiler reported. Reading one that is not live is reading what
      * the previous wave left. */
     GLboolean hw_vgpr_live[8];
+    /* **What a `v_cvt_pkrtz_f16_f32` put in a register**, which a float cannot hold: the
+       instruction packs two half-floats into one 32-bit register and the colour export reads
+       them back as a pair. `s->v` models a register as one float, so the pair lives beside it
+       and the compressed export reads this instead. Written by opcode 47 and by nothing else,
+       so a register that was never packed and is exported compressed reads as zero rather than
+       as whatever its float happened to be. */
+    float vpack[256][2];
+    GLboolean vpacked[256];
 } sim_t;
+
+/* **A float as `v_cvt_pkrtz_f16_f32` leaves it**: half precision, round toward zero.
+ *
+ * The colour a shader computes in 32 bits does not survive to the colour block intact - an
+ * 8_8_8_8 target on this part takes half-floats, so ten mantissa bits is what a fragment gets.
+ * That is more than an 8-bit channel needs and the loss is invisible in a rendered frame, but a
+ * simulator that carried full precision through a half-precision instruction would be claiming
+ * an exactness the hardware does not have, and the next thing that depends on the low bits
+ * would find out on a console instead of here.
+ *
+ * Half's subnormal range ends below 6.1e-5, which is a quarter of one 8-bit level, so anything
+ * that small is flushed to zero rather than modelled. */
+static float sim_f16_rtz(float f) {
+    union { float f; uint32_t u; } c;
+    c.f = f;
+    const uint32_t sign = c.u & 0x80000000u;
+    const uint32_t biased = (c.u >> 23) & 0xffu;
+    if (biased == 0xffu) return f; /* inf and nan pass through */
+    {
+        const int32_t e = (int32_t)biased - 127;
+        if (e > 15) { c.u = sign | 0x7f800000u; return c.f; } /* beyond half's range */
+        if (e < -14) { c.u = sign; return c.f; }              /* below its normals */
+        c.u = (c.u & ~0x1fffu); /* ten mantissa bits, the low thirteen dropped - toward zero */
+        c.u |= sign;
+        return c.f;
+    }
+}
 
 /* The first register the allocator owns; everything below it is the SPI's. Mirrors
  * `GL_PS_FIRST_FREE_VGPR` in `glsl_ps.c`, which is not a header constant. */
@@ -2523,7 +2574,28 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
 
         if ((x >> 26) == 0x3eu) {                /* EXP - the second dword names the registers */
             const uint32_t regs = w[++i];
-            for (int c = 0; c < 4; c++) s->out[c] = s->v[(regs >> (8 * c)) & 0xffu];
+            if ((x >> 10) & 0x1u) {
+                /* **Compressed: two registers, four halves.** The first holds (R,G) and the
+                   second (B,A), which is what `glsl_emit_export_mrt0` packs and what an
+                   8_8_8_8 target requires - see that function. */
+                const uint32_t lo = regs & 0xffu, hi = (regs >> 8) & 0xffu;
+                /* **Only a surviving lane has to have packed anything.** A wave that discarded
+                   every lane still reaches the export and still carries `done`, because that is
+                   what retires it - but the packing above it is a VALU write and was skipped,
+                   exactly as the hardware would skip it. Asserting unconditionally here failed
+                   every shader that discards, which is a property of the simulator and not of
+                   the shader. */
+                if (s->exec) {
+                    ASSERT_TRUE(s->vpacked[lo]);
+                    ASSERT_TRUE(s->vpacked[hi]);
+                }
+                s->out[0] = s->vpack[lo][0];
+                s->out[1] = s->vpack[lo][1];
+                s->out[2] = s->vpack[hi][0];
+                s->out[3] = s->vpack[hi][1];
+            } else {
+                for (int c = 0; c < 4; c++) s->out[c] = s->v[(regs >> (8 * c)) & 0xffu];
+            }
             s->exported = GL_TRUE;
             /* **The export runs whatever exec says; the *pixel* is what exec decides.** A wave
              * that discarded every lane still exports, and still carries `done`, because that
@@ -2700,6 +2772,27 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
         {                                        /* VOP2 */
             const uint32_t op = (x >> 25) & 0x3fu;
             const uint32_t vdst = (x >> 17) & 0xffu;
+            if (op == 47u) { /* v_cvt_pkrtz_f16_f32 - the colour export's packing */
+                /* **Read straight out of the file, as the export itself always has.** These
+                   two instructions are the export's epilogue and they read exactly the
+                   registers the uncompressed export used to name in its second dword, which
+                   were never put through `sim_src`. They are registers the shader wrote, so
+                   the hardware-liveness question `sim_src` asks - was the SPI ever asked to
+                   fill this - is not about them and answering it would fail every shader that
+                   keeps its colour low in the file.
+
+                   The result is not a float, so it goes in the pack table and `s->v[vdst]` is
+                   left alone: reading a packed register as a float should not be plausible. */
+                const uint32_t s0 = x & 0x1ffu;
+                const float lo = s0 >= 256u ? s->v[s0 - 256u] : 0.0f;
+                const float hi = s->v[(x >> 9) & 0xffu];
+                if (s->exec) {
+                    s->vpack[vdst][0] = sim_f16_rtz(lo);
+                    s->vpack[vdst][1] = sim_f16_rtz(hi);
+                    s->vpacked[vdst] = GL_TRUE;
+                }
+                continue;
+            }
             const float b = s->v[(x >> 9) & 0xffu];
             const float a = sim_src(s, x & 0x1ffu, w, &i);
             float r = 0.0f;
@@ -2809,14 +2902,29 @@ static GLboolean compile_and_run(void *ctx, const char *vs_src, const char *fs_s
     return compile_and_run_prog(ctx, linked_program(vs_src, fs_src), attr, out);
 }
 
+/* **The tolerance carries the colour export's own precision, on top of whatever is asked for.**
+ *
+ * Everything compared here reached the test through `gl_FragColor`, and since 2026-09-23 that
+ * leaves the shader as two packed half-floats: an 8_8_8_8 target on a part with RB+ takes
+ * `SPI_SHADER_FP16_ABGR` and nothing else (`glsl_emit_export_mrt0`). Ten mantissa bits truncated
+ * toward zero is up to one part in 1024 of the value, so an assertion written at 1e-6 was
+ * asking the export for an exactness the hardware has never had - it only used to pass because
+ * the simulator carried 32 bits through an instruction that does not.
+ *
+ * Scaling by the expected magnitude rather than loosening to a flat number keeps the assertions
+ * sharp where it matters: these tests separate a component from its neighbours, a flipped y from
+ * an unflipped one, a uniform from a descriptor. Those differ by far more than a part in 1024,
+ * and anything that does not was never going to survive an 8-bit channel either. */
 #define ASSERT_NEAR(a, b, tol)                                                                 \
     do {                                                                                       \
         const float _a = (float)(a), _b = (float)(b);                                          \
         const float _d = _a > _b ? _a - _b : _b - _a;                                          \
-        if (!(_d <= (float)(tol))) {                                                           \
+        const float _mag = _b > 0.0f ? _b : -_b;                                               \
+        const float _lim = (float)(tol) + _mag * (1.0f / 1024.0f);                             \
+        if (!(_d <= _lim)) {                                                                   \
             printf("\n    %s = %f, expected %f\n", #a, (double)_a, (double)_b);                \
         }                                                                                      \
-        ASSERT_TRUE(_d <= (float)(tol));                                                       \
+        ASSERT_TRUE(_d <= _lim);                                                               \
     } while (0)
 
 /* The vertex shader every simulation below pairs with: one vec4 varying, which lands in

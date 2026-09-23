@@ -71,6 +71,35 @@ static void gl_klog_val(const char *tag, uint64_t val) {
 #endif
 
 /* One line in the kernel log, for the rest of the library. */
+/* **Keep the colour target linear instead of drawing the scanout buffers in place.**
+ *
+ * The scanout path is faster - it is the whole reason it exists, a frame drawn where it will be
+ * shown rather than drawn and then tiled into place - and it is the path every hardware run
+ * since 2026-09-20 has used. It is also 64KB_R_X, a swizzled surface, where the linear path is
+ * a plain one; and the blending fault documented at `CB_COLOR0_INFO` in gl_draw.c is a fault in
+ * the *placement* of a blended result, not in its value. A swizzle the write path agrees with
+ * and the read-modify-write path does not would produce exactly that, and would produce it on
+ * the scanout path only.
+ *
+ * So this exists to answer one question: does a blend land correctly on a linear target? It has
+ * to be settable rather than compiled in, because the answer is only worth anything next to the
+ * scanout run it is compared against, and `OOPS_GL_RX_MEASURED` is a record of a measurement
+ * that was made and should not be edited to run an experiment. Set it before the context is
+ * created; afterwards the target is already chosen and this does nothing.
+ *
+ * It was added on 2026-09-23 to ask whether blending landed correctly on an unswizzled surface.
+ * It did not - the two paths were wrong identically, which is what said the swizzle was not
+ * involved and sent the search to the export format instead. Kept because a runtime choice
+ * between the two targets is worth having on its own: `OOPS_GL_RX_MEASURED` is a record of a
+ * measurement and should not be edited to run an experiment. */
+GLboolean gl_force_linear_target = GL_FALSE;
+
+void oops_gl_set_linear_target(GLboolean on) {
+    gl_force_linear_target = on;
+    gl_log_line(on ? "the colour target will stay linear: the scanout path is skipped"
+                   : "the scanout path is allowed");
+}
+
 void gl_log_line(const char *msg) {
     if (msg) gl_klog_line(msg);
 }
@@ -660,10 +689,14 @@ void gl_ps_build_textured(uint32_t *ps_tex, uint64_t canary_gpu) {
     for (size_t p = GL_PS_ALPHA_SLOT_TEX; p < GL_PS_ALPHA_SLOT_TEX + 4u; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
-    ps_tex[GL_PS_EXPORT_TEX] = 0xf800180fu; /* exp mrt0, v4, v5, v6, v7 done vm */
-    ps_tex[GL_PS_EXPORT_TEX + 1u] = 0x07060504u;
-    ps_tex[GL_PS_EXPORT_TEX + 2u] = 0xbf810000u; /* s_endpgm */
-    for (size_t p = GL_PS_EXPORT_TEX + 3u; p < OOPS_GL_PS_TEX_WORDS; p++) ps_tex[p] = 0xbf800000u;
+    /* The half-float export `gl_ps_patch_export` keeps, written here so the program is correct
+       before the first draw patches it rather than only afterwards. */
+    ps_tex[GL_PS_EXPORT_TEX] = 0x5e080b04u;      /* v_cvt_pkrtz_f16_f32 v4, v4, v5 */
+    ps_tex[GL_PS_EXPORT_TEX + 1u] = 0x5e0a0f06u; /* v_cvt_pkrtz_f16_f32 v5, v6, v7 */
+    ps_tex[GL_PS_EXPORT_TEX + 2u] = 0xf8001c0fu; /* exp mrt0, v4, v5 done compr vm */
+    ps_tex[GL_PS_EXPORT_TEX + 3u] = 0x00000504u;
+    ps_tex[GL_PS_EXPORT_TEX + 4u] = 0xbf810000u; /* s_endpgm */
+    for (size_t p = GL_PS_EXPORT_TEX + 5u; p < OOPS_GL_PS_TEX_WORDS; p++) ps_tex[p] = 0xbf800000u;
 }
 
 /* **The vertex shader for a draw with a third interpolant** (since 2026-09-19). It is the
@@ -1406,10 +1439,12 @@ void *glContextCreate(struct oops_display *disp) {
             }
             /* 72..76: the export and the end - see gl_ps_patch_export, which writes the second
              * target's when GL names both buffers. */
-            ps_untex[GL_PS_EXPORT_UNTEX] = 0xf800180fu; /* exp mrt0, v4, v5, v6, v7 done vm */
-            ps_untex[GL_PS_EXPORT_UNTEX + 1u] = 0x07060504u;
-            ps_untex[GL_PS_EXPORT_UNTEX + 2u] = 0xbf810000u; /* s_endpgm */
-            for (size_t p = GL_PS_EXPORT_UNTEX + 3u; p < OOPS_GL_PS_UNTEX_WORDS; p++) {
+            ps_untex[GL_PS_EXPORT_UNTEX] = 0x5e080b04u;      /* v_cvt_pkrtz_f16_f32 v4, v4, v5 */
+            ps_untex[GL_PS_EXPORT_UNTEX + 1u] = 0x5e0a0f06u; /* v_cvt_pkrtz_f16_f32 v5, v6, v7 */
+            ps_untex[GL_PS_EXPORT_UNTEX + 2u] = 0xf8001c0fu; /* exp mrt0, v4, v5 done compr vm */
+            ps_untex[GL_PS_EXPORT_UNTEX + 3u] = 0x00000504u;
+            ps_untex[GL_PS_EXPORT_UNTEX + 4u] = 0xbf810000u; /* s_endpgm */
+            for (size_t p = GL_PS_EXPORT_UNTEX + 5u; p < OOPS_GL_PS_UNTEX_WORDS; p++) {
                 ps_untex[p] = 0xbf800000u;
             }
 
@@ -1432,7 +1467,7 @@ void *glContextCreate(struct oops_display *disp) {
             ctx->zs_tiled = GL_TRUE; /* the DB draws depth and stencil 64KB_Z_X from here on */
             /* The scanout path, once REQ-20260919T1927Z-7e21 has measured it (gl_rx.h) - before
              * the self-test, so that the test clears the buffer frames will be drawn into. */
-            if (OOPS_GL_RX_MEASURED &&
+            if (!gl_force_linear_target && OOPS_GL_RX_MEASURED &&
                 oops_display_scanout_layout(disp) == OOPS_DISPLAY_SCANOUT_RX) {
                 gl_scanout_begin(ctx);
             }
@@ -2764,17 +2799,41 @@ void gl_ps_patch_stipple(gl_context_t *ctx, GLboolean on) {
  */
 void gl_ps_patch_export(gl_context_t *ctx, GLboolean both) {
     if (!ctx || !ctx->gpu_payload) return;
-    /* tools/shader/mrt1-export.s. The single-target form's first two words are the ones this
-     * shader has always ended with, which is that file's cross-check. */
+    /* **The colour leaves as two packed half-float registers, not four floats.**
+     *
+     * This exported `exp mrt0, v4, v5, v6, v7 done vm` - `SPI_SHADER_32_ABGR`, four 32-bit
+     * floats - from the day it was written until 2026-09-23, and every unblended frame it ever
+     * drew was byte-exact, so nothing pointed at it. Blending is where it shows. Mesa's
+     * `ac_choose_spi_color_formats` (amd/common/ac_shader_util.c:672-693) maps `COLOR_8_8_8_8`
+     * UNORM to `SPI_SHADER_FP16_ABGR` in every one of its four cases, under the comment
+     * **"These are required values for RB+."** RB+ is allowed on every GFX10_3 part
+     * (ac_gpu_info.c:1117-1125), so it is not optional here: an 8-bit target fed 32-bit exports
+     * has the render backend read a 32-bit export bus as packed 16-bit data, and the blended
+     * result - which is computed correctly - is scattered in 2-byte slices across RB+'s 16-byte
+     * transaction, the first four bytes landing in place and the other twelve not. That is the
+     * fault recorded against `CB_COLOR0_INFO` in gl_draw.c, and no register cures it, because
+     * no register was what was wrong.
+     *
+     * The sequence is Mesa's: `ac_nir_lower_ps_late.c:479-506` packs `(R,G)` and `(B,A)` with
+     * `pack_half_2x16_rtz_split`, enables all four channels, and sets the compressed flag on
+     * anything below GFX11. The encodings are LLVM's for gfx1030 rather than derived by hand -
+     * `v_cvt_pkrtz_f16_f32_e32` is VOP2 opcode 0x2f, `0x5E000000 | VDST << 17 | VSRC1 << 9 |
+     * (256 + VSRC0)`, and the export is `[0x0f,0x1c,0x00,0xf8]` with COMPR and VM set.
+     *
+     * tools/shader/mrt1-export.s is the cross-check for the two-target form. */
     static const uint32_t one[GL_PS_EXPORT_WORDS] = {
-        0xf800180fu, /* exp mrt0, v4, v5, v6, v7 done vm */
-        0x07060504u, 0xbf810000u, /* s_endpgm */
+        0x5e080b04u,              /* v_cvt_pkrtz_f16_f32 v4, v4, v5   - (R,G) */
+        0x5e0a0f06u,              /* v_cvt_pkrtz_f16_f32 v5, v6, v7   - (B,A) */
+        0xf8001c0fu,              /* exp mrt0, v4, v5, off, off done compr vm */
+        0x00000504u, 0xbf810000u, /* s_endpgm */
         0xbf800000u, 0xbf800000u, /* s_nop 0, past the end */
     };
     static const uint32_t two[GL_PS_EXPORT_WORDS] = {
-        0xf800100fu, /* exp mrt0, v4, v5, v6, v7 vm - no done: it is not the last */
-        0x07060504u, 0xf800181fu, /* exp mrt1, v4, v5, v6, v7 done vm */
-        0x07060504u, 0xbf810000u, /* s_endpgm */
+        0x5e080b04u,              /* v_cvt_pkrtz_f16_f32 v4, v4, v5   - (R,G) */
+        0x5e0a0f06u,              /* v_cvt_pkrtz_f16_f32 v5, v6, v7   - (B,A) */
+        0xf800140fu,              /* exp mrt0, v4, v5 compr vm - no done: it is not the last */
+        0x00000504u, 0xf8001c1fu, /* exp mrt1, v4, v5 done compr vm */
+        0x00000504u, 0xbf810000u, /* s_endpgm */
     };
     const uint32_t *words = both ? two : one;
     uint32_t *const ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);

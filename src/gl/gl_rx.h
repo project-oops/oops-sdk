@@ -66,7 +66,14 @@
  * (src/amd/addrlib/inc/addrtypes.h:254) - `-7e21`'s arm1, which tools/rx-check names.
  *
  * **Measured over a whole 1920 x 1080 frame** - `REQ-20260921T1640Z-1d5e`, run 18, all 135
- * blocks and zero mismatches. See "Across the whole frame" above. */
-#define OOPS_GL_RX_ATTRIB3 0x08c6c000u
+ * blocks and zero mismatches. See "Across the whole frame" above.
+ *
+ * **RESOURCE_TYPE (bits 25:24) became 2D on 2026-09-23**, which is why this is 0x09c6c000 and
+ * not 0x08c6c000. It had said 1D since the value was first derived. Mesa picks the resource
+ * type in ac_surface.c:2739-2744 and reaches 1D only for a texture the caller declared 1D on a
+ * generation after gfx9; everything else, a render target included, is `ADDR_RSRC_TEX_2D`, and
+ * `RADEON_RESOURCE_2D` is 1 (ac_surface.h:145). The frame measurement above is unaffected -
+ * it was a measurement of the swizzle, in bits 18:14, which this does not touch. */
+#define OOPS_GL_RX_ATTRIB3 0x09c6c000u
 
 #endif

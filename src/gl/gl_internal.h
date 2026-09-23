@@ -352,7 +352,7 @@ typedef struct gl_texture_object {
     GLenum min_filter;
     GLenum mag_filter;
     void *pixels;          /* Host software copy */
-    void *garlic_data;     /* 256-byte aligned Garlic allocation on PS5 */
+    void *garlic_data;     /* 256-byte aligned Garlic allocation on Prospero */
     uint64_t garlic_va;    /* GPU Virtual Address */
     uint32_t pitch;      /* pixels per row in memory: equals the width, which is where the sampler takes the pitch from */
     uint32_t img_desc[8];  /* SQ_IMG_RSRC_WORD0..7 */
@@ -1988,12 +1988,18 @@ static inline uint32_t gl_f32_bits(float f) {
 #define GL_PS_STIPPLE_WORDS    16u
 #define GL_PS_EXPORT_TEX       290u
 /* The export and the end of the program, patched together by `gl_ps_patch_export` (since
- * 2026-09-20). One colour target is `exp mrt0 ... done vm`, `s_endpgm`, and two nops; both
- * buffers is `exp mrt0 ... vm`, `exp mrt1 ... done vm`, `s_endpgm` - `done` belongs to the last
- * export a wave raises, so the single-target word cannot simply be repeated
- * (tools/shader/mrt1-export.s). Five words either way, in both shaders; the untextured one's
- * slot is where its export has always been. */
-#define GL_PS_EXPORT_WORDS     5u
+ * 2026-09-20). One colour target is `exp mrt0 ... done compr vm`, `s_endpgm` and a nop; both
+ * buffers is `exp mrt0 ... compr vm`, `exp mrt1 ... done compr vm`, `s_endpgm` - `done` belongs
+ * to the last export a wave raises, so the single-target word cannot simply be repeated
+ * (tools/shader/mrt1-export.s). The untextured shader's slot is where its export has always
+ * been.
+ *
+ * **Seven words since 2026-09-23, from five**, because the export is preceded by the two
+ * `v_cvt_pkrtz_f16_f32` that pack four floats into two registers. See `gl_ps_patch_export`:
+ * an 8_8_8_8 target on a part with RB+ requires the half-float export format, and this shader
+ * exported four 32-bit floats until then. Both shaders have the room - the textured one's slot
+ * is word 290 of 320 and the untextured one's is 84 of 128. */
+#define GL_PS_EXPORT_WORDS     7u
 #define GL_PS_EXPORT_UNTEX     84u
 /*
  * **Antialiasing's coverage** in the untextured pixel shader (since 2026-09-20): sixteen words
@@ -3592,6 +3598,16 @@ static inline uint32_t gl_logicop_apply(uint32_t mode, uint32_t s, uint32_t d) {
  * Fields from `oops-mesa/mesa/src/amd/registers/gfx103.json`: `DISABLE_DUAL_QUAD` [0],
  * `MODE` [4,6], `ROP3` [16,23].
  */
+/* **`DISABLE_DUAL_QUAD` is RB+, and it stays on for blending.**
+ *
+ * Bit 0 turns off the render backend's RB+ path, which packs several pixels into one wide
+ * transaction on the way out of the colour block. It was set here for every draw for part of
+ * 2026-09-23, on the theory that RB+ was placing blended results wrongly; it was not, and the
+ * bit cured nothing - measured twice, once here and once by obSCEne's `arm17b`. RB+ was
+ * mishandling the export because the export was in the wrong format, which is
+ * `gl_ps_patch_export`'s account. Mesa disables RB+ for dual-source blending and logic op on
+ * every generation, and for all blending on GFX11 as a performance choice; on GFX10_3 it leaves
+ * it on, so this does too. */
 static inline uint32_t gl_compute_cb_color_control(const gl_context_t *ctx) {
     const uint32_t mode_normal = 1u << 4; /* CBMode CB_NORMAL */
     if (ctx && ctx->cap_color_logic_op) {
