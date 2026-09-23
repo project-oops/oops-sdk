@@ -829,11 +829,13 @@ typedef struct {
         const char *name;
         size_t name_len;
         uint32_t set;
-        /* **Which lookup this sampler answers to.** The descriptor decides how the hardware
-         * reads the memory and the shader decides what it hands the sampler, and the two have
-         * to be the same shape: a cube takes three address registers where a 2D takes two. So
-         * `texture2D` on a `samplerCube` is refused rather than sampled with the wrong dim. */
-        GLboolean cube;
+        /* **Which lookup this sampler answers to**, as the `GLSL_IMG_DIM_*` the sample will
+         * carry. The descriptor decides how the hardware reads the memory and the shader
+         * decides what it hands over, and the two have to be the same shape: a cube and a
+         * volume both take three address registers where a 2D takes two, and all three read a
+         * descriptor built a different way. So `texture2D` on a `samplerCube` is refused rather
+         * than sampled with the wrong dim. */
+        uint32_t dim;
     } samplers[GLSL_GEN_MAX_TEX_SETS];
     int sampler_count;
     const char *error;    /* the **first** failure, which stops everything after it */
@@ -862,8 +864,9 @@ GLboolean glsl_gen_lookup(glsl_gen_t *g, const char *name, size_t len, glsl_valu
 /* Tells the generator that `name` is a sampler whose descriptors the prologue loaded into set
  * `set`. A `texture2D` on any other name is refused, which is what stops a shader sampling
  * through something the draw path never filled in. */
+/* `dim` is one of the `GLSL_IMG_DIM_*` above - what this sampler's lookups will carry. */
 GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len, uint32_t set,
-                                   GLboolean cube);
+                                   uint32_t dim);
 
 /* -------------------------------------------------------------------------
  * A compiled unit

@@ -630,7 +630,8 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
                  * obSCEne's `-6c80` - so what was missing was only that a `samplerCube` never
                  * got a set to be loaded into. */
                 if (p->uniforms[i].type != GL_SAMPLER_2D &&
-                    p->uniforms[i].type != GL_SAMPLER_CUBE) {
+                    p->uniforms[i].type != GL_SAMPLER_CUBE &&
+                    p->uniforms[i].type != GL_SAMPLER_3D) {
                     continue;
                 }
                 if (!name_eq(p->uniforms[i].name, lit_len(p->uniforms[i].name), n->text,

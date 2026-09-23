@@ -54,7 +54,8 @@ arriving bit for bit, and its uniform block loading intact.
 
 **What a compiled fragment shader can do** is arithmetic on floats and integers, swizzle reads
 and writes, constructors, the built-in library, file-scope `const`s, uniforms, `texture2D`
-and `texture2DProj` through up to two samplers, comparisons, `?:`, `if`/`else`, `discard`,
+`texture2DProj`, `textureCube`, `texture3D` and `texture3DProj` through up to two samplers,
+comparisons, `?:`, `if`/`else`, `discard`,
 **local arrays**, **the whole of square-matrix arithmetic** (`m * v`, `v * m`, `m * m`, matrix
 with scalar, componentwise, and `matrixCompMult`, `transpose` and `outerProduct`), user-defined
 functions - inlined, since there is no call instruction here, and with **early `return`** - and
@@ -103,7 +104,14 @@ three leaves the face and the place alone, which is the whole reason a direction
 coordinate. Bind the cube to the unit the sampler names as usual; the six faces have to be
 complete, as GL requires of any cube map it samples.
 
-What it still cannot: the volume and shadow texture lookups. A
+**`texture3D` takes its three coordinates straight through** - no face selection and no divide,
+which is what separates a volume from the cube it sits one bit away from in the instruction. The
+descriptor is `TYPE 0xa` with the last slice in its fourth word, which obSCEne measured on this
+part alongside the cube (`-6c80`). `texture3DProj` divides all three by `w`, where the 2D form
+divides two.
+
+What it still cannot: the shadow lookups, which are different in kind - they compare against a
+reference rather than returning a texel. A
 shader the back end will not take is refused with a sentence naming what is missing, and still
 runs on the software path - the draw is what fails, with `GL_INVALID_OPERATION`, rather than
 quietly drawing something else. A GL 1.x port is unaffected: it never binds a program.
@@ -219,7 +227,7 @@ part, so the quotient is computed from a reciprocal and then corrected, which is
 | An array index the shader computes at run time | An array is a run of registers and a register file cannot be indexed by a running value. **An unrolled loop's counter counts as known**, so `for (int i = 0; i < 4; i++) total += w[i];` is fine - it is a uniform or a varying used as an index that is not |
 | Whole-array assignment, or an array as a value | Elements, one at a time. GLSL 1.10 has no array-valued expressions either |
 | A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
-| `texture3D`, the shadow forms | `texture2D`, `texture2DProj` and `textureCube` are generated. These two are not, and each is a different lookup rather than the same one with a flag: a volume's coordinate is three components against a descriptor of its own, and a shadow's compares rather than returns |
+| The shadow forms | `texture2D`, `texture2DProj`, `textureCube`, `texture3D` and `texture3DProj` are generated. A shadow lookup is different in kind: it compares against a reference rather than returning a texel, through `image_sample_c` and a compare function in the sampler. The hardware side of that **is** measured; the shader side is not written |
 | A cube map whose six faces are not all there | GL does not sample an incomplete cube either (2.1, 3.8.10). The draw is untextured rather than reading a descriptor that points at nothing |
 | A matrix with a vector that is not its width | `m * v`, `v * m` and `m * m` are generated at every square size, as are a matrix with a scalar and two matrices componentwise. `m4 * v3` is none of those, and treating it as componentwise would compute something that is not a product at all |
 | More than 16 floats of varyings, more than 32 floats of uniforms, more than two samplers | Each is refused with its own number in the message, so you know what to cut to |

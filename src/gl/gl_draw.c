@@ -2154,12 +2154,16 @@ static gl_texture_object_t *gl_gl2_sampler_texture(gl_context_t *ctx,
      * texture 0 is a real object - and an incomplete one still samples as none, which is the
      * half of `gl_unit_texture_id` that does apply. */
     const gl_tex_unit_t *tu = &ctx->tex_unit[(GLuint)unit_f];
-    const GLboolean want_cube = (GLboolean)(prog->uniforms[ui].type == GL_SAMPLER_CUBE);
-    const GLuint id = want_cube
-                          ? (tu->bound_texture_cube ? tu->bound_texture_cube
-                                                    : OOPS_GL_DEFAULT_TEXTURE_CUBE)
-                          : (tu->bound_texture_2d ? tu->bound_texture_2d
-                                                  : OOPS_GL_DEFAULT_TEXTURE_2D);
+    const GLenum st = prog->uniforms[ui].type;
+    const GLboolean want_cube = (GLboolean)(st == GL_SAMPLER_CUBE);
+    GLuint id;
+    if (want_cube) {
+        id = tu->bound_texture_cube ? tu->bound_texture_cube : OOPS_GL_DEFAULT_TEXTURE_CUBE;
+    } else if (st == GL_SAMPLER_3D) {
+        id = tu->bound_texture_3d ? tu->bound_texture_3d : OOPS_GL_DEFAULT_TEXTURE_3D;
+    } else {
+        id = tu->bound_texture_2d ? tu->bound_texture_2d : OOPS_GL_DEFAULT_TEXTURE_2D;
+    }
     {
         const gl_texture_object_t *probe = gl_lookup_texture(ctx, id);
         if (!probe || !gl_texture_complete(probe)) return (gl_texture_object_t *)0;

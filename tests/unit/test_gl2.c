@@ -2100,10 +2100,12 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
     uint32_t count = 0u, vgprs = 0u;
     char log[256] = {0};
 
-    /* **Refused, not guessed at.** `texture2D`, `texture2DProj` and `textureCube` are
-     * generated. A volume lookup is not: three components against a descriptor of its own, and
-     * nothing here has measured that one. Close enough to the cube to look interchangeable,
-     * different enough to draw the wrong thing.
+    /* **The lookups that are refused are the shadow forms, and only those.** `texture2D`,
+     * `texture2DProj`, `textureCube`, `texture3D` and `texture3DProj` are all generated: each
+     * reads a descriptor obSCEne has measured on this part, and none of them needed an
+     * instruction beyond the sample itself. A shadow lookup is different in kind - it compares
+     * against a reference rather than returning a texel, through `image_sample_c` and a
+     * `DEPTH_COMPARE_FUNC` in the sampler - so it is refused rather than approximated.
      *
      * Not here: a `samplerCube` sampled through `texture2D`, or the other way round. The back
      * end checks it - two address registers where the hardware reads three would leave the
@@ -2113,8 +2115,8 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
      * proxy. */
     gl_context_t *c = (gl_context_t *)ctx;
     static const char *const REFUSED_LOOKUPS[] = {
-        "uniform sampler3D s;\nvarying vec2 uv;\n"
-        "void main() { gl_FragColor = texture3D(s, vec3(uv, 1.0)); }\n",
+        "uniform sampler2DShadow s;\nvarying vec2 uv;\n"
+        "void main() { gl_FragColor = shadow2D(s, vec3(uv, 0.5)); }\n",
     };
     for (size_t i = 0; i < sizeof(REFUSED_LOOKUPS) / sizeof(REFUSED_LOOKUPS[0]); i++) {
         memset(log, 0, sizeof(log));
@@ -2344,7 +2346,7 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
             const uint32_t dim = (x >> 3) & 0x7u;
             ASSERT_EQ((x >> 18) & 0x7fu, 32u);           /* image_sample, not _lz */
             ASSERT_EQ((x >> 8) & 0xfu, 0xfu);            /* all four channels */
-            ASSERT_TRUE(dim == 1u || dim == 3u);         /* 2D or cube */
+            ASSERT_TRUE(dim == 1u || dim == 2u || dim == 3u); /* 2D, volume or cube */
             /* The sampler's four registers sit eight above the image's eight - the layout
              * `glsl_internal.h` sets out and the prologue loads into. */
             ASSERT_EQ(ssamp, srsrc + 8u);
@@ -2358,11 +2360,12 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count, const float att
             if (s->exec) {
                 s->v[vdata + 0u] = s->v[vaddr];
                 s->v[vdata + 1u] = s->v[vaddr + 1u];
-                /* **A cube reports the face instead of the set.** Its third address register is
-                 * the face the direction resolved to, which is the thing worth reading back -
-                 * a wrong face is the failure a cube lookup has that a 2D one does not, and it
-                 * would otherwise be invisible behind a texel that only carried u and v. */
-                s->v[vdata + 2u] = (dim == 3u) ? s->v[vaddr + 2u] : (float)set;
+                /* **A three-address lookup reports its third register instead of the set.** For
+                 * a cube that is the face the direction resolved to and for a volume the slice
+                 * coordinate, and either is the thing worth reading back: both are the failure
+                 * those lookups have that a 2D one does not, and behind a texel carrying only
+                 * u and v both would be invisible. */
+                s->v[vdata + 2u] = (dim == 2u || dim == 3u) ? s->v[vaddr + 2u] : (float)set;
                 s->v[vdata + 3u] = 1.0f;
             }
             for (uint32_t k = 0; k < 4u; k++) s->vpending[vdata + k] = GL_TRUE;
@@ -5127,6 +5130,33 @@ static void test_gl2_compiled_texture_lookups_reach_the_right_set(void) {
     ASSERT_NEAR(o[0], 0.375f, tol);
     ASSERT_NEAR(o[1], 0.375f, tol); /* the same, because the direction is the same */
     ASSERT_NEAR(o[2], 0.0f, tol);
+
+    /* **A volume takes its three coordinates straight through**, with no face selection and no
+     * divide - which is exactly what separates it from the cube it is one bit away from in the
+     * instruction. All three must arrive, in order: a lowering that sent only `s` and `t` would
+     * leave the slice holding whatever the allocator last put there. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler3D vol;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = texture3D(vol, vec3(vin.x, vin.y, 0.625));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.75f, tol);
+    ASSERT_NEAR(o[2], 0.625f, tol);   /* the slice, not the descriptor set */
+
+    /* And its projective form divides **all three** by `w`, where the 2D one divides two. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "uniform sampler3D vol;\n"
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = texture3DProj(vol, vec4(vin.x, vin.y, 1.0, 2.0));\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.125f, tol);
+    ASSERT_NEAR(o[1], 0.375f, tol);
+    ASSERT_NEAR(o[2], 0.5f, tol);     /* 1.0 / 2.0 - the slice is divided too */
 
     /* **A zero divisor answers zero, not an infinity.** The language calls it undefined and the
      * reference picks zero; the two paths agreeing is worth the compare and the select. A

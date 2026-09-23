@@ -96,6 +96,23 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **`texture3D` and `texture3DProj`** (2026-09-23), which needed no new instruction at all: a
+  volume takes its three coordinates straight through, and `image_sample` already carried a dim.
+  That is exactly what separates it from the cube it sits one bit away from in the encoding -
+  no face selection and no reduction. The projective form divides all three by `w`, where the 2D
+  one divides two.
+
+  **The descriptor was measured a year's worth of context ago and I nearly asked for it again.**
+  obSCEne's `-6c80` sampled a 4x4x2 volume on this part with `TYPE 0xa` and the last slice in
+  `desc-word-4`, against a 2D control reading the same memory, and reported the texel. The
+  sampler record now carries the `GLSL_IMG_DIM_*` the lookup will use rather than a cube flag,
+  so the three lookups are one code path with the dim as data.
+
+  What is still refused is the shadow forms, and for a reason that is not "unmeasured" either:
+  the hardware side of `image_sample_c` with a compare function was measured in the same sweep.
+  They are different in kind - a comparison against a reference rather than a texel - and the
+  shader side is simply not written.
+
 - **`textureCube` in a compiled shader** (2026-09-23). **The descriptor half has been there
   since the fixed-function path learnt cube maps**: the six faces upload as one array, the
   descriptor carries TYPE 0xb, and obSCEne measured a cube sampled on this part and reported the
