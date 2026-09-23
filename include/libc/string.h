@@ -37,6 +37,21 @@ char *strrchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);
 
 /*
+ * **The locale-aware pair, on a platform with one locale** (2026-09-23,
+ * `REQ-20260923T1810Z-7d42`). libc++'s locale support calls both, so every stream and every
+ * numeric facet needs them present.
+ *
+ * `strcoll` orders two strings by the current locale's collating sequence and `strxfrm` turns a
+ * string into a form that `strcmp` orders the same way. In the "C" locale - the only one here -
+ * the collating sequence *is* byte order, so `strcoll` is `strcmp` and `strxfrm` is a bounded
+ * copy. Those are not simplifications: they are what the standard specifies these two to do in
+ * this locale, which is why they can be implementations rather than the loud refusals a verb
+ * with nothing behind it gets.
+ */
+int strcoll(const char *a, const char *b);
+size_t strxfrm(char *dest, const char *src, size_t n);
+
+/*
  * **The parser's half of <string.h>** (2026-09-20). A port that loads anything - an OBJ mesh, an
  * MTL material, a level file, a config - is built out of these four, and without them the loader
  * is the part of the port that has to be rewritten.

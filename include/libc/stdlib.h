@@ -34,9 +34,17 @@ extern "C" {
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 
+/*
+ * MB_CUR_MAX (REQ-20260923T1810Z-7d42).
+ * On this platform there is exactly one locale ("C"), so characters are single-byte
+ * and MB_CUR_MAX is fixed at 1 rather than being a selectable locale function call.
+ */
+#define MB_CUR_MAX ((size_t)1)
+
 void *malloc(size_t size);
 void *calloc(size_t count, size_t size);
 void *realloc(void *ptr, size_t size);
+void *aligned_alloc(size_t alignment, size_t size);
 void free(void *ptr);
 
 int abs(int x);

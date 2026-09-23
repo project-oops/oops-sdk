@@ -37,6 +37,16 @@ typedef struct oops_FILE {
     int eof;
     int err;
     int is_log; /* stdout and stderr, which have no descriptor */
+    /*
+     * One character of pushback, for `ungetc`, or -1 when empty. C guarantees exactly one, so a
+     * single slot is the whole contract rather than a simplification of it (2026-09-23,
+     * `REQ-20260923T1810Z-7d42`).
+     *
+     * It belongs to the *stream*, not to `fgetc`, so `fread` consumes it too - a caller that
+     * ungets a byte and then reads a block must see that byte first, and a pushback only
+     * `fgetc` knew about would silently vanish from any other read.
+     */
+    int pushback;
 } FILE;
 
 extern FILE *stdout;
@@ -76,6 +86,36 @@ int vprintf(const char *fmt, va_list args);
 int vfprintf(FILE *f, const char *fmt, va_list args);
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
 int vsprintf(char *buf, const char *fmt, va_list args);
+
+/*
+ * **`asprintf` and `vasprintf`, because libc++'s localization needs them** (2026-09-23,
+ * `REQ-20260923T1810Z-7d42`, alongside `MB_CUR_MAX`).
+ *
+ * They format into a buffer they allocate, and hand it over: the caller owns it and frees it
+ * with `free`. On failure `*ret` is set to null and `-1` is returned, which is what every caller
+ * checks and is the one behaviour worth getting right, because the alternative - leaving `*ret`
+ * untouched - hands the caller a stale pointer it will free.
+ *
+ * These are BSD rather than ISO C, and they are here because libc++'s locale support is written
+ * against a BSD-family C library: 23 of its 45 sources stop on `asprintf` without them, which is
+ * every stream and every numeric facet. A title that never touches a stream never links them.
+ *
+ * `free` for the result rather than a paired `asprintf_free`, because that is what the BSDs and
+ * glibc both specify and a ported program will not know to call anything else.
+ */
+int asprintf(char **ret, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+int vasprintf(char **ret, const char *fmt, va_list args);
+
+/*
+ * **`ungetc`, which is what a stream parser is built on** (2026-09-23,
+ * `REQ-20260923T1810Z-7d42`). libc++'s `std_stream.h` calls it for `std::cin`'s `putback`, so
+ * `iostream.cpp` and `ostream.cpp` do not compile without it.
+ *
+ * Pushes one character back so the next read returns it. C guarantees one character of pushback
+ * and no more, and `EOF` is refused rather than stored - pushing back end-of-file would make a
+ * stream that has ended look like one that has not.
+ */
+int ungetc(int c, FILE *f);
 
 /*
  * **`sscanf`, because that is how a model file is read** (2026-09-20). An OBJ loader is a

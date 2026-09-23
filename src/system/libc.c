@@ -294,6 +294,31 @@ char *strstr(const char *haystack, const char *needle) {
     return (char *)0;
 }
 
+/* The "C" locale's collating sequence is byte order, so this is `strcmp` - see `<libc/string.h>`
+ * for why that is the specified behaviour here rather than a shortcut. */
+int strcoll(const char *a, const char *b) { return strcmp(a, b); }
+
+/* `strxfrm` transforms `src` so that `strcmp` on the results orders the same way `strcoll`
+ * orders the originals. With `strcoll` being `strcmp`, the transform is the identity and this is
+ * a bounded copy.
+ *
+ * **The return is the length of the transform, not of what was copied**, and it excludes the
+ * terminator. Callers size a buffer by calling with `n == 0` and a null `dest`, then calling
+ * again - so returning the copied count would make the first call report 0 and the caller
+ * allocate nothing. Nothing is written when `n` is 0, which is what makes the sizing call safe.
+ */
+size_t strxfrm(char *dest, const char *src, size_t n) {
+    const size_t len = strlen(src);
+
+    if (n != 0u) {
+        const size_t copy = (len < n - 1u) ? len : n - 1u;
+        for (size_t i = 0u; i < copy; i++) dest[i] = src[i];
+        dest[copy] = '\0';
+    }
+
+    return len;
+}
+
 /* Overlap-safe, which is the whole difference from memcpy: a caller that meant memmove and got a
  * forward copy loses data only when the regions overlap, which is the case it used memmove for. */
 void *memmove(void *dest, const void *src, size_t len) {
@@ -355,6 +380,7 @@ char *strerror(int errnum) {
 void *malloc(size_t size) { return oops_malloc(size); }
 void *calloc(size_t count, size_t size) { return oops_calloc(count, size); }
 void *realloc(void *ptr, size_t size) { return oops_realloc(ptr, size); }
+void *aligned_alloc(size_t alignment, size_t size) { return oops_aligned_alloc(alignment, size); }
 void free(void *ptr) { oops_free(ptr); }
 
 int abs(int x) { return (x < 0) ? -x : x; }
@@ -586,9 +612,12 @@ int *oops_errno_location(void) {
  * descriptor from oops_fs_open.
  * --------------------------------------------------------------------------- */
 
-static FILE s_stdout = {-1, 0, 0, 1};
-static FILE s_stderr = {-1, 0, 0, 2};
-static FILE s_stdin = {-1, 1, 0, 0}; /* nothing to read from; at end of file from the start */
+/* The trailing -1 is `pushback`, meaning empty. It is spelled out rather than left to the
+ * initialiser's implicit zero because zero is a valid character and would be handed to the first
+ * read as a stray NUL. */
+static FILE s_stdout = {-1, 0, 0, 1, -1};
+static FILE s_stderr = {-1, 0, 0, 2, -1};
+static FILE s_stdin = {-1, 1, 0, 0, -1}; /* nothing to read from; at end of file from the start */
 FILE *stdout = &s_stdout;
 FILE *stderr = &s_stderr;
 FILE *stdin = &s_stdin;
@@ -644,6 +673,7 @@ FILE *fopen(const char *path, const char *mode) {
     f->eof = 0;
     f->err = 0;
     f->is_log = 0;
+    f->pushback = -1; /* empty; zero is a valid character, so it cannot be the empty value */
     return f;
 }
 
@@ -660,6 +690,26 @@ int fclose(FILE *f) {
 
 size_t fread(void *ptr, size_t size, size_t count, FILE *f) {
     if (!f || f->is_log || !ptr || size == 0u || count == 0u) return 0u;
+
+    /* A pushed-back character belongs to the stream, so it is delivered here too and not only
+     * from `fgetc`. Taking it shortens this read by one byte and the loop above the caller asks
+     * again, which is simpler than splicing it into the descriptor read and cannot get the
+     * count wrong. */
+    if (f->pushback >= 0) {
+        *(unsigned char *)ptr = (unsigned char)f->pushback;
+        f->pushback           = -1;
+
+        if (size * count == 1u) return 1u / size;
+
+        const int64_t rest = oops_fs_read(f->fd, (unsigned char *)ptr + 1, size * count - 1u);
+        if (rest < 0) {
+            f->err = 1;
+            return 1u / size;
+        }
+        if ((size_t)rest + 1u < size * count) f->eof = 1;
+        return ((size_t)rest + 1u) / size;
+    }
+
     const int64_t got = oops_fs_read(f->fd, ptr, size * count);
     if (got < 0) {
         f->err = 1;
@@ -705,12 +755,37 @@ int fflush(FILE *f) {
 }
 
 int fgetc(FILE *f) {
+    /* Checked here as well as in `fread`, because `fread` refuses a log stream outright and
+     * `ungetc` on `stdin` has to work regardless of what is underneath it. */
+    if (f && f->pushback >= 0) {
+        const int c = f->pushback;
+        f->pushback = -1;
+        return c;
+    }
     unsigned char c;
     if (fread(&c, 1u, 1u, f) != 1u) return EOF;
     return (int)c;
 }
 
 int getc(FILE *f) { return fgetc(f); }
+
+/*
+ * One character of pushback - see `<libc/stdio.h>` for why one is the whole contract.
+ *
+ * `EOF` is refused because storing it would make the next read report a character that is not
+ * one, and a stream that has genuinely ended would look like it had not. Pushing back onto a
+ * slot that is already full is refused too: C leaves a second pushback undefined, and dropping
+ * the first silently is the version of undefined that costs a caller the most to find.
+ *
+ * Clearing `eof` is required: the point of ungetting after a failed read is that there is now
+ * something to read, so a stream that reported end-of-file must stop reporting it.
+ */
+int ungetc(int c, FILE *f) {
+    if (!f || c == EOF || f->pushback >= 0) return EOF;
+    f->pushback = (int)(unsigned char)c;
+    f->eof      = 0;
+    return (int)(unsigned char)c;
+}
 
 char *fgets(char *buf, int size, FILE *f) {
     if (!buf || size <= 0) return (char *)0;
@@ -753,6 +828,72 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args) {
 
 int vsprintf(char *buf, const char *fmt, va_list args) {
     return oops_vsnprintf(buf, (size_t)0x7fffffff, fmt, args);
+}
+
+/*
+ * `vasprintf` grows a buffer rather than asking how big one needs to be, and the reason is the
+ * sentence three comments up: **`oops_vsnprintf` returns what it wrote, not what it would have
+ * written.**
+ *
+ * The usual implementation is two calls - `vsnprintf(NULL, 0, ...)` to learn the length, then
+ * one allocation that fits. Here the probe would return 0 every time and every result would be
+ * an empty string. So this doubles a buffer until the result demonstrably fits.
+ *
+ * "Demonstrably" is `n + 1 < cap`: at least one byte spare, so nothing was cut. Exactly filling
+ * the buffer (`n + 1 == cap`) is indistinguishable from being truncated at the boundary, so that
+ * case grows too - one wasted iteration on an exact fit, against silently losing the last
+ * character otherwise.
+ *
+ * The ceiling is there because the alternative to a limit is a title that answers a bad format
+ * string by allocating until the process dies. A megabyte is far past any message a locale facet
+ * or a log line produces, and passing it returns -1 like any other failure rather than
+ * truncating, because a caller that checks the return gets to decide and one that does not gets
+ * a null pointer rather than a plausible half-message.
+ */
+int vasprintf(char **ret, const char *fmt, va_list args) {
+    size_t cap = 128u;
+
+    for (;;) {
+        char *const buf = (char *)malloc(cap);
+        if (buf == NULL) {
+            *ret = NULL;
+            return -1;
+        }
+
+        /* `args` is walked by the call, so each attempt needs its own copy. Reusing it after a
+           truncated attempt reads past the end of the argument list. */
+        va_list attempt;
+        va_copy(attempt, args);
+        const int n = oops_vsnprintf(buf, cap, fmt, attempt);
+        va_end(attempt);
+
+        if (n < 0) {
+            free(buf);
+            *ret = NULL;
+            return -1;
+        }
+
+        if ((size_t)n + 1u < cap) {
+            *ret = buf;
+            return n;
+        }
+
+        free(buf);
+
+        if (cap >= (size_t)1u << 20) {
+            *ret = NULL;
+            return -1;
+        }
+        cap *= 2u;
+    }
+}
+
+int asprintf(char **ret, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    const int n = vasprintf(ret, fmt, args);
+    va_end(args);
+    return n;
 }
 
 /* The conversion is `obs_vsscanf` in `src/system/scanf.c`, which builds on the host too so that

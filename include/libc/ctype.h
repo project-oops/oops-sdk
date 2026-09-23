@@ -35,6 +35,37 @@ static inline int ispunct(int c) { return isgraph(c) && !isalnum(c); }
 static inline int tolower(int c) { return isupper(c) ? c + 32 : c; }
 static inline int toupper(int c) { return islower(c) ? c - 32 : c; }
 
+/*
+ * **The character-class bitmasks, because C++'s `std::ctype_base` is defined in terms of them**
+ * (2026-09-23, `REQ-20260923T1810Z-7d42`).
+ *
+ * The functions above answer one question each. `std::ctype_base::mask` instead needs a *bit per
+ * class*, so that `std::ctype<char>::is()` can test several at once and `std::regex` and the
+ * numeric facets can build a class out of an `|`. libc++ picks which set of names to use from
+ * the predefined macros, and this target is `x86_64-unknown-freebsd`, so it reaches for these.
+ *
+ * **The values are FreeBSD's own, not ours to choose.** Taken from
+ * `oops-mesa/toolchain/sysroot/usr/include/_ctype.h:47-58`, which is a real FreeBSD header
+ * staged from the checkout oops-mesa pins - so a program that got a mask from anywhere else on
+ * this target agrees with these. Inventing a private numbering would compile equally well and
+ * disagree silently with anything that did not come through this header, which is the failure
+ * this collection keeps a citation to avoid.
+ *
+ * `_CTYPE_G` (graph), `_CTYPE_I` (ideogram) and the classes above `_CTYPE_R` are in the source
+ * header and omitted here: nothing declares them and an unused constant with a value nobody
+ * checked is worse than an absent one.
+ */
+#define _CTYPE_A 0x00000100L /* alpha   */
+#define _CTYPE_C 0x00000200L /* control */
+#define _CTYPE_D 0x00000400L /* digit   */
+#define _CTYPE_L 0x00001000L /* lower   */
+#define _CTYPE_P 0x00002000L /* punct   */
+#define _CTYPE_S 0x00004000L /* space   */
+#define _CTYPE_U 0x00008000L /* upper   */
+#define _CTYPE_X 0x00010000L /* hex digit */
+#define _CTYPE_B 0x00020000L /* blank   */
+#define _CTYPE_R 0x00040000L /* print   */
+
 #ifdef __cplusplus
 }
 #endif
