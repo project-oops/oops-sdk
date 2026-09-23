@@ -439,6 +439,13 @@ void glutMainLoop(void) {
          * returns and the program's own teardown runs, rather than the program being killed
          * mid-frame. Every GLUT program gets this without a line of its own. */
         if (oops_system_close_requested()) glutLeaveMainLoop();
+        /* **And be suspendable, which the Close above does not cover.** The kernel suspends a
+         * big-app asynchronously - after a Close, and for rest mode with no signal at all - and
+         * kills it at `0xa0d0c00f` if it has not reached a suspend point within a hundred
+         * seconds. Servicing the system's queue every frame is half of that; the drain on the
+         * way out is the other half, below. The same pair the SDL backend does, so a GLUT title
+         * is no more likely to be killed for resting than an SDL one. */
+        (void)oops_system_pump_events();
         glut_pump_keyboard();
         glut_pump_mouse();
         glut_pump_pad();
@@ -451,6 +458,10 @@ void glutMainLoop(void) {
             g.idle();
         }
     }
+    /* Out of the loop for any reason - a Close, or the program's own `glutLeaveMainLoop`. Empty
+       the queue once more and drain the renderer, so whatever the caller does next happens on a
+       quiesced process and the kernel has a suspend point to find. */
+    oops_system_prepare_for_suspend();
 }
 
 /* ---------------------------------------------------------------------------
