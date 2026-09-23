@@ -10,6 +10,32 @@ Nothing has shipped yet - this is the initial commit.
 
 ## [unreleased] - as of 2026-09-03
 
+### Added
+
+- **`gl_PointCoord`** (2026-09-23). It was refused with "point sprites are not implemented", and
+  they were - `cap_point_sprite`, `GL_COORD_REPLACE`, `GL_POINT_SPRITE_COORD_ORIGIN` and the
+  corner expansion have all been here since 2026-09-20, and gl1-probe's `point-sprite` passes on
+  hardware. The refusal outlived its reason, which is the one failure mode a refusal that names
+  its cause is supposed to prevent.
+
+  It is texture coordinate 0's interpolant, which is the hardware's own arrangement rather than a
+  shortcut: the part substitutes the sprite coordinate for a chosen interpolant with
+  `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`, and the expansion already writes it into that slot for
+  `GL_COORD_REPLACE`. A program that reads it generates the coordinate without
+  `glEnable(GL_POINT_SPRITE)`, since `gl_PointCoord` is defined for any point and a GLSL program
+  has no `GL_COORD_REPLACE` to set.
+
+  **Two restrictions, both link errors with a sentence.** Not beside `gl_TexCoord`, because they
+  are one slot. And not beside a vertex shader, because `gl_draw_point_square` expands the point
+  into its square *before* the vertex stage, sizing it in object space through the inverse MVP -
+  all four corners carry the same attributes, so a vertex shader collapses them and the sprite is
+  never drawn. Hardware expands points after the vertex stage; doing that here is what would lift
+  the second restriction.
+
+  Measured rather than asserted: gl2-probe's `point-coord` paints `vec4(gl_PointCoord, 0, 1)`
+  into a 64-pixel point and checks all four quadrants, so a constant, a swapped pair or an
+  inverted axis fails.
+
 ### Fixed
 
 - **`glReadPixels` of the second colour target read raw memory, not the GPU's answer**
