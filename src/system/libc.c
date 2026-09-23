@@ -523,14 +523,36 @@ void srand(unsigned int seed) { s_rand_state = seed; }
  * Neither returns. If the syscall does not resolve - it is weak, like every platform import -
  * the loop below is what is left, and a program that has asked to stop stopping is better than
  * one that carries on with a state it declared unusable.
+ *
+ * # Why they say so first
+ *
+ * **On this platform the exit syscall does not end the process, it raises `SIGSYS`** - obSCEne
+ * `REQ-20260917T1450Z-2e71` established that a `big-app` container cannot terminate itself at
+ * all, because lifecycle belongs to the shell. So every `exit` here becomes a fatal signal with
+ * a register dump and no sentence, and every `abort` becomes the same one function further away.
+ *
+ * That cost a diagnosis on 2026-09-23. `cxx-throw` died mid-probe with `signal: 12 (SIGSYS)` and
+ * a one-frame backtrace, and the only way to learn that the frame was *inside `exit`* was to
+ * resolve the address against the link map by hand. A library that aborts on purpose - libc++abi
+ * does, on any uncaught exception - was indistinguishable from one that faulted by accident.
+ *
+ * So both say what they are and who asked, before the syscall that will not work. It costs one
+ * klog line on a path that was about to end the program anyway, and it turns "a fatal signal
+ * somewhere" into "this program called abort". The loop still follows, because a title that has
+ * declared itself unusable should stop rather than continue - and parking is also what makes the
+ * line above survive to be read.
  */
 void exit(int status) {
+    oops_klog("libc", "exit called; this container cannot terminate itself, so it parks instead");
     sys_call(SYS_exit, (long)(unsigned int)status, 0, 0, 0, 0, 0);
     for (;;) {
     }
 }
 
-void abort(void) { exit(1); }
+void abort(void) {
+    oops_klog("libc", "abort called - something gave up deliberately, look above for why");
+    exit(1);
+}
 
 /* ---------------------------------------------------------------------------
  * errno
