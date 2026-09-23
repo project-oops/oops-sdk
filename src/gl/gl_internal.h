@@ -1382,6 +1382,9 @@ typedef struct gl_context {
      * CPU's share of a frame can be split between this library and the program above it. */
     uint64_t hw_draw_ns;
     uint32_t hw_draw_calls;
+    /* And, inside that, the per-draw shader patching - the block that rebuilds its words and
+     * compares them against the payload on every draw whether or not anything changed. */
+    uint64_t hw_patch_ns;
     const char *hw_flush_site[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_site_n[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_unnamed;

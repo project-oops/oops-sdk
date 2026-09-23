@@ -3762,6 +3762,16 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                 shadow = (GLboolean)(eff_obj->compare_mode == GL_COMPARE_R_TO_TEXTURE);
             }
         }
+        /* **The shader-patch block is timed separately**, because the draw path measured 5.9us
+         * per triangle on hardware while the same front half - transform, clip, light - takes
+         * 0.17us on a build machine. Over ninety per cent of a triangle is therefore spent after
+         * the vertex maths, and these calls are the part of "after" that does real work on every
+         * draw: each rebuilds its words and compares them against the payload before deciding it
+         * had nothing to do. Knowing whether that is the cost decides whether the fix is to make
+         * them cheaper or to batch the draws. */
+#ifndef OOPS_HOST_BUILD
+        const uint64_t patch_t0 = oops_time_get_ns();
+#endif
         if (eff_obj) {
             /* The texture's hardware image brought up to date - its mip chain built or rebuilt,
              * its descriptors repacked. Building may have submitted the frame to free an old
@@ -3815,6 +3825,9 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                  : !ctx->aa_hw_on ? GL_COVERAGE_OFF
                  : (eff_tex != 0u) ? GL_COVERAGE_TEXTURED
                                    : GL_COVERAGE_UNTEXTURED);
+#ifndef OOPS_HOST_BUILD
+        ctx->hw_patch_ns += oops_time_get_ns() - patch_t0;
+#endif
         if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
         /* **The colour sum after texturing** (GL 1.4, 3.9; on this path since 2026-09-19). A
          * textured draw whose secondary colour is not zero somewhere carries it in the third

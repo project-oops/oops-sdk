@@ -1499,9 +1499,13 @@ void glSwapBuffers(void) {
            `flush-us` minus `draw-us` is what the program above this library spent. */
         gl_klog_val("draw-us-this-frame", ctx->hw_draw_ns / 1000u);
         gl_klog_val("draw-calls-this-frame", (uint64_t)ctx->hw_draw_calls);
+        /* Of the draw time above, how much went on rebuilding shader words that were usually
+           already right. */
+        gl_klog_val("patch-us-this-frame", ctx->hw_patch_ns / 1000u);
         ctx->hw_flush_ns = 0u;
         ctx->hw_draw_ns = 0u;
         ctx->hw_draw_calls = 0u;
+        ctx->hw_patch_ns = 0u;
         /* **Every site with a count, not the largest one.** A single winner would answer "what
            to fix first" and leave "is that all of it" open; the full breakdown sums to the
            total above, so a reader can see at a glance whether one site is the frame or merely
