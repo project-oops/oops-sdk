@@ -324,6 +324,47 @@ static void test_freestd_sscanf(void) {
 }
 
 /*
+ * **Four (input, format) pairs where the host library is not the oracle.**
+ *
+ * C defines the input item as the longest sequence of characters that either is what the
+ * conversion expects or is a *prefix* of something it would expect, and fails the directive when
+ * that item cannot then be converted (C17 7.21.6.2). "1e" is a prefix of "1e5" and "0x" is a
+ * prefix of "0x1"; neither is itself a number, so each is a matching failure and the directive
+ * returns 0. That is what this library does, and what `test_freestd_sscanf` above pins case by
+ * case.
+ *
+ * glibc converts the valid prefix instead and leaves the rest unread: there `sscanf("1e", "%f")`
+ * is 1 and 1.0, and `sscanf("0x", "%x")` is 1 and 0. That is glibc's own long-standing departure
+ * and not one host library being newer than another - 2.36 and 2.41 were measured against this
+ * file and answer identically - while musl agrees with this library on every input in the list
+ * below. So these four cannot be settled by asking whichever host happens to be compiling the
+ * tests, and the standard settles them instead.
+ *
+ * Every other input is still compared against whatever the host says, which is the point of the
+ * test: a list of expectations only covers the rules somebody remembered to write down.
+ */
+static const struct {
+  const char *in;
+  const char *fmt;
+  int returns;
+} k_host_diverges[] = {
+    {"1e", "%f %f", 0},
+    {"1e+", "%f %f", 0},
+    {"0x", "%x %i", 0},
+    {"0xg", "%x %i", 0},
+};
+
+static int obs_scan_standard_answer(const char *in, const char *fmt, int *returns) {
+  for (size_t i = 0; i < sizeof(k_host_diverges) / sizeof(k_host_diverges[0]); i++) {
+    if (strcmp(in, k_host_diverges[i].in) == 0 && strcmp(fmt, k_host_diverges[i].fmt) == 0) {
+      *returns = k_host_diverges[i].returns;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/*
  * **The host's own `sscanf` as the oracle.**
  *
  * The cases above say what this should do; this says it does what C's does. The tests build on
@@ -332,6 +373,9 @@ static void test_freestd_sscanf(void) {
  * list of expectations, because it catches the rules nobody remembered to write a case for -
  * the first draft returned EOF where C returns 0, which is the difference between a loader
  * skipping a comment line and a loader stopping at one.
+ *
+ * Where the host library itself departs from C the standard answers instead;
+ * `k_host_diverges` above names every pair that does and says why.
  */
 static void test_freestd_sscanf_agrees_with_the_host(void) {
   static const char *const inputs[] = {
@@ -345,46 +389,67 @@ static void test_freestd_sscanf_agrees_with_the_host(void) {
   };
   for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
     const char *const in = inputs[i];
+    int standard = 0;
     {
       int a = -999, b = -999, ha = -999, hb = -999;
       const int mine = obs_sscanf(in, "%d %d", &a, &b);
-      const int theirs = sscanf(in, "%d %d", &ha, &hb);
-      ASSERT_EQ(mine, theirs);
-      if (theirs >= 1) ASSERT_EQ(a, ha);
-      if (theirs >= 2) ASSERT_EQ(b, hb);
+      if (obs_scan_standard_answer(in, "%d %d", &standard)) {
+        ASSERT_EQ(mine, standard);
+      } else {
+        const int theirs = sscanf(in, "%d %d", &ha, &hb);
+        ASSERT_EQ(mine, theirs);
+        if (theirs >= 1) ASSERT_EQ(a, ha);
+        if (theirs >= 2) ASSERT_EQ(b, hb);
+      }
     }
     {
       float a = -999.0f, b = -999.0f, ha = -999.0f, hb = -999.0f;
       const int mine = obs_sscanf(in, "%f %f", &a, &b);
-      const int theirs = sscanf(in, "%f %f", &ha, &hb);
-      ASSERT_EQ(mine, theirs);
-      if (theirs >= 1) ASSERT_FLOAT_NEAR(a, ha, 1e-5f);
-      if (theirs >= 2) ASSERT_FLOAT_NEAR(b, hb, 1e-5f);
+      if (obs_scan_standard_answer(in, "%f %f", &standard)) {
+        ASSERT_EQ(mine, standard);
+      } else {
+        const int theirs = sscanf(in, "%f %f", &ha, &hb);
+        ASSERT_EQ(mine, theirs);
+        if (theirs >= 1) ASSERT_FLOAT_NEAR(a, ha, 1e-5f);
+        if (theirs >= 2) ASSERT_FLOAT_NEAR(b, hb, 1e-5f);
+      }
     }
     {
       int a = -999, b = -999, c = -999, ha = -999, hb = -999, hc = -999;
       const int mine = obs_sscanf(in, "%d/%d/%d", &a, &b, &c);
-      const int theirs = sscanf(in, "%d/%d/%d", &ha, &hb, &hc);
-      ASSERT_EQ(mine, theirs);
-      if (theirs >= 1) ASSERT_EQ(a, ha);
+      if (obs_scan_standard_answer(in, "%d/%d/%d", &standard)) {
+        ASSERT_EQ(mine, standard);
+      } else {
+        const int theirs = sscanf(in, "%d/%d/%d", &ha, &hb, &hc);
+        ASSERT_EQ(mine, theirs);
+        if (theirs >= 1) ASSERT_EQ(a, ha);
+      }
     }
     {
       char a[32], ha[32];
       memset(a, 0, sizeof(a));
       memset(ha, 0, sizeof(ha));
       const int mine = obs_sscanf(in, "%31s", a);
-      const int theirs = sscanf(in, "%31s", ha);
-      ASSERT_EQ(mine, theirs);
-      if (theirs >= 1) ASSERT_STR_EQ(a, ha);
+      if (obs_scan_standard_answer(in, "%31s", &standard)) {
+        ASSERT_EQ(mine, standard);
+      } else {
+        const int theirs = sscanf(in, "%31s", ha);
+        ASSERT_EQ(mine, theirs);
+        if (theirs >= 1) ASSERT_STR_EQ(a, ha);
+      }
     }
     {
       unsigned int a = 0u, ha = 0u;
       int b = -999, hb = -999;
       const int mine = obs_sscanf(in, "%x %i", &a, &b);
-      const int theirs = sscanf(in, "%x %i", &ha, &hb);
-      ASSERT_EQ(mine, theirs);
-      if (theirs >= 1) ASSERT_EQ((int)a, (int)ha);
-      if (theirs >= 2) ASSERT_EQ(b, hb);
+      if (obs_scan_standard_answer(in, "%x %i", &standard)) {
+        ASSERT_EQ(mine, standard);
+      } else {
+        const int theirs = sscanf(in, "%x %i", &ha, &hb);
+        ASSERT_EQ(mine, theirs);
+        if (theirs >= 1) ASSERT_EQ((int)a, (int)ha);
+        if (theirs >= 2) ASSERT_EQ(b, hb);
+      }
     }
   }
 }

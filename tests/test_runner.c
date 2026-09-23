@@ -1,8 +1,121 @@
 #include "tests/test_common.h"
 
+#include <stdarg.h>
+
 int g_tests_run = 0;
 int g_tests_passed = 0;
 int g_tests_failed = 0;
+
+jmp_buf g_test_abort;
+int g_test_abort_ready = 0;
+
+/*
+ * # Every failure, not the first one
+ *
+ * `tests/test_common.h` explains why an assertion unwinds instead of exiting; this is the other
+ * half of it. A failure is printed where it happens, as it always was, and also kept here, so
+ * the end of the run can name all of them in one place - the thing a red gate is read for, and
+ * the thing that scrolling back through nine hundred lines of suite output does not give.
+ *
+ * The store is fixed and lives in `.bss`: a test run that is failing is not the moment to find
+ * out what the allocator does. Past its end the failures are counted rather than kept, and the
+ * summary says so, because a runner that quietly drops the two hundredth failure is back to
+ * hiding things.
+ */
+#define OOPS_TEST_MAX_FAILURES 256
+
+typedef struct {
+  char suite[64];
+  char test[64];
+  char file[128];
+  int line;
+  char msg[192];
+} oops_test_failure_t;
+
+static oops_test_failure_t s_failures[OOPS_TEST_MAX_FAILURES];
+static int s_failure_count = 0;
+static int s_failures_dropped = 0;
+static char s_suite[64] = "(no suite)";
+static char s_test[64] = "(no test)";
+
+static void oops_test_copy(char *dst, size_t cap, const char *src) {
+  if (src == NULL) {
+    src = "(null)";
+  }
+  size_t n = strlen(src);
+  if (n >= cap) {
+    n = cap - 1;
+  }
+  memcpy(dst, src, n);
+  dst[n] = '\0';
+}
+
+void oops_test_suite_begin(const char *suite) {
+  oops_test_copy(s_suite, sizeof(s_suite), suite);
+  printf("\n=== [SUITE: %s] ===\n", suite);
+}
+
+void oops_test_begin(const char *test) {
+  oops_test_copy(s_test, sizeof(s_test), test);
+}
+
+void oops_test_fail(const char *file, int line, const char *fmt, ...) {
+  char msg[192];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, args);
+  va_end(args);
+
+  g_tests_failed++;
+  printf("\033[31mFAIL\033[0m (%s:%d: %s)\n", file, line, msg);
+  fflush(stdout);
+
+  if (s_failure_count < OOPS_TEST_MAX_FAILURES) {
+    oops_test_failure_t *f = &s_failures[s_failure_count++];
+    oops_test_copy(f->suite, sizeof(f->suite), s_suite);
+    oops_test_copy(f->test, sizeof(f->test), s_test);
+    oops_test_copy(f->file, sizeof(f->file), file);
+    f->line = line;
+    oops_test_copy(f->msg, sizeof(f->msg), msg);
+  } else {
+    s_failures_dropped++;
+  }
+
+  if (g_test_abort_ready) {
+    g_test_abort_ready = 0;
+    longjmp(g_test_abort, 1);
+  }
+
+  /* An assertion outside any RUN_TEST - fixture setup, or a helper called from main - has no
+   * test to abandon and nowhere to unwind to, so it ends the run as it did before. */
+  printf("(that assertion was outside a test: stopping)\n");
+  fflush(stdout);
+  exit(1);
+}
+
+int oops_test_report(void) {
+  if (s_failure_count > 0) {
+    printf("\n\033[31m=== FAILURES ===\033[0m\n");
+    for (int i = 0; i < s_failure_count; i++) {
+      const oops_test_failure_t *f = &s_failures[i];
+      printf("  %2d. [%s] %s\n", i + 1, f->suite, f->test);
+      printf("      %s:%d: %s\n", f->file, f->line, f->msg);
+    }
+    if (s_failures_dropped > 0) {
+      printf("  ... and %d more, past the %d this runner keeps\n", s_failures_dropped,
+             OOPS_TEST_MAX_FAILURES);
+    }
+  }
+
+  printf("\n=======================================================\n");
+  printf(" TEST SUMMARY: %d Ran | \033[32m%d Passed\033[0m | \033[%sm%d "
+         "Failed\033[0m\n",
+         g_tests_run, g_tests_passed, g_tests_failed > 0 ? "31" : "32",
+         g_tests_failed);
+  printf("=======================================================\n\n");
+
+  return (g_tests_failed == 0) ? 0 : 1;
+}
 
 #include "oops/display.h"
 
@@ -153,12 +266,5 @@ int main(int argc, char **argv) {
     run_integration_tests_net_loopback();
   }
 
-  printf("\n=======================================================\n");
-  printf(" TEST SUMMARY: %d Ran | \033[32m%d Passed\033[0m | \033[%sm%d "
-         "Failed\033[0m\n",
-         g_tests_run, g_tests_passed, g_tests_failed > 0 ? "31" : "32",
-         g_tests_failed);
-  printf("=======================================================\n\n");
-
-  return (g_tests_failed == 0) ? 0 : 1;
+  return oops_test_report();
 }
