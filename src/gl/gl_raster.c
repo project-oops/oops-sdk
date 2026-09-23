@@ -757,7 +757,11 @@ void glAccum(GLenum op, GLfloat value) {
         for (int y = y0; y < y1; y++) {
             int16_t *row = ctx->accum_buffer + ((size_t)y * w) * 4u;
             for (int x = x0; x < x1; x++) {
-                const uint32_t p = src[gl_color_index(ctx, x, y)];
+                /* The CP's copy is filled by a DMA the CPU has no idea about, so the line is
+                 * dropped before it is read - the same rule glReadPixels follows. */
+                const size_t at = gl_color_index(ctx, x, y);
+                gl_color_copy_invalidate_word(ctx, src, at);
+                const uint32_t p = src[at];
                 const float c[4] = {(float)((p >> 16) & 0xffu) / 255.0f,
                                     (float)((p >> 8) & 0xffu) / 255.0f,
                                     (float)(p & 0xffu) / 255.0f,

@@ -4409,7 +4409,13 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                 continue;
             }
             /* The flip, and on the scanout path the swizzle, are gl_color_index's. */
-            const uint32_t argb = source[gl_color_index(ctx, window_x, window_y)];
+            const size_t at = gl_color_index(ctx, window_x, window_y);
+            /* **And when `source` is the CP's copy, the line has to be dropped first**, because
+             * a DMA filled it behind the CPU's back. Without this the read returns whatever the
+             * CPU had cached of an earlier frame - see gl_color_copy_invalidate_word, and the
+             * drifting bytes that sent two suites chasing a blend. */
+            gl_color_copy_invalidate_word(ctx, source, at);
+            const uint32_t argb = source[at];
             float c[4] = {(float)((argb >> 16) & 0xffu) / 255.0f,
                           (float)((argb >> 8) & 0xffu) / 255.0f,
                           (float)(argb & 0xffu) / 255.0f,

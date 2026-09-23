@@ -1596,7 +1596,11 @@ void glSwapBuffers(void) {
      * front's (GL 1.0, 2.1.1). A program that has a front surface gets it brought up to date. The
      * back is left as it was, which GL allows - its contents after a swap are undefined. */
     if (ctx->front_fb && presented) {
-        memcpy(ctx->front_fb, gl_color_read_source(ctx, presented),
+        const uint32_t *const shown = gl_color_read_source(ctx, presented);
+        /* A whole-buffer read of the CP's copy drops the whole copy first: it was filled by a
+         * DMA, so what the CPU has cached of it is an earlier frame. */
+        gl_color_copy_invalidate_all(ctx, shown, gl_color_words(ctx));
+        memcpy(ctx->front_fb, shown,
                (size_t)ctx->width * (size_t)ctx->height * sizeof(uint32_t));
     }
     ctx->front_pending = GL_FALSE;
@@ -1621,7 +1625,9 @@ GLboolean gl_front_buffer(gl_context_t *ctx) {
     uint32_t *front = (uint32_t *)oops_mem_alloc(bytes, 64 * 1024, OOPS_MEM_WC_GARLIC);
     if (!front) return GL_FALSE;
     if (oops_display_read_shown(ctx->disp, front) != 0) {
-        memcpy(front, gl_color_read_source(ctx, ctx->back_fb), bytes);
+        const uint32_t *const src = gl_color_read_source(ctx, ctx->back_fb);
+        gl_color_copy_invalidate_all(ctx, src, gl_color_words(ctx));
+        memcpy(front, src, bytes);
     }
 #else
     if (bytes > sizeof(s_host_front)) return GL_FALSE;
@@ -1686,7 +1692,9 @@ void gl_front_present(gl_context_t *ctx) {
     if (!ctx->front_pending && !drawing) return;
 #ifndef OOPS_HOST_BUILD
     if (ctx->disp && !ctx->hw_rx) {
-        (void)oops_display_present(ctx->disp, gl_color_read_source(ctx, ctx->front_fb));
+        const uint32_t *const shown = gl_color_read_source(ctx, ctx->front_fb);
+        gl_color_copy_invalidate_all(ctx, shown, gl_color_words(ctx));
+        (void)oops_display_present(ctx->disp, shown);
     }
 #endif
     ctx->front_pending = GL_FALSE;
@@ -2883,7 +2891,10 @@ const GLuint *glGetFrameReadbackSampled(GLuint line_stride) {
      * matters more than the original note, because a hazard that only sometimes fires is the
      * kind a green run talks you out of.
      */
-    const GLboolean invalidate = (GLboolean)(src == ctx->readback);
+    /* `gl_color_is_copy`, so that the one question "is this a copy the CPU must drop?" has one
+     * answer - this test was `src == ctx->readback` and would have missed the second target's
+     * copy had a caller ever read the frame through it. */
+    const GLboolean invalidate = gl_color_is_copy(ctx, src);
     if (!ctx->color_tiled) {
 #if defined(__x86_64__)
         if (invalidate) {

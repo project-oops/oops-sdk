@@ -3347,6 +3347,60 @@ static inline const uint32_t *gl_color_read_source(const gl_context_t *ctx, cons
     return buf;
 }
 
+/* Whether `src` is one of the CP's copies rather than a colour buffer itself. */
+static inline GLboolean gl_color_is_copy(const gl_context_t *ctx, const uint32_t *src) {
+    return (GLboolean)(src && (src == ctx->readback || src == ctx->readback_also));
+}
+
+/*
+ * **Drop what the CPU has cached of the CP's copy, before reading it** (since 2026-09-23).
+ *
+ * A copy is filled by a DMA the CPU knows nothing about, so any line of it the CPU still holds
+ * is a line from some earlier frame. `glGetFrameReadback` has invalidated before reading since
+ * it was written; nothing else did, so `glReadPixels` - which indexes the same copy directly -
+ * read stale lines and reported them as pixels.
+ *
+ * **That is the whole of the drift.** gl1-probe's `front-and-back` answered `0x14`, `0x56`,
+ * `0xb9`, `0xd3`, `0x4e` in its blue byte across five runs, and gl2-probe's `two-draw-buffers`
+ * returned the *same* byte for two source colours 191 apart in blue. Values that change with
+ * what the CPU happens to be holding and not with what was drawn are not measurements.
+ *
+ * `clflush` writes a dirty line back before invalidating it, which is why this is only ever
+ * pointed at a copy: the CPU never writes one, so every line is clean and the write-back is a
+ * no-op. Aimed at a *live* colour buffer it would write a stale line back over what the GPU
+ * just drew - the hazard `glGetFrameReadback`'s own comment records.
+ *
+ * Per word, because a read is usually a rectangle and often one pixel: invalidating the whole
+ * copy for a 1x1 read would touch nine megabytes. Neighbouring pixels of a tiled surface share
+ * lines, so a large read repeats the instruction on a line it has already dropped - which costs
+ * an instruction and is still cheaper than the alternative.
+ */
+static inline void gl_color_copy_invalidate_word(const gl_context_t *ctx, const uint32_t *src,
+                                                 size_t i) {
+#if defined(__x86_64__) && !defined(OOPS_HOST_BUILD)
+    if (gl_color_is_copy(ctx, src)) {
+        __builtin_ia32_clflush((const void *)(src + i));
+    }
+#else
+    (void)ctx; (void)src; (void)i;
+#endif
+}
+
+/* The same, for a caller that reads the whole copy in one go - a swap's memcpy, or the present.
+ * `words` is the copy's own extent (gl_color_words), not the visible image's. */
+static inline void gl_color_copy_invalidate_all(const gl_context_t *ctx, const uint32_t *src,
+                                                size_t words) {
+#if defined(__x86_64__) && !defined(OOPS_HOST_BUILD)
+    if (gl_color_is_copy(ctx, src)) {
+        for (size_t p = 0; p < words * 4u; p += 64u) {
+            __builtin_ia32_clflush((const void *)((const char *)src + p));
+        }
+    }
+#else
+    (void)ctx; (void)src; (void)words;
+#endif
+}
+
 /* Whether colour channel `i` is written: its glColorMask bit, and a draw buffer that is not
  * GL_NONE (GL 1.0, 4.2.1; accepted since 2026-09-19). */
 static inline GLboolean gl_color_writes(const gl_context_t *ctx, int i) {
