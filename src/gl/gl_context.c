@@ -2072,69 +2072,15 @@ static void gl_ps_env_write(gl_context_t *ctx, size_t slot, const uint32_t *word
     gl_ps_flush_shaders(ctx);
 }
 
-static GLboolean gl_ps_patch_tex_env_body(gl_context_t *ctx);
-
-/* **The guard, in front of the work.** `gl_ps_patch_tex_env` runs on every draw and assembles
- * up to 64 words of GPU machine code before comparing them with the payload - a large share of
- * 34ms in a 218ms frame, nearly all of it rebuilding what was already there. If none of its
- * inputs have moved since the last draw, neither have its outputs.
- *
- * Wrapped rather than guarded inline because the body returns from several places and the
- * answer has to be remembered at every one of them; a wrapper cannot miss one. */
+/* **A guard on this was tried twice and measured a loss both times; see the commit that removed
+ * it.** The function assembles up to 64 words of GPU machine code on every draw and usually
+ * finds them already in the payload, which looks exactly like something a cache should fix -
+ * and the cache cost more than the rebuild, because a program changes texture environment per
+ * material and so the key changes nearly as often as the words do. Left plain, and the 34ms it
+ * costs a Neverball frame stands as measured rather than papered over.
+ */
 GLboolean gl_ps_patch_tex_env(gl_context_t *ctx) {
     if (!ctx || !ctx->gpu_payload) return GL_TRUE;
-
-    /* **Compared in place, and the texture's name is not one of the inputs.**
-     *
-     * The first version of this guard built a signature struct and compared it whole, and it
-     * cost 16ms a frame more than it saved - measured, 34ms of patching became 50ms. Two
-     * reasons, both worth writing down because they are the difference between a cache and a
-     * tax:
-     *
-     * - **It keyed on the texture name.** The body reads the name only to reach
-     *   `gl_tex_sample_format`, so two textures of the same base format assemble identical
-     *   words - and a program that switches texture per material, which is every program,
-     *   changed the key on nearly every draw. The guard almost never hit and the rebuild
-     *   happened anyway, with the key-building added on top.
-     * - **It copied to compare.** Two `gl_combine_t` structs and a `memset` of the whole
-     *   signature, on the path whose whole purpose was to be cheaper than the work it skips.
-     *
-     * So: the stored fields are compared where they lie, short-circuiting on the first
-     * difference, and written only when one has actually moved. */
-    const GLuint base_unit = gl_hw_base_unit(ctx);
-    GLenum fmt[2];
-    for (GLuint u = 0u; u < 2u; u++) {
-        fmt[u] = (u < OOPS_GL_MAX_TEXTURE_UNITS)
-                     ? gl_tex_sample_format(gl_lookup_texture(ctx, gl_unit_texture_id(ctx, u)))
-                     : (GLenum)0;
-    }
-    GLboolean same = ctx->ps_env_sig_valid;
-    if (same && ctx->ps_env_sig.base_unit != base_unit) same = GL_FALSE;
-    for (GLuint u = 0u; same && u < 2u && u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
-        const gl_tex_unit_t *tu = &ctx->tex_unit[u];
-        if (ctx->ps_env_sig.fmt[u] != fmt[u] ||
-            ctx->ps_env_sig.mode[u] != tu->tex_env_mode ||
-            memcmp(&ctx->ps_env_sig.cb[u], &tu->combine, sizeof(tu->combine)) != 0 ||
-            memcmp(ctx->ps_env_sig.col[u], tu->tex_env_color, sizeof(tu->tex_env_color)) != 0) {
-            same = GL_FALSE;
-        }
-    }
-    if (same) return ctx->ps_env_sig_result;
-
-    ctx->ps_env_sig.base_unit = base_unit;
-    for (GLuint u = 0u; u < 2u && u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
-        const gl_tex_unit_t *tu = &ctx->tex_unit[u];
-        ctx->ps_env_sig.fmt[u] = fmt[u];
-        ctx->ps_env_sig.mode[u] = tu->tex_env_mode;
-        ctx->ps_env_sig.cb[u] = tu->combine;
-        memcpy(ctx->ps_env_sig.col[u], tu->tex_env_color, sizeof(tu->tex_env_color));
-    }
-    ctx->ps_env_sig_valid = GL_TRUE;
-    ctx->ps_env_sig_result = gl_ps_patch_tex_env_body(ctx);
-    return ctx->ps_env_sig_result;
-}
-
-static GLboolean gl_ps_patch_tex_env_body(gl_context_t *ctx) {
     if (!ctx || !ctx->gpu_payload) return GL_TRUE;
 
     /* Unit 0's stage: its texel is the sample in v4..v7, and GL_PREVIOUS at unit 0 is the
