@@ -3557,9 +3557,19 @@ static inline uint32_t gl_blend_comb(GLenum equation) {
  * `COLOR_DESTBLEND` [8,12], `ALPHA_SRCBLEND` [16,20], `ALPHA_COMB_FCN` [21,23],
  * `ALPHA_DESTBLEND` [24,28], `SEPARATE_ALPHA_BLEND` [29], `ENABLE` [30].
  *
- * The alpha channel is always programmed and `SEPARATE_ALPHA_BLEND` always set, because oops-gl
- * tracks a separate alpha factor pair (`glBlendFuncSeparate`) and letting the block infer alpha
- * from the colour fields would quietly ignore it.
+ * **`SEPARATE_ALPHA_BLEND` is set only when the alpha state differs from the colour state**,
+ * which is what radeonsi does (`si_state.c:499`: `if (srcA != srcRGB || dstA != dstRGB ||
+ * eqA != eqRGB)`). It used to be set always, on the grounds that oops-gl tracks a separate
+ * alpha pair and letting the block infer alpha would ignore it - true of the fields, and the
+ * wrong conclusion about the bit, because with the two sets equal the inference is exact.
+ *
+ * **The bit is not free on this part.** With it set, the colour block applies `COLOR_COMB_FCN`
+ * to channels 0 and 2 and `ALPHA_COMB_FCN` to channels 1 and 3 - alternating by position, not
+ * by channel identity. obSCEne measured that three ways on `166-agc/compiled-ps`
+ * (`-9c31`): swapping the two combines inverted the pattern exactly, and masking to one channel
+ * at a time left each channel taking the same combine it took in the full draw. So a draw whose
+ * alpha state matches its colour state must not set the bit, because doing so hands green an
+ * equation GL never asked it to use - invisible only while the two equations agree.
  */
 static inline uint32_t gl_compute_cb_blend_control(const gl_context_t *ctx) {
     if (!ctx || !ctx->cap_blend) return 0u;
@@ -3583,10 +3593,14 @@ static inline uint32_t gl_compute_cb_blend_control(const gl_context_t *ctx) {
     const uint32_t cdst = minmax ? 1u : gl_blend_op(ctx->blend_dst, 5u);
     const uint32_t asrc = aminmax ? 1u : gl_blend_op(ctx->blend_src_alpha, 4u);
     const uint32_t adst = aminmax ? 1u : gl_blend_op(ctx->blend_dst_alpha, 5u);
+    /* Compared as the register's own fields rather than as the GL enums, so two spellings of
+     * the same hardware factor - which `gl_blend_op` maps together - do not read as different. */
+    const GLboolean separate =
+        (GLboolean)(asrc != csrc || adst != cdst || acomb != comb);
     return (csrc & 0x1fu) | ((comb & 0x7u) << 5) | ((cdst & 0x1fu) << 8) |
            ((asrc & 0x1fu) << 16) | ((acomb & 0x7u) << 21) | ((adst & 0x1fu) << 24) |
-           (1u << 29) | /* SEPARATE_ALPHA_BLEND */
-           (1u << 30);  /* ENABLE - the bit the constant never set */
+           (separate ? (1u << 29) : 0u) | /* SEPARATE_ALPHA_BLEND - see above */
+           (1u << 30);                    /* ENABLE - the bit the constant never set */
 }
 
 /*

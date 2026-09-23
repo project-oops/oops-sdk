@@ -2341,6 +2341,13 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
          * `glBlendFuncSeparate`, so the register pair is being read correctly and something
          * else is deciding the channel. These five are the something else this path never set.
          */
+        /* `SX_PS_DOWNCONVERT_CONTROL` is gfx10.3's and only exists there. **0xff is what
+         * radeonsi writes** (`ac_cmdbuf.c:549`), and the field is `MRT<n>_FMT_MAPPING_DISABLE` -
+         * so all-ones is every target's format mapping *off*, not on. The console leaves it at
+         * 0xff already, which obSCEne read back while measuring `-9c31`; it is written here for
+         * the same reason as the four below, which is that inheriting the right value is not
+         * the same as setting it. */
+        {0x1d4u, 0x000000ffu}, /* SX_PS_DOWNCONVERT_CONTROL: mapping disabled on every target */
         {0x1d5u, 0x00000000u}, /* SX_PS_DOWNCONVERT: none */
         {0x1d6u, 0x00000000u}, /* SX_BLEND_OPT_EPSILON */
         {0x1d7u, 0x00000000u}, /* SX_BLEND_OPT_CONTROL */

@@ -1659,6 +1659,103 @@ static void test_pm4_gl_rbplus_blend_opt_is_written_off(void) {
   oops_display_close(disp);
 }
 
+/* **`SEPARATE_ALPHA_BLEND` is set only when the alpha state differs from the colour state.**
+ *
+ * It used to be set always, on the grounds that oops-gl tracks a separate alpha factor pair and
+ * letting the block infer alpha would ignore it. That is true of the *fields* and the wrong
+ * conclusion about the *bit*: with the two sets equal the inference is exact, and radeonsi sets
+ * it under the same condition (`si_state.c:499`).
+ *
+ * **The bit is not free on this part.** With it set, the colour block applies `COLOR_COMB_FCN`
+ * to channels 0 and 2 and `ALPHA_COMB_FCN` to channels 1 and 3 - alternating by position rather
+ * than by channel identity, measured three ways by obSCEne (`-9c31`). So a draw whose alpha
+ * matches its colour must not set it, or green runs an equation GL never asked for - which is
+ * invisible exactly while the two equations agree, and is why this went unnoticed.
+ */
+/* The last value written to `CB_BLEND0_CONTROL`, whichever packet carried it. **The frame's
+ * opening table writes it one register at a time and a later draw writes it with MRT1 in the
+ * same packet**, so a scan that knew only the one-register form would see the frame's value and
+ * miss every change after it. */
+static uint32_t pm4_last_blend0(const uint32_t *dcb, uint32_t words) {
+  uint32_t last = 0xffffffffu;
+  for (uint32_t i = 0; i + 2 < words; i++) {
+    if (dcb[i + 1] != 0x1e0u) continue;
+    if (dcb[i] == 0xc0016900u || dcb[i] == 0xc0026900u) last = dcb[i + 2];
+  }
+  return last;
+}
+
+static void test_pm4_gl_separate_alpha_blend_only_when_alpha_differs(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+  static _Alignas(4096) uint32_t dcb[8192];
+  static _Alignas(256) uint8_t payload[0x20000];
+  static _Alignas(256) uint8_t vbo[16384];
+  static _Alignas(64) uint32_t fence[4] = {0x11111111u};
+  static _Alignas(64) uint32_t canary[16];
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 8192;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+
+  /* **2.0, because `glBlendEquationSeparate` is a 2.0 entry point** and a 1.1 context refuses
+   * it - correctly, and quietly enough that a test which forgot would measure the default
+   * equation twice and conclude the bit never moves. */
+  glContextSetVersion(2, 0);
+
+  /* The same equation and the same factors for both: no separate behaviour was asked for. */
+  glEnable(GL_BLEND);
+  glBlendEquation(GL_FUNC_ADD);
+  glBlendFunc(GL_ONE, GL_ONE);
+  pm4_draw_plain_quad();
+  uint32_t last = pm4_last_blend0(dcb, ctx->dcb_words);
+  ASSERT_TRUE(last != 0xffffffffu);
+  ASSERT_EQ(last & (1u << 30), 1u << 30); /* ENABLE, so this is a blending draw at all */
+  ASSERT_EQ(last & (1u << 29), 0u);       /* and SEPARATE_ALPHA_BLEND is not set */
+
+  /* Different equations: now it is asked for, and the bit has to go out. */
+  glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_ADD);
+  pm4_draw_plain_quad();
+  last = pm4_last_blend0(dcb, ctx->dcb_words);
+  ASSERT_TRUE(last != 0xffffffffu);
+  ASSERT_EQ(last & (1u << 29), 1u << 29);
+
+  /* And different *factors* with the same equation counts too - the bit covers both. */
+  glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+  glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
+  pm4_draw_plain_quad();
+  last = pm4_last_blend0(dcb, ctx->dcb_words);
+  ASSERT_TRUE(last != 0xffffffffu);
+  ASSERT_EQ(last & (1u << 29), 1u << 29);
+
+  /* And back to matching state clears it again, mid-frame - the per-draw path has to put it
+   * back rather than leave the frame on the value the last draw needed. */
+  glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
+  pm4_draw_plain_quad();
+  last = pm4_last_blend0(dcb, ctx->dcb_words);
+  ASSERT_TRUE(last != 0xffffffffu);
+  ASSERT_EQ(last & (1u << 29), 0u);
+
+  glDisable(GL_BLEND);
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 /* **`SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS` decides what kind of number the face register is, and
  * it has to be clear.**
  *
@@ -5105,6 +5202,7 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_depth_range_changes_within_a_frame);
   RUN_TEST(test_pm4_gl_logic_op_and_blend_constant_reach_their_registers);
   RUN_TEST(test_pm4_gl_vertex_ring_submits_before_it_wraps);
+  RUN_TEST(test_pm4_gl_separate_alpha_blend_only_when_alpha_differs);
   RUN_TEST(test_pm4_gl_rbplus_blend_opt_is_written_off);
   RUN_TEST(test_pm4_gl_baryc_cntl_delivers_a_float_face);
   RUN_TEST(test_pm4_gl_a_discarding_shader_sets_kill_enable);
