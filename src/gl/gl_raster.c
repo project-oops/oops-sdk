@@ -316,7 +316,11 @@ static void gl_raster_sync(gl_context_t *ctx) {
         gl_hw_flush(ctx);
     }
 #endif
+    /* **Both copies go stale**, because the CPU writes a two-target draw's pixels into both
+     * buffers (gl_draw_targets' `fb_also`). Dropping only the primary's tag would leave the
+     * second target answering reads from a copy made before the write. */
     ctx->readback_of = NULL;
+    ctx->readback_also_of = NULL;
 }
 
 /*

@@ -4926,6 +4926,131 @@ static void test_pm4_gl_front_buffer_targets(void) {
   oops_display_close(disp);
 }
 
+/*
+ * **A two-target submission copies both targets back** (since 2026-09-23), so `glReadPixels` of
+ * either one reads the CP's copy rather than the surface.
+ *
+ * The submission copied `framebuffer` alone, and `gl_color_read_source` hands back the copy only
+ * for the buffer it is tagged as being of - so under GL_FRONT_AND_BACK, where `gl_draw_targets`
+ * puts the back in `framebuffer` and the front in `fb_also`, every read of the front fell through
+ * to the raw pointer. Not a stale frame with a name on it: the CPU's view of a surface the GPU
+ * had written, which is why gl1-probe's `front-and-back` reported a byte that drifted between
+ * runs - `0x14`, `0x56`, `0xb9`, `0xd3`, `0x4e` - and held still within one, while the same pixel
+ * read through `glGetFrameReadback` was the colour GL asks for. Four checks across two suites
+ * were reading an instrument, not a result.
+ *
+ * The test is the stream, not the pixels: two `DMA_DATA` packets after the fence wait, one per
+ * target, and a tag on each copy naming the buffer it holds.
+ */
+static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[4096];
+  static _Alignas(64) uint32_t fence[4] = {0x11111111u};
+  static _Alignas(64) uint32_t canary[16];
+  static uint32_t readback[64 * 64];
+  static uint32_t readback_also[64 * 64];
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 4096;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+  /* Both copies are the test's own storage, so the lazy allocation in `gl_draw_targets` has
+   * nothing to do and the mock needs no allocator. */
+  ctx->readback = readback;
+  ctx->readback_also = readback_also;
+
+  glDrawBuffer(GL_FRONT_AND_BACK);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  const uint64_t back = (uint64_t)(uintptr_t)ctx->back_fb;
+  const uint64_t front = (uint64_t)(uintptr_t)ctx->front_fb;
+  ASSERT_TRUE(front != 0u && front != back);
+  /* `gl_draw_targets`' arrangement, which is what makes the second copy necessary rather than
+   * tidy: the front is the one that is never `framebuffer`. */
+  ASSERT_TRUE(ctx->framebuffer == ctx->back_fb);
+  ASSERT_TRUE(ctx->fb_also == ctx->front_fb);
+
+  ctx->dcb_words = 0;
+  glBegin(GL_TRIANGLES);
+  glVertex3f(-0.5f, -0.5f, 0.5f);
+  glVertex3f(0.5f, -0.5f, 0.5f);
+  glVertex3f(0.0f, 0.5f, 0.5f);
+  glEnd();
+  /* `gl_hw_flush` rather than `glFlush`, because `glFlush`'s submit is compiled out of a host
+   * build - the stream is still built here, so it is the submit that has to be asked for. */
+  gl_hw_flush(ctx);
+
+  /* One `DMA_DATA` per target, each from its surface to its own copy. The fills a clear emits
+   * share the packet header, so the source address is what tells them apart - a fill's second
+   * word is the colour, and these carry the CP_SYNC/TC_L2 selectors. */
+  /* **Scanned over the whole buffer, not `dcb_words`**, because the submit that emitted these
+   * packets also reset the count - the stream is spent. `dcb` is zeroed above and nothing else
+   * writes it, so what is left in it is exactly the submission. */
+  size_t copies = 0;
+  GLboolean back_copied = GL_FALSE, front_copied = GL_FALSE;
+  for (uint32_t i = 0; i + 6 < (uint32_t)(sizeof(dcb) / sizeof(dcb[0])); i++) {
+    if (dcb[i] != 0xc0055000u) continue;
+    if (dcb[i + 1] != (0x80000000u | (3u << 29) | (3u << 20))) continue;
+    copies++;
+    if (dcb[i + 2] == (uint32_t)back && dcb[i + 4] == (uint32_t)(uintptr_t)readback) {
+      back_copied = GL_TRUE;
+    }
+    if (dcb[i + 2] == (uint32_t)front && dcb[i + 4] == (uint32_t)(uintptr_t)readback_also) {
+      front_copied = GL_TRUE;
+    }
+  }
+  ASSERT_EQ(copies, 2u);
+  ASSERT_TRUE(back_copied);
+  ASSERT_TRUE(front_copied);
+  ASSERT_TRUE(ctx->readback_of == ctx->back_fb);
+  ASSERT_TRUE(ctx->readback_also_of == ctx->front_fb);
+
+  /* And a read of either buffer takes its own copy. Two sentinels, so a read that took the
+   * wrong one is a wrong colour rather than a coincidence. */
+  ctx->hw_frames_confirmed = 1u;
+  for (size_t i = 0; i < 64u * 64u; i++) {
+    readback[i] = 0xff00ff00u;      /* the back's copy: green */
+    readback_also[i] = 0xff0000ffu; /* the front's: blue */
+  }
+  GLubyte out[4] = {0, 0, 0, 0};
+  glReadBuffer(GL_BACK);
+  glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
+  ASSERT_TRUE(out[0] == 0u && out[1] == 255u && out[2] == 0u);
+  glReadBuffer(GL_FRONT);
+  glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
+  ASSERT_TRUE(out[0] == 0u && out[1] == 0u && out[2] == 255u);
+
+  /* A CPU write into the colour buffer drops **both** tags, not just the primary's - the CPU
+   * path writes `fb_also` too, so a surviving second tag would answer the next read from a copy
+   * made before the write. */
+  glReadBuffer(GL_BACK);
+  glDrawBuffer(GL_FRONT_AND_BACK);
+  const GLubyte red[4] = {255, 0, 0, 255};
+  glWindowPos2i(5, 5);
+  glDrawPixels(1, 1, GL_RGBA, GL_UNSIGNED_BYTE, red);
+  ASSERT_TRUE(ctx->readback_of == NULL);
+  ASSERT_TRUE(ctx->readback_also_of == NULL);
+
+  glDrawBuffer(GL_BACK);
+  glReadBuffer(GL_BACK);
+  ctx->readback = NULL;
+  ctx->readback_also = NULL;
+  ctx->hw_frames_confirmed = 0u;
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 /* The textured pixel shader samples with a level of detail and divides q per fragment (since
  * 2026-09-19). Its sampling words are `tools/shader/tex-prolog.s`'s, assembled - the file also
  * assembles the image_sample_lz this replaced to the word the tree had - and the vertex carries
@@ -5185,6 +5310,7 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_stencil_reaches_its_registers);
   RUN_TEST(test_pm4_gl_zs_tiling_is_a_permutation);
   RUN_TEST(test_pm4_gl_front_buffer_targets);
+  RUN_TEST(test_pm4_gl_both_colour_targets_are_copied_back);
   RUN_TEST(test_pm4_gl_polygon_stipple_discards_in_the_shader);
   RUN_TEST(test_pm4_gl_scanout_path_targets);
   RUN_TEST(test_pm4_gl_param3_vertex_shader_is_the_assembled_one);

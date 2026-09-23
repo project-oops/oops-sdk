@@ -1639,6 +1639,18 @@ typedef struct gl_context {
     /* The colour buffer that copy is of, or NULL once the CPU has written into it since
      * (gl_raster.c's gl_raster_sync) - see gl_color_read_source. */
     const uint32_t *readback_of;
+    /* **The second colour target's copy**, and the buffer it is of (since 2026-09-23).
+     *
+     * A draw under GL_FRONT_AND_BACK writes two surfaces, and until now the submission copied
+     * only `framebuffer` - so `glReadPixels` of whichever buffer was in `fb_also` fell through
+     * `gl_color_read_source` to the raw pointer and read the CPU's view of a surface the GPU
+     * had just written. That is not a stale value with a name on it; it is whatever that memory
+     * holds, which is why gl1-probe's `front-and-back` reported a blue byte that drifted between
+     * runs (0x14, 0x56, 0xb9, 0xd3, 0x4e) and stayed put within one, while the same pixel read
+     * through `glGetFrameReadback` was the colour GL asks for. Allocated the first time a second
+     * target is bound, so a program that never names one pays nothing. */
+    uint32_t *readback_also;
+    const uint32_t *readback_also_of;
     /* On the scanout path the copy is tiled like its buffer; glGetFrameReadback detiles it
      * into this, the linear image its callers index. */
     uint32_t *readback_lin;
@@ -3326,9 +3338,12 @@ static inline const uint32_t *gl_read_target(const gl_context_t *ctx) {
  * this is the CP's CPU-cached copy, when the last submission made one of this very buffer and
  * the CPU has not written into the buffer since. Otherwise it is the buffer itself. */
 static inline const uint32_t *gl_color_read_source(const gl_context_t *ctx, const uint32_t *buf) {
-    if (buf && ctx->readback && ctx->hw_frames_confirmed > 0u && ctx->readback_of == buf) {
-        return ctx->readback;
-    }
+    if (!buf || ctx->hw_frames_confirmed == 0u) return buf;
+    if (ctx->readback && ctx->readback_of == buf) return ctx->readback;
+    /* **Either target answers here**, not just the one the last draw called primary. The tags
+     * are distinct pointers, so the second copy can only be returned for the buffer it was made
+     * of, and a target with no copy still falls through to itself. */
+    if (ctx->readback_also && ctx->readback_also_of == buf) return ctx->readback_also;
     return buf;
 }
 

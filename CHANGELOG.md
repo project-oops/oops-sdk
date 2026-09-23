@@ -12,6 +12,33 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Fixed
 
+- **`glReadPixels` of the second colour target read raw memory, not the GPU's answer**
+  (2026-09-23). The end of every submission has the CP copy the render target into a CPU-cached
+  buffer, and `gl_color_read_source` hands that copy back only for the buffer it is tagged as
+  being of. Only `ctx->framebuffer` was ever copied - and under `GL_FRONT_AND_BACK`
+  `gl_draw_targets` puts the back in `framebuffer` and the front in `fb_also`, so **the front
+  was never the tagged buffer and every read of it fell through to the surface pointer**.
+
+  That is not a stale frame with a name on it. It is the CPU's view of memory the GPU has just
+  written through its own caches, so what comes back is neither the old value nor the new one
+  reliably - which is exactly the signature gl1-probe's `front-and-back` has been reporting since
+  it was written: a blue byte of `0x14`, `0x56`, `0xb9`, `0xd3`, `0x4e` across five runs, drifting
+  between runs and holding still within one, in **both** targets at once, while the same pixel
+  read through `glGetFrameReadback` came back the colour GL asks for.
+
+  **Four checks across two suites were reading the instrument rather than the result**, and the
+  reading of them had already reached the pixel shader's second export - which LLVM assembles to
+  the words oops-gl emits, byte for byte, so that hunt would have found nothing. What settled it
+  was gl2-probe's `two-draw-buffers`, which drives the same path from a shader whose output it
+  chooses and printed the two read paths disagreeing about one pixel in one row.
+
+  A second copy and a second tag, allocated the first time a program binds a second target -
+  in `gl_draw_targets` rather than `gl_front_buffer`, because the latter is skipped entirely on
+  the scanout path, which is the console. Both tags are dropped when the CPU writes into the
+  colour buffer, because the CPU path writes `fb_also` too. Pinned by
+  `test_pm4_gl_both_colour_targets_are_copied_back`: two `DMA_DATA` packets behind the one fence
+  wait, a tag naming each, and a read of either buffer taking its own copy.
+
 - **A discarded fragment kept its depth, because the depth block was never told the shader could
   kill** (2026-09-22). `DB_SHADER_CONTROL.KILL_ENABLE` - bit 6 of context register `0x203` - was
   never set, by any path. Clearing `exec` stops the shader writing; it does not stop the depth

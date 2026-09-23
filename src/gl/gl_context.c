@@ -303,6 +303,7 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
      * flushed and L2 written back, then copies the finished render target into the CPU-cached
      * readback buffer. WAIT_REG_MEM: function EQUAL, memory space, polled by the ME. */
     ctx->readback_of = NULL;
+    ctx->readback_also_of = NULL;
     if (ctx->readback && ctx->framebuffer) {
         ctx->readback_of = ctx->framebuffer;
         *dw++ = 0xc0053c00u;
@@ -314,6 +315,18 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
         *dw++ = 4u;
         gl_hw_emit_dma_copy(&dw, (uint64_t)(uintptr_t)ctx->framebuffer, (uint64_t)(uintptr_t)ctx->readback,
                             (uint32_t)gl_color_words(ctx) * 4u);
+        /* **The second colour target is copied too** (since 2026-09-23), and behind the same
+         * wait: the fence above is already satisfied by the time the first copy is issued, so
+         * this one needs no wait of its own. A draw under GL_FRONT_AND_BACK writes both
+         * surfaces and the CPU has to be able to read either - `glReadPixels` of the buffer
+         * that happened not to be primary was reading raw memory before this, which is what
+         * made gl1-probe's `front-and-back` rows drift from run to run. */
+        if (ctx->readback_also && ctx->fb_also) {
+            ctx->readback_also_of = ctx->fb_also;
+            gl_hw_emit_dma_copy(&dw, (uint64_t)(uintptr_t)ctx->fb_also,
+                                (uint64_t)(uintptr_t)ctx->readback_also,
+                                (uint32_t)gl_color_words(ctx) * 4u);
+        }
     }
     *dw++ = 0xc0064900u; /* RELEASE_MEM: the same event, DATA_SEL=3: the 64-bit GPU clock counter */
     *dw++ = 0x06603514u;
@@ -1447,6 +1460,7 @@ void glContextDestroy(void *ctx_handle) {
     }
     if (ctx->gpu_payload) oops_mem_free(ctx->gpu_payload);
     if (ctx->readback) oops_mem_free(ctx->readback);
+    if (ctx->readback_also) oops_mem_free(ctx->readback_also);
     if (ctx->fence) oops_mem_free(ctx->fence);
     if (ctx->canary) oops_mem_free(ctx->canary);
     if (ctx->dcb_mem) oops_mem_free(ctx->dcb_mem);
@@ -1641,6 +1655,19 @@ void gl_draw_targets(gl_context_t *ctx) {
 #ifndef OOPS_HOST_BUILD
     if (primary != ctx->framebuffer && ctx->use_hardware && ctx->hw_frame_active) {
         gl_hw_flush(ctx);
+    }
+    /* **The second target's readback, allocated the first time there is a second target.**
+     *
+     * Here rather than in `gl_front_buffer` because that one is skipped entirely on the scanout
+     * path, where the front is a scanout buffer the display already owns - which is the console,
+     * so allocating there would have covered every case except the one that matters. Sized like
+     * `readback`: whole 128x128 blocks, because the copy is of a tiled surface (gl_color_words).
+     * A failed allocation leaves the pointer NULL and `gl_color_read_source` falls through to the
+     * buffer itself, which is what it did before this existed. */
+    if (also && ctx->readback && !ctx->readback_also) {
+        ctx->readback_also = (uint32_t *)oops_mem_alloc(
+            (size_t)((ctx->width + 127u) & ~127u) * (size_t)((ctx->height + 127u) & ~127u) * 4u,
+            0x1000, OOPS_MEM_WB_ONION);
     }
 #endif
     ctx->framebuffer = primary;
