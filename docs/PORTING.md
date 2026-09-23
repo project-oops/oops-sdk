@@ -54,9 +54,9 @@ arriving bit for bit, and its uniform block loading intact.
 
 **What a compiled fragment shader can do** is arithmetic on floats and integers, swizzle reads
 and writes, constructors, the built-in library, file-scope `const`s, uniforms, `texture2D`
-through up to two samplers, comparisons, `?:`, `if`/`else`, `discard`, user-defined functions -
-inlined, since there is no call instruction here - and **loops, including `break` and
-`continue`**.
+through up to two samplers, comparisons, `?:`, `if`/`else`, `discard`, **local arrays**,
+user-defined functions - inlined, since there is no call instruction here, and with **early
+`return`** - and **`for` loops, including `break` and `continue`**.
 
 A loop is unrolled where the trip count allows and branched where it does not, and a branched
 one carries a trip guard: a counter that ends it after the number of trips the compiler counted,
@@ -65,7 +65,25 @@ never goes false does not draw the wrong colour - it does not finish, and takes 
 so the one thing still refused is a loop whose **bound is not knowable when the shader is
 compiled**, because that is the loop no guard can be built for. `for (int i = 0; i < 8; i++)`
 and `for (int i = 0; i < 5000; i++)` both compile; a bound that is a uniform does not, and says
-so.
+so. **`while` and `do`-`while` are refused for that reason and not for want of a branch**: they
+have no initialiser, bound or step to count, so there is no ceiling to put on the guard. Write
+`for (int i = 0; i < <a bound>; i++)` with a `break` for the real condition - that is the same
+loop and it is bounded.
+
+**An array is a run of registers**, so its index has to be known when the shader is compiled.
+That is less restrictive than it sounds, because an unrolled loop's counter *is* known:
+`for (int i = 0; i < 4; i++) total += w[i];` resolves element by element, which is how the
+pattern is usually written. An index the shader computes at run time is refused - there is no
+addressable memory behind the array, and the alternatives are a chain of selects costing the
+whole array per access, or scratch memory this back end has not got.
+
+**An early `return` ends the function and nothing else.** A guard clause - `if (x > 1.0) return
+0.0;` followed by the real body - is generated, and the lanes that took it rejoin the caller
+immediately afterwards, so the statement the call was part of still finishes and the loop it sat
+in still goes round. A value-returning function must still end in `return <expr>;`, because
+GLSL requires every path to return and the trailing one is what catches the lanes no earlier
+return took. A `return` in `main` is refused: there is no call to hand the lanes back at, and
+the export that retires the wave runs after the body.
 
 What it still cannot: the projective, cube, volume and shadow texture lookups, and the inverse
 trigonometric functions, where the only lowering is a polynomial of somebody's choosing. A
@@ -178,7 +196,11 @@ part, so the quotient is computed from a reciprocal and then corrected, which is
 | A loop whose trip count is not known when the shader is compiled | A loop that branches is bounded by a **trip guard**, and that guard's ceiling is the trip count counted at compile time. A loop without one - `for (int i = 0; float(i) < someUniform; i++)` - cannot be given a ceiling, and a loop whose condition never goes false hangs the part rather than drawing the wrong colour. Give the loop a constant bound and `break` out of it early instead: that shape compiles and does the same thing |
 | A loop whose body assigns its own counter | The trip count is worked out when the shader is compiled, and `i = i + 2` inside the body makes that count wrong without failing - the loop would silently run a different number of times. Move the counter with the loop's own step, or use a second variable |
 | More than two branched loops nested inside one another | Each keeps three masks in scalar registers. Loops that unroll cost nothing here, so this is only reached by three nested loops that *all* branch |
-| An early `return` from a function | Same reason. A function whose body ends in its `return` is generated; one that returns from inside an `if` is not |
+| `while` and `do`-`while` | Not for want of a branch - `for` branches whenever it cannot unroll. A branched loop carries a trip guard whose ceiling is the trip count, and `while` has no initialiser, bound or step to count one from. `for (int i = 0; i < <a bound>; i++)` with a `break` is the same loop, bounded |
+| A `return` in `main` | An early `return` **inside a function** is generated. `main` has no call to hand the lanes back at, and the export that retires the wave runs after the body - so put the rest of `main` in the `else`, or use `discard` if the fragment should be thrown away |
+| A function that returns a value and does not end in `return <expr>;` | Earlier returns are generated; this is the one that catches the lanes none of them took. GLSL requires every path to return anyway |
+| An array index the shader computes at run time | An array is a run of registers and a register file cannot be indexed by a running value. **An unrolled loop's counter counts as known**, so `for (int i = 0; i < 4; i++) total += w[i];` is fine - it is a uniform or a varying used as an index that is not |
+| Whole-array assignment, or an array as a value | Elements, one at a time. GLSL 1.10 has no array-valued expressions either |
 | A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
 | `asin`, `acos`, `atan`, `refract` | No instruction on this part, and a polynomial of unmeasured accuracy is not written in their place. Each is refused **by name**, so you are told which one |
 | `textureCube`, `texture3D`, the `Proj` and shadow forms | Only `texture2D` is generated. The others are each a different lookup rather than the same one with a flag |

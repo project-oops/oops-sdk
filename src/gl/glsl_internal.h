@@ -747,6 +747,22 @@ typedef struct {
     size_t name_len;
     glsl_value_t value;
     glsl_type_t type;
+    /* **How many elements, or 0 for a name that is not an array**, mirroring `glsl_symbol_t`.
+     * An array's registers are its elements end to end - element `k` of a `vec3 v[4]` is
+     * `value.base + 3k` - so the length and the element type are the whole of what indexing
+     * needs. GLSL 1.10 has one level of array and no array-valued expressions, so there is
+     * nothing else a name can be. */
+    int array_size;
+    /* **Set only for an unrolled loop's counter**, which holds a different known value in each
+     * copy of the body - so `w[i]` is an index this can resolve, and that is the whole reason
+     * an array in a register file is useful rather than merely legal.
+     *
+     * Deliberately not set for locals in general. "This variable holds a constant" stops being
+     * true the moment something assigns to it, and knowing where that happens is a dataflow
+     * question this generator does not ask. The counter is the one variable it can answer for,
+     * because a body that assigns to it is refused before any of this is emitted. */
+    GLboolean is_const;
+    double const_val;
 } glsl_gen_var_t;
 
 typedef struct {
@@ -773,6 +789,19 @@ typedef struct {
      * GLSL forbids recursion, but a compiler that loops forever on invalid input is still a
      * compiler that loops forever. */
     int inline_depth;
+    /* **What an early `return` needs to know about the function it is leaving**, one entry per
+     * inlined call. `out` is where the value goes - the caller's result register, the same one
+     * the trailing return writes. `exec_depth` and `loop_depth` are where that function started,
+     * so a return takes its lanes out of the `if`s and loops *inside* the function and leaves
+     * the ones enclosing the **call** alone: a lane that returned early still runs the rest of
+     * the caller's statement, and still goes round the caller's loop.
+     *
+     * `saved` is false when the body has no early return in it, which is the common case - then
+     * no mask is taken and the words are what they always were. */
+    glsl_value_t fn_out[GLSL_GEN_MAX_INLINE_DEPTH];
+    int fn_exec_depth[GLSL_GEN_MAX_INLINE_DEPTH];
+    int fn_loop_depth[GLSL_GEN_MAX_INLINE_DEPTH];
+    GLboolean fn_saved[GLSL_GEN_MAX_INLINE_DEPTH];
     /* Whether this shader runs in whole-quad mode, which it does exactly when it samples. When
      * it is set, `discard` has one more mask to take the lane out of - the live one at
      * `GLSL_GEN_LIVE_SGPR`, which is what the export is restored from. */

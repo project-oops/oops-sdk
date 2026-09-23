@@ -96,6 +96,50 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **An early `return` ends the function and nothing else** (2026-09-23). A guard clause -
+  `if (x > 1.0) return 0.0;` and then the real body - is the shape, and it was refused because
+  the mask would have to be carried through every statement after it. That mask is the one
+  `break` already carries: the value goes into the caller's result under the exec the lanes have
+  at that point, the lanes come out of every `if` and loop **inside the function**, and `exec` is
+  cleared so the rest of the body writes nothing for them.
+
+  **What it must not touch is anything around the call.** The `if` the call sits in, the loop it
+  sits in, and the function's own entry mask all keep the lane, because returning ends the
+  function and not the statement the call was part of - so the depths are recorded at the call
+  and counted from there rather than from zero. The mask is restored **before** the `out`/`inout`
+  copy-back, or a lane that returned early would leave the caller's variable holding what it had.
+
+  A body with no early return in it takes no mask at all, so every shader that had none emits
+  exactly the words it did before. A value-returning function must still end in
+  `return <expr>;` - GLSL requires every path to return, and the trailing one catches the lanes
+  no earlier return took. A `return` in `main` is still refused, and now says why: there is no
+  call to hand the lanes back at, and the export that retires the wave runs after the body.
+
+- **Local arrays** (2026-09-23), as a run of registers - `float w[4]`, `vec3 v[2]`, element `k`
+  at `base + k * width`. There is no addressable memory behind one, so the index has to be known
+  when the shader is compiled.
+
+  **That is less restrictive than it sounds, and the reason is the unrolled loop.** Its counter
+  holds a different constant in each copy of the body, so `for (int i = 0; i < 4; i++) total +=
+  w[i];` resolves element by element - which is how the pattern is actually written, and the
+  case that makes an array in a register file useful rather than merely legal. `const_of` learnt
+  to resolve that one variable, and deliberately only that one: "this variable holds a constant"
+  stops being true the moment something assigns to it, and the counter is the only variable this
+  generator can answer for, because a body that assigns to it is refused before anything is
+  emitted.
+
+  An index the shader computes at run time is refused. The alternatives are a chain of selects
+  costing the whole array per access - which silently changes what a shader costs - or scratch
+  memory this back end has not got.
+
+- **`while` and `do`-`while` say why they are refused** (2026-09-23), which they previously did
+  by falling into a message claiming loops need "a branch and a label mechanism it has not got".
+  That stopped being true when `for` started branching. The real reason is the trip guard: a
+  branched loop is bounded by the trip count the compiler worked out from the initialiser, bound
+  and step, and `while` has none of the three to count from. A ceiling picked out of the air
+  would end a legitimate loop early and quietly, which is worse than refusing. The message names
+  the `for`-with-`break` rewrite, which is the same loop and is bounded.
+
 - **Loops branch, with `break` and `continue`** (2026-09-22) - the first backward jump this back
   end emits. Everything else in it is straight-line: an `if` narrows the exec mask and runs both
   arms, which is cheaper than a jump as well as simpler. Going round again is the one thing a

@@ -3944,6 +3944,317 @@ static void test_gl2_user_functions_are_inlined(void) {
     glContextDestroy(ctx);
 }
 
+/* **A local array is a run of registers**, indexed where the shader is compiled.
+ *
+ * There is no addressable memory behind one, so the index has to be known at compile time. The
+ * case that makes that worth having rather than merely legal is an unrolled loop: its counter
+ * holds a different constant in each copy of the body, so `w[i]` resolves element by element -
+ * which is how a shader actually writes this.
+ */
+static void test_gl2_local_arrays_are_indexed_where_the_shader_is_compiled(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* Written by literal index, read by literal index, and the elements must not overlap -
+     * 0.1, 0.2, 0.3, 0.4 into four slots, read back out of order so a stride mistake shows as
+     * a different number rather than the same one twice. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float w[4];\n"
+                    "  w[0] = 0.1; w[1] = 0.2; w[2] = 0.3; w[3] = 0.4;\n"
+                    "  gl_FragColor = vec4(w[2], w[0], w[3], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.3f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.1f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.4f, 1e-6f);
+
+    /* **A `vec3` array, where the stride is three and not one.** An implementation that gave
+     * every element one register would read `v[1].x` out of `v[0].y` and the answer would be
+     * plausible - 0.2 instead of 0.4 - so the values are chosen to tell those apart. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  vec3 v[2];\n"
+                    "  v[0] = vec3(0.1, 0.2, 0.3);\n"
+                    "  v[1] = vec3(0.4, 0.5, 0.6);\n"
+                    "  gl_FragColor = vec4(v[1].x, v[0].y, v[1].z, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.4f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.2f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.6f, 1e-6f);
+
+    /* **The one this exists for: an unrolled loop's counter as the index.** 1+2+3+4 = 10, and
+     * 10 * 0.05 is 0.5 - a sum no single element produces, so a loop that read the same element
+     * four times gives a different answer rather than a near one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float w[4];\n"
+                    "  w[0] = 1.0; w[1] = 2.0; w[2] = 3.0; w[3] = 4.0;\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 0; i < 4; i++) { total += w[i]; }\n"
+                    "  gl_FragColor = vec4(total * 0.05, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-6f);
+
+    /* Written through the counter too, then read back the other way round, so the write and
+     * the read have to agree about which element is which. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float w[4];\n"
+                    "  for (int i = 0; i < 4; i++) { w[i] = float(i) * 0.1; }\n"
+                    "  gl_FragColor = vec4(w[3], w[1], w[0], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.3f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.1f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.0f, 1e-6f);
+
+    /* An element assigned through a swizzle, which goes through the same place. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  vec3 v[2];\n"
+                    "  v[0] = vec3(0.0, 0.0, 0.0);\n"
+                    "  v[1] = vec3(0.0, 0.0, 0.0);\n"
+                    "  v[1].xz = vec2(0.25, 0.75);\n"
+                    "  gl_FragColor = vec4(v[1].x, v[1].y, v[1].z, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.0f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.75f, 1e-6f);
+
+    glContextDestroy(ctx);
+}
+
+/* What an array cannot do here, each said in its own words. */
+static void test_gl2_arrays_refuse_what_a_register_file_cannot_do(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+    uint32_t words[512];
+    uint32_t count = 0u, vgprs = 0u;
+    char log[256] = {0};
+
+    static const struct { const char *fs; const char *wants; } cases[] = {
+        /* **An index only known while the shader runs.** An array is a run of registers and a
+         * register file cannot be indexed by a value the shader computes - the alternatives are
+         * a select chain costing the whole array per access, or memory this back end has not
+         * got, and neither is something to do quietly. */
+        {"uniform float k;\n"
+         "void main() {\n"
+         "  float w[4];\n"
+         "  w[0] = 0.1; w[1] = 0.2; w[2] = 0.3; w[3] = 0.4;\n"
+         "  gl_FragColor = vec4(w[int(k)], 0.0, 0.0, 1.0);\n"
+         "}\n",
+         "known when the shader is compiled"},
+        /* A whole array as a value, which the language has no expression for either. */
+        {"void main() {\n"
+         "  float w[4];\n"
+         "  float v[4];\n"
+         "  w[0] = 0.1;\n"
+         "  v = w;\n"
+         "  gl_FragColor = vec4(v[0], 0.0, 0.0, 1.0);\n"
+         "}\n",
+         "element at a time"},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const GLuint prog = linked_program(VS_ONE_VARYING, cases[i].fs);
+        log[0] = '\0';
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, prog), words, 512u, &count,
+                                              &vgprs, NULL, NULL, log, sizeof(log)),
+                  GL_FALSE);
+        if (strstr(log, cases[i].wants) == NULL) {
+            printf("\n    case %d: expected a message about '%s', got '%s'\n", (int)i,
+                   cases[i].wants, log);
+        }
+        ASSERT_TRUE(strstr(log, cases[i].wants) != NULL);
+    }
+
+    glContextDestroy(ctx);
+}
+
+/* **An early `return`, which ends the function and nothing else.**
+ *
+ * The value goes into the caller's result under the exec the lanes have at that point, so each
+ * lane takes the value from whichever return it reached. Then the lanes come out of every `if`
+ * and loop inside the function - the same drop `break` and `discard` do - and `exec` is
+ * cleared, so the rest of the body writes nothing for them. What it must **not** touch is
+ * anything around the call: the lane still finishes the caller's statement and still goes round
+ * the caller's loop.
+ */
+static void test_gl2_an_early_return_ends_the_function_and_nothing_else(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float lo[4][4] = {{0.0f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float hi[4][4] = {{1.0f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* The shape the refusal test used to carry: a guard clause, then the real work. Both arms
+     * over the same varying, so one run takes the early return and the other does not. */
+    static const char *const FS_GUARD =
+        "varying vec4 vin;\n"
+        "float f(float a) {\n"
+        "  if (a > 0.5) { return 0.25; }\n"
+        "  return 0.75;\n"
+        "}\n"
+        "void main() { gl_FragColor = vec4(f(vin.x), 0.0, 0.0, 1.0); }\n";
+    compile_and_run(ctx, VS_ONE_VARYING, FS_GUARD, hi, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+    compile_and_run(ctx, VS_ONE_VARYING, FS_GUARD, lo, o);
+    ASSERT_NEAR(o[0], 0.75f, 1e-6f);
+
+    /* **The statements after the return must not run for the lane that took it.** If `exec` is
+     * not cleared, `t` is written twice and the answer is the second value - so 0.25 against
+     * 0.9 is the difference between returning early and merely computing a value early. */
+    static const char *const FS_SKIPS =
+        "varying vec4 vin;\n"
+        "float f(float a) {\n"
+        "  float t = 0.25;\n"
+        "  if (a > 0.5) { return t; }\n"
+        "  t = 0.9;\n"
+        "  return t;\n"
+        "}\n"
+        "void main() { gl_FragColor = vec4(f(vin.x), 0.0, 0.0, 1.0); }\n";
+    compile_and_run(ctx, VS_ONE_VARYING, FS_SKIPS, hi, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+
+    /* **And the caller carries on.** The statement the call sits in still runs for a lane that
+     * returned early - the green channel is written after the call and must be there whichever
+     * way the function went. A return that cleared `exec` and did not put it back gives green
+     * zero on exactly the lanes that returned. */
+    static const char *const FS_CALLER_GOES_ON =
+        "varying vec4 vin;\n"
+        "float f(float a) {\n"
+        "  if (a > 0.5) { return 0.25; }\n"
+        "  return 0.75;\n"
+        "}\n"
+        "void main() {\n"
+        "  float r = f(vin.x);\n"
+        "  gl_FragColor = vec4(r, 1.0, 0.0, 1.0);\n"
+        "}\n";
+    compile_and_run(ctx, VS_ONE_VARYING, FS_CALLER_GOES_ON, hi, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+    ASSERT_NEAR(o[1], 1.0f, 1e-6f);
+    compile_and_run(ctx, VS_ONE_VARYING, FS_CALLER_GOES_ON, lo, o);
+    ASSERT_NEAR(o[0], 0.75f, 1e-6f);
+    ASSERT_NEAR(o[1], 1.0f, 1e-6f);
+
+    /* **An `out` parameter is copied back even for a lane that returned early.** The copy-back
+     * runs after the mask is restored; if it ran before, the caller's variable would keep what
+     * it held and the blue channel would be zero. */
+    static const char *const FS_OUT_PARAM =
+        "varying vec4 vin;\n"
+        "float f(float a, out float mark) {\n"
+        "  mark = 0.5;\n"
+        "  if (a > 0.5) { return 0.25; }\n"
+        "  mark = 1.0;\n"
+        "  return 0.75;\n"
+        "}\n"
+        "void main() {\n"
+        "  float m = 0.0;\n"
+        "  float r = f(vin.x, m);\n"
+        "  gl_FragColor = vec4(r, 0.0, m, 1.0);\n"
+        "}\n";
+    compile_and_run(ctx, VS_ONE_VARYING, FS_OUT_PARAM, hi, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.5f, 1e-6f);  /* the value it had when it returned, not the later one */
+    compile_and_run(ctx, VS_ONE_VARYING, FS_OUT_PARAM, lo, o);
+    ASSERT_NEAR(o[0], 0.75f, 1e-6f);
+    ASSERT_NEAR(o[2], 1.0f, 1e-6f);
+
+    /* **A return out of a loop inside the function.** The loop reloads `exec` from its own mask
+     * at the top of every trip, so a returning lane left in that mask goes round again - and
+     * would then run the statements after the loop as well. Returns at 3, so 0.3; a lane that
+     * kept going reaches the trailing `return 0.9`. */
+    static const char *const FS_RETURN_FROM_LOOP =
+        "varying vec4 vin;\n"
+        "float f(float a) {\n"
+        "  float t = 0.0;\n"
+        "  for (int i = 0; i < 200; i++) {\n"
+        "    t += 1.0;\n"
+        "    if (t > 2.5) { return t * 0.1; }\n"
+        "  }\n"
+        "  return 0.9;\n"
+        "}\n"
+        "void main() { gl_FragColor = vec4(f(vin.x), 1.0, 0.0, 1.0); }\n";
+    compile_and_run(ctx, VS_ONE_VARYING, FS_RETURN_FROM_LOOP, hi, o);
+    ASSERT_NEAR(o[0], 0.3f, 1e-6f);
+    ASSERT_NEAR(o[1], 1.0f, 1e-6f); /* and the caller still ran */
+
+    /* **A bare `return;` from a void function**, which has no value to write and still has to
+     * stop the body. Without the mask, `mark` is overwritten and comes back 1.0. */
+    static const char *const FS_VOID_RETURN =
+        "varying vec4 vin;\n"
+        "void g(float a, out float mark) {\n"
+        "  mark = 0.25;\n"
+        "  if (a > 0.5) { return; }\n"
+        "  mark = 1.0;\n"
+        "}\n"
+        "void main() {\n"
+        "  float m = 0.0;\n"
+        "  g(vin.x, m);\n"
+        "  gl_FragColor = vec4(m, 0.0, 0.0, 1.0);\n"
+        "}\n";
+    compile_and_run(ctx, VS_ONE_VARYING, FS_VOID_RETURN, hi, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+    compile_and_run(ctx, VS_ONE_VARYING, FS_VOID_RETURN, lo, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f);
+
+    /* **Nested calls**, so the two functions' masks are distinct. The inner returns early and
+     * the outer must carry on to its own arithmetic - an inner return that reached the outer
+     * function's mask gives 0.2 instead of 0.5. */
+    static const char *const FS_NESTED =
+        "varying vec4 vin;\n"
+        "float inner(float a) { if (a > 0.5) { return 0.2; } return 0.4; }\n"
+        "float outer(float a) {\n"
+        "  float v = inner(a);\n"
+        "  if (a > 9.0) { return 0.0; }\n"
+        "  return v + 0.3;\n"
+        "}\n"
+        "void main() { gl_FragColor = vec4(outer(vin.x), 0.0, 0.0, 1.0); }\n";
+    compile_and_run(ctx, VS_ONE_VARYING, FS_NESTED, hi, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-6f);
+    compile_and_run(ctx, VS_ONE_VARYING, FS_NESTED, lo, o);
+    ASSERT_NEAR(o[0], 0.7f, 1e-6f);
+
+    /* **A function with no early return emits no mask**, which is what keeps every shader that
+     * had none costing exactly what it did. Two words fewer than the same body with a guard. */
+    {
+        gl_context_t *c = (gl_context_t *)ctx;
+        uint32_t plain[512], guarded[512];
+        uint32_t n_plain = 0u, n_guarded = 0u, vgprs = 0u;
+        char log[256] = {0};
+        const GLuint p1 = linked_program(
+            VS_ONE_VARYING, "varying vec4 vin;\n"
+                            "float f(float a) { return a * 0.5; }\n"
+                            "void main() { gl_FragColor = vec4(f(vin.x), 0.0, 0.0, 1.0); }\n");
+        const GLuint p2 = linked_program(VS_ONE_VARYING, FS_GUARD);
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, p1), plain, 512u, &n_plain,
+                                              &vgprs, NULL, NULL, log, sizeof(log)),
+                  GL_TRUE);
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, p2), guarded, 512u, &n_guarded,
+                                              &vgprs, NULL, NULL, log, sizeof(log)),
+                  GL_TRUE);
+        /* `s_and_saveexec_b32` is SOP1 op 60; the guarded one has the `if`'s and the
+         * function's, the plain one has neither. */
+        int saves_plain = 0, saves_guarded = 0;
+        for (uint32_t i = 0; i < n_plain; i++) {
+            if ((plain[i] >> 23) == 0x17du && ((plain[i] >> 8) & 0xffu) == 60u) saves_plain++;
+        }
+        for (uint32_t i = 0; i < n_guarded; i++) {
+            if ((guarded[i] >> 23) == 0x17du && ((guarded[i] >> 8) & 0xffu) == 60u) {
+                saves_guarded++;
+            }
+        }
+        ASSERT_EQ(saves_plain, 0);
+        ASSERT_TRUE(saves_guarded >= 1);
+    }
+
+    glContextDestroy(ctx);
+}
+
 /* The shapes that are refused rather than generated, each with the reason named. A call
  * mechanism that quietly did something else for these is the failure this guards. */
 static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
@@ -3954,11 +4265,24 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
     char log[256] = {0};
 
     static const struct { const char *fs; const char *wants; } cases[] = {
-        /* An early return is an exec mask through every statement after it. */
+        /* **A return in `main`, which is the one that is still refused.** An early return
+         * inside a function hands its lanes back at the call; `main` has no call to hand them
+         * back at, and the export that retires the wave runs after the body rather than inside
+         * it - so the lanes would have to be held off across a boundary this generator does not
+         * reach. */
         {"varying vec4 vin;\n"
-         "float f(float a) { if (a > 0.0) { return 1.0; } return 0.0; }\n"
+         "void main() {\n"
+         "  gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);\n"
+         "  if (vin.x > 0.0) { return; }\n"
+         "  gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+         "}\n",
+         "`main`"},
+        /* A value-returning function still has to end in a return: GLSL requires every path to
+         * return, and the trailing one is what catches the lanes no earlier return took. */
+        {"varying vec4 vin;\n"
+         "float f(float a) { if (a > 0.0) { return 1.0; } }\n"
          "void main() { gl_FragColor = vec4(f(vin.x), 0.0, 0.0, 1.0); }\n",
-         "return"},
+         "has to end in"},
         /* Not here: an `out` argument that is not a place. The back end checks it, because the
          * copy-back has to have somewhere to write - but the semantic stage owns l-value
          * validity and refuses `f(x, q.xx)` and `f(x, 1.0)` before the back end sees either, so
@@ -4647,6 +4971,9 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_integers_are_floats_kept_whole);
     RUN_TEST(test_gl2_front_facing_is_a_sign_not_a_flag);
     RUN_TEST(test_gl2_user_functions_are_inlined);
+    RUN_TEST(test_gl2_local_arrays_are_indexed_where_the_shader_is_compiled);
+    RUN_TEST(test_gl2_arrays_refuse_what_a_register_file_cannot_do);
+    RUN_TEST(test_gl2_an_early_return_ends_the_function_and_nothing_else);
     RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);

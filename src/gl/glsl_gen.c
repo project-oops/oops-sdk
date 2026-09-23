@@ -41,6 +41,17 @@ void glsl_gen_init(glsl_gen_t *g, glsl_ast_t *ast, glsl_sema_t *sema, glsl_code_
     g->exec_depth = 0;
     g->loop_depth = 0;
     g->inline_depth = 0;
+    /* Written at every call before they are read, and cleared anyway: this struct is
+     * initialised field by field rather than zeroed, and a field added without a line here is
+     * a garbage read the first time a shader reaches the feature. That cost a segfault on
+     * 2026-09-22 when `loop_depth` was added without one. */
+    for (int i = 0; i < GLSL_GEN_MAX_INLINE_DEPTH; i++) {
+        g->fn_out[i].base = 0u;
+        g->fn_out[i].count = 0;
+        g->fn_exec_depth[i] = 0;
+        g->fn_loop_depth[i] = 0;
+        g->fn_saved[i] = GL_FALSE;
+    }
     g->wqm = GL_FALSE;
     g->sampler_count = 0;
     g->error = (const char *)0;
@@ -122,7 +133,41 @@ static glsl_gen_var_t *gen_declare(glsl_gen_t *g, const char *name, size_t len,
     v->name_len = len;
     v->type = type;
     v->value = home;
+    v->array_size = 0; /* the declarator sets it; everything else is a plain variable */
+    v->is_const = GL_FALSE;
+    v->const_val = 0.0;
     return v;
+}
+
+/* A compile-time constant, or false. Literals, a negation of one, and **an unrolled loop's
+ * counter** - which is a different constant in each copy of the body, and is what makes `w[i]`
+ * an index this can resolve. See `is_const` for why no other variable qualifies. */
+static GLboolean const_of(const glsl_gen_t *g, int32_t node, double *out) {
+    if (node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (n->kind == GLSL_NODE_INTCONST || n->kind == GLSL_NODE_FLOATCONST) {
+        *out = n->value;
+        return GL_TRUE;
+    }
+    if (n->kind == GLSL_NODE_UNARY && n->op == GLSL_TOK_MINUS) {
+        double inner = 0.0;
+        if (!const_of(g, n->a, &inner)) return GL_FALSE;
+        *out = -inner;
+        return GL_TRUE;
+    }
+    if (n->kind == GLSL_NODE_IDENTIFIER) {
+        /* Backwards, so an inner declaration shadows an outer one - the same rule `gen_find`
+         * follows, and it has to be the same or a shadowed counter would resolve to the wrong
+         * copy's value. */
+        for (int i = g->var_count - 1; i >= 0; i--) {
+            if (name_is(&g->vars[i], n->text, n->length)) {
+                if (!g->vars[i].is_const) return GL_FALSE;
+                *out = g->vars[i].const_val;
+                return GL_TRUE;
+            }
+        }
+    }
+    return GL_FALSE;
 }
 
 /* -------------------------------------------------------------------------
@@ -849,6 +894,55 @@ typedef struct {
     int count;
 } gen_place_t;
 
+/*
+ * **`a[k]` resolved to the element's registers**, for reading and for assigning alike.
+ *
+ * The index must be constant. There is no addressable memory behind an array here - it is a run
+ * of registers - and a register file cannot be indexed by a value only known while the shader
+ * runs. The honest alternatives are a chain of selects over every element, which costs the
+ * whole array per access and silently changes what a shader costs, or scratch memory, which
+ * this back end does not have. So a variable index is refused and says which it was.
+ *
+ * **In an unrolled loop the induction variable *is* constant**, and `const_of` knows it, so
+ * `for (int i = 0; i < 4; i++) sum += w[i];` resolves here element by element. That is the
+ * shape this exists for.
+ */
+static GLboolean gen_index_of(glsl_gen_t *g, int32_t node, glsl_value_t *out) {
+    const glsl_node_t *n = &g->ast->nodes[node];
+    const glsl_node_t *base = &g->ast->nodes[n->a];
+    if (base->kind != GLSL_NODE_IDENTIFIER) {
+        (void)gen_fail(g, "only a name may be indexed here; GLSL 1.10 has no array-valued "
+                          "expressions to index into", node);
+        return GL_FALSE;
+    }
+    glsl_gen_var_t *v = gen_find(g, base->text, base->length);
+    if (!v) {
+        (void)gen_fail(g, "indexing a name with no registers: only locals declared in this body "
+                          "and the shader's own inputs are generated so far", node);
+        return GL_FALSE;
+    }
+    if (v->array_size <= 0) {
+        (void)gen_fail(g, "this name is not an array", node);
+        return GL_FALSE;
+    }
+    double idx = 0.0;
+    if (!const_of(g, n->b, &idx)) {
+        (void)gen_fail(g, "an array index has to be known when the shader is compiled: an array "
+                          "is a run of registers here, and a register file cannot be indexed by "
+                          "a value that is only known while it runs. A loop that unrolls counts "
+                          "as known", node);
+        return GL_FALSE;
+    }
+    const int k = (int)idx;
+    if ((double)k != idx || k < 0 || k >= v->array_size) {
+        (void)gen_fail(g, "this array index is outside the array", node);
+        return GL_FALSE;
+    }
+    out->base = v->value.base + (uint32_t)(k * v->value.count);
+    out->count = v->value.count;
+    return GL_TRUE;
+}
+
 static GLboolean gen_place_of(glsl_gen_t *g, int32_t node, gen_place_t *out) {
     if (node == GLSL_NO_NODE) {
         (void)gen_fail(g, "an assignment with no destination", node);
@@ -867,8 +961,25 @@ static GLboolean gen_place_of(glsl_gen_t *g, int32_t node, gen_place_t *out) {
             (void)gen_fail(g, "a matrix is not assignable here", node);
             return GL_FALSE;
         }
+        if (v->array_size > 0) {
+            (void)gen_fail(g, "an array is assigned an element at a time here; GLSL 1.10 has no "
+                              "whole-array assignment either", node);
+            return GL_FALSE;
+        }
         out->count = v->value.count;
         for (int i = 0; i < out->count; i++) out->reg[i] = v->value.base + (uint32_t)i;
+        return GL_TRUE;
+    }
+    /* `a[k] = …`, and `a[k].xy = …` through the swizzle arm below, which recurses into this. */
+    if (n->kind == GLSL_NODE_INDEX) {
+        glsl_value_t elem;
+        if (!gen_index_of(g, node, &elem)) return GL_FALSE;
+        if (elem.count > 4) {
+            (void)gen_fail(g, "a matrix is not assignable here", node);
+            return GL_FALSE;
+        }
+        out->count = elem.count;
+        for (int i = 0; i < out->count; i++) out->reg[i] = elem.base + (uint32_t)i;
         return GL_TRUE;
     }
     if (n->kind == GLSL_NODE_FIELD) {
@@ -1676,6 +1787,26 @@ static int32_t gen_last_stmt(const glsl_gen_t *g, int32_t compound) {
     return last;
 }
 
+/* Whether anything in this statement is a `return` - an **early** one, since the caller passes
+ * the body's trailing return as `skip` and the walk stops there.
+ *
+ * A nested function's body is not reachable from here: a call is a node naming a function, not
+ * the function's body, so this cannot wander into one and report its returns as this one's.
+ * Siblings are followed in `{ ... }` only, for the reason `has_loop_flow` gives. */
+static GLboolean has_early_return(const glsl_gen_t *g, int32_t node, int32_t skip) {
+    if (node == GLSL_NO_NODE || node == skip) return GL_FALSE;
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (n->kind == GLSL_NODE_RETURN) return GL_TRUE;
+    if (n->kind == GLSL_NODE_COMPOUND) {
+        for (int32_t s = n->a; s != GLSL_NO_NODE; s = g->ast->nodes[s].sibling) {
+            if (has_early_return(g, s, skip)) return GL_TRUE;
+        }
+        return GL_FALSE;
+    }
+    return (GLboolean)(has_early_return(g, n->a, skip) || has_early_return(g, n->b, skip) ||
+                       has_early_return(g, n->c, skip) || has_early_return(g, n->d, skip));
+}
+
 static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_arg,
                                   int32_t node) {
     const glsl_node_t *fn = &g->ast->nodes[fn_node];
@@ -1709,9 +1840,15 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
         }
     } else if (last == GLSL_NO_NODE || g->ast->nodes[last].kind != GLSL_NODE_RETURN ||
                g->ast->nodes[last].a == GLSL_NO_NODE) {
-        return gen_fail(g, "a function is generated only when its body ends in `return <expr>;` "
-                           "- an early or missing return would need the exec mask carried "
-                           "through the statements after it", node);
+        /* **The trailing return is still required, and it is not a limitation.** GLSL requires
+         * every path out of a value-returning function to return, so a body that does not end
+         * in one either has a path that falls off the end - which the language forbids - or
+         * ends in a construct this generator would have to prove exhaustive. The early returns
+         * below are the ones *inside* the body; this is the one that catches every lane none of
+         * them took. */
+        return gen_fail(g, "a function that returns a value has to end in `return <expr>;` - "
+                          "returns earlier in the body are generated, but one lane in every "
+                          "quad may reach the end and there has to be a value for it", node);
     }
 
     /* **The arguments are evaluated in the caller's scope**, before the parameters shadow
@@ -1743,6 +1880,34 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
 
     const int vars_before = g->var_count;
     glsl_scope_push(g->sema);
+
+    /*
+     * **A body with an early `return` in it runs under a mask; one without does not.**
+     *
+     * The mask is the exec at the call, saved so the lanes that returned early can be handed
+     * back the moment the function is over - because returning from a function stops the rest
+     * of *its* body and nothing else. A lane that returned still runs the statement the call
+     * was part of, and still goes round any loop the call sits in.
+     *
+     * Taken only when there is an early return to catch, so every shader that had none emits
+     * exactly the words it did before: an inlined call is the common case and it should not pay
+     * for a construct it does not use.
+     */
+    const int d = g->inline_depth;
+    const GLboolean early = has_early_return(g, fn->c, last);
+    if (early && g->exec_depth >= GLSL_GEN_MAX_EXEC_DEPTH) {
+        (void)gen_fail(g, "the conditionals and inlined calls in this shader nest deeper than "
+                          "the scalar registers set aside for them", node);
+    }
+    const uint32_t fn_saved_sgpr = GLSL_GEN_EXEC_SGPR_BASE + (uint32_t)g->exec_depth;
+    g->fn_saved[d] = (GLboolean)(early && !g->error);
+    if (g->fn_saved[d]) {
+        glsl_emit_exec_save(g->code, fn_saved_sgpr);
+        g->exec_depth++;
+    }
+    g->fn_out[d] = out;
+    g->fn_exec_depth[d] = g->exec_depth;
+    g->fn_loop_depth[d] = g->loop_depth;
     g->inline_depth++;
 
     /* **Every parameter is a copy, which is what GLSL says and not an implementation detail.**
@@ -1843,6 +2008,18 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
         gen_release(g, mark);
     }
 
+    /* **Everyone back before the copy-back**, and before anything the caller does next.
+     *
+     * The lanes that returned early are off at this point, and the writeback below has to run
+     * for all of them: each lane's `out` parameter holds its own value, written before it
+     * returned, and a lane whose copy-back was skipped would leave the caller's variable
+     * holding what it had before the call. Restoring here rather than after also means the
+     * caller resumes with the mask it had, which is what returning from a function means. */
+    if (g->fn_saved[d]) {
+        glsl_emit_exec_restore(g->code, fn_saved_sgpr);
+        g->exec_depth--;
+    }
+
     /* **The copy-back, after the body and before the parameters go out of scope.**
      *
      * This is what makes `out` and `inout` pass-by-value-and-copy-back rather than
@@ -1898,7 +2075,22 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
             glsl_gen_var_t *v = gen_find(g, n->text, n->length);
             if (!v) return gen_fail(g, "this name has no register: only locals declared in this "
                                        "body are generated so far", node);
+            if (v->array_size > 0) {
+                return gen_fail(g, "an array is used an element at a time here; the language "
+                                   "has no array-valued expressions either", node);
+            }
             return v->value;
+        }
+        /* **Reading `a[k]` hands back the element's own registers**, not a copy of them: an
+         * array element is a place, exactly as a variable is, and `sum += w[i]` reads it where
+         * it lives. Nothing is released for it, for the same reason nothing is released for a
+         * variable read. */
+        case GLSL_NODE_INDEX: {
+            glsl_value_t elem;
+            if (!gen_index_of(g, node, &elem)) {
+                glsl_value_t none; none.base = 0u; none.count = 0; return none;
+            }
+            return elem;
         }
         case GLSL_NODE_FIELD:
             return gen_field(g, node);
@@ -2091,21 +2283,6 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
 
 /* A compile-time constant, or false. Only what a loop header needs: a literal, or a negated
  * one. Anything else is a loop whose count this cannot know. */
-static GLboolean const_of(const glsl_gen_t *g, int32_t node, double *out) {
-    if (node == GLSL_NO_NODE) return GL_FALSE;
-    const glsl_node_t *n = &g->ast->nodes[node];
-    if (n->kind == GLSL_NODE_INTCONST || n->kind == GLSL_NODE_FLOATCONST) {
-        *out = n->value;
-        return GL_TRUE;
-    }
-    if (n->kind == GLSL_NODE_UNARY && n->op == GLSL_TOK_MINUS) {
-        double inner = 0.0;
-        if (!const_of(g, n->a, &inner)) return GL_FALSE;
-        *out = -inner;
-        return GL_TRUE;
-    }
-    return GL_FALSE;
-}
 
 /* Whether `node` is the identifier `name`. */
 static GLboolean is_name(const glsl_gen_t *g, int32_t node, const char *name, size_t len) {
@@ -2453,7 +2630,13 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
         if (is_bad(iv)) break;
         glsl_emit_mov_imm(g->code, iv.base, float_bits((float)v));
         const int vars_here = g->var_count;
-        if (!gen_declare(g, decl->text, decl->length, ind_t, iv, node)) break;
+        glsl_gen_var_t *ivar = gen_declare(g, decl->text, decl->length, ind_t, iv, node);
+        if (!ivar) break;
+        /* **This copy's value, so `w[i]` is an index and not a refusal.** Safe for exactly this
+         * variable: the body was checked for assignments to it before any of this was emitted,
+         * so the constant cannot go stale between here and the end of the copy. */
+        ivar->is_const = GL_TRUE;
+        ivar->const_val = v;
         (void)glsl_gen_stmt(g, n->d);
         g->var_count = vars_here;
         gen_release(g, mark);
@@ -2498,12 +2681,55 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
                 (void)gen_fail(g, "only float, vec, mat and bool locals are generated", node);
                 return GL_FALSE;
             }
+            /*
+             * **An array is its elements end to end in the register file**, which is the only
+             * shape available: there is no addressable memory in a fragment shader here, and
+             * GLSL 1.10 has one level of array and no array-valued expressions, so a length and
+             * an element type is the whole of what the language can say about one.
+             *
+             * The size has to be a constant, which the language requires anyway (1.10, 4.1.9),
+             * and the registers are allocated in one run so element `k` is at `base + k * w`.
+             */
+            int elems = 0;
             if (n->array_size != GLSL_NO_NODE) {
-                (void)gen_fail(g, "arrays have no instruction selection yet", node);
-                return GL_FALSE;
+                double sz = 0.0;
+                if (!const_of(g, n->array_size, &sz)) {
+                    (void)gen_fail(g, "an array's length has to be a constant, which the "
+                                      "language requires of it too", node);
+                    return GL_FALSE;
+                }
+                elems = (int)sz;
+                if (elems < 1 || (double)elems != sz) {
+                    (void)gen_fail(g, "an array's length has to be a positive whole number",
+                                   node);
+                    return GL_FALSE;
+                }
+                /* **No initialiser.** An array is initialised by a constructor - `float[4](…)` -
+                 * which is GLSL 1.20 syntax this front end does not parse, so anything here is
+                 * a width mismatch waiting to be reported as something else. */
+                if (n->a != GLSL_NO_NODE) {
+                    (void)gen_fail(g, "an array is not initialised where it is declared here; "
+                                      "assign its elements", node);
+                    return GL_FALSE;
+                }
             }
-            glsl_value_t home = gen_alloc(g, glsl_type_components(t), node);
+            glsl_value_t home =
+                gen_alloc(g, glsl_type_components(t) * (elems > 0 ? elems : 1), node);
             if (is_bad(home)) return GL_FALSE;
+            if (elems > 0) {
+                /* The run is the array; `value.count` stays the *element* width so every other
+                 * reader - a move, a place, a width check - sees one element. */
+                home.count = glsl_type_components(t);
+                glsl_gen_var_t *av = gen_declare(g, n->text, n->length, t, home, node);
+                if (!av) return GL_FALSE;
+                av->array_size = elems;
+                if (!glsl_declare_array(g->sema, n->text, n->length, t, elems,
+                                        (glsl_token_type_t)0)) {
+                    (void)gen_fail(g, "this name is already declared in this scope", node);
+                    return GL_FALSE;
+                }
+                return GL_TRUE;
+            }
             if (n->a != GLSL_NO_NODE) {
                 const uint32_t mark = gen_mark(g);
                 glsl_value_t init = gen_expr(g, n->a);
@@ -2665,22 +2891,95 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
         case GLSL_NODE_FOR:
             return gen_for(g, node);
 
-        case GLSL_NODE_RETURN:
-            /* **A return reaching here is one that is not the last statement of a function
-             * body.** `gen_call_user` generates the trailing one itself, into the caller's
-             * result, and never walks as far as this arm. Anything else - a return inside an
-             * `if`, or one in `main` - would have to stop the lanes that took it from executing
-             * the rest of the body while the others carry on, and that mask would need
-             * threading through every statement after it. */
-            (void)gen_fail(g, "a return is generated only as the last statement of a function "
-                              "body; an early return is an exec mask this generator does not "
-                              "carry through the statements that follow it", node);
+        /*
+         * **An early `return`: the value, then the lanes.**
+         *
+         * A return reaching this arm is one that is not the last statement of its body -
+         * `gen_call_user` generates the trailing one itself, into the caller's result, and
+         * never walks as far as here.
+         *
+         * The value goes into the same register the trailing return writes, under the exec the
+         * lanes have *now*, so each lane takes the value from whichever return it reached and
+         * no lane overwrites another's. Then the lanes come out of every `if` and every loop
+         * **inside this function**, exactly as `break` does for a loop and `discard` does for
+         * the shader, and `exec` is cleared so the rest of the body writes nothing for them.
+         *
+         * **What it does not touch is anything enclosing the call.** The `if` the call sits in,
+         * the loop it sits in, and the function's own entry mask all keep the lane, because
+         * returning ends the function and not the statement the call was part of. That is the
+         * whole difference between this and `discard`, and it is why the depths are recorded at
+         * the call rather than counted from zero.
+         */
+        case GLSL_NODE_RETURN: {
+            if (g->inline_depth <= 0) {
+                /* `main` has no caller to hand the lanes back to, and its epilogue - the export
+                 * that retires the wave - runs after the body rather than inside it. */
+                (void)gen_fail(g, "a return in `main` is not generated: the lanes that took it "
+                                  "would have to be held off until the colour is exported, "
+                                  "which happens after the body. Put the rest of `main` in the "
+                                  "`else`, or use `discard` if the fragment should be thrown "
+                                  "away", node);
+                return GL_FALSE;
+            }
+            const int d = g->inline_depth - 1;
+            if (n->a != GLSL_NO_NODE) {
+                if (g->fn_out[d].count == 0) {
+                    (void)gen_fail(g, "a void function returns a value", node);
+                    return GL_FALSE;
+                }
+                const uint32_t mark = gen_mark(g);
+                glsl_value_t rv = gen_expr(g, n->a);
+                if (is_bad(rv)) return GL_FALSE;
+                if (rv.count != g->fn_out[d].count) {
+                    (void)gen_fail(g, "the returned expression is a different width from the "
+                                      "function's return type", node);
+                    return GL_FALSE;
+                }
+                for (int c = 0; c < g->fn_out[d].count; c++) {
+                    glsl_emit_mov(g->code, g->fn_out[d].base + (uint32_t)c,
+                                  rv.base + (uint32_t)c);
+                }
+                gen_release(g, mark);
+            }
+            for (int e = g->fn_exec_depth[d]; e < g->exec_depth; e++) {
+                glsl_emit_exec_drop_live(g->code, GLSL_GEN_EXEC_SGPR_BASE + (uint32_t)e);
+            }
+            /* And out of any loop **the function opened**, whose top would otherwise reload
+             * `exec` from a mask the lane is still in and start it round again. */
+            for (int l = g->fn_loop_depth[d]; l < g->loop_depth; l++) {
+                glsl_emit_exec_drop_live(g->code, loop_active_sgpr(l));
+                glsl_emit_exec_drop_live(g->code, loop_entry_sgpr(l));
+            }
+            glsl_emit_exec_clear(g->code);
+            return GL_TRUE;
+        }
+        /*
+         * **`while` and `do`-`while` are refused, and the reason is the guard rather than the
+         * branch.**
+         *
+         * Branching is not the obstacle - `for` takes a real backward branch whenever it cannot
+         * be unrolled. What a branched loop also carries is a trip guard: a counter that ends
+         * it after the number of trips the compiler worked out, so a condition that never goes
+         * false is a wrong colour rather than a part that stops. That number comes from the
+         * initialiser, the bound and the step, and `while` has none of the three.
+         *
+         * A ceiling picked out of the air instead would end a legitimate loop early and quietly,
+         * which is the one failure worse than refusing. `for` with a `break` expresses the same
+         * loop and is bounded, so the rewrite is small and it is named here.
+         */
+        case GLSL_NODE_WHILE:
+        case GLSL_NODE_DO_WHILE:
+            (void)gen_fail(g, "a `while` loop is not generated: a loop that branches carries a "
+                              "trip guard so that a condition which never goes false cannot "
+                              "hang the part, and the trip count comes from a `for`'s "
+                              "initialiser, bound and step. Write it as "
+                              "`for (int i = 0; i < <a bound>; i++)` with a `break` for the "
+                              "real condition - both are generated", node);
             return GL_FALSE;
         default:
-            (void)gen_fail(g, "this statement has no instruction selection yet: the generator "
-                              "handles declarations, expressions, blocks, if and discard - a "
-                              "loop would need a branch and a label mechanism it has not got",
-                           node);
+            (void)gen_fail(g, "this statement has no instruction selection yet: declarations, "
+                              "expressions, blocks, `if`, `for`, `break`, `continue`, `return` "
+                              "and `discard` are", node);
             return GL_FALSE;
     }
 }
