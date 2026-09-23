@@ -677,6 +677,21 @@ FILE *fopen(const char *path, const char *mode) {
     return f;
 }
 
+/* Wraps a descriptor the caller already opened. See `<libc/stdio.h>` for why `mode` is ignored
+ * rather than parsed. */
+FILE *fdopen(int fd, const char *mode) {
+    (void)mode;
+    if (fd < 0) return (FILE *)0;
+    FILE *f = (FILE *)oops_malloc(sizeof(FILE));
+    if (!f) return (FILE *)0;
+    f->fd = fd;
+    f->eof = 0;
+    f->err = 0;
+    f->is_log = 0;
+    f->pushback = -1;
+    return f;
+}
+
 int fclose(FILE *f) {
     if (!f) return EOF;
     if (f->is_log) {
@@ -744,6 +759,16 @@ long ftell(FILE *f) {
     return (long)oops_fs_tell(f->fd);
 }
 
+/* `long` is 64 bits on this target, so these carry no more range than the pair above - see
+ * `<libc/stdio.h>` for why the names exist anyway. A pushback is discarded by a seek, because
+ * the character it held came from somewhere the stream is no longer positioned. */
+int fseeko(FILE *f, off_t offset, int whence) {
+    if (f) f->pushback = -1;
+    return fseek(f, (long)offset, whence);
+}
+
+off_t ftello(FILE *f) { return (off_t)ftell(f); }
+
 void rewind(FILE *f) { (void)fseek(f, 0L, SEEK_SET); }
 int feof(FILE *f) { return f ? f->eof : 1; }
 int ferror(FILE *f) { return f ? f->err : 1; }
@@ -768,6 +793,21 @@ int fgetc(FILE *f) {
 }
 
 int getc(FILE *f) { return fgetc(f); }
+
+/* Nothing to unbuffer - see `<libc/stdio.h>`. `setbuf` is a no-op because the stream is already
+ * what it is asking for; `setvbuf` accepts `_IONBF` and refuses the buffered modes rather than
+ * accepting them and ignoring them. */
+void setbuf(FILE *f, char *buf) {
+    (void)f;
+    (void)buf;
+}
+
+int setvbuf(FILE *f, char *buf, int mode, size_t size) {
+    (void)buf;
+    (void)size;
+    if (!f) return -1;
+    return (mode == _IONBF) ? 0 : -1;
+}
 
 /*
  * One character of pushback - see `<libc/stdio.h>` for why one is the whole contract.

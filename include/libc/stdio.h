@@ -118,6 +118,54 @@ int vasprintf(char **ret, const char *fmt, va_list args);
 int ungetc(int c, FILE *f);
 
 /*
+ * **`setbuf` and `setvbuf` on a C library that does not buffer** (2026-09-23).
+ *
+ * `basic_filebuf` calls `setbuf(file, nullptr)` to take over buffering itself, and without the
+ * declaration every `<fstream>` user fails to compile. There is nothing to take over: a `FILE`
+ * here is a descriptor and a few flags, and `fwrite` goes straight to `oops_fs_write`.
+ *
+ * So `setbuf` is a no-op that is *already correct* - asking for an unbuffered stream is asking
+ * for what this is - and `setvbuf` reports success for `_IONBF` and failure for the two buffered
+ * modes it cannot provide. Refusing is the honest answer there rather than accepting and
+ * ignoring: a caller that checks the return learns the truth, and one that does not is no worse
+ * off than with a silent lie.
+ */
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+
+void setbuf(FILE *f, char *buf);
+int  setvbuf(FILE *f, char *buf, int mode, size_t size);
+
+/*
+ * **`fdopen`, which is nearly free here** (2026-09-23). libc++'s `basic_filebuf` has a
+ * constructor taking a native handle and reaches for it, so `<fstream>` does not compile
+ * without the declaration.
+ *
+ * A `FILE` on this platform *is* a descriptor and a few flags, so this wraps rather than
+ * converts: no buffer to attach, no mode to reconcile. The `mode` string is accepted and
+ * ignored, because the descriptor already carries the access the caller opened it with and
+ * re-deriving it from a string would be inventing a second source of truth for it.
+ *
+ * `fclose` on the result closes the descriptor, which is what POSIX specifies.
+ */
+FILE *fdopen(int fd, const char *mode);
+
+/*
+ * **`fseeko` / `ftello`, the 64-bit-offset pair** (2026-09-23). `basic_filebuf` seeks with these
+ * rather than `fseek`, so `<fstream>` needs them.
+ *
+ * On this target `long` is already 64 bits, so they carry no more range than `fseek` and
+ * `ftell` do and are one-line forwards. That is worth saying rather than leaving to be
+ * rediscovered: they are not here because the plain pair is too narrow, they are here because
+ * the *names* are what libc++ reaches for, and a 32-bit host is where the distinction lives.
+ */
+typedef long off_t;
+
+int   fseeko(FILE *f, off_t offset, int whence);
+off_t ftello(FILE *f);
+
+/*
  * **`sscanf`, because that is how a model file is read** (2026-09-20). An OBJ loader is a
  * `fgets` and an `sscanf("%f %f %f")`; so is an MTL loader, and so is every level format anyone
  * wrote by hand. It converts `%d %i %u %o %x %X %p`, the float forms, `%s %c %n %%` and
