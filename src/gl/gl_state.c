@@ -3363,6 +3363,77 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     tex->img_desc[5] = 0u;
     tex->img_desc[6] = 0u;
     tex->img_desc[7] = 0u;
+    /* **What a texture actually got**, for the first few packed in a run.
+     *
+     * A port whose textures render as blocky, banded, wrongly-coloured surfaces has a sampling
+     * fault, and the candidates - the row pitch, whether the chain path or the plain one was
+     * taken, what WORD4 ended up as - are all decided right here and none of them are visible
+     * from outside. Guessing between them has cost several hardware runs; this prints them.
+     *
+     * Eight, because a title's first textures are the ones a title screen draws, and because a
+     * line per texture for eighty-five of them would bury what it is competing with. */
+#ifndef OOPS_HOST_BUILD
+    {
+        /* **Every distinct texture once**, the default excluded. Filtering by width was a guess
+           about which textures were interesting, and the guess is what needs testing: a port whose
+           *text* draws correctly while its level art does not already proves the sampling path
+           works for some textures, so the useful comparison is a working one beside a broken one,
+           not a preselected set. The default texture is skipped because it is repacked on every
+           bind and ate the whole window when it was not. */
+        static uint32_t told;
+        static uint32_t last_id;
+        if (told < 24u && tex->id > 1u && tex->id != last_id) {
+            told++;
+            last_id = tex->id;
+            /* Two lines. The first is the descriptor as packed; the second is what the texels
+               actually are in GPU memory, which is the half of the question the descriptor
+               cannot answer.
+               `gl_klog_val` belongs to gl_context.c, so this builds its own from the hex helper
+               every refusal message already uses. */
+            char m[200];
+            size_t n = 0;
+            const char *lead = "tex id/w/h/pitch/levels/word4/valo";
+            while (lead[n] && n < 48u) { m[n] = lead[n]; n++; }
+            n = gl_msg_hex(m, sizeof(m), n, tex->id);
+            n = gl_msg_hex(m, sizeof(m), n, w);
+            n = gl_msg_hex(m, sizeof(m), n, h);
+            n = gl_msg_hex(m, sizeof(m), n, pitch);
+            n = gl_msg_hex(m, sizeof(m), n, (uint32_t)tex->chain_levels);
+            n = gl_msg_hex(m, sizeof(m), n, tex->img_desc[4]);
+            /* The low byte of the address the descriptor could not carry: `img_desc[0]` is the
+               address in 256-byte units, so anything here is a texture the sampler reads from
+               the wrong place. Expected zero - `oops_mem_alloc` is asked for 256. */
+            n = gl_msg_hex(m, sizeof(m), n, (uint32_t)(va & 0xffu));
+            m[n] = 0;
+            gl_log_line(m);
+
+            /* **The first four texels of row 0, and the first of row 1.** This is the one
+               measurement that splits the problem in half whichever theory is right: if these
+               bytes are the image, the upload is sound and the fault is in how the sampler is
+               told to read them; if they are not, nothing about the descriptor matters yet.
+               Row 1 comes along because it is where a wrong pitch shows up first - it should be
+               the image's second row, not more of the first. */
+            const uint32_t *t0 = (const uint32_t *)tex->garlic_data;
+            if (t0) {
+                char t[200];
+                size_t k = 0;
+                const char *tl = "tex texels id/r0x4/r1";
+                while (tl[k] && k < 32u) { t[k] = tl[k]; k++; }
+                k = gl_msg_hex(t, sizeof(t), k, tex->id);
+                k = gl_msg_hex(t, sizeof(t), k, t0[0]);
+                k = gl_msg_hex(t, sizeof(t), k, t0[1]);
+                k = gl_msg_hex(t, sizeof(t), k, t0[2]);
+                k = gl_msg_hex(t, sizeof(t), k, t0[3]);
+                /* Guarded: the allocation is `pitch * height` texels, so row 1 exists only when
+                   there is a second row to read. A one-pixel-high texture would otherwise read
+                   one texel past the end. */
+                k = gl_msg_hex(t, sizeof(t), k, h > 1u ? t0[pitch] : 0u);
+                t[k] = 0;
+                gl_log_line(t);
+            }
+        }
+    }
+#endif
     if (chain) {
         /* WORD3 LAST_LEVEL [16,19] and WORD5 MAX_MIP [4,7] (gfx10-rsrc.json, SQ_IMG_RSRC_WORD3 and
          * _WORD5) both the chain's last level, BASE_LEVEL [12,15] left at 0 - as radeonsi fills
