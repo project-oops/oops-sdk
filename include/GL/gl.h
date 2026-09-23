@@ -2399,25 +2399,23 @@ void *oops_gl_get_proc_address(const char *name);
  * lists use, so a capture cannot drift from a list. It returns the number of commands run,
  * which is the count in the header unless the stream was truncated. */
 /*
- * **How much oops-gl writes to the kernel log.**
+ * **How much oops-gl writes to the kernel log**, on the SDK's own scale.
  *
- * `OOPS_GL_LOG_NORMAL` is the default and is what a title wants: bring-up, the hardware
- * self-test, GL errors with the call that raised them, and anything that went wrong - the lines
- * that are worth reading when something is broken.
+ * The level is an `oops_log_level_t` from `oops/system.h` - `OOPS_LOG_NONE`, `_ERROR`, `_WARN`,
+ * `_INFO`, `_DEBUG`, `_TRACE` - the same vocabulary every other part of this SDK uses, and it
+ * is taken as an `int` here only so that a GL header need not include a system one. A second
+ * set of names for the same idea was written and withdrawn on 2026-09-24; there is one scale.
  *
- * `OOPS_GL_LOG_FRAMES` adds the per-frame and per-submit counters: draw calls, flushes, the
- * timings, the fence and timestamp, the canaries. They are how the blending fault and the
- * sixteen-byte transaction were measured, so they are not going away - but a title submitting
- * thirty times a frame writes thousands of lines a second through them, and that buries every
- * message the title and the rest of the SDK have to make. Diagnostic tools ask for them;
- * `gl1-probe` does. A title being played should not.
+ * `OOPS_LOG_INFO` is the default: bring-up, the hardware self-test, GL errors with the call
+ * that raised them - the lines worth reading when something is wrong.
  *
- * `OOPS_GL_LOG_QUIET` silences even the bring-up lines. `OOPS_GL_LOG_ALL` is every level.
+ * `OOPS_LOG_DEBUG` adds the per-frame and per-submit counters: draw calls, flushes, the
+ * timings, the fence and timestamp, the canaries. They are how the blending fault and its
+ * sixteen-byte transaction were measured, so they stay - but a title submitting thirty times a
+ * frame writes thousands of lines a second through them and buries everything the title and the
+ * rest of the SDK have to say. A diagnostic asks for them; `gl1-probe` does. A title being
+ * played should not.
  */
-#define OOPS_GL_LOG_QUIET   0
-#define OOPS_GL_LOG_NORMAL  1
-#define OOPS_GL_LOG_FRAMES  2
-#define OOPS_GL_LOG_ALL     3
 void oops_gl_set_log_level(int level);
 int oops_gl_get_log_level(void);
 

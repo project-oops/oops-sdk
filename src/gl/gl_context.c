@@ -19,7 +19,7 @@ static uint8_t s_host_stencil[1920 * 1080];
 static uint32_t s_host_front[1920 * 1080];
 static inline __attribute__((unused)) void gl_klog_line(const char *msg) { (void)msg; }
 static inline __attribute__((unused)) void gl_klog_val(const char *tag, uint64_t val) { (void)tag; (void)val; }
-int gl_log_level = OOPS_GL_LOG_NORMAL; /* host build keeps the setter honest, and logs nothing */
+int gl_log_level = (int)OOPS_LOG_INFO; /* host build keeps the setter honest, and logs nothing */
 #else
 #include "oops/syscall.h"
 #include "oops/time.h" /* the submit is timed - see hw_flush_ns */
@@ -36,9 +36,9 @@ __attribute__((weak)) int sceAgcDriverCreateQueue(uint32_t type, void *queue_out
  * `oops_gl_set_log_level` and documented there. The per-frame counters were unconditional and a
  * title submitting thirty times a frame buried everything else it and the SDK had to say - which
  * is the opposite of what a log is for. `gl_klog_line` and `gl_klog_val` stay unguarded, because
- * the things that call them at level 1 are the things worth reading; it is the per-frame and
- * per-submit blocks that ask before they speak. */
-int gl_log_level = OOPS_GL_LOG_NORMAL;
+ * the things that call them at `OOPS_LOG_INFO` are the things worth reading; it is the per-frame
+ * and per-submit blocks that ask before they speak. */
+int gl_log_level = (int)OOPS_LOG_INFO;
 
 static void gl_klog_line(const char *msg) {
     char buf[160];
@@ -81,8 +81,8 @@ static void gl_klog_val(const char *tag, uint64_t val) {
 
 /* One line in the kernel log, for the rest of the library. */
 void oops_gl_set_log_level(int level) {
-    gl_log_level = level < OOPS_GL_LOG_QUIET ? OOPS_GL_LOG_QUIET
-                 : (level > OOPS_GL_LOG_ALL ? OOPS_GL_LOG_ALL : level);
+    gl_log_level = level < (int)OOPS_LOG_NONE ? (int)OOPS_LOG_NONE
+                 : (level > (int)OOPS_LOG_TRACE ? (int)OOPS_LOG_TRACE : level);
 }
 
 int oops_gl_get_log_level(void) { return gl_log_level; }
@@ -495,7 +495,7 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
      * confirming it stays at zero and every submit logs**, which is exactly when the detail is
      * wanted and exactly when there is no flood to cause.
      */
-    if (gl_log_level >= OOPS_GL_LOG_FRAMES &&
+    if (gl_log_level >= (int)OOPS_LOG_DEBUG &&
         (ctx->hw_frames_confirmed % 60 == 0 || ctx->hw_frames_confirmed < 5)) {
         gl_klog_val("flush-words", (uint64_t)total_words);
         gl_klog_val("submit-rc", (uint64_t)(uint32_t)rc);
@@ -1626,7 +1626,7 @@ void glSwapBuffers(void) {
          * reading. */
         /* **The counters are cleared whether or not they are printed**, so that turning the log
            down changes what is written and never what is measured. Only the printing asks. */
-        const int gl_verbose = gl_log_level >= OOPS_GL_LOG_FRAMES;
+        const int gl_verbose = gl_log_level >= (int)OOPS_LOG_DEBUG;
         if (gl_verbose) {
             gl_klog_val("flushes-this-frame", (uint64_t)ctx->hw_flushes);
             /* **Microseconds waiting for the GPU this frame.** Against the frame's own duration

@@ -62,21 +62,21 @@ typedef struct oops_key_event {
 #define OOPS_MAX_KEY_EVENTS 32
 
 /*
- * **How much the input layer says about what it delivers.**
+ * **How much the input layer says about what it delivers**, on the SDK's own scale.
  *
- * `OOPS_INPUT_LOG_QUIET` is the default and covers open, close and failures - the lines that
- * matter when input does not work at all.
+ * The level is an `oops_log_level_t` from `oops/system.h` - `OOPS_LOG_NONE`, `_ERROR`, `_WARN`,
+ * `_INFO`, `_DEBUG`, `_TRACE` - taken as an `int` so this header need not include that one.
+ * `OOPS_LOG_INFO` is the default and covers open, close and failures: the lines that matter when
+ * input does not work at all.
  *
- * `OOPS_INPUT_LOG_EVENTS` adds every key transition handed to the caller, with its usage code,
- * its modifiers and the handle it came from. A held key is silent and a typed sentence is two
- * lines a character, so it is not a level to leave on; it is a level to turn on when what the
- * title receives and what the player pressed have stopped agreeing. That is not hypothetical -
- * the SDK opens a handle per keyboard index and delivered every press twice when the second
- * index mirrored the first, which from above this layer is indistinguishable from a player
- * pressing twice and left no trace in any log.
+ * `OOPS_LOG_DEBUG` adds every key transition handed to the caller, with its usage code and its
+ * modifiers. A held key is silent but a typed sentence is two lines a character, so it is not a
+ * level to leave on; it is the level to reach for when what the title receives and what the
+ * player pressed have stopped agreeing. That is not hypothetical - a handle is opened per
+ * keyboard index, and when the second index mirrored the first every press was delivered twice,
+ * which from above this layer is indistinguishable from a player pressing twice and left no
+ * trace in any log.
  */
-#define OOPS_INPUT_LOG_QUIET  0
-#define OOPS_INPUT_LOG_EVENTS 1
 void oops_input_set_log_level(int level);
 int oops_input_get_log_level(void);
 
