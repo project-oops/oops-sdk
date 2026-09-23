@@ -3360,7 +3360,16 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     } else {
         tex->img_desc[4] = 0u;
     }
-    tex->img_desc[5] = 0u;
+    /* WORD5 PERF_MOD [20,22] (gfx10-rsrc.json:413, and :424 for the gfx10.3 form this part
+     * uses). **Mesa writes 4 here unconditionally** for every gfx10 texture it builds -
+     * `S_00A014_PERF_MOD(4)`, ac_descriptors.c:543 - and this wrote zero, which is the one field
+     * of the eight where the descriptor differs from the reference implementation for an ordinary
+     * 2D image. Zero is not a documented "default" so much as the value nobody chose.
+     *
+     * ARRAY_PITCH [0,3] stays 0: it is meaningful only for a 3D image, where 0 selects the
+     * read-only reading of DEPTH that the sampler wants. MAX_MIP [4,7] is the chain's, ORed in
+     * below rather than assigned over this. */
+    tex->img_desc[5] = 4u << 20;
     tex->img_desc[6] = 0u;
     tex->img_desc[7] = 0u;
     /* **What a texture actually got**, for the first few packed in a run.
@@ -3442,7 +3451,7 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
          * surface created with a pitch of its own (ac_descriptors.c:697-713). */
         const uint32_t top = (uint32_t)(tex->chain_levels > 0 ? tex->chain_levels - 1 : 0);
         tex->img_desc[3] |= (top & 0xfu) << 16;
-        tex->img_desc[5] = (top & 0xfu) << 4;
+        tex->img_desc[5] |= (top & 0xfu) << 4;
     }
 
     /* RDNA2 SQ_IMG_SAMP_WORD0..3 (16 bytes). CLAMP_X [0,2] and CLAMP_Y [3,5] as radeonsi's

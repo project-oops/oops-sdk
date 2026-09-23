@@ -13764,6 +13764,11 @@ static void test_gl_texture_descriptor_describes_the_image_it_was_given(void) {
     ASSERT_EQ(got_w, (uint32_t)w);
     ASSERT_EQ(got_h, (uint32_t)h);
 
+    /* WORD5 PERF_MOD, which Mesa writes as 4 for every gfx10 texture it builds
+     * (`S_00A014_PERF_MOD(4)`, ac_descriptors.c:543) and this wrote as 0 until the comparison
+     * was made. */
+    ASSERT_EQ((stored->img_desc[5] >> 20) & 7u, 4u);
+
     /* WORD4. Inert when the rows are exactly as wide as the image, the pitch otherwise. */
     if (want_pitch > (uint32_t)w) {
       const uint32_t p1 = want_pitch - 1u;
