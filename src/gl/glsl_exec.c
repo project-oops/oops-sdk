@@ -1749,6 +1749,23 @@ GLboolean gl_shader_run_vertex(gl_context_t *ctx, gl_program_object_t *p, const 
             }
         }
         if (fogf) out->vary[GL_SHADER_VARY_FOG] = fogf[0];
+        /*
+         * **The point sprite's coordinate outlives the vertex shader** (since 2026-09-23).
+         *
+         * `gl_PointCoord` is texture coordinate 0's interpolant, and the point expansion writes
+         * the sprite coordinate into the corner's `tc[0]` before this runs - but a program with a
+         * vertex shader fills this block from what that shader *wrote*, and a vertex shader has
+         * no `gl_PointCoord` to write. Without this the coordinate is dropped between the
+         * expansion and the fragment stage and every fragment reads (0, 0), which is precisely
+         * the silent lie the refusal this replaced was guarding against.
+         *
+         * Only s and t, and only when the fragment stage reads the name - the link refuses a
+         * program that reads `gl_TexCoord` as well, so nothing else can want this slot.
+         */
+        if (p->hw_reads_point_coord && ff) {
+            out->vary[GL_SHADER_VARY_TEXCOORD + 0] = ff->tc[0][0];
+            out->vary[GL_SHADER_VARY_TEXCOORD + 1] = ff->tc[0][1];
+        }
         (void)back;
         (void)bsec;
 
@@ -1804,6 +1821,13 @@ GLboolean gl_shader_run_fragment(gl_context_t *ctx, gl_program_object_t *p,
     declare_vary_in(e, "gl_TexCoord", GLSL_TYPE_VEC4, OOPS_GL_MAX_TEXTURE_UNITS,
                     GL_SHADER_VARY_TEXCOORD);
     declare_vary_in(e, "gl_FogFragCoord", GLSL_TYPE_FLOAT, 0, GL_SHADER_VARY_FOG);
+    /* **`gl_PointCoord` is the s and t of texture coordinate 0**, which is where the point
+     * expansion puts the sprite coordinate - the same slot `GL_COORD_REPLACE` fills for the
+     * fixed-function path, and the same substitution the part performs with
+     * `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`. A vec2 window onto the block, so its derivative works
+     * like any other varying's. The link refuses a shader that reads this and `gl_TexCoord[0]`
+     * both, so the two can never disagree about what the slot holds. */
+    declare_vary_in(e, "gl_PointCoord", GLSL_TYPE_VEC2, 0, GL_SHADER_VARY_TEXCOORD);
     {
         const glsl_ast_t *ast = &p->fs->ast;
         for (int32_t d = ast->nodes[p->fs->root].a; d != GLSL_NO_NODE;

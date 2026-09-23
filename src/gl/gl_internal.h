@@ -970,6 +970,12 @@ typedef struct {
      * (`si_state_shaders.cpp:1711` and `:1758`) - so the kill is this one bit, not a switch to
      * late Z. */
     GLboolean hw_ps_kills;
+    /* **Whether the fragment stage reads `gl_PointCoord`** (since 2026-09-23). The point
+     * expansion generates the sprite coordinate for a unit whose `GL_COORD_REPLACE` is set, and
+     * for texture coordinate 0 as well when this is true - because `gl_PointCoord` is that
+     * interpolant and a GLSL program has no `GL_COORD_REPLACE` to set. The link refuses a
+     * fragment shader that reads both this and `gl_TexCoord`, so the slot has one meaning. */
+    GLboolean hw_reads_point_coord;
     /* **Whether this program's refusal has been said out loud.** Cleared at every link, so a
      * relinked program that is still refused says so again - the source may have changed and
      * the reason with it. On the program rather than the context because program names are

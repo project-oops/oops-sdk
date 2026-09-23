@@ -555,6 +555,52 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     if (!walk_globals(p, fs, GLSL_TOK_KW_VARYING, add_varying, (void *)0)) return GL_FALSE;
     if (!check_fragment_varyings(p, vs, fs)) return GL_FALSE;
 
+    /*
+     * **`gl_PointCoord`'s two restrictions**, and they are link errors rather than console ones -
+     * which is why they are here and not in the hardware half below. Everything past
+     * `p->linked = GL_TRUE` deliberately cannot fail a link, so that `GL_LINK_STATUS` reads the
+     * same on a host and on a console; these two hold on both paths, so they belong above it.
+     * Putting them below was worth one wrong diagnosis: the refusal ran, returned `GL_FALSE`,
+     * and the program linked anyway.
+     *
+     * **One: `gl_PointCoord` and `gl_TexCoord[0]` are one interpolant.** The point expansion
+     * writes the sprite coordinate into texture coordinate 0 - what `GL_COORD_REPLACE` does for
+     * the fixed-function path, and what the part itself does with
+     * `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX` - so the slot cannot hold a sprite coordinate and a
+     * texture coordinate at once.
+     *
+     * **Two: not alongside a vertex shader.** `gl_draw_point_square` sizes the square in object
+     * space through the inverse of the fixed-function MVP, which is the right construction when
+     * the fixed-function vertex stage transforms it afterwards and meaningless when a shader
+     * recomputes each corner from its attributes. All four corners of a point carry the same
+     * attributes, so a vertex shader collapses them onto one another and the sprite is never
+     * drawn. Hardware expands points after the vertex stage; doing that here is what would lift
+     * this restriction.
+     *
+     * Both refused rather than drawn wrong: a point that silently disappears is the failure a
+     * named refusal exists to prevent, and it is why `gl_PointCoord` was refused outright until
+     * 2026-09-23 - that refusal named the wrong cause, not a wrong conclusion.
+     *
+     * The flag is recorded on the program because the draw needs it too: only a program whose
+     * fragment stage reads `gl_PointCoord` makes the expansion generate the coordinate for a
+     * unit whose `GL_COORD_REPLACE` is clear.
+     */
+    p->hw_reads_point_coord =
+        (GLboolean)(fs != (glsl_unit_t *)0 && glsl_unit_mentions(fs, "gl_PointCoord", 13u));
+    if (p->hw_reads_point_coord && glsl_unit_mentions(fs, "gl_TexCoord", 11u)) {
+        oops_snprintf(p->info_log, sizeof(p->info_log),
+                      "a fragment shader reading gl_PointCoord cannot also read gl_TexCoord: "
+                      "they are the same interpolant here, as they are on the hardware");
+        return GL_FALSE;
+    }
+    if (p->hw_reads_point_coord && vs) {
+        oops_snprintf(p->info_log, sizeof(p->info_log),
+                      "gl_PointCoord needs the fixed-function vertex stage: points are expanded "
+                      "into their square before the vertex stage here, and a vertex shader "
+                      "collapses the square. Attach only a fragment shader");
+        return GL_FALSE;
+    }
+
     /* **Requested bindings first, then the rest into the lowest free slots.** A binding the
      * caller asked for that names no attribute in this shader is not an error and simply does
      * not appear - which is what lets one binding table serve several programs. */
@@ -668,6 +714,9 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
      * the name: `discard` is a keyword, so the identifier search beside this one looks in the
      * one place it can never be. */
     p->hw_ps_kills = glsl_unit_discards(fs);
+
+    /* `gl_PointCoord`'s two restrictions are decided above, with the other link errors, because
+     * they hold on both paths - see the note beside `p->linked = GL_TRUE`. */
 
     p->hw_color_param = -1;
     if (fs && glsl_unit_mentions(fs, "gl_Color", 8u)) {

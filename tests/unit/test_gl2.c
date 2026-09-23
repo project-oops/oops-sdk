@@ -223,15 +223,99 @@ static void test_gl2_compile_refuses_and_explains(void) {
     ASSERT_EQ(status, GL_FALSE);
 
     /* A `gl_` name that is real GLSL and is missing here is **named**, with the reason. "Use of
-     * an undeclared name" reads as a typo and sends its author to check their spelling. */
+     * an undeclared name" reads as a typo and sends its author to check their spelling.
+     *
+     * This asserted on `gl_PointCoord` until 2026-09-23, when that stopped being missing - the
+     * refusal had claimed point sprites were not implemented and they had been since 2026-09-20.
+     * `gl_Fog` is the example now because it is still true: there is no struct type here. */
     GLuint pc = glCreateShader(GL_FRAGMENT_SHADER);
-    source_of(pc, "#version 120\nvoid main() { gl_FragColor = vec4(gl_PointCoord, 0.0, 1.0); }\n");
+    source_of(pc, "#version 120\nvoid main() { gl_FragColor = vec4(gl_Fog.color); }\n");
     glCompileShader(pc);
     glGetShaderiv(pc, GL_COMPILE_STATUS, &status);
     ASSERT_EQ(status, GL_FALSE);
     char pclog[256] = {0};
     glGetShaderInfoLog(pc, (GLsizei)sizeof(pclog), NULL, pclog);
-    ASSERT_TRUE(strstr(pclog, "point sprites") != NULL);
+    ASSERT_TRUE(strstr(pclog, "structs") != NULL);
+
+    /* **And `gl_PointCoord` compiles**, because it is an input now. */
+    GLuint ok_pc = glCreateShader(GL_FRAGMENT_SHADER);
+    source_of(ok_pc, "void main() { gl_FragColor = vec4(gl_PointCoord, 0.0, 1.0); }\n");
+    glCompileShader(ok_pc);
+    glGetShaderiv(ok_pc, GL_COMPILE_STATUS, &status);
+    ASSERT_EQ(status, GL_TRUE);
+
+    /*
+     * **Its two restrictions are refused at link, and each says why.** Both are real properties
+     * of this implementation rather than omissions:
+     *
+     *   - `gl_PointCoord` is texture coordinate 0's interpolant, here and on the part (where the
+     *     substitution is `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`), so it cannot share a program with
+     *     `gl_TexCoord`;
+     *   - a point is expanded into its square *before* the vertex stage, in object space through
+     *     the inverse MVP, so a vertex shader recomputes four corners from identical attributes
+     *     and collapses the square. A point that silently vanishes is what this refuses.
+     */
+    {
+        /* The vertex-shader refusal first, because it is the one that says whether
+         * `hw_reads_point_coord` is being seen at all. */
+        GLuint vs_first = glCreateShader(GL_VERTEX_SHADER);
+        source_of(vs_first, "#version 120\nvoid main() { gl_Position = gl_Vertex; }\n");
+        glCompileShader(vs_first);
+        GLuint pc_own = glCreateShader(GL_FRAGMENT_SHADER);
+        source_of(pc_own, "void main() { gl_FragColor = vec4(gl_PointCoord, 0.0, 1.0); }\n");
+        glCompileShader(pc_own);
+        glGetShaderiv(pc_own, GL_COMPILE_STATUS, &status);
+        ASSERT_EQ(status, GL_TRUE);
+        GLuint probe_vs = glCreateProgram();
+        glAttachShader(probe_vs, vs_first);
+        glAttachShader(probe_vs, pc_own);
+        glLinkProgram(probe_vs);
+        GLint lk0 = 0;
+        glGetProgramiv(probe_vs, GL_LINK_STATUS, &lk0);
+        ASSERT_EQ(lk0, GL_FALSE);
+
+        GLuint both = glCreateProgram();
+        glAttachShader(both, ok_pc);
+        GLuint clash = glCreateShader(GL_FRAGMENT_SHADER);
+        source_of(clash, "#version 120\nvoid main() {\n"
+                         "  gl_FragColor = vec4(gl_PointCoord, 0.0, 1.0) * gl_TexCoord[0];\n"
+                         "}\n");
+        glCompileShader(clash);
+        /* **Asserted, because a shader that failed to compile links as a program with no
+         * fragment stage** - which succeeds, and would read as the refusal not firing. That is
+         * exactly how this test first failed. */
+        glGetShaderiv(clash, GL_COMPILE_STATUS, &status);
+        ASSERT_EQ(status, GL_TRUE);
+        GLuint pc_tc = glCreateProgram();
+        glAttachShader(pc_tc, clash);
+        glLinkProgram(pc_tc);
+        GLint lk = 0;
+        glGetProgramiv(pc_tc, GL_LINK_STATUS, &lk);
+        ASSERT_EQ(lk, GL_FALSE);
+        char lg[256] = {0};
+        glGetProgramInfoLog(pc_tc, (GLsizei)sizeof(lg), NULL, lg);
+        ASSERT_TRUE(strstr(lg, "gl_TexCoord") != NULL);
+
+        /* A fragment shader on its own links: the fixed-function vertex stage transforms the
+         * expansion as it was built. */
+        glLinkProgram(both);
+        glGetProgramiv(both, GL_LINK_STATUS, &lk);
+        ASSERT_EQ(lk, GL_TRUE);
+
+        /* With a vertex shader it does not, and the log names the expansion. */
+        GLuint vs_pc = glCreateShader(GL_VERTEX_SHADER);
+        source_of(vs_pc, "#version 120\nvoid main() { gl_Position = gl_Vertex; }\n");
+        glCompileShader(vs_pc);
+        GLuint with_vs = glCreateProgram();
+        glAttachShader(with_vs, vs_pc);
+        glAttachShader(with_vs, ok_pc);
+        glLinkProgram(with_vs);
+        glGetProgramiv(with_vs, GL_LINK_STATUS, &lk);
+        ASSERT_EQ(lk, GL_FALSE);
+        char lg2[256] = {0};
+        glGetProgramInfoLog(with_vs, (GLsizei)sizeof(lg2), NULL, lg2);
+        ASSERT_TRUE(strstr(lg2, "vertex stage") != NULL);
+    }
 
     GLuint ls = glCreateShader(GL_VERTEX_SHADER);
     source_of(ls, "void main() { gl_Position = vec4(gl_LightSource[0].diffuse); }\n");

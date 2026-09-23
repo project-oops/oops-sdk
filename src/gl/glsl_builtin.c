@@ -500,10 +500,27 @@ static const bi_var_t BUILTIN_FRAGMENT[] = {
     {"gl_TexCoord",    GLSL_TYPE_VEC4, OOPS_GL_MAX_TEXTURE_UNITS, GLSL_TOK_KW_UNIFORM},
     {"gl_FogFragCoord", GLSL_TYPE_FLOAT, 0, GLSL_TOK_KW_UNIFORM},
 
-    /* **`gl_PointCoord` is GLSL 1.20's and is not here**, because point sprites are not: a
-     * `vec2` that always read (0, 0) would be the silent lie this library refuses everywhere
-     * else. It is refused by name through the table below, so a shader using it is told that
-     * point sprites are missing rather than that its spelling is wrong. */
+    /*
+     * **`gl_PointCoord`** (GLSL 1.20; since 2026-09-23). Where the fragment sits inside the
+     * point being drawn, (0,0) at one corner and (1,1) at the other, with the origin
+     * `GL_POINT_SPRITE_COORD_ORIGIN` names - `GL_UPPER_LEFT` by default, which is the opposite
+     * of the rest of GL and the specification's own choice.
+     *
+     * **It is texture coordinate 0's interpolant, and that is the hardware's mechanism rather
+     * than a shortcut here.** A point is expanded into two triangles whose corners carry the
+     * sprite coordinates (gl_draw.c), which is exactly what `GL_COORD_REPLACE` already does for
+     * the fixed-function path; on the part itself the same thing is spelled
+     * `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`, which substitutes the sprite coordinate for a chosen
+     * interpolant. So `gl_PointCoord` and `gl_TexCoord[0]` are one slot, and a fragment shader
+     * reading both is refused at link time rather than given the same value twice.
+     *
+     * This was refused until 2026-09-23 on the grounds that point sprites were not implemented.
+     * They were - `cap_point_sprite`, `GL_COORD_REPLACE`, `GL_POINT_SPRITE_COORD_ORIGIN` and the
+     * corner expansion have all been here since 2026-09-20, and gl1-probe's `point-sprite`
+     * passes on hardware. The refusal outlived its reason, which is the failure mode a refusal
+     * that names its cause is supposed to prevent.
+     */
+    {"gl_PointCoord",  GLSL_TYPE_VEC2, 0, GLSL_TOK_KW_UNIFORM},
     {"gl_FragColor",   GLSL_TYPE_VEC4, 0, GLSL_TOK_EOF},
     {"gl_FragDepth",   GLSL_TYPE_FLOAT, 0, GLSL_TOK_EOF},
     /* One draw buffer, so one element. A shader writing `gl_FragData[1]` is refused by the
@@ -544,9 +561,8 @@ const char *glsl_builtin_refusal(const char *name, size_t len) {
          "gl_BackLightProduct is a struct array, and structs are not implemented"},
         {"gl_Fog", "gl_Fog is a struct, and structs are not implemented"},
         {"gl_DepthRange", "gl_DepthRange is a struct, and structs are not implemented"},
-        /* **Point sprites do not exist here**, so this would be a vec2 that always read (0, 0)
-         * - which is worse than a refusal, because a shader would draw and be wrong. */
-        {"gl_PointCoord", "gl_PointCoord needs point sprites, which are not implemented"},
+        /* `gl_PointCoord` was here until 2026-09-23, refused because point sprites were said not
+         * to exist. They did, and had since 2026-09-20. It is a declared input now. */
         /* GLSL 1.30 and later, named so a shader that meant to be a later version is told which
          * version it is written in rather than which word is unknown. */
         {"gl_InstanceID", "gl_InstanceID is GLSL 1.40; this front end takes 1.10 and 1.20"},

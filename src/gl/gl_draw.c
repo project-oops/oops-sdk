@@ -1625,7 +1625,23 @@ static void gl_draw_point_square(gl_context_t *ctx, const gl_mat4_t *inv_mvp,
      * specification's own choice rather than a mistake here. GL_LOWER_LEFT flips it back.
      *
      * r and q are untouched at 0 and 1: the specification generates s and t only. */
-    if (ctx->cap_point_sprite) {
+    /*
+     * **A GLSL program reading `gl_PointCoord` asks for this too**, and has no
+     * `GL_COORD_REPLACE` with which to ask (since 2026-09-23). `gl_PointCoord` *is* texture
+     * coordinate 0's interpolant here - the same substitution the part performs with
+     * `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX` - so a program that reads it makes unit 0 generate the
+     * coordinate whether or not the fixed-function switch is on. The link refuses a fragment
+     * shader that reads `gl_PointCoord` and `gl_TexCoord` both, so unit 0 cannot be wanted for
+     * two things at once.
+     *
+     * **And it does not need `glEnable(GL_POINT_SPRITE)`.** That switch is ARB_point_sprite's,
+     * for the fixed-function path; `gl_PointCoord` is GLSL 1.20's and is defined for any point,
+     * so a shader reading it gets the coordinate from the program alone.
+     */
+    const gl_program_object_t *const pc_prog = gl_active_program(ctx);
+    const GLboolean want_point_coord =
+        (GLboolean)(pc_prog != (const gl_program_object_t *)0 && pc_prog->hw_reads_point_coord);
+    if (ctx->cap_point_sprite || want_point_coord) {
         const GLboolean upper = (GLboolean)(ctx->point_sprite_origin != GL_LOWER_LEFT);
         const float t_lo = upper ? 1.0f : 0.0f; /* the two lower corners */
         const float t_hi = upper ? 0.0f : 1.0f; /* the two upper corners */
@@ -1633,7 +1649,9 @@ static void gl_draw_point_square(gl_context_t *ctx, const gl_mat4_t *inv_mvp,
         const float s_of[4] = {0.0f, 1.0f, 1.0f, 0.0f};
         const float t_of[4] = {t_lo, t_lo, t_hi, t_hi};
         for (GLuint u = 0u; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
-            if (!ctx->tex_unit[u].coord_replace) continue;
+            const GLboolean replace =
+                (GLboolean)(ctx->cap_point_sprite && ctx->tex_unit[u].coord_replace);
+            if (!replace && !(want_point_coord && u == 0u)) continue;
             for (int k = 0; k < 4; k++) {
                 corner[k]->tc[u][0] = s_of[k];
                 corner[k]->tc[u][1] = t_of[k];
