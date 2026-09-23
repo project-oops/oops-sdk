@@ -4,9 +4,9 @@
 
 `oops-sdk` is a clean-room, freestanding C runtime (`-ffreestanding -nostdlib`) for developing native homebrew on 8th and 9th generation console hardware (Orbis and Prospero). It exposes direct hardware interfaces for RDNA2 AGC display and tile swizzling, DualSense controller polling, PCM audio streaming, GPU direct memory allocation, and threading—all without relying on proprietary vendor headers or libraries.
 
-| 📖 **[Developer User Guide](docs/USER_GUIDE.md)** | 📚 **[Complete API Reference](docs/API_REFERENCE.md)** | 📐 **[Architecture Decisions](docs/DECISIONS.md)** |
-| :--- | :--- | :--- |
-| *Step-by-step tutorials from Hello World to 3D graphics, audio, and JIT.* | *Exhaustive technical reference covering all 25 subsystem headers in `include/oops/` — oops-gl's declared entry points are counted in [GL_ROADMAP.md](docs/GL_ROADMAP.md).* | *Numbered ADRs capturing provenance, compiler design, W^X, and oops-gl's scope.* |
+| 🚢 **[Homebrew Porting Guide](docs/PORTING.md)** | 📖 **[Developer User Guide](docs/USER_GUIDE.md)** | 📚 **[Complete API Reference](docs/API_REFERENCE.md)** | 📐 **[Architecture Decisions](docs/DECISIONS.md)** |
+| :--- | :--- | :--- | :--- |
+| *Master guide for porting existing games and emulators: SDL2, OpenGL 1.x/2.0/3.x, Mesa, POSIX libc stubs, and save data.* | *Step-by-step tutorials from Hello World to 3D graphics, SDL2, audio, directory traversal, and JIT.* | *Exhaustive technical reference covering all 25 subsystem headers in `include/oops/` — oops-gl's declared entry points are counted in [GL_ROADMAP.md](docs/GL_ROADMAP.md).* | *Numbered ADRs capturing provenance, compiler design, W^X, and oops-gl's scope.* |
 
 ---
 
@@ -20,7 +20,7 @@ oops-sdk (Freestanding C Runtime & Hardware Abstraction)
     ├──► oops-apps (Test Titles: gl1-cube, gl1-probe, gl2-cube, seashell, pltauth-patch)
     │        │
     │        ▼
-    │    Packaged by SELFish ──► Deployed by Prosperous ──► Tested on PS5
+    │    Packaged by SELFish ──► Deployed by Prosperous ──► Tested on Prospero
     │                                                        │
     │    ┌───────────────────────────────────────────────────┘
     │    ▼
@@ -54,8 +54,24 @@ Alternatively, `make all` builds a static target archive `liboops.a` for standar
 
 ### 2. Run Local Unit Tests
 ```bash
-make test    # compiles and runs headless test stubs on host PC (200 tests)
+make test    # compiles and runs headless test stubs on host PC (397 tests)
 ```
+
+---
+
+## Graphics & Frameworks Decision Guide
+
+When developing or porting applications to Prospero / Orbis, selecting the right rendering backend and framework is the primary architectural choice:
+
+| Technology | API & Standard | Environment | Memory Footprint | Primary Use Cases |
+| :--- | :--- | :--- | :--- | :--- |
+| **`oops-gl` (`gl1`)** | OpenGL 1.1–1.5 Fixed Function | Pure Freestanding (`-ffreestanding`) | ~100–300 KB | Retro 3D ports (Quake, DOOM, Neverball), GLUT utilities, lightweight 3D tools. Direct PM4 lowering. |
+| **`oops-gl` (`gl2`)** | OpenGL 2.0, GLSL 1.10 / 1.20 | Pure Freestanding (`-ffreestanding`) | ~300–600 KB | Programmable vertex/fragment shaders, procedural materials, retro-indie games. Compiles directly to RDNA2 machine code. |
+| **`oops-mesa` (`mesa`)** | OpenGL 3.3 Core, GLES 2/3, EGL | Hosted (`USE_MESA = 1`, FreeBSD libc sysroot) | ~15–30 MB | Modern 3D engines, GLSL 330+, geometry/compute shaders, framebuffers (FBOs), complex desktop ports. |
+| **`oops-draw` (2D Canvas)** | 2D CPU Rasterizer (`<oops/draw.h>`) | Pure Freestanding | Zero extra | Launchers (SeaShell), HUDs, text overlays, diagnostics, simple menus. Zero GPU overhead. |
+| **`oops-sdl` (SDL2)** | SDL 2.0.22 Windowing, Events, Audio | Either (Freestanding or Hosted) | ~500 KB | Cross-platform games and emulators already built on SDL2. Compatible with `oops-gl` and `oops-mesa`. |
+
+For step-by-step recipes, architectural diagrams, ported dependency libraries (`zlib`, `libpng`, `freetype`, `libvorbis`), and POSIX compatibility shims, see the **[Homebrew Porting Guide](docs/PORTING.md)**.
 
 ---
 
@@ -75,18 +91,18 @@ Detailed signatures, parameters, return codes, hardware invariants, and code exa
 | **[PCM Audio Output](docs/API_REFERENCE.md#8-audio-streaming-oopsaudioh)** | `<oops/audio.h>` | `oops_audio_open`, `write` | Multi-channel PCM audio streaming (48 kHz 16-bit stereo), hardware port volume control |
 | **[Hardware Media Codecs](docs/API_REFERENCE.md#9-hardware-media-codecs-oopsaudiodech-oopsvideodech)** | `<oops/videodec.h>`, `<oops/audiodec.h>` | `oops_videodec_open`, `oops_audiodec_open` | VPU hardware-accelerated H.264/HEVC video decoding, DSP MP3/AAC audio decompression |
 | **[Dialogs & IME Keyboard](docs/API_REFERENCE.md#10-system-ui-dialogs--on-screen-ime-oopsdialogh)** | `<oops/dialog.h>` | `oops_dialog_ime_open`, `poll`, `get_result` | System OS virtual keyboard dialog, UTF-8 text entry, asynchronous user confirmation |
-| **[Save Data Management](docs/API_REFERENCE.md#11-save-data-management-oopssavedatah)** | `<oops/savedata.h>` | `oops_savedata_mount`, `unmount` | Title save data directory mounting, encrypted partition access, quota management |
+| **[Save Data Management](docs/API_REFERENCE.md#11-save-data-management-oopssavedatah)** | `<oops/savedata.h>` | `oops_savedata_mount`, `oops_savedata_save_file`, `oops_savedata_load_file` | Encrypted save mounting and whole-file persistence with automatic sandbox escape fallback to `/data/savedata/<app_id>` |
 | **[Package Management](docs/API_REFERENCE.md#12-package-management-oopspkgh)** | `<oops/pkg.h>` | `oops_pkg_install`, `get_progress` | Background package installer, progress polling, `/data/pkg` installation broker |
 | **[Security Escalation](docs/API_REFERENCE.md#13-privilege-escalation--sandbox-escape-oopsescalateh)** | `<oops/escalate.h>` | `oops_jailbreak_process`, `escalate_to_system_authid` | Clean-room credential override (`cr_uid 0`), jailbreak escape (`rootvnode`), debug entitlement elevation |
 | **[Kernel Read/Write Broker](docs/API_REFERENCE.md#14-kernel-readwrite--syscall-dispatcher-oopskrwh-oopssyscallh)** | `<oops/krw.h>`, `<oops/syscall.h>` | `krw_init`, `krw_read64`, `krw_write64` | Arbitrary kernel memory primitives, pipe/socket leak or exploit driver broker |
 | **[Dynamic Module Loader](docs/API_REFERENCE.md#15-system-modules--dynamic-linking-oopssysmoduleh)** | `<oops/sysmodule.h>` | `oops_sysmodule_load`, `unload` | Dynamic runtime loading of system PRXs (AudioDec, VideoDec, ImeDialog, SaveData, NetCtl) |
-| **[System Telemetry](docs/API_REFERENCE.md#16-system-information--telemetry-oopssystemh-oopsoffsetsh)** | `<oops/system.h>` | `oops_klog`, `oops_kprintf`, `oops_system_get_info` | Kernel log streaming (`SYS_klog 601`), hardware telemetry, firmware offset tables |
+| **[System Telemetry](docs/API_REFERENCE.md#16-system-information--telemetry-oopssystemh-oopsoffsetsh)** | `<oops/system.h>` | `oops_klog`, `oops_kprintf`, `oops_log_enable_disk_sink` | Kernel log streaming (`SYS_klog 601`), unbuffered crash-resilient disk logging sink, hardware sensors |
 | **[High-Resolution Timing](docs/API_REFERENCE.md#17-high-resolution-timing-oopstimeh)** | `<oops/time.h>` | `oops_time_get_ms`, `sleep_ms` | Hardware TSC counter access, microsecond/millisecond intervals, thread sleep |
 | **[Multithreading & Sync](docs/API_REFERENCE.md#18-threading--synchronization-oopsthreadh)** | `<oops/thread.h>` | `oops_thread_create`, `mutex_lock` | Native kernel thread creation, affinity binding, priority control, mutexes, condition variables |
 | **[Sockets & DNS](docs/API_REFERENCE.md#19-bsd-sockets--network-telemetry-oopsneth-oopsnetctlh)** | `<oops/net.h>`, `<oops/netctl.h>` | `oops_socket`, `connect`, `net_resolve` | POSIX TCP/UDP sockets, clean-room RFC 1035 UDP DNS resolution, NetCtl telemetry |
 | **[Freestanding C Runtime](docs/API_REFERENCE.md#20-freestanding-c-runtime-utilities-oopsfreestdh)** | `<oops/freestd.h>` | `obs_strlen`, `oops_snprintf`, `obs_compute_nid` | Freestanding string manipulation, clean-room printf/snprintf formatting, NID hashing |
 | **[Process Injection](docs/API_REFERENCE.md#21-process-control--code-injection-oopsinjecth)** | `<oops/inject.h>` | `oops_inject_elf`, `procctl_attach`, `loader_load_into_proc` | Dynamic code injection into running processes via kernel thread hijacking / ptrace |
-| **[High-Level Filesystem](docs/API_REFERENCE.md#22-high-level-filesystem-subsystem-oopsfsh)** | `<oops/fs.h>` | `oops_fs_open`, `read_all`, `write_all`, `exists` | Clean-room POSIX-compatible filesystem layer, whole-file slurp/dump, file size query |
+| **[High-Level Filesystem](docs/API_REFERENCE.md#22-high-level-filesystem-subsystem-oopsfsh)** | `<oops/fs.h>` | `oops_fs_open`, `oops_fs_read_all`, `oops_fs_opendir`, `oops_fs_readdir` | Clean-room POSIX filesystem layer, directory enumeration, USB/SSD persistent storage resolution, recursive `mkdir -p` |
 | **[Userland Heap Allocator](docs/API_REFERENCE.md#23-freestanding-userland-heap-allocator-oopsheaph)** | `<oops/heap.h>` | `oops_malloc`, `free`, `calloc`, `realloc` | Segregated-fit slab allocator backed by anonymous virtual memory (works in Cat 65536 zero-DMEM) |
 | **[Freestanding Math & 3D](docs/API_REFERENCE.md#24-freestanding-math--3d-linear-algebra-oopsmathh)** | `<oops/math.h>` | `oops_sinf`, `vec3_normalize`, `mat4_perspective` | Clean-room math library, polynomial trig, 3D vectors and 4x4 matrices matching RDNA2 layout |
 | **[Target Platform Identification](docs/API_REFERENCE.md#25-target-platform-identification-oopstargeth)** | `<oops/target.h>` | `oops_get_target`, `oops_target_name` | Compile-time `OOPS_TARGET` selection (`orbis`, `neo`, `prospero`, `trinity`) and the generation-classification helpers other headers build on |

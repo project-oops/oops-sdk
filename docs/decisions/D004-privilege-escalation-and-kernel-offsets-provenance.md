@@ -93,7 +93,7 @@ Standard FreeBSD processes that have never called `chroot(2)` (such as PID 1 `mi
 standalone daemons) have `fd_rdir == NULL (0x0)` because path resolution defaults to the kernel
 `rootvnode` symbol whenever `fd_rdir == NULL`. However, PID 1 permanently runs at `/`, meaning
 its `fd_cdir` (`0x08`) is permanently rooted at `rootvnode`.
-On PS5 FW 12.40 hardware, PID 1 has both `fd_rdir == 0xffffdc5d01d89fe0` and
+On Prospero FW 12.40 hardware, PID 1 has both `fd_rdir == 0xffffdc5d01d89fe0` and
 `fd_cdir == 0xffffdc5d01d89fe0` (`fd_jdir == 0x0`). `sandbox-daemon` inspects PID 1 and self to
 dynamically resolve the true `rootvnode` without hardcoding kernel pointer addresses.
 

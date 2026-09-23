@@ -20,6 +20,7 @@ void *oops_malloc(size_t size);
 void oops_free(void *ptr);
 void *oops_calloc(size_t count, size_t size);
 void *oops_realloc(void *ptr, size_t new_size);
+void *oops_aligned_alloc(size_t alignment, size_t size);
 
 typedef struct oops_heap_stats {
   size_t current_allocated_bytes;

@@ -450,7 +450,7 @@ pid_t target_find_foreground_app(void) {
 
   klog_write("ERROR: no active retail game found in userland");
   klog_write(
-      "ACTION: launch a retail game on the PS5 home screen, then re-run");
+      "ACTION: launch a retail game on the Prospero home screen, then re-run");
   return -1;
 }
 

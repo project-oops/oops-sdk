@@ -221,7 +221,7 @@ What it is *for* is evidence: because nothing sits between the call and the pack
 
 ## 4. Hardware RDNA2 AGC Graphics (`<oops/agc.h>`, `<oops/gpu.h>`)
 
-Low-level bare-metal access to PS5 RDNA2 GFX10.3 hardware command queues, compute dispatchers, and tile micro-swizzling.
+Low-level bare-metal access to Prospero RDNA2 GFX10.3 hardware command queues, compute dispatchers, and tile micro-swizzling.
 
 ### Queues and shaders (`<oops/gpu.h>`)
 
@@ -475,6 +475,7 @@ Safe, encrypted title save data mounting via `libSceSaveData`.
 ### `int oops_savedata_mount(const char *dir_name, oops_savedata_mode_t mode, char *out_mount_path, size_t max_path_len)`
 * **When to use**: Mount an encrypted save directory to standard POSIX file path (e.g. `/savedata0`).
 * **Modes**: `OOPS_SAVEDATA_MODE_READ_ONLY`, `OOPS_SAVEDATA_MODE_READ_WRITE`, `OOPS_SAVEDATA_MODE_CREATE`.
+* **Homebrew Fallback & Sandbox Escape**: When `libSceSaveData` fails or is unavailable (such as in unsigned homebrew or payload environments lacking official save credentials), `oops_savedata_mount` automatically invokes `oops_system_escape_sandbox()` and transparently mounts a persistent directory at `/data/savedata/<app_id>/<dir_name>`. No title-side error recovery boilerplate is required.
 * **Example**:
   ```c
   char mount[64];
@@ -666,6 +667,15 @@ below.
 * `void oops_kprintf(const char *tag, const char *fmt, ...)`: `printf`-style variant of `oops_klog`.
 * `const char *oops_test_get_last_klog(void)`: Read back the last message logged, for host-side test assertions.
 
+### Crash-Resilient Disk Logging Sink
+* `int oops_log_enable_disk_sink(const char *app_id, int keep_timestamped_archive)`: Enables crash-resilient unbuffered disk teeing for all subsequent `oops_klog`, `oops_kprintf`, and `oops_log` output.
+  * Writes synchronously to `<storage_dir>/latest.log` using direct kernel `SYS_write` syscalls without userspace buffering.
+  * If `keep_timestamped_archive` is non-zero, also duplicates entries to `<storage_dir>/log-<timestamp>.txt` for audit trails across runs.
+  * Automatically resolves persistent storage via `oops_fs_get_storage_dir` (preferring USB if mounted, escaping filesystem sandbox if needed).
+  * Returns `0` on success, or `-1` on error.
+* `const char *oops_log_get_disk_sink_path(void)`: Returns the absolute filesystem path of the active disk sink file, or `NULL` if disabled.
+* `void oops_log_close_disk_sink(void)`: Flushes and closes the active disk sink file descriptor.
+
 ### System Service Controls (`libSceSystemService`)
 * `int oops_system_hide_splash(void)`, `int oops_system_power_tick(void)`, `int oops_system_navigate_home(void)`: Splash dismissal, power-save tick, and return-to-home.
 * `int oops_system_get_enter_button(int *out_button)`: `0` = Circle, `1` = Cross, per the console's region setting.
@@ -842,7 +852,22 @@ Freestanding POSIX-conforming filesystem layer wrapping kernel syscalls (`SYS_op
 * `void oops_fs_free_data(void *data)`: Free buffer allocated by `oops_fs_read_all`.
 * `int oops_fs_write_all(const char *path, const void *data, size_t size)`: Write an entire memory buffer to disk, replacing existing contents.
 * `int oops_fs_mkdir(const char *path, int mode)`: Create a directory.
+* `int oops_fs_mkdir_p(const char *path, int mode)`: Recursively create an entire directory hierarchy, creating missing intermediate directories.
 * `int oops_fs_unlink(const char *path)`: Remove a file from disk.
+
+### Application Persistent Storage Resolution
+* `int oops_fs_get_storage_dir(const char *app_id, oops_storage_location_t pref, char *out_path, size_t max_len)`:
+  * Resolves an accessible, persistent, writeable storage directory for an application.
+  * If `pref` is `OOPS_STORAGE_PREFER_USB` or `OOPS_STORAGE_USB`, probes `/mnt/usb0` and `/mnt/usb1`.
+  * Automatically invokes `oops_system_escape_sandbox()` when accessing `/data` or `/mnt/usb*` from sandbox-jailed processes.
+  * Falls back to `/data/<app_id>` when USB is unavailable (under `OOPS_STORAGE_PREFER_USB`).
+  * Creates the directory hierarchy recursively before returning. Returns `0` on success, or `-1` if no suitable storage could be created.
+* `int oops_fs_storage_path(const char *app_id, oops_storage_location_t pref, const char *rel_filename, char *out_path, size_t max_len)`:
+  * Resolves the storage directory and constructs a complete, valid absolute path to `rel_filename` inside that directory.
+* **Storage Location Preference (`oops_storage_location_t`)**:
+  * `OOPS_STORAGE_APP_DATA`: Direct internal SSD storage at `/data/<app_id>`.
+  * `OOPS_STORAGE_USB`: External USB mass storage (`/mnt/usb0/<app_id>` or `/mnt/usb1/<app_id>`); fails if no USB drive is attached.
+  * `OOPS_STORAGE_PREFER_USB`: Automatically use USB if mounted and writeable; otherwise smoothly fall back to internal SSD `/data/<app_id>`.
 
 ---
 
@@ -851,7 +876,7 @@ Freestanding POSIX-conforming filesystem layer wrapping kernel syscalls (`SYS_op
 Clean-room segregated-fit slab and anonymous virtual memory allocator.
 
 ### Category 65536 & Direct Memory Independence
-On the PS5, System Applications (Category `65536` titles, e.g. UI overlays, background daemons, and system launch payloads) are allocated **0 bytes of Direct Memory (DMEM)** by the OS. Standard PlayStation SDK memory calls fail instantly in this environment.
+On Prospero, System Applications (Category `65536` titles, e.g. UI overlays, background daemons, and system launch payloads) are allocated **0 bytes of Direct Memory (DMEM)** by the OS. Standard vendor SDK memory calls fail instantly in this environment.
 `oops-sdk`'s heap allocator solves this by backing allocations with anonymous virtual memory (`SYS_mmap 477` with `MAP_PRIVATE | MAP_ANON 0x1002`). It operates identically in game titles (`gd`), system titles, and elfldr payloads.
 
 ### Allocator Functions

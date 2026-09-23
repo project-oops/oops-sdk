@@ -329,7 +329,7 @@ uintptr_t procctl_find_syscall_gadget(pid_t pid, uintptr_t libkernel_base) {
   if (libkernel_base == 0) {
     return 0;
   }
-  /* PS5 Prospero getpid+0xa is 0x4ea; PS4 Orbis getpid+0xa is 0x5ba */
+  /* Prospero getpid+0xa is 0x4ea; Orbis getpid+0xa is 0x5ba */
   const uintptr_t offsets[] = { 0x4ea, 0x5ba };
   for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
     uintptr_t canonical = libkernel_base + offsets[i];

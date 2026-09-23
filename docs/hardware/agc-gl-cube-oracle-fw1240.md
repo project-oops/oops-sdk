@@ -1,4 +1,4 @@
-# AGC oracle record: the GL cube frame on PS5 firmware 12.40
+# AGC oracle record: the GL cube frame on Prospero firmware 12.40
 
 > **The program was renamed on 2026-09-17**, after this record was taken: `oops-apps/src/gl-cube`
 > is now `oops-apps/src/gl1-cube`, and its entry point `gl_cube_start` is `gl1_cube_start`. The

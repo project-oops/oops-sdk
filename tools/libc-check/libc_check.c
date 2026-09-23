@@ -111,6 +111,8 @@ int libc_check_touch(void) {
     g_p = malloc(16);
     g_p = calloc(2, 8);
     g_p = realloc((void *)(size_t)g_p, 32);
+    g_p = aligned_alloc(16, 32);
+    g_z = MB_CUR_MAX;
     free((void *)(size_t)g_p);
 
     g_i = abs(-1);

@@ -87,8 +87,35 @@ static void test_fs_read_write_seek(void) {
   ASSERT_EQ(oops_fs_exists(TEST_PATH), 0);
 }
 
+static void test_fs_storage_dir(void) {
+  char dir[256];
+  ASSERT_EQ(oops_fs_get_storage_dir(OOPS_STORAGE_APP_DATA, NULL, 0), -1);
+  ASSERT_EQ(oops_fs_get_storage_dir(OOPS_STORAGE_APP_DATA, dir, sizeof(dir)), 0);
+  ASSERT_TRUE(obs_strlen(dir) > 0);
+  ASSERT_EQ(oops_fs_exists(dir), 1);
+
+  char file_path[256];
+  ASSERT_EQ(oops_fs_storage_path(OOPS_STORAGE_APP_DATA, "test.dat", file_path, sizeof(file_path)), 0);
+  ASSERT_TRUE(obs_strlen(file_path) > obs_strlen(dir));
+
+  /* Write and read through the resolved path */
+  const char test_data[] = "storage_test_payload";
+  ASSERT_EQ(oops_fs_write_all(file_path, test_data, obs_strlen(test_data)), 0);
+  ASSERT_EQ(oops_fs_exists(file_path), 1);
+
+  void *read_back = NULL;
+  size_t read_sz = 0;
+  ASSERT_EQ(oops_fs_read_all(file_path, &read_back, &read_sz), 0);
+  ASSERT_EQ(read_sz, obs_strlen(test_data));
+  ASSERT_STR_EQ((const char *)read_back, test_data);
+  oops_fs_free_data(read_back);
+
+  (void)oops_fs_unlink(file_path);
+}
+
 void run_unit_tests_fs(void) {
   TEST_SUITE_BEGIN("High-Level Filesystem Subsystem");
   RUN_TEST(test_fs_null_safety);
   RUN_TEST(test_fs_read_write_seek);
+  RUN_TEST(test_fs_storage_dir);
 }

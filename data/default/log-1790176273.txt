@@ -1,0 +1,2 @@
+[DISK] first disk telemetry record
+[DISK] number=12345

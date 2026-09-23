@@ -86,11 +86,38 @@ static void test_heap_large_mmap(void) {
   oops_free(big);
 }
 
+static void test_heap_aligned_alloc(void) {
+  /* Invalid arguments */
+  ASSERT_TRUE(oops_aligned_alloc(0, 64) == NULL);
+  ASSERT_TRUE(oops_aligned_alloc(64, 0) == NULL);
+  ASSERT_TRUE(oops_aligned_alloc(15, 60) == NULL); /* not a power of 2 */
+  ASSERT_TRUE(oops_aligned_alloc(64, 50) == NULL); /* size not multiple of alignment */
+
+  /* Various valid alignments: 16, 32, 64, 128, 256, 1024, 4096 */
+  size_t alignments[] = {16, 32, 64, 128, 256, 1024, 4096};
+  for (size_t i = 0; i < sizeof(alignments) / sizeof(alignments[0]); i++) {
+    size_t align = alignments[i];
+    size_t size = align * 4;
+    void *ptr = oops_aligned_alloc(align, size);
+    ASSERT_TRUE(ptr != NULL);
+    ASSERT_EQ(((uintptr_t)ptr % align), 0ULL);
+
+    /* Write pattern and verify */
+    memset(ptr, 0x7c, size);
+    uint8_t *b = (uint8_t *)ptr;
+    ASSERT_EQ(b[0], 0x7c);
+    ASSERT_EQ(b[size - 1], 0x7c);
+
+    oops_free(ptr);
+  }
+}
+
 void run_unit_tests_heap(void) {
   TEST_SUITE_BEGIN("Freestanding Userland Heap Allocator");
   RUN_TEST(test_heap_null_and_zero);
   RUN_TEST(test_heap_slabs_and_reuse);
   RUN_TEST(test_heap_calloc_and_realloc);
   RUN_TEST(test_heap_large_mmap);
+  RUN_TEST(test_heap_aligned_alloc);
 }
 

@@ -14,11 +14,11 @@ static int *(*s_ptr_error)(void) = NULL;
 
 static long find_libkernel_syscall_gadget(void) {
 #if OOPS_TARGET_IS_PROSPERO
-  /* PS5 Prospero: libkernel is mapped Execute-Only (XO). Dereferencing causes SYSTEM_XO_VIOLATION.
+  /* Prospero: libkernel is mapped Execute-Only (XO). Dereferencing causes SYSTEM_XO_VIOLATION.
    * getpid is at 0x4e0; getpid + 0xa (0x4ea) is 'syscall; jb +1; ret'. */
   return (long)(0x800000000ULL + 0x4eaULL);
 #else
-  /* PS4 Orbis: getpid is at 0x5b0; getpid + 0xa (0x5ba) is 'syscall'. */
+  /* Orbis: getpid is at 0x5b0; getpid + 0xa (0x5ba) is 'syscall'. */
   return (long)(0x800000000ULL + 0x5baULL);
 #endif
 }

@@ -56,7 +56,7 @@ int oops_jit_get_method(void);
 /**
  * Allocate a dynamic executable buffer of at least `size` bytes.
  *
- * Rounds `size` up to the system page boundary (typically 16 KB on PS5,
+ * Rounds `size` up to the system page boundary (typically 16 KB on Prospero,
  * 4 KB on host). Attempts Sony shared memory dual-mapping first. If refused
  * by the kernel (e.g. without custom authinfo), falls back to direct mprotect
  * if permitted by the environment (e.g. kstuff-lite).

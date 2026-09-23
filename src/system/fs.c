@@ -7,6 +7,7 @@
 #include "oops/heap.h"
 #include "oops/memory.h"
 #include "oops/syscall.h"
+#include "oops/system.h"
 
 #ifdef OOPS_HOST_BUILD
 #include <fcntl.h>
@@ -362,3 +363,109 @@ int oops_fs_unlink(const char *path) {
   return unlink(path);
 #endif
 }
+
+static int oops_fs_mkdir_p(const char *path) {
+  if (!path || path[0] == '\0') {
+    return -1;
+  }
+  char tmp[256];
+  size_t len = obs_strlen(path);
+  if (len >= sizeof(tmp)) {
+    return -1;
+  }
+  for (size_t i = 0; i < len; i++) {
+    tmp[i] = path[i];
+    if (i > 0 && (path[i] == '/' || path[i] == '\\')) {
+      tmp[i] = '\0';
+      if (!oops_fs_exists(tmp)) {
+        (void)oops_fs_mkdir(tmp, 0755);
+      }
+      tmp[i] = path[i];
+    }
+  }
+  if (!oops_fs_exists(path)) {
+    (void)oops_fs_mkdir(path, 0755);
+  }
+  return oops_fs_exists(path) ? 0 : -1;
+}
+
+int oops_fs_get_storage_dir(oops_storage_location_t loc, char *out_path, size_t max_len) {
+  if (!out_path || max_len == 0) {
+    return -1;
+  }
+  out_path[0] = '\0';
+
+  const char *app_id = oops_log_get_app_id();
+  if (!app_id || app_id[0] == '\0') {
+    app_id = "default";
+  }
+
+  char resolved[256];
+  resolved[0] = '\0';
+
+#ifndef OOPS_HOST_BUILD
+  int usb0_ok = oops_fs_exists("/mnt/usb0");
+  int usb1_ok = oops_fs_exists("/mnt/usb1");
+
+  if (loc == OOPS_STORAGE_USB || loc == OOPS_STORAGE_PREFER_USB) {
+    if (usb0_ok) {
+      (void)oops_snprintf(resolved, sizeof(resolved), "/mnt/usb0/%s", app_id);
+    } else if (usb1_ok) {
+      (void)oops_snprintf(resolved, sizeof(resolved), "/mnt/usb1/%s", app_id);
+    } else if (loc == OOPS_STORAGE_USB) {
+      return -1;
+    }
+  }
+
+  if (resolved[0] == '\0') {
+    (void)oops_system_escape_sandbox();
+    if (oops_fs_exists("/data")) {
+      (void)oops_snprintf(resolved, sizeof(resolved), "/data/%s", app_id);
+    } else {
+      (void)oops_snprintf(resolved, sizeof(resolved), "data/%s", app_id);
+    }
+  }
+#else
+  if (loc == OOPS_STORAGE_USB) {
+    if (oops_fs_exists("/mnt/usb0")) {
+      (void)oops_snprintf(resolved, sizeof(resolved), "/mnt/usb0/%s", app_id);
+    } else if (oops_fs_exists("usb0")) {
+      (void)oops_snprintf(resolved, sizeof(resolved), "usb0/%s", app_id);
+    } else {
+      return -1;
+    }
+  } else {
+    (void)oops_snprintf(resolved, sizeof(resolved), "data/%s", app_id);
+  }
+#endif
+
+  if (oops_fs_mkdir_p(resolved) != 0) {
+    return -1;
+  }
+
+  size_t rlen = obs_strlen(resolved);
+  if (rlen + 1 > max_len) {
+    return -1;
+  }
+  for (size_t i = 0; i <= rlen; i++) {
+    out_path[i] = resolved[i];
+  }
+  return 0;
+}
+
+int oops_fs_storage_path(oops_storage_location_t loc, const char *rel_path,
+                         char *out_path, size_t max_len) {
+  if (!rel_path || !out_path || max_len == 0) {
+    return -1;
+  }
+  char base[256];
+  if (oops_fs_get_storage_dir(loc, base, sizeof(base)) != 0) {
+    return -1;
+  }
+  while (*rel_path == '/' || *rel_path == '\\') {
+    rel_path++;
+  }
+  int written = oops_snprintf(out_path, max_len, "%s/%s", base, rel_path);
+  return (written > 0 && (size_t)written < max_len) ? 0 : -1;
+}
+

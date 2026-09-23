@@ -276,7 +276,7 @@ uint32_t oops_gpu_get_last_fence(const oops_gpu_queue_t *queue) {
 
 #else
 
-/* Host / Non-PS5 Stubs */
+/* Host / Non-Prospero Stubs */
 int oops_gpu_available(void) { return 0; }
 oops_gpu_queue_t *oops_gpu_create_compute_queue(void) {
   return (oops_gpu_queue_t *)0;

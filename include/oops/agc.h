@@ -50,7 +50,7 @@ extern "C" {
  * CB_COLOR0_ATTRIB2 surface extent macro:
  * Bits [27:14] = (width - 1)
  * Bits [13:0]  = (height - 1)
- * Physical PS5 verification: omitting the register makes the GFX10 CB treat the
+ * Physical Prospero verification: omitting the register makes the GFX10 CB treat the
  * surface as 0x0 and drop every pixel write. With the fields the other way round
  * (height in 27:14) a 1920 x 1080 LINEAR_GENERAL target was written with a row
  * pitch of 1088 pixels (1080 rounded up to 64), measured 2026-09-14: the colour

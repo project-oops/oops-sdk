@@ -338,7 +338,7 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
 
 #else
 
-/* Host / Non-PS5 Stubs */
+/* Host / Non-Prospero Stubs */
 int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t *desc) {
   if (!queue || !desc) {
     return -1;

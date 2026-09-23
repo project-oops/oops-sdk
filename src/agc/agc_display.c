@@ -153,7 +153,7 @@ agc_display_t *agc_display_open_adopting(unsigned int width,
   for (size_t i = 0; i < sizeof(*disp); i++) {
     ((unsigned char *)disp)[i] = 0;
   }
-  /* PS5 libSceVideoOut restricts 720p buffer registration to consoles configured
+  /* Prospero libSceVideoOut restricts 720p buffer registration to consoles configured
    * for 720p scanout mode, refusing 1280x720 with 0x80290005 on 1080p/1440p/4K displays.
    * Universal 1080p (1920x1080) is supported across all output modes. If requested
    * at 1280x720, promote to standard 1080p. */

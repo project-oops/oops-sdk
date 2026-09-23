@@ -77,6 +77,39 @@ oops_dir_t *oops_fs_opendir(const char *path);
 int oops_fs_readdir(oops_dir_t *dir, oops_dirent_t *out);
 int oops_fs_closedir(oops_dir_t *dir);
 
+/* Storage locations for application persistence & data */
+typedef enum oops_storage_location {
+  OOPS_STORAGE_APP_DATA,   /* Internal persistent storage: /data/<app_id> (escaped) or ./data/<app_id> */
+  OOPS_STORAGE_USB,        /* External USB storage: /mnt/usb0/<app_id> or /mnt/usb1/<app_id> */
+  OOPS_STORAGE_PREFER_USB, /* USB storage if mounted, else internal /data/<app_id> */
+} oops_storage_location_t;
+
+/**
+ * Resolve and ensure (create) a writable directory for application storage.
+ * On target hardware, accessing /data or /mnt/usb automatically ensures
+ * sandbox escape privileges.
+ *
+ * loc: Storage location preference.
+ * out_path: Buffer receiving the resolved absolute directory path.
+ * max_len: Capacity of out_path buffer.
+ *
+ * Returns: 0 on success, or negative error code.
+ */
+int oops_fs_get_storage_dir(oops_storage_location_t loc, char *out_path, size_t max_len);
+
+/**
+ * Format a full path to a file inside the resolved application storage directory.
+ *
+ * loc: Storage location preference.
+ * rel_path: Relative filename or subpath (e.g. "config.ini" or "saves/slot1.dat").
+ * out_path: Buffer receiving the formatted path.
+ * max_len: Capacity of out_path buffer.
+ *
+ * Returns: 0 on success, or negative error code.
+ */
+int oops_fs_storage_path(oops_storage_location_t loc, const char *rel_path,
+                         char *out_path, size_t max_len);
+
 #ifdef __cplusplus
 }
 #endif

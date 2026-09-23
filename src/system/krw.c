@@ -140,13 +140,13 @@ static uint32_t detect_fw_version(void) {
     unsigned long structsize;
     unsigned int magic;
     unsigned int ent_count;
-    unsigned int sdk_ps4_ver;
-    unsigned int sdk_ps5_ver;
+    unsigned int sdk_orbis_ver;
+    unsigned int sdk_prospero_ver;
   } *param = NULL;
 
   if (sys_call(SYS_dynlib_get_obj_member, 0x2, 8, (long)&param, 0, 0, 0) == 0 &&
-      param != NULL && param->sdk_ps5_ver > 0x02000009) {
-    return param->sdk_ps5_ver;
+      param != NULL && param->sdk_prospero_ver > 0x02000009) {
+    return param->sdk_prospero_ver;
   }
   return 0x12400000; /* Fallback default (FW 12.40) */
 }

@@ -1,4 +1,5 @@
 #include "oops/system.h"
+#include "oops/fs.h"
 #include "tests/test_common.h"
 
 static void test_system_info_query(void) {
@@ -70,7 +71,7 @@ static void test_system_services_and_multiuser(void) {
 
 static void test_system_pltauth_check(void) {
   int status = oops_system_check_pltauth();
-  /* On host or PS4 it returns 1; on PS5 it returns 0 or 1 */
+  /* On host or Orbis it returns 1; on Prospero it returns 0 or 1 */
   ASSERT_TRUE(status == 0 || status == 1);
 }
 
@@ -151,6 +152,38 @@ static void test_system_klog(void) {
   oops_log_init(NULL);
 }
 
+static void test_system_disk_sink(void) {
+  ASSERT_TRUE(oops_log_get_disk_sink_path() == NULL);
+
+  int rc = oops_log_enable_disk_sink("TESTAPP", 1);
+  ASSERT_EQ(rc, 0);
+
+  const char *path = oops_log_get_disk_sink_path();
+  ASSERT_TRUE(path != NULL);
+  ASSERT_TRUE(strlen(path) > 0);
+
+  /* Write logs while disk sink is active */
+  oops_klog("DISK", "first disk telemetry record");
+  oops_kprintf("DISK", "number=%d", 12345);
+
+  /* Verify file exists and has content */
+  ASSERT_EQ(oops_fs_exists(path), 1);
+  ASSERT_TRUE(oops_fs_file_size(path) > 0);
+
+  void *data = NULL;
+  size_t size = 0;
+  ASSERT_EQ(oops_fs_read_all(path, &data, &size), 0);
+  ASSERT_TRUE(size > 0);
+  ASSERT_TRUE(data != NULL);
+  oops_fs_free_data(data);
+
+  char path_copy[256];
+  snprintf(path_copy, sizeof(path_copy), "%s", path);
+  oops_log_close_disk_sink();
+  ASSERT_TRUE(oops_log_get_disk_sink_path() == NULL);
+  (void)oops_fs_unlink(path_copy);
+}
+
 void run_unit_tests_system(void) {
   TEST_SUITE_BEGIN("System & User Services");
   RUN_TEST(test_system_info_query);
@@ -159,4 +192,5 @@ void run_unit_tests_system(void) {
   RUN_TEST(test_system_services_and_multiuser);
   RUN_TEST(test_system_pltauth_check);
   RUN_TEST(test_system_klog);
+  RUN_TEST(test_system_disk_sink);
 }

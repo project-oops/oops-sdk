@@ -27,6 +27,7 @@ typedef struct heap_block_header {
   uint32_t class_idx;
   size_t payload_size;
   size_t total_size;
+  void *mmap_base;
 } heap_block_header_t;
 
 typedef struct free_chunk {
@@ -171,6 +172,7 @@ void *oops_malloc(size_t size) {
   hdr->class_idx = 0xFF; /* Direct mmap marker */
   hdr->payload_size = size;
   hdr->total_size = page_aligned;
+  hdr->mmap_base = block;
 
   s_stats.current_allocated_bytes += size;
   if (s_stats.current_allocated_bytes > s_stats.peak_allocated_bytes) {
@@ -180,6 +182,51 @@ void *oops_malloc(size_t size) {
 
   heap_release();
   return (void *)(block + sizeof(heap_block_header_t));
+}
+
+void *oops_aligned_alloc(size_t alignment, size_t size) {
+  if (size == 0 || alignment == 0) {
+    return NULL;
+  }
+  /* Alignment must be a power of two */
+  if ((alignment & (alignment - 1)) != 0) {
+    return NULL;
+  }
+  /* Size must be an integral multiple of alignment (C17 §7.22.3.1) */
+  if ((size % alignment) != 0) {
+    return NULL;
+  }
+  if (alignment < 16) {
+    alignment = 16;
+  }
+
+  size_t total_needed = size + alignment + sizeof(heap_block_header_t);
+  size_t page_aligned = (total_needed + OOPS_PAGE_SIZE - 1) & ~(OOPS_PAGE_SIZE - 1);
+
+  uint8_t *block = (uint8_t *)sys_vm_alloc(page_aligned);
+  if (block == NULL) {
+    return NULL;
+  }
+
+  uintptr_t min_payload = (uintptr_t)block + sizeof(heap_block_header_t);
+  uintptr_t aligned_addr = (min_payload + (alignment - 1)) & ~(alignment - 1);
+
+  heap_block_header_t *hdr = (heap_block_header_t *)(aligned_addr - sizeof(heap_block_header_t));
+  hdr->magic = OOPS_HEAP_MAGIC;
+  hdr->class_idx = 0xFE; /* Aligned direct mmap marker */
+  hdr->payload_size = size;
+  hdr->total_size = page_aligned;
+  hdr->mmap_base = block;
+
+  heap_acquire();
+  s_stats.current_allocated_bytes += size;
+  if (s_stats.current_allocated_bytes > s_stats.peak_allocated_bytes) {
+    s_stats.peak_allocated_bytes = s_stats.current_allocated_bytes;
+  }
+  s_stats.total_alloc_count++;
+  heap_release();
+
+  return (void *)aligned_addr;
 }
 
 void oops_free(void *ptr) {
@@ -207,11 +254,12 @@ void oops_free(void *ptr) {
     free_chunk_t *node = (free_chunk_t *)ptr;
     node->next = s_freelists[hdr->class_idx];
     s_freelists[hdr->class_idx] = node;
-  } else if (hdr->class_idx == 0xFF) {
-    /* Unmap direct large allocation */
+  } else if (hdr->class_idx == 0xFF || hdr->class_idx == 0xFE) {
+    /* Unmap direct large or aligned allocation */
     hdr->magic = 0;
+    void *mmap_base = hdr->mmap_base ? hdr->mmap_base : (void *)hdr;
     size_t total_sz = hdr->total_size;
-    sys_vm_free((void *)hdr, total_sz);
+    sys_vm_free(mmap_base, total_sz);
   }
 
   heap_release();

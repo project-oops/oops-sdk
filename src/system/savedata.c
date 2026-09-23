@@ -143,6 +143,7 @@ int oops_savedata_mount(const char *dir_name, oops_savedata_mode_t mode,
 
   char slot_path[256];
 #ifndef OOPS_HOST_BUILD
+  (void)oops_system_escape_sandbox();
   if (oops_fs_exists("/data")) {
     oops_snprintf(slot_path, sizeof(slot_path), "/data/savedata/%s/%s", app_id, dir_name);
   } else {

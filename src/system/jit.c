@@ -90,7 +90,7 @@ int oops_jit_flush_icache(const void *addr, size_t size) {
 
 #else
 
-/* Target implementation: PS5 freestanding runtime */
+/* Target implementation: Prospero freestanding runtime */
 #include "oops/syscall.h"
 
 #define JIT_TARGET_PAGE_SIZE 0x4000UL /* 16 KB pages */

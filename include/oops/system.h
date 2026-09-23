@@ -68,6 +68,32 @@ void oops_kprintf_level(oops_log_level_t level, const char *tag, const char *fmt
 
 const char *oops_test_get_last_klog(void);
 
+/**
+ * Enable an unbuffered crash-resilient disk sink for oops_klog / oops_log.
+ *
+ * Probes candidate storage locations (USB storage /mnt/usb0, /mnt/usb1, then
+ * internal persistent /data/<app_name>) and opens unbuffered write streams.
+ * Every subsequent oops_klog / oops_log call is written immediately via direct
+ * syscall so that telemetry survives an unhandled kernel fault or GPU hang.
+ *
+ * app_name: Application identifier (NULL defaults to oops_log_get_app_id()).
+ * archive_timestamped: If non-zero, also writes an archived log-<timestamp>.txt.
+ *
+ * Returns: 0 on success, or negative error code if no writable sink is found.
+ */
+int oops_log_enable_disk_sink(const char *app_name, int archive_timestamped);
+
+/**
+ * Get the path of the currently active disk sink file.
+ * Returns NULL if disk sink is not enabled.
+ */
+const char *oops_log_get_disk_sink_path(void);
+
+/**
+ * Flush and close the active disk sink.
+ */
+void oops_log_close_disk_sink(void);
+
 /* Runtime dynamic linker symbol resolution probe (prevents 0xa0020101 PLT traps) */
 int oops_symbol_is_resolved(const void *fn_ptr);
 
