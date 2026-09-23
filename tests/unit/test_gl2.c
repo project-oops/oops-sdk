@@ -3136,6 +3136,23 @@ static void test_gl2_the_probes_control_flow_shaders_compile_and_run(void) {
     ASSERT_NEAR(o[1], 0.75f, 1e-6f);
     ASSERT_NEAR(o[2], 0.5f, 1e-6f);
 
+    /* **gl2-probe's `texture-cube` shader**, whose shape differs from the tests above: the
+     * direction arrives as a `varying vec3` rather than a literal, so the three components the
+     * face selection reads are interpolated registers. A vec3 varying is also the case where
+     * the parameter packing could hand over the wrong third component. */
+    {
+        const float hi[4][4] = {{1.0f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        compile_and_run(ctx, VS_ONE_VARYING,
+                        "uniform samplerCube sky;\n"
+                        "varying vec4 vin;\n"
+                        "void main() {\n"
+                        "  vec3 dir = vec3(vin.x, 0.0, 0.0);\n"
+                        "  gl_FragColor = textureCube(sky, dir);\n"
+                        "}\n",
+                        hi, o);
+        ASSERT_NEAR(o[2], 0.0f, 1e-6f); /* +X is face 0 */
+    }
+
     /* `^^` has no short-circuit in the language, so a right side that assigns is correct rather
      * than a problem - both sides always run and the mark always lands. */
     compile_and_run(ctx, VS_ONE_VARYING,
