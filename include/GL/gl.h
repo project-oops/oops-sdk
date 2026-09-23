@@ -2398,6 +2398,29 @@ void *oops_gl_get_proc_address(const char *name);
  * Replay executes the stream against the current context through the same executor display
  * lists use, so a capture cannot drift from a list. It returns the number of commands run,
  * which is the count in the header unless the stream was truncated. */
+/*
+ * **How much oops-gl writes to the kernel log.**
+ *
+ * `OOPS_GL_LOG_NORMAL` is the default and is what a title wants: bring-up, the hardware
+ * self-test, GL errors with the call that raised them, and anything that went wrong - the lines
+ * that are worth reading when something is broken.
+ *
+ * `OOPS_GL_LOG_FRAMES` adds the per-frame and per-submit counters: draw calls, flushes, the
+ * timings, the fence and timestamp, the canaries. They are how the blending fault and the
+ * sixteen-byte transaction were measured, so they are not going away - but a title submitting
+ * thirty times a frame writes thousands of lines a second through them, and that buries every
+ * message the title and the rest of the SDK have to make. Diagnostic tools ask for them;
+ * `gl1-probe` does. A title being played should not.
+ *
+ * `OOPS_GL_LOG_QUIET` silences even the bring-up lines. `OOPS_GL_LOG_ALL` is every level.
+ */
+#define OOPS_GL_LOG_QUIET   0
+#define OOPS_GL_LOG_NORMAL  1
+#define OOPS_GL_LOG_FRAMES  2
+#define OOPS_GL_LOG_ALL     3
+void oops_gl_set_log_level(int level);
+int oops_gl_get_log_level(void);
+
 /* **Draw into a linear colour target instead of the scanout buffers in place.**
  *
  * The scanout path draws a frame where it will be shown, in the display's 64KB_R_X swizzle; the

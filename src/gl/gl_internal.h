@@ -3672,6 +3672,9 @@ static inline uint32_t gl_blend_comb(GLenum equation) {
  * alpha state matches its colour state must not set the bit, because doing so hands green an
  * equation GL never asked it to use - invisible only while the two equations agree.
  */
+/* Set by `oops_gl_set_log_level`; see GL/gl.h for what each level covers. */
+extern int gl_log_level;
+
 static inline uint32_t gl_compute_cb_blend_control(const gl_context_t *ctx) {
     if (!ctx || !ctx->cap_blend) return 0u;
     /* A logic op replaces blending, so the blender is left off and CB_COLOR_CONTROL's ROP3

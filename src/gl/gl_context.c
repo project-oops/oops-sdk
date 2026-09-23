@@ -19,6 +19,7 @@ static uint8_t s_host_stencil[1920 * 1080];
 static uint32_t s_host_front[1920 * 1080];
 static inline __attribute__((unused)) void gl_klog_line(const char *msg) { (void)msg; }
 static inline __attribute__((unused)) void gl_klog_val(const char *tag, uint64_t val) { (void)tag; (void)val; }
+int gl_log_level = OOPS_GL_LOG_NORMAL; /* host build keeps the setter honest, and logs nothing */
 #else
 #include "oops/syscall.h"
 #include "oops/time.h" /* the submit is timed - see hw_flush_ns */
@@ -30,6 +31,14 @@ __attribute__((weak)) int sceAgcDriverSubmitDcb(const oops_agc_dcb_desc *desc);
 __attribute__((weak)) int sceAgcDriverCreateQueue(uint32_t type, void *queue_out, uint32_t flags);
 
 #ifndef OOPS_HOST_BUILD
+
+/* **How much of itself this library writes to the kernel log**, set by
+ * `oops_gl_set_log_level` and documented there. The per-frame counters were unconditional and a
+ * title submitting thirty times a frame buried everything else it and the SDK had to say - which
+ * is the opposite of what a log is for. `gl_klog_line` and `gl_klog_val` stay unguarded, because
+ * the things that call them at level 1 are the things worth reading; it is the per-frame and
+ * per-submit blocks that ask before they speak. */
+int gl_log_level = OOPS_GL_LOG_NORMAL;
 
 static void gl_klog_line(const char *msg) {
     char buf[160];
@@ -71,6 +80,13 @@ static void gl_klog_val(const char *tag, uint64_t val) {
 #endif
 
 /* One line in the kernel log, for the rest of the library. */
+void oops_gl_set_log_level(int level) {
+    gl_log_level = level < OOPS_GL_LOG_QUIET ? OOPS_GL_LOG_QUIET
+                 : (level > OOPS_GL_LOG_ALL ? OOPS_GL_LOG_ALL : level);
+}
+
+int oops_gl_get_log_level(void) { return gl_log_level; }
+
 /* **Keep the colour target linear instead of drawing the scanout buffers in place.**
  *
  * The scanout path is faster - it is the whole reason it exists, a frame drawn where it will be
@@ -479,7 +495,8 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
      * confirming it stays at zero and every submit logs**, which is exactly when the detail is
      * wanted and exactly when there is no flood to cause.
      */
-    if (ctx->hw_frames_confirmed % 60 == 0 || ctx->hw_frames_confirmed < 5) {
+    if (gl_log_level >= OOPS_GL_LOG_FRAMES &&
+        (ctx->hw_frames_confirmed % 60 == 0 || ctx->hw_frames_confirmed < 5)) {
         gl_klog_val("flush-words", (uint64_t)total_words);
         gl_klog_val("submit-rc", (uint64_t)(uint32_t)rc);
         gl_klog_val("fence-hit", (uint64_t)fence_hit);
@@ -1607,19 +1624,24 @@ void glSwapBuffers(void) {
          * Reported every flip rather than on the submit gate - there are only a handful of
          * flips a second when this number is the problem, which is exactly when it is worth
          * reading. */
-        gl_klog_val("flushes-this-frame", (uint64_t)ctx->hw_flushes);
-        /* **Microseconds waiting for the GPU this frame.** Against the frame's own duration this
-           says whether a slow frame is submits or this library's CPU work, which two rounds of
-           reasoning from the submit count alone got wrong. */
-        gl_klog_val("flush-us-this-frame", ctx->hw_flush_ns / 1000u);
-        /* And the draw path's own share, with the triangles behind it. Frame time minus
-           `flush-us` minus `draw-us` is what the program above this library spent. */
-        gl_klog_val("draw-us-this-frame", ctx->hw_draw_ns / 1000u);
-        gl_klog_val("draw-calls-this-frame", (uint64_t)ctx->hw_draw_calls);
-        /* Of the draw time above, how much went on rebuilding shader words that were usually
-           already right. */
-        gl_klog_val("patch-us-this-frame", ctx->hw_patch_ns / 1000u);
-        gl_klog_val("dcb-us-this-frame", ctx->hw_dcb_ns / 1000u);
+        /* **The counters are cleared whether or not they are printed**, so that turning the log
+           down changes what is written and never what is measured. Only the printing asks. */
+        const int gl_verbose = gl_log_level >= OOPS_GL_LOG_FRAMES;
+        if (gl_verbose) {
+            gl_klog_val("flushes-this-frame", (uint64_t)ctx->hw_flushes);
+            /* **Microseconds waiting for the GPU this frame.** Against the frame's own duration
+               this says whether a slow frame is submits or this library's CPU work, which two
+               rounds of reasoning from the submit count alone got wrong. */
+            gl_klog_val("flush-us-this-frame", ctx->hw_flush_ns / 1000u);
+            /* And the draw path's own share, with the triangles behind it. Frame time minus
+               `flush-us` minus `draw-us` is what the program above this library spent. */
+            gl_klog_val("draw-us-this-frame", ctx->hw_draw_ns / 1000u);
+            gl_klog_val("draw-calls-this-frame", (uint64_t)ctx->hw_draw_calls);
+            /* Of the draw time above, how much went on rebuilding shader words that were
+               usually already right. */
+            gl_klog_val("patch-us-this-frame", ctx->hw_patch_ns / 1000u);
+            gl_klog_val("dcb-us-this-frame", ctx->hw_dcb_ns / 1000u);
+        }
         ctx->hw_dcb_ns = 0u;
         ctx->hw_flush_ns = 0u;
         ctx->hw_draw_ns = 0u;
@@ -1651,7 +1673,7 @@ void glSwapBuffers(void) {
                 div /= 10u;
             }
             msg[n] = '\0';
-            gl_log_line(msg);
+            if (gl_verbose) gl_log_line(msg);
             ctx->hw_flush_site_n[i] = 0u;
         }
         if (ctx->hw_flush_unnamed) {

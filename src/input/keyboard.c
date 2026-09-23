@@ -56,8 +56,8 @@ __attribute__((weak)) int sceSysmoduleLoadModule(uint16_t id);
 #define OOPS_KEYBOARD_MAX_HANDLES 2
 
 /*
- * Verified 96-byte PS5 native hardware keyboard report layout
- * (from ps5-native-gamepad-input-research hardware measurements).
+ * Verified 96-byte Prospero native hardware keyboard report layout
+ * (from native-gamepad-input-research hardware measurements).
  */
 typedef struct {
   uint64_t timestamp_us;               /* 0x00: Native report timestamp */
@@ -157,6 +157,44 @@ static uint32_t decode_keys_array(const uint16_t *keys, int count) {
 
 static int is_usable_sample(const oops_kbd_hw_record_t *rec) {
   return (rec && rec->connected != 0 && rec->intercepted == 0);
+}
+
+/* See `oops_input_set_log_level` in oops/keyboard.h. */
+int s_input_log_level = OOPS_INPUT_LOG_QUIET;
+
+void oops_input_set_log_level(int level) {
+  s_input_log_level = level < OOPS_INPUT_LOG_QUIET ? OOPS_INPUT_LOG_QUIET
+                    : (level > OOPS_INPUT_LOG_EVENTS ? OOPS_INPUT_LOG_EVENTS : level);
+}
+
+int oops_input_get_log_level(void) { return s_input_log_level; }
+
+/*
+ * **One keypress is one event, however many handles saw it.**
+ *
+ * `sceKeyboardOpen` is called for index 0 and index 1 of the same user, because a user may have
+ * more than one keyboard. With one attached, index 1 opens anyway and mirrors index 0 - the log
+ * shows both succeeding with different handles - and the loop below then has two histories that
+ * transition together. Every press was therefore delivered twice.
+ *
+ * A title cannot tell those apart and would not want to. Neverball showed what it costs: its
+ * on-screen keyboard typed `YY` for one press of `Y`, and pressing Enter on Play activated the
+ * level select's OK and then the *next* screen's Back, so the menu appeared to bounce off
+ * itself. Nothing in the title was wrong and nothing in the log said so, because from above
+ * this the two presses are indistinguishable from someone pressing twice.
+ *
+ * Suppressing the repeat here rather than closing the second handle keeps the case it was opened
+ * for: two real keyboards still work, and pressing the same key on both at the same moment
+ * produces one event, which is the only answer that means anything.
+ */
+static int kbd_event_already_out(const oops_key_event_t *ev, unsigned int n, uint16_t usage,
+                                 uint8_t transition) {
+  for (unsigned int i = 0u; i < n; i++) {
+    if (ev[i].usage == usage && ev[i].transition == transition) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 int oops_keyboard_available(void) {
@@ -414,10 +452,12 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
     }
 
     const uint8_t mods = kbd_event_modifiers(&record);
+    const unsigned int n_before = n;
 
     for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
       const uint16_t was = s_kbd_event_keys[idx][k];
-      if (was != 0u && !kbd_usage_present(now, was)) {
+      if (was != 0u && !kbd_usage_present(now, was) &&
+          !kbd_event_already_out(out_events, n, was, (uint8_t)OOPS_KEY_UP)) {
         out_events[n].usage = was;
         out_events[n].transition = (uint8_t)OOPS_KEY_UP;
         out_events[n].modifiers = mods;
@@ -427,12 +467,26 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
     }
     for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
       const uint16_t is = now[k];
-      if (is != 0u && !kbd_usage_present(s_kbd_event_keys[idx], is)) {
+      if (is != 0u && !kbd_usage_present(s_kbd_event_keys[idx], is) &&
+          !kbd_event_already_out(out_events, n, is, (uint8_t)OOPS_KEY_DOWN)) {
         out_events[n].usage = is;
         out_events[n].transition = (uint8_t)OOPS_KEY_DOWN;
         out_events[n].modifiers = mods;
         out_events[n].timestamp = 0u;
         n++;
+      }
+    }
+
+    /* **What the title is about to be told**, at OOPS_INPUT_LOG_EVENTS and above. Off by
+       default: a held key is quiet but a typed sentence is two lines a character, and the
+       reason this exists is that a duplicated press is invisible from above the SDK and
+       indistinguishable, in a log, from someone pressing twice. */
+    if (s_input_log_level >= OOPS_INPUT_LOG_EVENTS) {
+      for (unsigned int e = n_before; e < n; e++) {
+        oops_kprintf("KBD", "event usage=0x%x %s mods=0x%x (handle idx %d)\n",
+                     (unsigned int)out_events[e].usage,
+                     out_events[e].transition == (uint8_t)OOPS_KEY_DOWN ? "down" : "up",
+                     (unsigned int)out_events[e].modifiers, idx);
       }
     }
 
