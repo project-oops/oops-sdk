@@ -1615,7 +1615,8 @@ void glSwapBuffers(void) {
     /* Flush hardware rendering before flipping */
     if (ctx->use_hardware && ctx->hw_frame_active) {
         gl_hw_flush(ctx);
-        if (ctx->frame_count % 60 == 0 || ctx->frame_count < 5) {
+        if (gl_log_level >= (int)OOPS_LOG_DEBUG &&
+            (ctx->frame_count % 60 == 0 || ctx->frame_count < 5)) {
             (void)sys_call(SYS_klog, 7, (long)"[OOPS-GL] AGC hardware frame rendered and flipped\n", 0, 0, 0, 0);
         }
         /* **What the displayed frame actually cost**, reported here because this is the only

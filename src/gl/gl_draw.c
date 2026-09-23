@@ -4,7 +4,8 @@
 
 #include "gl_internal.h"
 #ifndef OOPS_HOST_BUILD
-#include "oops/time.h" /* the draw path is timed - see hw_draw_ns */
+#include "oops/time.h"   /* the draw path is timed - see hw_draw_ns */
+#include "oops/system.h" /* oops_log_level_t, for gating the per-draw trace */
 #else
 /* The desktop harness's geometry dump writes through stdio; the payload has neither. */
 #include <stdio.h>
@@ -4169,7 +4170,18 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                    all the same texture and all correct, and the frame has four hundred and
                    fifty-one - so the prefix answered for the surface that is fine and said
                    nothing about the rest. */
-                if (ctx->frame_count >= 3u && drew < 512u) {
+                /* **At OOPS_LOG_TRACE, because this is a syscall per draw call.**
+                 *
+                 * The cap of 512 bounds how many lines a frame writes and was taken for a
+                 * bound on the cost. It is not one: Neverball issues around twenty thousand
+                 * draws a frame, so five hundred kernel-log syscalls land in every one of
+                 * them, and the game advanced about a fifth of a second while several seconds
+                 * of wall clock went past. From the sofa that is a frozen game, and it was
+                 * reported as one - there was no fault, no GL error and no stalled fence,
+                 * because nothing was wrong except that the library was writing a log nobody
+                 * had asked for. */
+                if (gl_log_level >= (int)OOPS_LOG_TRACE && ctx->frame_count >= 3u &&
+                    drew < 512u) {
                     drew++;
                     char m[200];
                     size_t n = 0;
