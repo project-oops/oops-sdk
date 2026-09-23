@@ -5,6 +5,9 @@
 #include "gl_internal.h"
 #include "gl_procs.h"
 #include "oops/agc.h"
+/* Outside the host/target split below: the suspend drain is registered on both, and the host
+   build needs the declaration as much as the target does. */
+#include "oops/system.h"
 
 gl_context_t *g_gl_ctx = NULL;
 
@@ -787,6 +790,10 @@ static void gl_tex_unit_init(gl_tex_unit_t *tu) {
     tu->texgen_eye_plane[1][1] = 1.0f;
 }
 
+/* Defined beside glFinish, which is what it calls; declared here because the context registers
+   it the moment it exists. */
+static void gl_suspend_drain(void);
+
 void *glContextCreate(struct oops_display *disp) {
     if (!disp) return NULL;
 
@@ -1407,6 +1414,10 @@ void *glContextCreate(struct oops_display *disp) {
 #endif
 
     g_gl_ctx = ctx;
+    /* Offer the suspend path a way to quiesce this context - see gl_suspend_drain. Registered
+       here rather than asked for by a title, so every renderer that makes a context is
+       suspendable without knowing the sequence exists. */
+    oops_system_set_suspend_drain(gl_suspend_drain);
     return (void *)ctx;
 }
 
@@ -1670,6 +1681,20 @@ void glFlush(void) {
 
 void glFinish(void) {
     glFlush();
+}
+
+/* **What oops-gl offers the suspend path**, registered at context creation.
+ *
+ * `glFlush` submits the open frame and then waits on the end-of-pipe fence - bounded, sleeping,
+ * the same wait every other submit here uses - so on return nothing of this context's is still
+ * in flight. That is exactly the quiescence the kernel's suspend point wants, and the reason it
+ * is worth offering: obSCEne could name the GPU suspend point but not test, from inside a probe,
+ * whether an unretired submission is what holds a process out of suspend
+ * (`gpu-drain-required / needs-live-suspend`). This is the arm that settles it. */
+static void gl_suspend_drain(void) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    glFinish();
 }
 
 void glGetCanary(GLuint *vs_canary, GLuint *ps_canary) {

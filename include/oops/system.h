@@ -225,6 +225,36 @@ __attribute__((noreturn)) void oops_system_park_until_closed(void);
 void oops_system_install_close_handler(void);
 int  oops_system_close_requested(void);
 
+/*
+ * Be suspendable, which is a different thing from being closable.
+ *
+ * After the Close signal above - and for rest mode, without any signal at all - the kernel
+ * suspends the process asynchronously and allows it **100 seconds to reach a suspend point**.
+ * A title that does not is killed with `0xa0d0c00f`,
+ * `CPU_FAULT_SUSPENDPOINT_TIMEOUT_IN_SUSPEND_ASYNC`. Handling the signal perfectly does not
+ * save a title from this; they are two mechanisms and both want servicing.
+ *
+ * `oops_system_pump_events()` empties the system event queue and returns how many it took. Call
+ * it **every frame**, not only when closing: a queue serviced only at the end is a queue that
+ * was ignored until then. It reads nothing out of the events - see the note in `system.c` for
+ * exactly which part of that API is measured and which single assumption is left.
+ *
+ * `oops_system_prepare_for_suspend()` is the whole sequence: pump the queue, then drain whatever
+ * the renderer has in flight, leaving a quiescent process for the kernel to freeze. Call it once
+ * when a close or suspend is seen.
+ *
+ * `oops_system_set_suspend_drain()` is how a renderer offers its drain. oops-gl registers one
+ * that submits and waits on its end-of-pipe fence; a title using no renderer needs none, and the
+ * sequence then reduces to the pump.
+ *
+ * None of this uses `sceSystemServiceDeclareReadyForSuspend` or the `sceApplication` lifecycle.
+ * Both were measured absent to a homebrew title - the first ENOENT at every path, the second
+ * gated on an SDK version this does not claim - so neither is referenced even weakly.
+ */
+int  oops_system_pump_events(void);
+void oops_system_prepare_for_suspend(void);
+void oops_system_set_suspend_drain(void (*drain)(void));
+
 #ifdef __cplusplus
 }
 #endif
