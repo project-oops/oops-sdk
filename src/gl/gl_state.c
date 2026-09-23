@@ -3390,10 +3390,17 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
            not a preselected set. The default texture is skipped because it is repacked on every
            bind and ate the whole window when it was not. */
         static uint32_t told;
-        static uint32_t last_id;
-        if (told < 24u && tex->id > 1u && tex->id != last_id) {
+        /* **Every real image, keyed on the size rather than the name.** Two earlier versions of
+           this filter each spent the whole window before anything interesting loaded: first on
+           the default texture, which is repacked on every bind, and then on skipping a repeat of
+           the last id - which turned out to discard every picture this port has, because its
+           loader uploads a 1x1 placeholder and immediately re-specifies the same texture at its
+           true size. The call worth seeing is always the one straight after the one that got
+           printed. Eighty-four lines of `0x1 0x1` from a title that plainly draws pictures was
+           what said so. A hundred and twenty-eight of these is nothing next to the six thousand
+           lines a frame of this port already emits. */
+        if (told < 128u && tex->id > 1u && (w > 1u || h > 1u)) {
             told++;
-            last_id = tex->id;
             /* Two lines. The first is the descriptor as packed; the second is what the texels
                actually are in GPU memory, which is the half of the question the descriptor
                cannot answer.

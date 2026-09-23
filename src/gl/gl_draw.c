@@ -5,6 +5,10 @@
 #include "gl_internal.h"
 #ifndef OOPS_HOST_BUILD
 #include "oops/time.h" /* the draw path is timed - see hw_draw_ns */
+#else
+/* The desktop harness's geometry dump writes through stdio; the payload has neither. */
+#include <stdio.h>
+#include <stdlib.h>
 #endif
 
 /* -------------------------------------------------------------------------
@@ -3153,6 +3157,39 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                                      const gl_vertex_t *pv) {
     if (!ctx || !v0 || !v1 || !v2) return;
 
+#ifdef OOPS_HOST_BUILD
+    /* **The geometry, which is the one property of the port's sky no probe has reproduced.**
+     *
+     * Every check written against that surface draws a single full-screen quad with coordinates
+     * running 0 to 1. The port draws a tessellated dome - thousands of triangles carrying their
+     * own coordinates - and the fault appears at column granularity, which is a property of how
+     * triangles land on pixels rather than of any state. This prints the triangles so the shape
+     * of them can be compared against the shape of the artifact.
+     *
+     * Host only, and behind an environment variable, because it belongs to the desktop harness
+     * where the same draws can be watched with a filesystem and a debugger. `OOPS_GL_DUMP_TRIS`
+     * is how many to print. */
+    {
+        static long tris = -1;
+        if (tris < 0) {
+            const char *e = getenv("OOPS_GL_DUMP_TRIS");
+            tris = (e && *e) ? strtol(e, (char **)0, 10) : 0;
+        }
+        if (tris > 0) {
+            tris--;
+            fprintf(stderr,
+                    "tri v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f) "
+                    "v2=(%.3f,%.3f,%.3f,%.3f) tc0=(%.4f,%.4f) tc1=(%.4f,%.4f) tc2=(%.4f,%.4f)\n",
+                    (double)v0->x, (double)v0->y, (double)v0->z, (double)v0->w,
+                    (double)v1->x, (double)v1->y, (double)v1->z, (double)v1->w,
+                    (double)v2->x, (double)v2->y, (double)v2->z, (double)v2->w,
+                    (double)v0->tc[1][0], (double)v0->tc[1][1],
+                    (double)v1->tc[1][0], (double)v1->tc[1][1],
+                    (double)v2->tc[1][0], (double)v2->tc[1][1]);
+        }
+    }
+#endif
+
     gl_update_mvp(ctx);
 
     /* **A GL 2.0 program replaces this stage entirely** (since 2026-09-21).
@@ -3951,6 +3988,93 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                  * the slot they were given; this one gets its own. */
                 ctx->hw_desc_slot++;
             }
+#ifndef OOPS_HOST_BUILD
+            /* **Which texture each draw actually bound, and into which slot.**
+             *
+             * The port being chased renders one surface as a fine mosaic of two images while its
+             * texels and descriptors are provably correct in memory - so the question left is
+             * not what a texture contains but which one a given draw reached for. Nothing has
+             * ever reported that: the census counts draws and the dumps describe textures, and
+             * the mapping between them has been invisible.
+             *
+             * Sixty-four draws from the fourth frame, which is after loading has settled and
+             * inside a frame that is drawing the scene rather than building it. */
+            {
+                static uint32_t drew;
+                /* **A whole frame, not a prefix of one.** Two hundred and fifty-six draws were
+                   all the same texture and all correct, and the frame has four hundred and
+                   fifty-one - so the prefix answered for the surface that is fine and said
+                   nothing about the rest. */
+                if (ctx->frame_count >= 3u && drew < 512u) {
+                    drew++;
+                    char m[200];
+                    size_t n = 0;
+                    /* **The environment and the colour as well as the texture.** The first run of
+                       this reported sixty-four draws that all bound the right texture into the
+                       right slot, which ruled out the binding and left the question of what is
+                       then done with the texel: a texture holding (0,0,25) cannot be modulated
+                       into anything bright, so an environment that adds or replaces is a
+                       different story from one that multiplies. */
+                    /* **The unit that is sampled, not unit zero.** Reading unit 0 unconditionally
+                       reported GL_COMBINE with a shadow formula for every draw, which looked
+                       like a fault and is not one: a port using two stages leaves unit 0
+                       disabled with a staged environment on it and puts the real texture on unit
+                       1, so unit 0's mode describes a unit nothing samples. `gl_hw_base_unit`
+                       is what the shader patch itself asks, so it is what this has to ask. */
+                    const GLuint bu = gl_hw_base_unit(ctx);
+                    const char *lead = "draw tex/w/h/slot/unit/env/col/blend";
+                    while (lead[n] && n < 48u) { m[n] = lead[n]; n++; }
+                    n = gl_msg_hex(m, sizeof(m), n, eff_obj->id);
+                    n = gl_msg_hex(m, sizeof(m), n, (uint32_t)eff_obj->width);
+                    n = gl_msg_hex(m, sizeof(m), n, (uint32_t)eff_obj->height);
+                    n = gl_msg_hex(m, sizeof(m), n, ctx->hw_desc_slot);
+                    n = gl_msg_hex(m, sizeof(m), n, bu);
+                    n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->tex_unit[bu].tex_env_mode);
+                    {
+                        /* The primary colour the combine will use, packed as eight bits a
+                           channel so one word carries it. */
+                        uint32_t c = 0u;
+                        for (int k = 0; k < 4; k++) {
+                            float v = ctx->cur_color[k];
+                            if (v < 0.0f) v = 0.0f;
+                            if (v > 1.0f) v = 1.0f;
+                            c = (c << 8) | (uint32_t)(v * 255.0f);
+                        }
+                        n = gl_msg_hex(m, sizeof(m), n, c);
+                    }
+                    /* Blending, because the fault was described as something translucent laid
+                       over what is behind it, and a blended draw is the only kind that can be. */
+                    n = gl_msg_hex(m, sizeof(m), n, ctx->cap_blend ? 1u : 0u);
+                    m[n] = 0;
+                    gl_log_line(m);
+
+                    /* **And what GL_COMBINE was actually asked for**, which is the whole of what
+                       happens to the texel once it has been correctly fetched. The surface being
+                       chased draws every one of its triangles through this path, and no check
+                       anywhere has verified a combine on hardware - they all use GL_REPLACE or
+                       GL_MODULATE. A texel of (0,0,25) cannot be modulated into anything bright,
+                       but a combine that adds, interpolates or scales by four can take it
+                       anywhere, so these are the numbers that decide whether the colour on the
+                       panel is explicable at all. */
+                    if (ctx->tex_unit[bu].tex_env_mode == GL_COMBINE) {
+                        const gl_combine_t *cb = &ctx->tex_unit[bu].combine;
+                        size_t k = 0;
+                        const char *cl = "draw comb rgb/src0-2/op0-2/scale";
+                        while (cl[k] && k < 40u) { m[k] = cl[k]; k++; }
+                        k = gl_msg_hex(m, sizeof(m), k, (uint32_t)cb->mode_rgb);
+                        for (int s = 0; s < 3; s++) {
+                            k = gl_msg_hex(m, sizeof(m), k, (uint32_t)cb->source_rgb[s]);
+                        }
+                        for (int s = 0; s < 3; s++) {
+                            k = gl_msg_hex(m, sizeof(m), k, (uint32_t)cb->operand_rgb[s]);
+                        }
+                        k = gl_msg_hex(m, sizeof(m), k, (uint32_t)(cb->scale_rgb * 16.0f));
+                        m[k] = 0;
+                        gl_log_line(m);
+                    }
+                }
+            }
+#endif
         }
 
         /* **The GL 2.0 uniform ring, on the descriptors' own rule.** A uniform block is per
