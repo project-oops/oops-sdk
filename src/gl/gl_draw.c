@@ -14,9 +14,17 @@
 /* -------------------------------------------------------------------------
  * What this subset will draw, and how it refuses the rest
  *
- * Everything here reaches the hardware as triangles, so the four modes that triangulate are
- * the four that work. GL_POINTS, GL_LINES, GL_LINE_STRIP, GL_LINE_LOOP, GL_QUAD_STRIP and
- * GL_POLYGON are declared in <GL/gl.h> and are not implemented.
+ * Everything here reaches the hardware as triangles, and **every mode GL 1.x has now gets
+ * there**: GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN, GL_QUADS, GL_QUAD_STRIP and
+ * GL_POLYGON triangulate directly, and GL_POINTS, GL_LINES, GL_LINE_STRIP and GL_LINE_LOOP are
+ * expanded into triangles before they get here (see the expansion above glEnd, and
+ * `gl_draw_point_square`).
+ *
+ * **This paragraph said the opposite until 2026-09-23**, and had been wrong since 2026-09-17,
+ * when points and lines stopped being refused. A comment that names what is missing is the most
+ * useful kind to write and the easiest kind to leave behind: a porter reading it would have
+ * hand-triangulated primitives that already worked. The same rot had left `gl_PointCoord`
+ * refused for "point sprites are not implemented" three days after they were.
  *
  * **That is now a measured refusal rather than an unmeasured one.** obSCEne's
  * `166-agc/primitive-draw-point-line` submitted both on retail hardware across four
@@ -1907,11 +1915,15 @@ void glEnd(void) {
  *     glVertex2(x1, y1); glVertex2(x2, y1); glVertex2(x2, y2); glVertex2(x1, y2);
  *     glEnd();
  *
- * **GL_POLYGON is not a primitive this accepts, and GL_QUADS is.** For four vertices those two
- * are not merely similar: GL_POLYGON triangulates a convex polygon as a fan from vertex 0, and
- * GL_QUADS splits a quad into (0,1,2) and (0,2,3), which for n=4 is the same fan. A rectangle is
- * always convex, so the substitution is exact rather than an approximation - and the vertex
- * order above is the winding the specification gives, so face culling sees what it should.
+ * **GL_QUADS is used instead of GL_POLYGON, and for four vertices the two are identical.**
+ * GL_POLYGON triangulates a convex polygon as a fan from vertex 0, and GL_QUADS splits a quad
+ * into (0,1,2) and (0,2,3), which for n=4 is that same fan. A rectangle is always convex, so the
+ * substitution is exact rather than an approximation - and the vertex order above is the winding
+ * the specification gives, so face culling sees what it should.
+ *
+ * This said GL_POLYGON was "not a primitive this accepts" until 2026-09-23. It is accepted, and
+ * has been; the substitution stands on the geometry being the same, which does not need the
+ * other claim to be true.
  *
  * Written on top of glBegin/glVertex/glEnd rather than reaching into the immediate-mode buffer,
  * which is what makes it compile into a display list correctly: those three capture, so a
