@@ -96,6 +96,28 @@ Nothing has shipped yet - this is the initial commit.
 
 ### Added
 
+- **Square-matrix arithmetic, all of it** (2026-09-23): `m * m`, a matrix with a scalar either
+  way round, two matrices componentwise, and the built-ins `matrixCompMult`, `transpose` and
+  `outerProduct`. Only `m * v` and `v * m` were generated before.
+
+  **None of it needed an instruction that was not already here**, and column-major storage is
+  why. `m * m` is n of the matrix-vector products, one per column of the right operand, because
+  a column of the right operand is already a run of n registers and needs no gather - which is
+  the same shape `glsl_exec.c` computes, so the two paths agree by construction rather than by
+  arithmetic that happens to match. Everything else falls through to the componentwise path that
+  was there all along; the change was to stop refusing it.
+
+  `[]` now indexes a matrix's column and a vector's component as well as an array's element -
+  the same arithmetic at three strides, and `m[c][r]` is two of them composed. The base is
+  evaluated rather than looked up, so a computed matrix can be indexed and `m[1].x = …` is still
+  a place rather than a temporary.
+
+  What a matrix still cannot do is meet a vector that is not its width. `m4 * v3` used to fall
+  into the same refusal as `m * m`; now it has its own, because with the blanket refusal gone it
+  would otherwise fall through to componentwise and compute something that is not a product at
+  all. `inverse` and `determinant` remain refused - both are real arithmetic rather than a
+  shuffle.
+
 - **An early `return` ends the function and nothing else** (2026-09-23). A guard clause -
   `if (x > 1.0) return 0.0;` and then the real body - is the shape, and it was refused because
   the mask would have to be carried through every statement after it. That mask is the one

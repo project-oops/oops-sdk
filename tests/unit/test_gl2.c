@@ -3046,6 +3046,46 @@ static void test_gl2_the_probes_control_flow_shaders_compile_and_run(void) {
         ASSERT_EQ(compile_and_run(ctx, VS_ONE_VARYING, FS_DISCARD_LOOP, kill, o), GL_FALSE);
     }
 
+    /* **`early-return` and `local-arrays`, the probe's own sources.** Both features are new
+     * enough that the software reference running them says nothing about the compiled path -
+     * which is exactly how `control-flow` and `short-circuit` sat as `0x0502` refusals on
+     * hardware while the host reported them passing. */
+    {
+        static const char *const FS_EARLY =
+            "varying vec4 vin;\n"
+            "float pick(float a) {\n"
+            "  if (a < 0.5) { return 0.25; }\n"
+            "  return 1.0;\n"
+            "}\n"
+            "void main() {\n"
+            "  float r = pick(vin.x);\n"
+            "  gl_FragColor = vec4(r, 1.0, 0.0, 1.0);\n"
+            "}\n";
+        const float lo[4][4] = {{0.0f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        const float hi[4][4] = {{1.0f, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+        compile_and_run(ctx, VS_ONE_VARYING, FS_EARLY, lo, o);
+        ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+        ASSERT_NEAR(o[1], 1.0f, 1e-6f); /* the caller's green, after the call */
+        compile_and_run(ctx, VS_ONE_VARYING, FS_EARLY, hi, o);
+        ASSERT_NEAR(o[0], 1.0f, 1e-6f);
+        ASSERT_NEAR(o[1], 1.0f, 1e-6f);
+    }
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float w[4];\n"
+                    "  for (int i = 0; i < 4; i++) { w[i] = float(i) + 1.0; }\n"
+                    "  float total = 0.0;\n"
+                    "  for (int i = 0; i < 4; i++) { total += w[i]; }\n"
+                    "  vec3 v[2];\n"
+                    "  v[0] = vec3(0.0, 0.25, 0.5);\n"
+                    "  v[1] = vec3(0.75, 1.0, 0.0);\n"
+                    "  gl_FragColor = vec4(total * 0.1, v[1].x, v[0].z, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, 1e-6f);   /* 1+2+3+4 = 10 */
+    ASSERT_NEAR(o[1], 0.75f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.5f, 1e-6f);
+
     /* `^^` has no short-circuit in the language, so a right side that assigns is correct rather
      * than a problem - both sides always run and the mark always lands. */
     compile_and_run(ctx, VS_ONE_VARYING,
@@ -3940,6 +3980,114 @@ static void test_gl2_user_functions_are_inlined(void) {
      * this shader before it reaches the built-in table. The front end does not get that far -
      * `float min(float, float)` fails to compile, ahead of any of this - so the case cannot
      * reach the back end and a test of it here would be testing the front end by proxy. */
+
+    glContextDestroy(ctx);
+}
+
+/* **Matrix arithmetic, where a wrong answer is still a matrix.**
+ *
+ * Every value below is chosen so that the transposed result, the componentwise result and the
+ * product are three different numbers. A matrix test built on symmetric operands passes with
+ * the rows and columns swapped, which is the one mistake column-major storage invites.
+ */
+static void test_gl2_matrix_by_matrix_and_by_scalar(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **`m * m` is a product and not componentwise.** `a` is a shear and `b` a scale, so
+     * `a * b` and `b * a` differ - which is what says the columns were walked in the right
+     * order rather than merely all multiplied.
+     *
+     * Column-major: `mat2(1, 2, 0, 1)` is col0 = (1,2), col1 = (0,1).
+     *   a = [[1,0],[2,1]] as (row, col);  b = [[3,0],[0,4]]
+     *   a*b: col0 = a * (3,0) = (3, 6);   col1 = a * (0,4) = (0, 4)
+     *   b*a: col0 = b * (1,2) = (3, 8);   col1 = b * (0,1) = (0, 4)
+     * The (1,0) element is 6 one way and 8 the other. Componentwise would give 3. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  mat2 a = mat2(1.0, 2.0, 0.0, 1.0);\n"
+                    "  mat2 b = mat2(3.0, 0.0, 0.0, 4.0);\n"
+                    "  mat2 ab = a * b;\n"
+                    "  mat2 ba = b * a;\n"
+                    "  gl_FragColor = vec4(ab[0][1] * 0.1, ba[0][1] * 0.1, ab[1][1] * 0.1, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.6f, 1e-6f); /* a*b at (1,0) */
+    ASSERT_NEAR(o[1], 0.8f, 1e-6f); /* b*a at (1,0) - the other product */
+    ASSERT_NEAR(o[2], 0.4f, 1e-6f);
+
+    /* `mat3 * mat3`, so the size is not baked in anywhere. The identity times anything is that
+     * thing, and a scale down the diagonal multiplies each column by its own factor. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  mat3 s = mat3(2.0, 0.0, 0.0,  0.0, 3.0, 0.0,  0.0, 0.0, 4.0);\n"
+                    "  mat3 t = mat3(1.0, 1.0, 1.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0);\n"
+                    "  mat3 st = s * t;\n"
+                    "  gl_FragColor = vec4(st[0][0] * 0.1, st[0][1] * 0.1, st[0][2] * 0.1, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    /* col0 of t is (1,1,1); s * that is (2,3,4). */
+    ASSERT_NEAR(o[0], 0.2f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.3f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.4f, 1e-6f);
+
+    /* **A matrix with a scalar is componentwise and broadcast**, both ways round, and a matrix
+     * with a matrix under `+` is componentwise too - which is why `*` had to be special. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  mat2 a = mat2(1.0, 2.0, 3.0, 4.0);\n"
+                    "  mat2 h = a * 0.5;\n"
+                    "  mat2 k = 2.0 * a;\n"
+                    "  mat2 s = a + a;\n"
+                    "  gl_FragColor = vec4(h[1][1] * 0.1, k[0][1] * 0.1, s[1][0] * 0.1, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.2f, 1e-6f); /* 4 * 0.5 */
+    ASSERT_NEAR(o[1], 0.4f, 1e-6f); /* 2 * 2 */
+    ASSERT_NEAR(o[2], 0.6f, 1e-6f); /* 3 + 3 */
+
+    /* `matrixCompMult` is the componentwise product GLSL spells out precisely because `*` does
+     * not mean it - so it must differ from `a * b` on the same operands. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  mat2 a = mat2(1.0, 2.0, 0.0, 1.0);\n"
+                    "  mat2 b = mat2(3.0, 0.0, 0.0, 4.0);\n"
+                    "  mat2 c = matrixCompMult(a, b);\n"
+                    "  mat2 p = a * b;\n"
+                    "  gl_FragColor = vec4(c[0][1] * 0.1, p[0][1] * 0.1, c[0][0] * 0.1, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.0f, 1e-6f); /* 2 * 0 componentwise */
+    ASSERT_NEAR(o[1], 0.6f, 1e-6f); /* 6 as a product */
+    ASSERT_NEAR(o[2], 0.3f, 1e-6f); /* 1 * 3 */
+
+    /* `transpose` swaps the indices, so an asymmetric matrix is the only useful witness.
+     * **1.20, which is where the language put it** - the front end gates it and is right to. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat2 a = mat2(1.0, 2.0, 3.0, 4.0);\n"
+                    "  mat2 t = transpose(a);\n"
+                    "  gl_FragColor = vec4(t[0][1] * 0.1, t[1][0] * 0.1, t[0][0] * 0.1, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.3f, 1e-6f); /* was a[1][0] */
+    ASSERT_NEAR(o[1], 0.2f, 1e-6f); /* was a[0][1] */
+    ASSERT_NEAR(o[2], 0.1f, 1e-6f); /* the diagonal does not move */
+
+    /* `outerProduct(c, r)` puts `c` down the columns; the other order is the transpose of this
+     * and would still be a matrix, so the two off-diagonal elements are the test. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat2 m = outerProduct(vec2(1.0, 2.0), vec2(3.0, 5.0));\n"
+                    "  gl_FragColor = vec4(m[0][1] * 0.1, m[1][0] * 0.1, m[1][1] * 0.1, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.6f, 1e-6f); /* (col 0, row 1) = c[1] * r[0] = 2 * 3 */
+    ASSERT_NEAR(o[1], 0.5f, 1e-6f); /* (col 1, row 0) = c[0] * r[1] = 1 * 5 */
+    ASSERT_NEAR(o[2], 1.0f, 1e-6f); /* 2 * 5 */
 
     glContextDestroy(ctx);
 }
@@ -4971,6 +5119,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_integers_are_floats_kept_whole);
     RUN_TEST(test_gl2_front_facing_is_a_sign_not_a_flag);
     RUN_TEST(test_gl2_user_functions_are_inlined);
+    RUN_TEST(test_gl2_matrix_by_matrix_and_by_scalar);
     RUN_TEST(test_gl2_local_arrays_are_indexed_where_the_shader_is_compiled);
     RUN_TEST(test_gl2_arrays_refuse_what_a_register_file_cannot_do);
     RUN_TEST(test_gl2_an_early_return_ends_the_function_and_nothing_else);

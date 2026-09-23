@@ -55,6 +55,8 @@ arriving bit for bit, and its uniform block loading intact.
 **What a compiled fragment shader can do** is arithmetic on floats and integers, swizzle reads
 and writes, constructors, the built-in library, file-scope `const`s, uniforms, `texture2D`
 through up to two samplers, comparisons, `?:`, `if`/`else`, `discard`, **local arrays**,
+**the whole of square-matrix arithmetic** - `m * v`, `v * m`, `m * m`, matrix with scalar,
+componentwise, and `matrixCompMult`, `transpose` and `outerProduct` -
 user-defined functions - inlined, since there is no call instruction here, and with **early
 `return`** - and **`for` loops, including `break` and `continue`**.
 
@@ -204,7 +206,8 @@ part, so the quotient is computed from a reciprocal and then corrected, which is
 | A `void` function used for its side effects on globals | A `void` function **is** generated - `out` and `inout` parameters carry results back. What is not is one whose effect is to assign to a global |
 | `asin`, `acos`, `atan`, `refract` | No instruction on this part, and a polynomial of unmeasured accuracy is not written in their place. Each is refused **by name**, so you are told which one |
 | `textureCube`, `texture3D`, the `Proj` and shadow forms | Only `texture2D` is generated. The others are each a different lookup rather than the same one with a flag |
-| Matrix by matrix, matrix by scalar | `mat * vec` and `vec * mat` are generated at every square size, and they are different products - the second is the transpose's |
+| A matrix with a vector that is not its width | `m * v`, `v * m` and `m * m` are generated at every square size, as are a matrix with a scalar and two matrices componentwise. `m4 * v3` is none of those, and treating it as componentwise would compute something that is not a product at all |
+| `inverse`, `determinant` | `matrixCompMult`, `transpose` and `outerProduct` **are** generated. These two are not: both are real arithmetic rather than a shuffle, and neither has been written and measured here yet |
 | More than 16 floats of varyings, more than 32 floats of uniforms, more than two samplers | Each is refused with its own number in the message, so you know what to cut to |
 
 Everything above is refused **by name with a line and column**, not as a general failure. If a

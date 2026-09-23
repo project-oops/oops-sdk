@@ -611,13 +611,43 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
             return vm;
         }
     }
-    if (is_matrix(lt) || is_matrix(rt)) {
-        /* What is left is matrix times matrix, and matrix times scalar. The first is n of the
-         * products above and the second is componentwise; neither is written yet, and both are
-         * named rather than approximated. */
-        return gen_fail(g, "the matrix arithmetic generated is a square matrix times a vector "
-                           "and a vector times one; matrix by matrix and matrix by scalar are "
-                           "not", node);
+    /* **`m * m` is n of the products above, one per column of the right operand.**
+     *
+     * Column `c` of the result is `A` times column `c` of `B`, which is the definition and also
+     * exactly what `glsl_exec.c` computes - so the two paths agree by construction rather than
+     * by arithmetic that happens to match. Column-major storage is what makes it that simple:
+     * a column of `B` is already a run of `n` registers, so it is handed to the matrix-vector
+     * emitter as it stands with no gather.
+     *
+     * The destination is freshly allocated, so it overlaps neither operand - which the emitter
+     * requires of the vector it reads, because it writes the first component of a result before
+     * reading the last of its input. */
+    if (op == GLSL_TOK_STAR && is_matrix(lt) && is_matrix(rt)) {
+        const int dim = mat_dim(lt);
+        if (mat_dim(rt) != dim) {
+            return gen_fail(g, "both matrices in a product have to be the same size", node);
+        }
+        glsl_value_t mm = gen_alloc(g, dim * dim, node);
+        if (is_bad(mm)) return mm;
+        for (int c = 0; c < dim; c++) {
+            glsl_emit_mat_mul_vec(g->code, mm.base + (uint32_t)(c * dim), a.base,
+                                  b.base + (uint32_t)(c * dim), (uint32_t)dim);
+        }
+        return mm;
+    }
+    /* **A matrix with a vector, having missed the products above, is not arithmetic GLSL has.**
+     * `m * v` and `v * m` returned already when the widths matched; reaching here means either
+     * the vector is the wrong size for the matrix, or the operator is one the language does not
+     * define between the two. Falling through would treat them as componentwise and quietly
+     * compute something that is not a product at all. A scalar is fine and goes on below - GLSL
+     * broadcasts it over every element. */
+    if (is_matrix(lt) != is_matrix(rt)) {
+        const int other = is_matrix(lt) ? b.count : a.count;
+        if (other != 1) {
+            return gen_fail(g, "a matrix combines with a matrix of the same size, with a vector "
+                               "of its own width under `*`, or with a scalar - and this is none "
+                               "of those", node);
+        }
     }
 
     const int width = a.count > b.count ? a.count : b.count;
@@ -909,37 +939,63 @@ typedef struct {
  */
 static GLboolean gen_index_of(glsl_gen_t *g, int32_t node, glsl_value_t *out) {
     const glsl_node_t *n = &g->ast->nodes[node];
-    const glsl_node_t *base = &g->ast->nodes[n->a];
-    if (base->kind != GLSL_NODE_IDENTIFIER) {
-        (void)gen_fail(g, "only a name may be indexed here; GLSL 1.10 has no array-valued "
-                          "expressions to index into", node);
-        return GL_FALSE;
-    }
-    glsl_gen_var_t *v = gen_find(g, base->text, base->length);
-    if (!v) {
-        (void)gen_fail(g, "indexing a name with no registers: only locals declared in this body "
-                          "and the shader's own inputs are generated so far", node);
-        return GL_FALSE;
-    }
-    if (v->array_size <= 0) {
-        (void)gen_fail(g, "this name is not an array", node);
-        return GL_FALSE;
-    }
+
     double idx = 0.0;
     if (!const_of(g, n->b, &idx)) {
-        (void)gen_fail(g, "an array index has to be known when the shader is compiled: an array "
-                          "is a run of registers here, and a register file cannot be indexed by "
-                          "a value that is only known while it runs. A loop that unrolls counts "
+        (void)gen_fail(g, "an index has to be known when the shader is compiled: an array is a "
+                          "run of registers here, and a register file cannot be indexed by a "
+                          "value that is only known while it runs. A loop that unrolls counts "
                           "as known", node);
         return GL_FALSE;
     }
     const int k = (int)idx;
-    if ((double)k != idx || k < 0 || k >= v->array_size) {
-        (void)gen_fail(g, "this array index is outside the array", node);
+    if ((double)k != idx || k < 0) {
+        (void)gen_fail(g, "an index has to be a whole number that is not negative", node);
         return GL_FALSE;
     }
-    out->base = v->value.base + (uint32_t)(k * v->value.count);
-    out->count = v->value.count;
+
+    /* **An array name first**, because it is the one base that has no value of its own: reading
+     * it as an expression is refused, precisely so that a whole array cannot be used where a
+     * vector is meant. Its elements are the run of registers behind the name. */
+    const glsl_node_t *base = &g->ast->nodes[n->a];
+    if (base->kind == GLSL_NODE_IDENTIFIER) {
+        glsl_gen_var_t *v = gen_find(g, base->text, base->length);
+        if (v && v->array_size > 0) {
+            if (k >= v->array_size) {
+                (void)gen_fail(g, "this array index is outside the array", node);
+                return GL_FALSE;
+            }
+            out->base = v->value.base + (uint32_t)(k * v->value.count);
+            out->count = v->value.count;
+            return GL_TRUE;
+        }
+    }
+
+    /* **Otherwise a matrix's column or a vector's component**, which are the language's other
+     * two uses of `[]` and are the same arithmetic with a different stride. `m[c]` is a column
+     * of `dim` registers and `v[c]` is one register, and `m[c][r]` is the two composed - the
+     * inner index lands here again with a vector as its base.
+     *
+     * The base is evaluated rather than looked up, so a computed matrix can be indexed too, and
+     * a name still hands back its own registers rather than a copy - which is what lets
+     * `m[1].x = ...` be a place and not a temporary. */
+    const glsl_type_t bt = glsl_type_of(g->sema, n->a);
+    glsl_value_t bv = gen_expr(g, n->a);
+    if (is_bad(bv)) return GL_FALSE;
+    const int dim = mat_dim(bt);
+    const int width = (dim > 0) ? dim : 1;
+    const int count = (dim > 0) ? dim : bv.count;
+    if (count < 2) {
+        (void)gen_fail(g, "this is not something `[]` indexes: an array, a matrix and a vector "
+                          "are", node);
+        return GL_FALSE;
+    }
+    if (k >= count) {
+        (void)gen_fail(g, "this index is outside what it indexes", node);
+        return GL_FALSE;
+    }
+    out->base = bv.base + (uint32_t)(k * width);
+    out->count = width;
     return GL_TRUE;
 }
 
@@ -1156,10 +1212,6 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         return gen_fail(g, "refract needs a square root of a value that may be negative and a "
                            "select on it, which this has no lowering for yet", node);
     }
-    if (nm_is(nm, len, "matrixCompMult") || nm_is(nm, len, "transpose") ||
-        nm_is(nm, len, "outerProduct")) {
-        return gen_fail(g, "the matrix built-ins are not generated; only mat4 * vec4 is", node);
-    }
     /* `texture2D` is generated; the rest of section 8.7 is not. Each of the others needs
      * something this has no measurement for - a cube's coordinate is a direction the hardware
      * resolves to a face, a volume's is three components, a `Proj` form divides by its last,
@@ -1223,16 +1275,21 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
      * not evaluate its expression twice. */
     glsl_value_t arg[GEN_MAX_ARGS];
     int argc = 0;
+    /* **Two built-ins take a matrix and the rest do not.** A componentwise lowering walks its
+     * arguments as a run of components, which is right for a vector and wrong for a square -
+     * `min(m, m)` would produce something shaped like a matrix and meaning nothing. So the
+     * refusal below stays, with the two that are *about* matrices named out of it. */
+    const GLboolean takes_matrix =
+        (GLboolean)(nm_is(nm, len, "matrixCompMult") || nm_is(nm, len, "transpose"));
     for (int32_t a = first_arg; a != GLSL_NO_NODE; a = g->ast->nodes[a].sibling) {
         if (argc == GEN_MAX_ARGS) {
             return gen_fail(g, "more arguments than any built-in generated here takes", node);
         }
         const glsl_type_t at = glsl_type_of(g->sema, a);
         /* A `bool` or a `bvec` is a float per component here, so the reductions take one
-         * directly; an `int` is a whole float and compares and scales like any other. What is
-         * still refused is a matrix, whose components are a square and not a run. */
+         * directly; an `int` is a whole float and compares and scales like any other. */
         if ((!is_float_family(at) && !is_bool_family(at) && !is_int_family(at)) ||
-            is_matrix(at)) {
+            (is_matrix(at) && !takes_matrix)) {
             return gen_fail(g, "this built-in is generated for float, int and bool arguments "
                                "only",
                             node);
@@ -1627,6 +1684,70 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
     if (nm_is(nm, len, "dot")) {
         if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
         return gen_dot(g, arg[0], arg[1], node);
+    }
+
+    /*
+     * **The matrix built-ins, which are shuffles and multiplies and nothing else.**
+     *
+     * None of the three needs an instruction this back end did not already have - column-major
+     * storage is what makes them that cheap. `matrixCompMult` is not a product at all, which is
+     * the whole reason GLSL spells it out rather than letting `*` mean it; `transpose` moves
+     * registers and computes nothing; and `outerProduct` is a multiply per element.
+     *
+     * Each destination is freshly allocated and so overlaps neither operand, which `transpose`
+     * in particular depends on: it reads every element of its input while writing its output,
+     * and in place it would read back what it had just written.
+     */
+    if (nm_is(nm, len, "matrixCompMult")) {
+        if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
+        if (arg[0].count != arg[1].count) {
+            return gen_fail(g, "matrixCompMult takes two matrices of the same size", node);
+        }
+        glsl_value_t d = gen_alloc(g, arg[0].count, node);
+        if (is_bad(d)) return d;
+        for (int i = 0; i < arg[0].count; i++) {
+            glsl_emit_mul_f32(g->code, d.base + (uint32_t)i, arg[0].base + (uint32_t)i,
+                              arg[1].base + (uint32_t)i);
+        }
+        return d;
+    }
+
+    /* Element `(col, row)` is `v[col * dim + row]`, so the transpose swaps the two indices.
+     * **The type decides, not the width**: a `vec4` and a `mat2` are both four registers, and
+     * transposing a vector is not a thing the language has. */
+    if (nm_is(nm, len, "transpose")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        const int dim = mat_dim(glsl_type_of(g->sema, first_arg));
+        if (dim == 0) return gen_fail(g, "transpose takes a square matrix", node);
+        glsl_value_t d = gen_alloc(g, dim * dim, node);
+        if (is_bad(d)) return d;
+        for (int col = 0; col < dim; col++) {
+            for (int row = 0; row < dim; row++) {
+                glsl_emit_mov(g->code, d.base + (uint32_t)(col * dim + row),
+                              arg[0].base + (uint32_t)(row * dim + col));
+            }
+        }
+        return d;
+    }
+
+    /* **`outerProduct(c, r)` has `c` down the columns and `r` across them**: element
+     * `(col, row)` is `c[row] * r[col]`. The other way round is the transpose of the answer,
+     * which is a different matrix and still draws - so the order is the whole of it. */
+    if (nm_is(nm, len, "outerProduct")) {
+        if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
+        const int n = arg[0].count;
+        if (n != arg[1].count || n < 2 || n > 4) {
+            return gen_fail(g, "outerProduct takes two vectors of the same width", node);
+        }
+        glsl_value_t d = gen_alloc(g, n * n, node);
+        if (is_bad(d)) return d;
+        for (int col = 0; col < n; col++) {
+            for (int row = 0; row < n; row++) {
+                glsl_emit_mul_f32(g->code, d.base + (uint32_t)(col * n + row),
+                                  arg[0].base + (uint32_t)row, arg[1].base + (uint32_t)col);
+            }
+        }
+        return d;
     }
 
     if (nm_is(nm, len, "length")) {
