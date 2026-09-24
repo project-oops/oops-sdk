@@ -6817,28 +6817,14 @@ GLboolean glIsTexture(GLuint texture) {
  * caller can act on.
  * ------------------------------------------------------------------------- */
 
+/* The lookups themselves are in `gl_internal.h`, because `gl_draw_targets` needs them from
+ * another file. These are the names the entry points below were written against. */
 static gl_framebuffer_object_t *gl_find_framebuffer(gl_context_t *ctx, GLuint id) {
-    if (!ctx || id == 0) return NULL;
-    if (id <= (GLuint)OOPS_GL_MAX_FRAMEBUFFER_OBJECTS) {
-        gl_framebuffer_object_t *f = &ctx->framebuffers[id - 1u];
-        if (f->used && f->id == id) return f;
-    }
-    for (int i = 0; i < OOPS_GL_MAX_FRAMEBUFFER_OBJECTS; i++) {
-        if (ctx->framebuffers[i].used && ctx->framebuffers[i].id == id) return &ctx->framebuffers[i];
-    }
-    return NULL;
+    return gl_framebuffer_slot(ctx, id);
 }
 
 static gl_renderbuffer_object_t *gl_find_renderbuffer(gl_context_t *ctx, GLuint id) {
-    if (!ctx || id == 0) return NULL;
-    if (id <= (GLuint)OOPS_GL_MAX_RENDERBUFFER_OBJECTS) {
-        gl_renderbuffer_object_t *r = &ctx->renderbuffers[id - 1u];
-        if (r->used && r->id == id) return r;
-    }
-    for (int i = 0; i < OOPS_GL_MAX_RENDERBUFFER_OBJECTS; i++) {
-        if (ctx->renderbuffers[i].used && ctx->renderbuffers[i].id == id) return &ctx->renderbuffers[i];
-    }
-    return NULL;
+    return gl_renderbuffer_slot(ctx, id);
 }
 
 /* The attachment point a name selects, or NULL for one this GL does not have. GL_COLOR_ATTACHMENT0
@@ -6922,6 +6908,7 @@ void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers) {
         if (ctx->bound_framebuffer == id) ctx->bound_framebuffer = 0;
         memset(fb, 0, sizeof(*fb));
     }
+    gl_draw_targets(ctx);
 }
 
 void glBindFramebuffer(GLenum target, GLuint framebuffer) {
@@ -6939,6 +6926,7 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         return;
     }
     ctx->bound_framebuffer = framebuffer;
+    gl_draw_targets(ctx);
 }
 
 GLboolean glIsFramebuffer(GLuint framebuffer) {
@@ -7003,6 +6991,7 @@ void glDeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers) {
         }
         memset(rb, 0, sizeof(*rb));
     }
+    gl_draw_targets(ctx);
 }
 
 void glBindRenderbuffer(GLenum target, GLuint renderbuffer) {
@@ -7071,6 +7060,8 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, 
         }
         memset(rb->pixels, 0, bytes);
     }
+    /* Storage is what made this attachment renderable, or what moved it. */
+    gl_draw_targets(ctx);
 }
 
 void glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params) {
@@ -7153,6 +7144,7 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
     }
     if (texture == 0) {
         memset(at, 0, sizeof(*at));
+        gl_draw_targets(ctx);
         return;
     }
     if (!gl_find_texture(ctx, texture)) {
@@ -7163,6 +7155,8 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
     at->name = texture;
     at->textarget = textarget;
     at->level = level;
+    /* The target the draw path holds was chosen from the attachments as they were. */
+    gl_draw_targets(ctx);
 }
 
 void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget,
@@ -7185,6 +7179,7 @@ void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbu
     }
     if (renderbuffer == 0) {
         memset(at, 0, sizeof(*at));
+        gl_draw_targets(ctx);
         return;
     }
     if (!gl_find_renderbuffer(ctx, renderbuffer)) {
@@ -7195,6 +7190,7 @@ void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbu
     at->name = renderbuffer;
     at->textarget = 0;
     at->level = 0;
+    gl_draw_targets(ctx);
 }
 
 void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname,
@@ -7284,21 +7280,28 @@ GLenum glCheckFramebufferStatus(GLenum target) {
     }
 
     /*
-     * **Complete, and still not somewhere a draw can go.**
+     * **Complete by the rules, and only if a draw can actually reach it.**
      *
-     * Everything above is the object layer and it is right; what is not written yet is the
-     * redirection in `gl_draw_targets` that would point the colour target at this attachment
-     * instead of the display. Until it is, the honest answer is GL_FRAMEBUFFER_UNSUPPORTED,
-     * which the specification defines as exactly this - a combination of attachments this
-     * implementation cannot render to - and which callers are required to handle.
+     * `gl_fbo_bound_target` is the function `gl_draw_targets` uses to point the colour buffer at
+     * the attachment, so asking it here is asking the draw path directly rather than restating
+     * its conditions - the two cannot drift, and a COMPLETE from this function is a promise the
+     * next draw keeps. What it refuses is the scanout and hardware paths, whose colour buffers
+     * are addressed in a swizzle an attachment is not in, and a base-level texture whose rows
+     * are further apart than they are wide.
      *
-     * Reporting GL_FRAMEBUFFER_COMPLETE instead would be the flattering answer and a false one:
-     * the caller would draw, the pixels would land on the display, and a suite reading the
-     * texture afterwards would get whatever was there before. A conformance run would score that
-     * as a pass in some cases and an unexplained failure in others. A refusal here makes dEQP
-     * report NotSupported, which is true.
+     * GL_FRAMEBUFFER_UNSUPPORTED is the specification's answer for exactly that, and callers
+     * must handle it. Reporting COMPLETE instead would be the flattering answer and a false one:
+     * the program would draw, the pixels would land on the display, and a suite reading the
+     * attachment afterwards would get whatever was there before - a pass in some cases and an
+     * unexplained failure in others. A refusal makes dEQP report NotSupported, which is true.
      */
-    return GL_FRAMEBUFFER_UNSUPPORTED;
+    gl_fb_storage_t colour;
+    float *depth = NULL;
+    const GLuint saved = ctx->bound_framebuffer;
+    ctx->bound_framebuffer = fb->id;
+    const GLboolean renderable = gl_fbo_bound_target(ctx, &colour, &depth);
+    ctx->bound_framebuffer = saved;
+    return renderable ? (GLenum)GL_FRAMEBUFFER_COMPLETE : (GLenum)GL_FRAMEBUFFER_UNSUPPORTED;
 }
 
 /*

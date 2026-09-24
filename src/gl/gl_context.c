@@ -1011,6 +1011,11 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->back_fb = ctx->framebuffer;
     ctx->width = w;
     ctx->height = h;
+    /* What `width` and `height` go back to when no framebuffer object is bound - see
+     * gl_draw_targets, which is the only place that moves them. */
+    ctx->fb0_width = w;
+    ctx->fb0_height = h;
+    ctx->fb0_depth_buffer = depth;
     ctx->depth_buffer = depth;
     ctx->depth_px = depth_px;
     ctx->stencil_buffer = stencil;
@@ -1949,6 +1954,30 @@ GLboolean gl_front_buffer(gl_context_t *ctx) {
  * what sent a hunt for `front-and-back`'s wrong front to the tiling of MRT1 rather than to its
  * blending. GL_NONE keeps the pointer and writes no colour (gl_color_writes). */
 void gl_draw_targets(gl_context_t *ctx) {
+    /*
+     * **A bound framebuffer object takes the whole target and the draw-buffer selection with
+     * it.** GL_FRONT and GL_BACK name the window system's buffers and mean nothing here; a
+     * framebuffer object has one colour attachment and the draw goes to it.
+     *
+     * `width` and `height` move too, because every address into the colour buffer is computed
+     * from them - the viewport, the scissor and `gl_color_index` itself. That is what makes
+     * rendering into an attachment of a different size work without a second addressing path.
+     */
+    gl_fb_storage_t fbo;
+    float *fbo_depth = NULL;
+    if (gl_fbo_bound_target(ctx, &fbo, &fbo_depth)) {
+        ctx->framebuffer = fbo.pixels;
+        ctx->fb_also = NULL;
+        ctx->width = (uint32_t)fbo.width;
+        ctx->height = (uint32_t)fbo.height;
+        ctx->depth_buffer = fbo_depth;
+        return;
+    }
+    /* Back to the display, from wherever the last call left it. */
+    ctx->width = ctx->fb0_width;
+    ctx->height = ctx->fb0_height;
+    ctx->depth_buffer = ctx->fb0_depth_buffer;
+
     const unsigned bits = gl_color_buffer_bits(ctx->draw_buffer);
     uint32_t *primary = ctx->back_fb;
     uint32_t *also = NULL;

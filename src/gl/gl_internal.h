@@ -1712,6 +1712,16 @@ typedef struct gl_context {
     gl_renderbuffer_object_t renderbuffers[OOPS_GL_MAX_RENDERBUFFER_OBJECTS];
     GLuint bound_framebuffer;
     GLuint bound_renderbuffer;
+    /* **The window-system framebuffer's size, kept because `width` and `height` stop being it.**
+     * Everything addresses the colour buffer through `gl_color_index`, which reads those two, so
+     * binding a framebuffer object of a different size means changing them - and changing them
+     * means remembering what they were. Set once beside them at context creation. */
+    uint32_t fb0_width;
+    uint32_t fb0_height;
+    /* The display's depth buffer, parked for the same reason. A framebuffer object with no depth
+     * attachment leaves `depth_buffer` NULL, which the draw path already reads as "no depth test
+     * here" - so an attachment-less depth needs no special case. */
+    float *fb0_depth_buffer;
     /* The proxy targets' levels - 1D, 2D, 3D, cube map: sizes and formats only, never pixels. A
      * level that would not have fitted is all zeros, which is how a proxy says no. */
     gl_tex_level_t proxy[4][OOPS_GL_MAX_TEXTURE_LEVELS];
@@ -3315,6 +3325,137 @@ static inline gl_texture_object_t *gl_texture_slot(gl_context_t *ctx, GLuint id)
     return (gl_texture_object_t *)0;
 }
 
+/* The framebuffer and renderbuffer a name refers to. Here rather than beside the entry points
+ * in `gl_state.c` because `gl_draw_targets` needs them too, and it lives in `gl_context.c`. Slot
+ * `id - 1` first, then the sweep that validates it - `gl_texture_slot`'s rule. */
+static inline gl_framebuffer_object_t *gl_framebuffer_slot(gl_context_t *ctx, GLuint id) {
+    if (!ctx || id == 0u) return (gl_framebuffer_object_t *)0;
+    if (id <= (GLuint)OOPS_GL_MAX_FRAMEBUFFER_OBJECTS) {
+        gl_framebuffer_object_t *f = &ctx->framebuffers[id - 1u];
+        if (f->used && f->id == id) return f;
+    }
+    for (int i = 0; i < OOPS_GL_MAX_FRAMEBUFFER_OBJECTS; i++) {
+        if (ctx->framebuffers[i].used && ctx->framebuffers[i].id == id) return &ctx->framebuffers[i];
+    }
+    return (gl_framebuffer_object_t *)0;
+}
+
+static inline gl_renderbuffer_object_t *gl_renderbuffer_slot(gl_context_t *ctx, GLuint id) {
+    if (!ctx || id == 0u) return (gl_renderbuffer_object_t *)0;
+    if (id <= (GLuint)OOPS_GL_MAX_RENDERBUFFER_OBJECTS) {
+        gl_renderbuffer_object_t *r = &ctx->renderbuffers[id - 1u];
+        if (r->used && r->id == id) return r;
+    }
+    for (int i = 0; i < OOPS_GL_MAX_RENDERBUFFER_OBJECTS; i++) {
+        if (ctx->renderbuffers[i].used && ctx->renderbuffers[i].id == id) return &ctx->renderbuffers[i];
+    }
+    return (gl_renderbuffer_object_t *)0;
+}
+
+/*
+ * **Whether a framebuffer object can receive a draw at all**, which is a property of the path
+ * rather than of the attachments.
+ *
+ * An attachment is linear RGBA8 in process memory. The scanout path addresses its colour buffer
+ * through a 64KB_R_X swizzle and the hardware path builds its target descriptor from the
+ * display's surface, so neither writes anywhere this can point. Redirection therefore applies to
+ * the software rasteriser only, and `glCheckFramebufferStatus` reads the same predicate so that
+ * what it promises and what a draw does cannot disagree.
+ */
+static inline GLboolean gl_fbo_path_can_render(const gl_context_t *ctx) {
+    return (GLboolean)(ctx && !ctx->use_hardware && !ctx->color_tiled);
+}
+
+/*
+ * **Where an attachment's pixels actually are**, and how wide its rows are.
+ *
+ * One resolver for both readers - `glCheckFramebufferStatus`, which decides whether to promise
+ * anything, and `gl_draw_targets`, which points the colour buffer at it. Two would be two
+ * answers to the same question, and the failure they produce is the one worth avoiding here: a
+ * status that says COMPLETE about storage the draw path then cannot find.
+ *
+ * `pitch` is in pixels. A renderbuffer is packed tight; a texture's base level has the object's
+ * own pitch, and a level above it is packed tight - which is `gl_tex_level_view`'s rule, so it
+ * is read from there rather than restated.
+ */
+typedef struct {
+    uint32_t *pixels;
+    GLsizei width;
+    GLsizei height;
+    size_t pitch;
+} gl_fb_storage_t;
+
+static inline GLboolean gl_fb_attachment_storage(gl_context_t *ctx, const gl_fb_attachment_t *at,
+                                                 gl_fb_storage_t *out) {
+    out->pixels = (uint32_t *)0;
+    out->width = 0;
+    out->height = 0;
+    out->pitch = 0;
+    if (!ctx || !at || at->kind == GL_FB_ATTACH_NONE) return GL_FALSE;
+
+    if (at->kind == GL_FB_ATTACH_RENDERBUFFER) {
+        gl_renderbuffer_object_t *rb = gl_renderbuffer_slot(ctx, at->name);
+        if (!rb || !rb->pixels || rb->width <= 0 || rb->height <= 0) return GL_FALSE;
+        out->pixels = rb->pixels;
+        out->width = rb->width;
+        out->height = rb->height;
+        out->pitch = (size_t)rb->width;
+        return GL_TRUE;
+    }
+
+    gl_texture_object_t *tex = gl_texture_slot(ctx, at->name);
+    if (!tex) return GL_FALSE;
+    gl_tex_view_t view;
+    const GLboolean have = (at->textarget == GL_TEXTURE_2D)
+                               ? gl_tex_level_view(tex, at->level, &view)
+                               : gl_tex_face_view(tex, GL_CUBE_FACE_INDEX(at->textarget),
+                                                  at->level, &view);
+    if (!have) return GL_FALSE;
+    /* **`gl_tex_view_t` is the sampler's read-only view and this is a write.** The cast is back
+     * to the storage the texture object owns, which is the same memory - the constness belongs
+     * to the view, not to the level. */
+    out->pixels = (uint32_t *)(void *)(uintptr_t)view.pixels;
+    out->width = view.width;
+    out->height = view.height;
+    out->pitch = view.pitch;
+    return GL_TRUE;
+}
+
+/*
+ * **The bound framebuffer object's colour and depth, when a draw can go there.**
+ *
+ * `gl_color_index` multiplies by `ctx->width` to step a row, so an attachment whose rows are
+ * further apart than they are wide cannot be addressed by pointing the colour buffer at it - a
+ * base-level texture with a padded pitch is the case that arises. Refusing it here is what keeps
+ * that from being a silent write past the end of each row, and because the status query asks the
+ * same function, a framebuffer this refuses is one that never reported itself complete.
+ *
+ * `depth` may come back NULL with a true result: a framebuffer object with a colour attachment
+ * and no depth one is legal, and the draw path already treats a null depth buffer as no depth
+ * test rather than as an error.
+ */
+static inline GLboolean gl_fbo_bound_target(gl_context_t *ctx, gl_fb_storage_t *colour,
+                                            float **depth) {
+    *depth = (float *)0;
+    if (!gl_fbo_path_can_render(ctx)) return GL_FALSE;
+    gl_framebuffer_object_t *fb = gl_framebuffer_slot(ctx, ctx->bound_framebuffer);
+    if (!fb) return GL_FALSE;
+    if (!gl_fb_attachment_storage(ctx, &fb->color0, colour)) return GL_FALSE;
+    if (colour->pitch != (size_t)colour->width) return GL_FALSE;
+
+    gl_fb_storage_t ds;
+    if (gl_fb_attachment_storage(ctx, &fb->depth, &ds)) {
+        if (ds.pitch != (size_t)ds.width || ds.width != colour->width ||
+            ds.height != colour->height) {
+            return GL_FALSE;
+        }
+        /* The depth renderbuffer is one word a sample, which is what the software rasteriser's
+         * depth buffer is - it reads them as floats, so this names the same words that way. */
+        *depth = (float *)(void *)ds.pixels;
+    }
+    return GL_TRUE;
+}
+
 static inline const gl_texture_object_t *gl_lookup_texture(const gl_context_t *ctx, GLuint id) {
     if (id != 0u && id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS) {
         const gl_texture_object_t *t = &ctx->textures[id - 1u];
@@ -3629,8 +3770,12 @@ GLboolean gl_front_buffer(gl_context_t *ctx);
 void gl_draw_targets(gl_context_t *ctx);
 /* The front put on screen, if it has been drawn into since it last was - glFlush and glFinish. */
 void gl_front_present(gl_context_t *ctx);
-/* The buffer glReadBuffer names. */
+/* The buffer glReadBuffer names - or the bound framebuffer object's colour attachment, which
+ * takes precedence over it for the reason glDrawBuffer is ignored while one is bound: GL_FRONT
+ * and GL_BACK name the window system's buffers, and a framebuffer object has neither. Reading
+ * has to follow drawing here, or a program draws into an attachment and reads the display. */
 static inline const uint32_t *gl_read_target(const gl_context_t *ctx) {
+    if (ctx->bound_framebuffer != 0u && ctx->framebuffer) return ctx->framebuffer;
     return (gl_color_buffer_bits(ctx->read_buffer) & GL_OCB_FRONT) && ctx->front_fb
                ? ctx->front_fb
                : ctx->back_fb;

@@ -1379,10 +1379,7 @@ static void test_gl2_framebuffer_objects(void) {
     ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS);
 
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16_ARB, 32, 32);
-    /* **Complete in every rule above, and still refused.** The draw path does not redirect yet,
-     * so reporting COMPLETE would send the program's pixels to the display while it read the
-     * attachment. This assertion changes to GL_FRAMEBUFFER_COMPLETE when that lands. */
-    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_UNSUPPORTED);
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
 
     /* **Deleting a renderbuffer detaches it everywhere**, so what was complete is not. */
     glDeleteRenderbuffers(1, &rb[0]);
@@ -1401,6 +1398,66 @@ static void test_gl2_framebuffer_objects(void) {
 
     glDeleteFramebuffers(1, &fb[1]);
     glDeleteRenderbuffers(1, &rb[1]);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
+/*
+ * **A draw into a framebuffer object lands in the attachment and not on the display.**
+ *
+ * The object layer above is all state a program sets and reads back; this is the one that says
+ * the state does anything. Both halves are asserted, because only one of them fails when the
+ * redirection is missing: the attachment holds the drawn colour *and* the display still holds
+ * what it was cleared to. Checking only the attachment would pass against a draw that wrote to
+ * both, and checking only the display would pass against a draw that wrote to neither.
+ *
+ * The attachment is deliberately a different size from the display, because every address into
+ * the colour buffer is computed from the context's width and height - a redirection that moved
+ * the pointer and not the size would write 32 pixels into rows 64 apart, and this is what
+ * notices.
+ */
+static void test_gl2_draw_into_a_framebuffer_object(void) {
+    gl2_target_t t = gl2_target();
+
+    /* The display, cleared to a colour nothing else uses. */
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    ASSERT_TRUE((px(&t, GL2_W / 2, GL2_H / 2) & 0xffffffu) == 0x0000ffu);
+
+    GLuint fb = 0, rb = 0;
+    glGenFramebuffers(1, &fb);
+    glGenRenderbuffers(1, &rb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 32, 32);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+    /* Clear the attachment green, and read it back through glReadPixels - which reads the
+     * colour buffer, whichever one that now is. */
+    glViewport(0, 0, 32, 32);
+    glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    uint8_t got[4] = {0, 0, 0, 0};
+    glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, got);
+    ASSERT_TRUE(got[0] == 0 && got[1] == 255 && got[2] == 0);
+
+    /* **The display was not touched.** This is the half that fails when nothing redirects. */
+    ASSERT_TRUE((px(&t, GL2_W / 2, GL2_H / 2) & 0xffffffu) == 0x0000ffu);
+
+    /* Unbinding puts the display back, at its own size. */
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, GL2_W, GL2_H);
+    ASSERT_TRUE((px(&t, GL2_W / 2, GL2_H / 2) & 0xffffffu) == 0x0000ffu);
+    glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    ASSERT_TRUE((px(&t, GL2_W / 2, GL2_H / 2) & 0xffffffu) == 0xff0000u);
+    /* And the corner furthest from the origin, which only a full-size target reaches. */
+    ASSERT_TRUE((px(&t, GL2_W - 1, GL2_H - 1) & 0xffffffu) == 0xff0000u);
+
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
     glContextDestroy(t.ctx);
     oops_display_close(t.disp);
 }
@@ -6085,6 +6142,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_program_draws);
     RUN_TEST(test_gl2_structs_run);
     RUN_TEST(test_gl2_framebuffer_objects);
+    RUN_TEST(test_gl2_draw_into_a_framebuffer_object);
     RUN_TEST(test_gl2_generate_mipmap);
     RUN_TEST(test_gl2_uniforms_and_varyings_reach_the_pixels);
     RUN_TEST(test_gl2_a_matrix_uniform_transforms);
