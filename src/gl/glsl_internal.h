@@ -102,6 +102,12 @@ typedef struct {
  * ------------------------------------------------------------------------- */
 
 #define GLSL_MAX_NODES 2048
+
+/* **Up here because the parser needs it too.** The type system below is where a struct is given
+ * meaning, but the grammar has to know which words are struct names before any of that runs -
+ * see `struct_name` on `glsl_parser_t`. */
+#define GLSL_MAX_STRUCTS 16
+#define GLSL_MAX_STRUCT_MEMBERS 16
 #define GLSL_NO_NODE (-1)
 
 typedef enum {
@@ -138,6 +144,10 @@ typedef enum {
     GLSL_NODE_PARAM,       /* one function parameter */
     GLSL_NODE_FUNCTION,    /* name in text, `b` = parameter chain, `c` = body.
                             * **`c` absent means a prototype**, not an empty body. */
+    /* `struct Name { members };` - name in text, members chained from `a` as GLSL_NODE_DECL.
+     * A declaration may follow the closing brace (`struct S { ... } s;`), in which case the
+     * declarators are the siblings of this node, exactly as for any other type. */
+    GLSL_NODE_STRUCT_DEF,
     GLSL_NODE_UNIT         /* the whole source: declarations chained from `a` */
 } glsl_node_kind_t;
 
@@ -152,6 +162,12 @@ typedef struct {
      * resolved type here, because resolving `vec4` to a type - and deciding whether an
      * identifier names a struct - is the semantic stage's job, not the grammar's. */
     glsl_token_type_t type_tok;
+    /* **The type's name, when the type is a struct.** `type_tok` is `GLSL_TOK_IDENTIFIER` then,
+     * which says only "a name was written here"; this says which. Separate from `text` because
+     * that already holds the declarator's own name - `S s;` has two names and needs both. NULL
+     * for every built-in type. */
+    const char *type_name;
+    size_t type_name_len;
     glsl_token_type_t qualifier;  /* const/attribute/varying/uniform/in/out/inout, or EOF */
     int32_t array_size;           /* the size expression, GLSL_NO_NODE if not an array */
     const char *text;       /* identifier or field name: into the source, never a copy */
@@ -185,6 +201,22 @@ typedef struct {
      * has a number, because `glsl_parser_init_pp` reads it off the `#version` line before the
      * first real token. */
     int version;
+    /*
+     * **The struct names seen so far, which the grammar cannot do without.**
+     *
+     * `Foo bar;` and `foo * bar;` differ only in whether `Foo` names a type, and no amount of
+     * lookahead settles it - C's famous ambiguity, and GLSL inherits it the moment `struct`
+     * exists. `starts_declaration` asks this list.
+     *
+     * It lives on the parser rather than being taken from the semantic pass, because the
+     * decision is needed *while parsing*, before any pass has run. The names point into the
+     * source, like every other token's text, so nothing is copied and nothing is freed. Sema
+     * builds its own table from the AST afterwards and is the authority on members and layout;
+     * this knows only which words are type names.
+     */
+    const char *struct_name[GLSL_MAX_STRUCTS];
+    size_t struct_name_len[GLSL_MAX_STRUCTS];
+    int struct_names;
 } glsl_parser_t;
 
 /* -------------------------------------------------------------------------
@@ -194,11 +226,15 @@ typedef struct {
  * has to allocate a rewritten copy of the source and every token keeps pointing into the
  * original text for diagnostics.
  *
- * Scoped to what GLSL 1.10 shaders actually use: `#version`, object-like `#define` and
- * `#undef`, `#ifdef`/`#ifndef`/`#else`/`#endif`, and `#error`. Function-like macros, `#if` with
- * an expression, `#extension`, `#pragma` and `#line` are **refused by name** rather than
- * skipped - a skipped `#extension` would compile a shader that asked for something it did not
- * get.
+ * GLSL 1.10's preprocessor, whole: `#version`, `#define` and `#undef` both object-like and
+ * function-like, `#ifdef`/`#ifndef`/`#if`/`#elif`/`#else`/`#endif` with constant expressions,
+ * `#error`, `#extension`, `#pragma` and `#line`.
+ *
+ * **What is still refused is refused by name, never skipped.** `#extension ... : require` fails
+ * because this front end implements no extensions and `require` is the word that says a shader
+ * will not work without one - a skipped one compiles a shader that asked for something it did
+ * not get. `<<` and `>>` in a `#if` fail because GLSL 1.10 has no shift token, so they would
+ * otherwise read as two `<` and evaluate to a number that picks a branch.
  * ------------------------------------------------------------------------- */
 
 #define GLSL_MAX_MACROS 64
@@ -308,8 +344,54 @@ typedef enum {
     GLSL_TYPE_BVEC2, GLSL_TYPE_BVEC3, GLSL_TYPE_BVEC4,
     GLSL_TYPE_MAT2, GLSL_TYPE_MAT3, GLSL_TYPE_MAT4,
     GLSL_TYPE_SAMPLER1D, GLSL_TYPE_SAMPLER2D, GLSL_TYPE_SAMPLER3D,
-    GLSL_TYPE_SAMPLERCUBE, GLSL_TYPE_SAMPLER1DSHADOW, GLSL_TYPE_SAMPLER2DSHADOW
+    GLSL_TYPE_SAMPLERCUBE, GLSL_TYPE_SAMPLER1DSHADOW, GLSL_TYPE_SAMPLER2DSHADOW,
+
+    /*
+     * **A user-defined struct is a type value in the same enum**, `GLSL_TYPE_STRUCT_BASE + i`
+     * for the `i`th struct this unit declared.
+     *
+     * The alternative was a `{kind, index}` pair, which is tidier and would have meant touching
+     * every place a type is carried - the symbol table, `params[]`, the AST, both back ends'
+     * value structs, every `glsl_type_t` parameter in this header. Reserving a range instead
+     * keeps a type one integer, so all of that code keeps working unchanged and only the places
+     * that must *distinguish* a struct need to ask.
+     *
+     * The base is well past the built-ins with room to spare, so adding a built-in type below
+     * never renumbers a struct.
+     */
+    GLSL_TYPE_STRUCT_BASE = 64
 } glsl_type_t;
+
+static inline GLboolean glsl_type_is_struct(glsl_type_t t) {
+    return (GLboolean)(t >= GLSL_TYPE_STRUCT_BASE &&
+                       t < (glsl_type_t)(GLSL_TYPE_STRUCT_BASE + GLSL_MAX_STRUCTS));
+}
+static inline int glsl_struct_index(glsl_type_t t) {
+    return (int)t - (int)GLSL_TYPE_STRUCT_BASE;
+}
+static inline glsl_type_t glsl_struct_type(int index) {
+    return (glsl_type_t)((int)GLSL_TYPE_STRUCT_BASE + index);
+}
+
+/* One member of a struct. `array_size` is 0 for a plain member, mirroring `glsl_symbol_t`. */
+typedef struct {
+    const char *name;
+    size_t name_len;
+    glsl_type_t type;
+    int array_size;
+    /* Where this member starts inside the struct, in components. Both back ends lay a struct out
+     * as its members end to end, so one offset serves the interpreter's float array and the
+     * code generator's register run. */
+    int offset;
+} glsl_struct_member_t;
+
+typedef struct {
+    const char *name;
+    size_t name_len;
+    glsl_struct_member_t member[GLSL_MAX_STRUCT_MEMBERS];
+    int member_count;
+    int components;   /* the whole struct, in components */
+} glsl_struct_t;
 
 #define GLSL_MAX_SYMBOLS 256
 
@@ -358,7 +440,19 @@ typedef struct {
      * would pick a type its author did not write, which is the mistake the existing refusal was
      * put there to prevent. */
     int version;
+    /* **The structs this unit declared**, in declaration order - a type value of
+     * `GLSL_TYPE_STRUCT_BASE + i` names entry `i`. Kept here rather than in the symbol table
+     * because a struct type is not a name that can be assigned to or called; it is only ever
+     * looked up to find a member's type and offset. */
+    glsl_struct_t structs[GLSL_MAX_STRUCTS];
+    int struct_count;
 } glsl_sema_t;
+
+/* The struct a type names, or NULL when it names anything else. */
+const glsl_struct_t *glsl_struct_of(const glsl_sema_t *s, glsl_type_t t);
+/* The member `name` of struct type `t`, or NULL. */
+const glsl_struct_member_t *glsl_struct_member(const glsl_sema_t *s, glsl_type_t t,
+                                               const char *name, size_t len);
 
 void glsl_sema_init(glsl_sema_t *s, glsl_ast_t *ast);
 /* The type a token names, or GLSL_TYPE_ERROR if it names no type. */

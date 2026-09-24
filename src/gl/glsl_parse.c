@@ -75,6 +75,11 @@ static int32_t node_new(glsl_parser_t *p, glsl_node_kind_t kind) {
     n->a = n->b = n->c = n->d = GLSL_NO_NODE;
     n->sibling = GLSL_NO_NODE;
     n->type_tok = GLSL_TOK_EOF;
+    /* **Cleared here or it is whatever the arena held.** The node arena is reused across parses
+     * and is not zeroed, so a field added to this struct and set at only some of its call sites
+     * is read as a stale pointer at the others. */
+    n->type_name = (const char *)0;
+    n->type_name_len = 0u;
     n->qualifier = GLSL_TOK_EOF;
     n->array_size = GLSL_NO_NODE;
     n->text = (const char *)0;
@@ -94,6 +99,10 @@ void glsl_parser_init(glsl_parser_t *p, glsl_ast_t *ast, const char *source, siz
     p->error_column = 0;
     p->pp = (glsl_pp_t *)0;
     p->version = 0;   /* not stated: enforce nothing - see glsl_parser_t */
+    /* **Cleared, because the caller's parser is not zeroed.** `starts_declaration` walks this
+     * list for every identifier it meets, so a stale count sends it through stale pointers on
+     * the first shader parsed - struct or not. */
+    p->struct_names = 0;
     glsl_lexer_init(&p->lx, source, length);
     bump(p);
 }
@@ -110,6 +119,7 @@ void glsl_parser_init_pp(glsl_parser_t *p, glsl_ast_t *ast, glsl_pp_t *pp) {
      * own over the same source. */
     glsl_lexer_init(&p->lx, (const char *)0, 0);
     p->version = 0;
+    p->struct_names = 0;   /* as in glsl_parser_init, and for the same reason */
     /* **This consumes every directive before the first real token**, so `#version` has already
      * been read when this returns - which is what lets a caller refuse a language it does not
      * implement before parsing a line of it. */
@@ -493,8 +503,46 @@ static GLboolean is_type_name(glsl_token_type_t t) {
  * C's famous ambiguity - and GLSL 1.10 has `struct`, so this will need revisiting when structs
  * are parsed. Written as its own function so that change has one place to happen.
  */
+/* Two names, both pointing into the source rather than copied. */
+static GLboolean same_text(const char *a, size_t an, const char *b, size_t bn) {
+    if (an != bn) return GL_FALSE;
+    for (size_t i = 0; i < an; i++) {
+        if (a[i] != b[i]) return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* **Does this identifier name a struct declared earlier in this unit?** The whole of why the
+ * parser keeps a list of them: see `struct_name` on `glsl_parser_t`. */
+static GLboolean is_struct_name(const glsl_parser_t *p, const char *t, size_t n) {
+    for (int i = 0; i < p->struct_names; i++) {
+        if (same_text(p->struct_name[i], p->struct_name_len[i], t, n)) return GL_TRUE;
+    }
+    return GL_FALSE;
+}
+
+static GLboolean remember_struct_name(glsl_parser_t *p, const char *t, size_t n) {
+    if (is_struct_name(p, t, n)) {
+        fail(p, "a struct with this name is already declared");
+        return GL_FALSE;
+    }
+    if (p->struct_names >= GLSL_MAX_STRUCTS) {
+        fail(p, "too many struct declarations");
+        return GL_FALSE;
+    }
+    p->struct_name[p->struct_names] = t;
+    p->struct_name_len[p->struct_names] = n;
+    p->struct_names++;
+    return GL_TRUE;
+}
+
 static GLboolean starts_declaration(const glsl_parser_t *p) {
-    return (GLboolean)(is_qualifier(p->tok.type) || is_type_name(p->tok.type));
+    if (is_qualifier(p->tok.type) || is_type_name(p->tok.type)) return GL_TRUE;
+    /* `struct S { ... } s;` declares a type and maybe a variable, and either way begins one. */
+    if (p->tok.type == GLSL_TOK_KW_STRUCT) return GL_TRUE;
+    /* And the case that needed the list: `S s;` where `S` is a struct. */
+    return (GLboolean)(p->tok.type == GLSL_TOK_IDENTIFIER &&
+                       is_struct_name(p, p->tok.text, p->tok.length));
 }
 
 /* `[ expr ]` or `[ ]` after a name. Returns the size expression, or GLSL_NO_NODE for both "not
@@ -524,7 +572,135 @@ static int32_t parse_array_suffix(glsl_parser_t *p, GLboolean *saw_bracket) {
  * would work until something reordered or filtered the list.
  */
 static int32_t parse_declarator_list(glsl_parser_t *p, glsl_token_type_t qualifier,
-                                     glsl_token_type_t type_tok) {
+                                     glsl_token_type_t type_tok, const char *type_name,
+                                     size_t type_name_len);
+
+/*
+ * `struct Name { members }` - the definition, without the declarators that may follow it.
+ *
+ * **The name is remembered before the body is read**, which is what lets a struct contain a
+ * pointer-free reference to nothing at all and still refuse `struct S { S next; };` further on:
+ * sema catches that, but the parser must already agree that `S` is a type name or the member
+ * line would not parse as a declaration in the first place.
+ *
+ * GLSL 1.10 allows no qualifiers and no initialisers on a member, and both are refused here
+ * rather than parsed and dropped - a member that silently loses its `= 1.0` is worse than one
+ * that will not compile.
+ */
+static int32_t parse_struct_definition(glsl_parser_t *p) {
+    bump(p); /* `struct` */
+    if (!check(p, GLSL_TOK_IDENTIFIER)) {
+        /* An anonymous struct is legal in C and not in GLSL 1.10, where the name is how a
+         * variable of it is ever declared. */
+        fail(p, "expected a name after `struct`");
+        return GLSL_NO_NODE;
+    }
+    const char *name = p->tok.text;
+    const size_t name_len = p->tok.length;
+    const int line = p->tok.line, col = p->tok.column;
+    if (!remember_struct_name(p, name, name_len)) return GLSL_NO_NODE;
+    bump(p);
+
+    int32_t at = node_new(p, GLSL_NODE_STRUCT_DEF);
+    if (at == GLSL_NO_NODE) return at;
+    p->ast->nodes[at].text = name;
+    p->ast->nodes[at].length = name_len;
+    p->ast->nodes[at].line = line;
+    p->ast->nodes[at].column = col;
+
+    if (!accept(p, GLSL_TOK_LBRACE)) {
+        fail(p, "expected `{` after a struct name");
+        return GLSL_NO_NODE;
+    }
+
+    int32_t first = GLSL_NO_NODE, prev = GLSL_NO_NODE;
+    while (!check(p, GLSL_TOK_RBRACE)) {
+        if (check(p, GLSL_TOK_EOF) || p->error) {
+            fail(p, "expected `}` to close a struct");
+            return GLSL_NO_NODE;
+        }
+        if (is_qualifier(p->tok.type)) {
+            fail(p, "a struct member may not have a storage qualifier");
+            return GLSL_NO_NODE;
+        }
+        glsl_token_type_t mtok;
+        const char *mname = (const char *)0;
+        size_t mname_len = 0;
+        if (is_type_name(p->tok.type)) {
+            mtok = p->tok.type;
+            bump(p);
+        } else if (check(p, GLSL_TOK_IDENTIFIER) && is_struct_name(p, p->tok.text, p->tok.length)) {
+            mtok = GLSL_TOK_IDENTIFIER;
+            mname = p->tok.text;
+            mname_len = p->tok.length;
+            bump(p);
+        } else {
+            fail(p, "expected a type in a struct member");
+            return GLSL_NO_NODE;
+        }
+        int32_t m = parse_declarator_list(p, GLSL_TOK_EOF, mtok, mname, mname_len);
+        if (p->error) return GLSL_NO_NODE;
+        /* An initialiser on a member is not GLSL 1.10, and dropping one silently would lose
+         * what its author wrote. */
+        for (int32_t k = m; k != GLSL_NO_NODE; k = p->ast->nodes[k].sibling) {
+            if (p->ast->nodes[k].a != GLSL_NO_NODE) {
+                fail(p, "a struct member may not have an initialiser");
+                return GLSL_NO_NODE;
+            }
+        }
+        if (!accept(p, GLSL_TOK_SEMICOLON)) {
+            fail(p, "expected `;` after a struct member");
+            return GLSL_NO_NODE;
+        }
+        if (first == GLSL_NO_NODE) first = m; else p->ast->nodes[prev].sibling = m;
+        prev = m;
+        while (p->ast->nodes[prev].sibling != GLSL_NO_NODE) prev = p->ast->nodes[prev].sibling;
+    }
+    bump(p); /* `}` */
+    if (first == GLSL_NO_NODE) {
+        fail(p, "a struct must have at least one member");
+        return GLSL_NO_NODE;
+    }
+    p->ast->nodes[at].a = first;
+    return at;
+}
+
+/*
+ * A type specifier at the head of a declaration: a built-in keyword, a `struct` definition, or
+ * the name of a struct already declared. Writes what the declarators will carry, and returns the
+ * definition node when there was one so the caller can chain it ahead of them.
+ */
+static int32_t parse_type_specifier(glsl_parser_t *p, glsl_token_type_t *type_tok,
+                                    const char **type_name, size_t *type_name_len) {
+    *type_name = (const char *)0;
+    *type_name_len = 0;
+    if (check(p, GLSL_TOK_KW_STRUCT)) {
+        const int32_t def = parse_struct_definition(p);
+        if (p->error) return GLSL_NO_NODE;
+        *type_tok = GLSL_TOK_IDENTIFIER;
+        *type_name = p->ast->nodes[def].text;
+        *type_name_len = p->ast->nodes[def].length;
+        return def;
+    }
+    if (check(p, GLSL_TOK_IDENTIFIER) && is_struct_name(p, p->tok.text, p->tok.length)) {
+        *type_tok = GLSL_TOK_IDENTIFIER;
+        *type_name = p->tok.text;
+        *type_name_len = p->tok.length;
+        bump(p);
+        return GLSL_NO_NODE;
+    }
+    if (!is_type_name(p->tok.type)) {
+        fail(p, "expected a type at the start of a declaration");
+        return GLSL_NO_NODE;
+    }
+    *type_tok = p->tok.type;
+    bump(p);
+    return GLSL_NO_NODE;
+}
+
+static int32_t parse_declarator_list(glsl_parser_t *p, glsl_token_type_t qualifier,
+                                     glsl_token_type_t type_tok, const char *type_name,
+                                     size_t type_name_len) {
     int32_t first = GLSL_NO_NODE, prev = GLSL_NO_NODE;
     for (;;) {
         if (!check(p, GLSL_TOK_IDENTIFIER)) {
@@ -537,6 +713,8 @@ static int32_t parse_declarator_list(glsl_parser_t *p, glsl_token_type_t qualifi
         p->ast->nodes[at].length = p->tok.length;
         p->ast->nodes[at].qualifier = qualifier;
         p->ast->nodes[at].type_tok = type_tok;
+        p->ast->nodes[at].type_name = type_name;
+        p->ast->nodes[at].type_name_len = type_name_len;
         bump(p);
 
         GLboolean bracketed = GL_FALSE;
@@ -606,17 +784,29 @@ int32_t glsl_parse_statement(glsl_parser_t *p) {
             qualifier = p->tok.type;
             bump(p);
         }
-        if (!is_type_name(p->tok.type)) {
-            fail(p, "expected a type after a qualifier");
-            return GLSL_NO_NODE;
+        glsl_token_type_t type_tok = GLSL_TOK_EOF;
+        const char *type_name = (const char *)0;
+        size_t type_name_len = 0;
+        const int32_t def = parse_type_specifier(p, &type_tok, &type_name, &type_name_len);
+        if (p->error) return GLSL_NO_NODE;
+
+        /* **`struct S { ... };` with no declarator is a whole statement**, and a legal one - it
+         * declares the type and nothing else. Only a name after the brace starts declarators. */
+        if (def != GLSL_NO_NODE && check(p, GLSL_TOK_SEMICOLON)) {
+            bump(p);
+            return def;
         }
-        glsl_token_type_t type_tok = p->tok.type;
-        bump(p);
-        int32_t decl = parse_declarator_list(p, qualifier, type_tok);
+        int32_t decl = parse_declarator_list(p, qualifier, type_tok, type_name, type_name_len);
         if (p->error) return GLSL_NO_NODE;
         if (!accept(p, GLSL_TOK_SEMICOLON)) {
             fail(p, "expected ';' after a declaration");
             return GLSL_NO_NODE;
+        }
+        /* The definition comes first and the variables hang off it, so a walk in order sees the
+         * type declared before anything is declared of it. */
+        if (def != GLSL_NO_NODE) {
+            p->ast->nodes[def].sibling = decl;
+            return def;
         }
         return decl;
     }
@@ -815,8 +1005,14 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
     parse_aux_qualifiers(p);
     if (p->error) return GLSL_NO_NODE;
     /* An identifier where a type should be, after `invariant`, is the restatement form -
-     * `invariant gl_Position;` - which declares nothing and produces no node. */
-    if (check(p, GLSL_TOK_IDENTIFIER)) {
+     * `invariant gl_Position;` - which declares nothing and produces no node.
+     *
+     * **Unless it names a struct**, in which case it is a type after all and `S s;` is an
+     * ordinary declaration. Before structs existed every identifier here was a restatement, and
+     * this branch was allowed to be that broad; now the two forms start with the same token and
+     * the name list is what tells them apart. Without this check `S s;` is consumed as a
+     * restatement of `S` and then fails on `s` where a `;` was expected. */
+    if (check(p, GLSL_TOK_IDENTIFIER) && !is_struct_name(p, p->tok.text, p->tok.length)) {
         bump(p);
         if (accept(p, GLSL_TOK_SEMICOLON)) return GLSL_NO_NODE;
         fail(p, "expected `;` after an invariant restatement");
@@ -828,12 +1024,14 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
         qualifier = p->tok.type;
         bump(p);
     }
-    if (!is_type_name(p->tok.type)) {
-        fail(p, "expected a type at the start of a declaration");
-        return GLSL_NO_NODE;
-    }
-    glsl_token_type_t type_tok = p->tok.type;
-    bump(p);
+    glsl_token_type_t type_tok = GLSL_TOK_EOF;
+    const char *type_name = (const char *)0;
+    size_t type_name_len = 0;
+    const int32_t struct_def = parse_type_specifier(p, &type_tok, &type_name, &type_name_len);
+    if (p->error) return GLSL_NO_NODE;
+
+    /* A struct declared at file scope with no variable after it. */
+    if (struct_def != GLSL_NO_NODE && accept(p, GLSL_TOK_SEMICOLON)) return struct_def;
 
     if (!check(p, GLSL_TOK_IDENTIFIER)) {
         fail(p, "expected a name after a type");
@@ -879,6 +1077,8 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
     p->ast->nodes[at].length = name_len;
     p->ast->nodes[at].qualifier = qualifier;
     p->ast->nodes[at].type_tok = type_tok;
+    p->ast->nodes[at].type_name = type_name;
+    p->ast->nodes[at].type_name_len = type_name_len;
     p->ast->nodes[at].line = name_line;
     p->ast->nodes[at].column = name_col;
 
@@ -890,13 +1090,18 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
         if (p->error) return GLSL_NO_NODE;
     }
     if (accept(p, GLSL_TOK_COMMA)) {
-        int32_t rest = parse_declarator_list(p, qualifier, type_tok);
+        int32_t rest = parse_declarator_list(p, qualifier, type_tok, type_name, type_name_len);
         if (p->error) return GLSL_NO_NODE;
         p->ast->nodes[at].sibling = rest;
     }
     if (!accept(p, GLSL_TOK_SEMICOLON)) {
         fail(p, "expected ';' after a declaration");
         return GLSL_NO_NODE;
+    }
+    /* As in a statement: the type is declared ahead of the variables of it. */
+    if (struct_def != GLSL_NO_NODE) {
+        p->ast->nodes[struct_def].sibling = at;
+        return struct_def;
     }
     return at;
 }

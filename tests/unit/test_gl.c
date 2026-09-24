@@ -11980,6 +11980,16 @@ static void glsl_print(const glsl_ast_t *ast, int32_t at, char *buf, size_t cap,
       if (n->a != GLSL_NO_NODE) { PUT("="); glsl_print(ast, n->a, buf, cap, len); }
       PUT(")");
       break;
+    case GLSL_NODE_STRUCT_DEF:
+      PUT("(struct ");
+      for (size_t i = 0; i < n->length && *len + 1 < cap; i++) buf[(*len)++] = n->text[i];
+      buf[*len] = '\0';
+      for (int32_t m = n->a; m != GLSL_NO_NODE; m = ast->nodes[m].sibling) {
+        PUT(" ");
+        glsl_print(ast, m, buf, cap, len);
+      }
+      PUT(")");
+      break;
     case GLSL_NODE_PARAM:
       PUT("(param ");
       for (size_t i = 0; i < n->length && *len + 1 < cap; i++) buf[(*len)++] = n->text[i];
@@ -12208,6 +12218,60 @@ static const char *glsl_unit_to_string(const char *src, const char **err) {
   buf[0] = '\0';
   glsl_print(&g_glsl_ast, root, buf, sizeof buf, &len);
   return buf;
+}
+
+/*
+ * **`struct`, which the grammar could not see before 2026-09-24.**
+ *
+ * `S s;` and `s * t;` differ only in whether `S` names a type, which no lookahead settles - so
+ * the parser keeps the names it has seen and `starts_declaration` asks that list. These assert
+ * both halves: that a definition is recognised, and that a variable *of* it afterwards is read
+ * as a declaration rather than as an expression.
+ */
+static void test_glsl_parses_structs(void) {
+  const char *err = NULL;
+  const char *s;
+
+  /* A definition on its own declares a type and nothing else. */
+  s = glsl_unit_to_string("struct S { float a; };", &err);
+  ASSERT_TRUE(s != NULL && strcmp(s, "(unit (struct S (decl a)))") == 0);
+
+  /* Several members, and several declarators on one member line. */
+  s = glsl_unit_to_string("struct S { float a; vec3 b, c; };", &err);
+  ASSERT_TRUE(s != NULL && strcmp(s, "(unit (struct S (decl a) (decl b) (decl c)))") == 0);
+
+  /* **A variable of it, which is the case the name list exists for.** Without it `S s;` parses
+   * as an expression statement and the declaration vanishes. */
+  s = glsl_unit_to_string("struct S { float a; }; S s;", &err);
+  ASSERT_TRUE(s != NULL && strcmp(s, "(unit (struct S (decl a)) (decl s))") == 0);
+
+  /* Declared and used in one go, which is the form that hides a declarator behind a brace. */
+  s = glsl_unit_to_string("struct S { float a; } s;", &err);
+  ASSERT_TRUE(s != NULL && strcmp(s, "(unit (struct S (decl a)) (decl s))") == 0);
+
+  /* Inside a function body, where the same ambiguity is decided by the same list. */
+  s = glsl_unit_to_string("struct S { float a; };\nvoid main() { S s; s.a = 1.0; }", &err);
+  ASSERT_TRUE(s != NULL && strstr(s, "(decl s)") != NULL);
+
+  /* A member whose type is an earlier struct. */
+  s = glsl_unit_to_string("struct A { float x; }; struct B { A inner; float y; };", &err);
+  ASSERT_TRUE(s != NULL &&
+              strcmp(s, "(unit (struct A (decl x)) (struct B (decl inner) (decl y)))") == 0);
+
+  /* An array member, and an array of structs. */
+  s = glsl_unit_to_string("struct S { float a[4]; };", &err);
+  ASSERT_TRUE(s != NULL && strcmp(s, "(unit (struct S (decl a[4])))") == 0);
+  s = glsl_unit_to_string("struct S { float a; }; S s[2];", &err);
+  ASSERT_TRUE(s != NULL && strcmp(s, "(unit (struct S (decl a)) (decl s[2]))") == 0);
+
+  /* What it refuses, each because accepting it would lose what the author wrote. */
+  ASSERT_TRUE(glsl_unit_to_string("struct { float a; } s;", &err) == NULL);      /* anonymous */
+  ASSERT_TRUE(glsl_unit_to_string("struct S { };", &err) == NULL);               /* no members */
+  ASSERT_TRUE(glsl_unit_to_string("struct S { float a = 1.0; };", &err) == NULL);/* initialiser */
+  ASSERT_TRUE(glsl_unit_to_string("struct S { uniform float a; };", &err) == NULL);
+  ASSERT_TRUE(glsl_unit_to_string("struct S { float a; }; struct S { float b; };", &err) == NULL);
+  ASSERT_TRUE(glsl_unit_to_string("struct S { float a; ", &err) == NULL);        /* unclosed */
+  ASSERT_TRUE(err != NULL);
 }
 
 /* Parses a single statement and renders it. */
@@ -14170,6 +14234,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_glsl_preprocessor_expands_and_records);
     RUN_TEST(test_glsl_preprocessor_nests_conditionals);
     RUN_TEST(test_glsl_preprocessor_refuses_by_name);
+    RUN_TEST(test_glsl_parses_structs);
     RUN_TEST(test_glsl_preprocessor_function_like_macros);
     RUN_TEST(test_glsl_preprocessor_evaluates_if);
     RUN_TEST(test_glsl_sema_types_the_operators);
