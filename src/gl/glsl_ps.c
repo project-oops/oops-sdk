@@ -255,6 +255,14 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     glsl_sema_init(sema, (glsl_ast_t *)&fs->ast);
     sema->stage = GL_FRAGMENT_SHADER;
     sema->version = fs->version ? fs->version : 110;
+    /* **The unit's struct table, back into this fresh symbol table**, for the same reason its
+     * functions are re-declared below: this sema is built here and never ran `glsl_check_unit`,
+     * so it knows nothing the compile worked out. The generator asks it for a struct's size and
+     * its members' positions, and the unit is the authority - that table was copied out of the
+     * pass that computed the layout, so the code generator and the interpreter read the same
+     * numbers rather than each deriving their own. */
+    sema->struct_count = fs->struct_count;
+    for (int i = 0; i < fs->struct_count; i++) sema->structs[i] = fs->structs[i];
     GLboolean ok = glsl_declare_builtins(sema, GL_FRAGMENT_SHADER);
 
     /* **The unit's own functions, back into the table.** `glsl_check_unit` recorded them during

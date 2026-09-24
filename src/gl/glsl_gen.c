@@ -256,7 +256,40 @@ static GLboolean is_int_family(glsl_type_t t) {
 
 /* Everything this stage has a register for. */
 static GLboolean is_generated(glsl_type_t t) {
+    /* **A struct too, since 2026-09-24.** It is a run of registers like everything else here -
+     * its members end to end, in the layout the semantic pass fixed - so nothing below needed a
+     * new storage shape, only the size and the position of a member. */
+    if (glsl_type_is_struct(t)) return GL_TRUE;
     return (is_float_family(t) || is_bool_family(t) || is_int_family(t)) ? GL_TRUE : GL_FALSE;
+}
+
+/* **The size of anything, including a struct.** `glsl_type_components` takes a type alone and a
+ * struct's size lives in the semantic table beside it, so every sizing site here asks this. */
+static int gen_comps(const glsl_gen_t *g, glsl_type_t t) {
+    return glsl_type_components_of(g->sema, t);
+}
+
+/* The struct a name refers to in this unit, or GLSL_TYPE_ERROR. */
+static glsl_type_t gen_struct_by_name(const glsl_gen_t *g, const char *name, size_t len) {
+    if (!g->sema || !name) return GLSL_TYPE_ERROR;
+    for (int i = 0; i < g->sema->struct_count; i++) {
+        const glsl_struct_t *st = &g->sema->structs[i];
+        if (st->name_len != len) continue;
+        size_t k = 0;
+        while (k < len && st->name[k] == name[k]) k++;
+        if (k == len) return glsl_struct_type(i);
+    }
+    return GLSL_TYPE_ERROR;
+}
+
+/* The type a declaration or parameter node writes - the generator's copy of sema's
+ * `node_declared_type`. The three readings of a type token have to agree, which is why all
+ * three ask the same table. */
+static glsl_type_t gen_node_type(const glsl_gen_t *g, const glsl_node_t *n) {
+    if (n->type_tok == GLSL_TOK_IDENTIFIER && n->type_name) {
+        return gen_struct_by_name(g, n->type_name, n->type_name_len);
+    }
+    return glsl_type_from_token(n->type_tok);
 }
 
 /* The bits of a float literal, without punning through a pointer.
@@ -766,6 +799,25 @@ static glsl_value_t gen_field(glsl_gen_t *g, int32_t node) {
     glsl_value_t src = gen_expr(g, n->a);
     if (is_bad(src)) return src;
 
+    /* **Reading a struct member is a slice of the run**, and does not need a copy: the member
+     * already occupies consecutive registers inside its struct, so naming them is the whole of
+     * it. The swizzle path below has to move, because the components it names need not be
+     * consecutive and need not be in order. */
+    {
+        const glsl_type_t bt = glsl_type_of(g->sema, n->a);
+        const glsl_struct_member_t *mem = glsl_struct_member(g->sema, bt, n->text, n->length);
+        if (mem) {
+            glsl_value_t out;
+            out.base = src.base + (uint32_t)mem->offset;
+            out.count = gen_comps(g, mem->type) *
+                        ((mem->array_size > 0) ? mem->array_size : 1);
+            return out;
+        }
+        if (glsl_type_is_struct(bt)) {
+            return gen_fail(g, "this struct has no member of that name", node);
+        }
+    }
+
     const int len = (int)n->length;
     if (len < 1 || len > 4) return gen_fail(g, "a swizzle names one to four components", node);
 
@@ -919,8 +971,14 @@ static glsl_value_t gen_construct(glsl_gen_t *g, glsl_type_t target, int32_t fir
  * nothing more.
  * ------------------------------------------------------------------------- */
 
+/* **Four was the width of a swizzle, and a struct is wider.** A place now has to be able to
+ * name a whole struct - `a = b` assigns one - and a member of any type, including a `mat4`.
+ * `GLSL_MAX_STRUCT_COMPONENTS` is the ceiling the semantic pass already enforces on a struct, so
+ * a place can always name one and nothing here has to refuse a shader sema accepted. */
+#define GLSL_GEN_MAX_PLACE_REGS GLSL_MAX_STRUCT_COMPONENTS
+
 typedef struct {
-    uint32_t reg[4];   /* the registers this place names, in the order it names them */
+    uint32_t reg[GLSL_GEN_MAX_PLACE_REGS]; /* the registers this place names, in order */
     int count;
 } gen_place_t;
 
@@ -1013,8 +1071,16 @@ static GLboolean gen_place_of(glsl_gen_t *g, int32_t node, gen_place_t *out) {
                            node);
             return GL_FALSE;
         }
-        if (v->value.count > 4) {
+        /* **A struct is assignable whole and a matrix still is not.** Both are wider than four,
+         * so the width alone stopped being the test when structs arrived: what a place can name
+         * is now bounded by `GLSL_GEN_MAX_PLACE_REGS`, and the matrix refusal is about matrices
+         * rather than about being wide. */
+        if (glsl_type_is_matrix(v->type)) {
             (void)gen_fail(g, "a matrix is not assignable here", node);
+            return GL_FALSE;
+        }
+        if (v->value.count > GLSL_GEN_MAX_PLACE_REGS) {
+            (void)gen_fail(g, "this value is wider than a place can name", node);
             return GL_FALSE;
         }
         if (v->array_size > 0) {
@@ -1041,6 +1107,32 @@ static GLboolean gen_place_of(glsl_gen_t *g, int32_t node, gen_place_t *out) {
     if (n->kind == GLSL_NODE_FIELD) {
         gen_place_t base;
         if (!gen_place_of(g, n->a, &base)) return GL_FALSE;
+        /* **A struct member is a run of consecutive registers**, not a set of component indices.
+         * Members lie end to end in the layout the semantic pass fixed, so a member is the
+         * base's first register plus its position, and a member of any width is assignable -
+         * where a swizzle is limited to the four a vector has. */
+        {
+            const glsl_type_t bt = glsl_type_of(g->sema, n->a);
+            const glsl_struct_member_t *mem =
+                glsl_struct_member(g->sema, bt, n->text, n->length);
+            if (mem) {
+                const int w = gen_comps(g, mem->type) *
+                              ((mem->array_size > 0) ? mem->array_size : 1);
+                if (w > GLSL_GEN_MAX_PLACE_REGS) {
+                    (void)gen_fail(g, "this struct member is wider than a place can name", node);
+                    return GL_FALSE;
+                }
+                out->count = w;
+                for (int i = 0; i < w; i++) {
+                    out->reg[i] = base.reg[0] + (uint32_t)(mem->offset + i);
+                }
+                return GL_TRUE;
+            }
+            if (glsl_type_is_struct(bt)) {
+                (void)gen_fail(g, "this struct has no member of that name", node);
+                return GL_FALSE;
+            }
+        }
         const int len = (int)n->length;
         if (len < 1 || len > 4) {
             (void)gen_fail(g, "a swizzle names one to four components", node);
@@ -2339,7 +2431,7 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
                         node);
     }
 
-    const glsl_type_t ret = glsl_type_from_token(fn->type_tok);
+    const glsl_type_t ret = gen_node_type(g, fn);
     const GLboolean is_void = (GLboolean)(ret == GLSL_TYPE_VOID);
     if (!is_void && !is_generated(ret)) {
         return gen_fail(g, "a function is generated only when it returns void, a float, a "
@@ -2388,7 +2480,7 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
 
     glsl_value_t out; out.base = 0u; out.count = 0;
     if (!is_void) {
-        out = gen_alloc(g, glsl_type_components(ret), node);
+        out = gen_alloc(g, gen_comps(g, ret), node);
         if (is_bad(out)) return out;
     }
 
@@ -2460,12 +2552,13 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
         }
         const GLboolean writes_back = (GLboolean)(pn->qualifier == GLSL_TOK_KW_OUT ||
                                                   pn->qualifier == GLSL_TOK_KW_INOUT);
-        const glsl_type_t pt = glsl_type_from_token(pn->type_tok);
+        const glsl_type_t pt = gen_node_type(g, pn);
         if (!is_generated(pt)) {
-            (void)gen_fail(g, "only float, vec, mat and bool parameters are generated", node);
+            (void)gen_fail(g, "only float, vec, mat, bool and struct parameters are generated",
+                           node);
             break;
         }
-        if (glsl_type_components(pt) != argv[bound].count) {
+        if (gen_comps(g, pt) != argv[bound].count) {
             (void)gen_fail(g, "an argument is a different width from the parameter it binds",
                            node);
             break;
@@ -2694,6 +2787,38 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
             }
             const glsl_type_t target = constructor_target(callee);
             if (target != GLSL_TYPE_ERROR) return gen_construct(g, target, n->b, node);
+
+            /* **A struct constructor writes its arguments end to end**, which is the layout:
+             * one argument per member, each moved to that member's place in the run. Sema has
+             * checked the count and the types, so this only has to place them. */
+            {
+                const glsl_type_t st_type =
+                    gen_struct_by_name(g, callee->text, callee->length);
+                const glsl_struct_t *st = glsl_struct_of(g->sema, st_type);
+                if (st) {
+                    glsl_value_t out = gen_alloc(g, st->components, node);
+                    if (is_bad(out)) return out;
+                    int i = 0;
+                    for (int32_t a = n->b; a != GLSL_NO_NODE && i < st->member_count;
+                         a = g->ast->nodes[a].sibling, i++) {
+                        const uint32_t mark = gen_mark(g);
+                        glsl_value_t av = gen_expr(g, a);
+                        if (is_bad(av)) return av;
+                        const int w = gen_comps(g, st->member[i].type);
+                        if (av.count != w) {
+                            return gen_fail(g, "this argument is a different width from the "
+                                               "struct's member", a);
+                        }
+                        for (int k = 0; k < w; k++) {
+                            glsl_emit_mov(g->code,
+                                          out.base + (uint32_t)(st->member[i].offset + k),
+                                          av.base + (uint32_t)k);
+                        }
+                        gen_release(g, mark);
+                    }
+                    return out;
+                }
+            }
             /* **A function this shader defines wins over the built-in table**, which is GLSL's
              * own rule: a user function may share a name with a built-in and hides it. */
             {
@@ -3198,9 +3323,10 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
         case GLSL_NODE_DECL: {
             /* Every declarator in `float a, b = 1.0;` is its own node on the sibling chain, so
              * this arm sees one name at a time and the chain is walked by the caller. */
-            const glsl_type_t t = glsl_type_from_token(n->type_tok);
+            const glsl_type_t t = gen_node_type(g, n);
             if (!is_generated(t)) {
-                (void)gen_fail(g, "only float, vec, mat and bool locals are generated", node);
+                (void)gen_fail(g, "only float, vec, mat, bool and struct locals are generated",
+                               node);
                 return GL_FALSE;
             }
             /*
@@ -3236,12 +3362,12 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
                 }
             }
             glsl_value_t home =
-                gen_alloc(g, glsl_type_components(t) * (elems > 0 ? elems : 1), node);
+                gen_alloc(g, gen_comps(g, t) * (elems > 0 ? elems : 1), node);
             if (is_bad(home)) return GL_FALSE;
             if (elems > 0) {
                 /* The run is the array; `value.count` stays the *element* width so every other
                  * reader - a move, a place, a width check - sees one element. */
-                home.count = glsl_type_components(t);
+                home.count = gen_comps(g, t);
                 glsl_gen_var_t *av = gen_declare(g, n->text, n->length, t, home, node);
                 if (!av) return GL_FALSE;
                 av->array_size = elems;

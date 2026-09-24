@@ -4847,6 +4847,113 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * **Structs compiled to gfx1030 and simulated**, which is a different question from the software
+ * path's: there a struct is a float array and here it is a run of registers, and the two agree
+ * only because both read the layout the semantic pass fixed. A member resolved to the wrong
+ * register is a colour, not an error - so each case puts a different member in a different
+ * channel and a layout off by one comes back rotated.
+ */
+static void test_gl2_compiled_structs(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0.25f, 0.5f, 0.75f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float tol = 2e-3f;
+
+    /* Construct and read each member back into its own channel. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct C { float r; float g; float b; };\n"
+                    "void main() {\n"
+                    "  C c = C(0.25, 0.5, 0.75);\n"
+                    "  gl_FragColor = vec4(c.r, c.g, c.b, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.75f, tol);
+
+    /* A vector member, and a swizzle of it - both meanings of `.` in one expression. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct M { float a; vec3 v; };\n"
+                    "void main() {\n"
+                    "  M m = M(0.0, vec3(0.25, 0.5, 0.75));\n"
+                    "  gl_FragColor = vec4(m.v.z, m.v.y, m.v.x, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.25f, tol);
+
+    /* **A member is writable**, and writing one must not disturb its neighbours. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct C { float r; float g; float b; };\n"
+                    "void main() {\n"
+                    "  C c = C(0.25, 0.5, 0.75);\n"
+                    "  c.g = 0.125;\n"
+                    "  gl_FragColor = vec4(c.r, c.g, c.b, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.125f, tol);
+    ASSERT_NEAR(o[2], 0.75f, tol);
+
+    /* Whole-struct assignment, where writing the copy must leave the original alone. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct C { float r; float g; float b; };\n"
+                    "void main() {\n"
+                    "  C a = C(0.25, 0.5, 0.75);\n"
+                    "  C b = a;\n"
+                    "  b.r = 1.0;\n"
+                    "  gl_FragColor = vec4(a.r, b.g, b.b, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.75f, tol);
+
+    /* Nested, so the inner struct's layout is added to the outer one's. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct In { float x; float y; };\n"
+                    "struct Out { float lead; In in2; };\n"
+                    "void main() {\n"
+                    "  Out s = Out(0.25, In(0.5, 0.75));\n"
+                    "  gl_FragColor = vec4(s.lead, s.in2.x, s.in2.y, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.75f, tol);
+
+    /* Built from a varying, so the members carry interpolated values rather than constants -
+     * a constant-folded layout would pass the cases above and fail this one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "struct C { float r; float g; float b; };\n"
+                    "void main() {\n"
+                    "  C c = C(vin.x, vin.y, vin.z);\n"
+                    "  gl_FragColor = vec4(c.b, c.g, c.r, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.25f, tol);
+
+    /* Through a function, by value both ways. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct C { float r; float g; float b; };\n"
+                    "C half_of(C c) { return C(c.r * 0.5, c.g * 0.5, c.b * 0.5); }\n"
+                    "void main() {\n"
+                    "  C c = half_of(C(0.5, 1.0, 1.5));\n"
+                    "  gl_FragColor = vec4(c.r, c.g, c.b, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.75f, tol);
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_arithmetic_matches_the_language(void) {
     void *ctx = gl2_context();
     /* The reciprocal is a 1-ULP instruction and the transcendentals are worse, so these compare
@@ -5795,6 +5902,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);
+    RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);
     RUN_TEST(test_gl2_compiled_swizzle_writes_land_where_they_are_named);
