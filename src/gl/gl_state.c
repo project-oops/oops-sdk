@@ -2058,6 +2058,24 @@ void glGetIntegerv(GLenum pname, GLint *params) {
         case GL_TEXTURE_BINDING_2D:
             params[0] = (GLint)gl_tu(ctx)->bound_texture_2d;
             break;
+        case GL_FRAMEBUFFER_BINDING:
+            params[0] = (GLint)ctx->bound_framebuffer;
+            break;
+        case GL_RENDERBUFFER_BINDING:
+            params[0] = (GLint)ctx->bound_renderbuffer;
+            break;
+        case GL_MAX_RENDERBUFFER_SIZE:
+            params[0] = (GLint)OOPS_GL_MAX_TEXTURE_SIZE;
+            break;
+        /* ES 2.0's shader-compiler queries. This GL compiles online and has no binary format,
+         * so the pair is GL_TRUE and zero - and the zero is what makes glShaderBinary's refusal
+         * the correct answer rather than an arbitrary one. */
+        case GL_SHADER_COMPILER:
+            params[0] = (GLint)GL_TRUE;
+            break;
+        case GL_NUM_SHADER_BINARY_FORMATS:
+            params[0] = 0;
+            break;
         case GL_TEXTURE_BINDING_1D:
             params[0] = (GLint)gl_tu(ctx)->bound_texture_1d;
             break;
@@ -6789,4 +6807,612 @@ GLboolean glIsTexture(GLuint texture) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || texture == 0) return GL_FALSE;
     return gl_find_texture(ctx, texture) != NULL ? GL_TRUE : GL_FALSE;
+}
+
+/* -------------------------------------------------------------------------
+ * Framebuffer objects
+ *
+ * The object layer: names, storage, attachments and the completeness rules. What it does *not*
+ * yet do is redirect a draw - see glCheckFramebufferStatus, which says so in the only way a
+ * caller can act on.
+ * ------------------------------------------------------------------------- */
+
+static gl_framebuffer_object_t *gl_find_framebuffer(gl_context_t *ctx, GLuint id) {
+    if (!ctx || id == 0) return NULL;
+    if (id <= (GLuint)OOPS_GL_MAX_FRAMEBUFFER_OBJECTS) {
+        gl_framebuffer_object_t *f = &ctx->framebuffers[id - 1u];
+        if (f->used && f->id == id) return f;
+    }
+    for (int i = 0; i < OOPS_GL_MAX_FRAMEBUFFER_OBJECTS; i++) {
+        if (ctx->framebuffers[i].used && ctx->framebuffers[i].id == id) return &ctx->framebuffers[i];
+    }
+    return NULL;
+}
+
+static gl_renderbuffer_object_t *gl_find_renderbuffer(gl_context_t *ctx, GLuint id) {
+    if (!ctx || id == 0) return NULL;
+    if (id <= (GLuint)OOPS_GL_MAX_RENDERBUFFER_OBJECTS) {
+        gl_renderbuffer_object_t *r = &ctx->renderbuffers[id - 1u];
+        if (r->used && r->id == id) return r;
+    }
+    for (int i = 0; i < OOPS_GL_MAX_RENDERBUFFER_OBJECTS; i++) {
+        if (ctx->renderbuffers[i].used && ctx->renderbuffers[i].id == id) return &ctx->renderbuffers[i];
+    }
+    return NULL;
+}
+
+/* The attachment point a name selects, or NULL for one this GL does not have. GL_COLOR_ATTACHMENT0
+ * only: ES 2.0 has exactly one colour attachment and GL_MAX_COLOR_ATTACHMENTS is 1. */
+static gl_fb_attachment_t *gl_fb_attachment_for(gl_framebuffer_object_t *fb, GLenum attachment) {
+    if (!fb) return NULL;
+    switch (attachment) {
+        case GL_COLOR_ATTACHMENT0: return &fb->color0;
+        case GL_DEPTH_ATTACHMENT: return &fb->depth;
+        case GL_STENCIL_ATTACHMENT: return &fb->stencil;
+        default: return NULL;
+    }
+}
+
+/* An attachment's size, and whether it has storage at all. A texture level that was never given
+ * an image, and a renderbuffer with no glRenderbufferStorage, are both attachments that exist
+ * and are not renderable - which is the difference between INCOMPLETE_ATTACHMENT and
+ * INCOMPLETE_MISSING_ATTACHMENT. */
+static GLboolean gl_fb_attachment_size(gl_context_t *ctx, const gl_fb_attachment_t *at,
+                                       GLsizei *w, GLsizei *h) {
+    *w = 0;
+    *h = 0;
+    if (!at || at->kind == GL_FB_ATTACH_NONE) return GL_FALSE;
+    if (at->kind == GL_FB_ATTACH_RENDERBUFFER) {
+        const gl_renderbuffer_object_t *rb = gl_find_renderbuffer(ctx, at->name);
+        if (!rb || !rb->pixels) return GL_FALSE;
+        *w = rb->width;
+        *h = rb->height;
+        return GL_TRUE;
+    }
+    const gl_texture_object_t *tex = gl_find_texture(ctx, at->name);
+    if (!tex) return GL_FALSE;
+    gl_tex_view_t view;
+    if (!gl_tex_level_view(tex, at->level, &view)) return GL_FALSE;
+    *w = view.width;
+    *h = view.height;
+    return GL_TRUE;
+}
+
+void glGenFramebuffers(GLsizei n, GLuint *framebuffers) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !framebuffers) return;
+    if (n < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    GLuint next_id = 1;
+    for (GLsizei i = 0; i < n; i++) {
+        while (next_id <= (GLuint)OOPS_GL_MAX_FRAMEBUFFER_OBJECTS &&
+               ctx->framebuffers[next_id - 1u].used) {
+            next_id++;
+        }
+        if (next_id > (GLuint)OOPS_GL_MAX_FRAMEBUFFER_OBJECTS) {
+            framebuffers[i] = 0;
+            gl_record_error(ctx, GL_OUT_OF_MEMORY);
+            continue;
+        }
+        gl_framebuffer_object_t *fb = &ctx->framebuffers[next_id - 1u];
+        memset(fb, 0, sizeof(*fb));
+        fb->id = next_id;
+        fb->used = GL_TRUE;
+        framebuffers[i] = next_id;
+        next_id++;
+    }
+}
+
+void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !framebuffers) return;
+    if (n < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    for (GLsizei i = 0; i < n; i++) {
+        const GLuint id = framebuffers[i];
+        if (id == 0) continue;
+        gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, id);
+        if (!fb) continue;
+        /* Deleting the bound framebuffer binds 0 in its place, as GL says - otherwise the
+         * binding names a slot that has been cleared and every later draw reads it. */
+        if (ctx->bound_framebuffer == id) ctx->bound_framebuffer = 0;
+        memset(fb, 0, sizeof(*fb));
+    }
+}
+
+void glBindFramebuffer(GLenum target, GLuint framebuffer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_FRAMEBUFFER) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (framebuffer != 0 && !gl_find_framebuffer(ctx, framebuffer)) {
+        /* **A name glGenFramebuffers never gave.** ES 2.0 refuses it; desktop GL before 3.0 let
+         * a bind create one. This takes the ES rule, because that is the surface being answered
+         * here and the other spelling is not offered. */
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    ctx->bound_framebuffer = framebuffer;
+}
+
+GLboolean glIsFramebuffer(GLuint framebuffer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || framebuffer == 0) return GL_FALSE;
+    return gl_find_framebuffer(ctx, framebuffer) ? GL_TRUE : GL_FALSE;
+}
+
+void glGenRenderbuffers(GLsizei n, GLuint *renderbuffers) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !renderbuffers) return;
+    if (n < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    GLuint next_id = 1;
+    for (GLsizei i = 0; i < n; i++) {
+        while (next_id <= (GLuint)OOPS_GL_MAX_RENDERBUFFER_OBJECTS &&
+               ctx->renderbuffers[next_id - 1u].used) {
+            next_id++;
+        }
+        if (next_id > (GLuint)OOPS_GL_MAX_RENDERBUFFER_OBJECTS) {
+            renderbuffers[i] = 0;
+            gl_record_error(ctx, GL_OUT_OF_MEMORY);
+            continue;
+        }
+        gl_renderbuffer_object_t *rb = &ctx->renderbuffers[next_id - 1u];
+        memset(rb, 0, sizeof(*rb));
+        rb->id = next_id;
+        rb->used = GL_TRUE;
+        renderbuffers[i] = next_id;
+        next_id++;
+    }
+}
+
+void glDeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !renderbuffers) return;
+    if (n < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    for (GLsizei i = 0; i < n; i++) {
+        const GLuint id = renderbuffers[i];
+        if (id == 0) continue;
+        gl_renderbuffer_object_t *rb = gl_find_renderbuffer(ctx, id);
+        if (!rb) continue;
+        gl_buffer_release(rb->pixels);
+        if (ctx->bound_renderbuffer == id) ctx->bound_renderbuffer = 0;
+        /* **Every attachment naming it goes too**, on every framebuffer and not only the bound
+         * one, which is what GL says happens and what keeps gl_fb_attachment_size from looking
+         * up a name that no longer exists. */
+        for (int f = 0; f < OOPS_GL_MAX_FRAMEBUFFER_OBJECTS; f++) {
+            gl_framebuffer_object_t *fb = &ctx->framebuffers[f];
+            if (!fb->used) continue;
+            gl_fb_attachment_t *slots[3] = {&fb->color0, &fb->depth, &fb->stencil};
+            for (int s = 0; s < 3; s++) {
+                if (slots[s]->kind == GL_FB_ATTACH_RENDERBUFFER && slots[s]->name == id) {
+                    memset(slots[s], 0, sizeof(*slots[s]));
+                }
+            }
+        }
+        memset(rb, 0, sizeof(*rb));
+    }
+}
+
+void glBindRenderbuffer(GLenum target, GLuint renderbuffer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_RENDERBUFFER) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (renderbuffer != 0 && !gl_find_renderbuffer(ctx, renderbuffer)) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    ctx->bound_renderbuffer = renderbuffer;
+}
+
+GLboolean glIsRenderbuffer(GLuint renderbuffer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || renderbuffer == 0) return GL_FALSE;
+    return gl_find_renderbuffer(ctx, renderbuffer) ? GL_TRUE : GL_FALSE;
+}
+
+void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_RENDERBUFFER) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    gl_renderbuffer_object_t *rb = gl_find_renderbuffer(ctx, ctx->bound_renderbuffer);
+    if (!rb) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    if (width < 0 || height < 0 ||
+        width > OOPS_GL_MAX_TEXTURE_SIZE || height > OOPS_GL_MAX_TEXTURE_SIZE) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    switch (internalformat) {
+        case GL_RGBA4: case GL_RGB5_A1: case GL_RGB565: case GL_RGBA8: case GL_RGB8:
+        case GL_DEPTH_COMPONENT16_ARB: case GL_DEPTH_COMPONENT24: case GL_STENCIL_INDEX8:
+            break;
+        default:
+            gl_record_error(ctx, GL_INVALID_ENUM);
+            return;
+    }
+    /* **One word a sample whatever the format.** A renderbuffer is not sampled, so nothing reads
+     * it in its declared layout - the format is kept to answer the queries and to decide
+     * completeness, and the storage is the width this GL's colour and depth buffers already are.
+     * Packing RGB565 tightly would save memory a render target does not have a shortage of, and
+     * would need a second addressing path through the rasteriser. */
+    gl_buffer_release(rb->pixels);
+    rb->pixels = NULL;
+    rb->internal_format = internalformat;
+    rb->width = width;
+    rb->height = height;
+    if (width > 0 && height > 0) {
+        const size_t bytes = (size_t)width * (size_t)height * sizeof(uint32_t);
+        rb->pixels = (uint32_t *)gl_buffer_alloc(bytes);
+        if (!rb->pixels) {
+            rb->width = 0;
+            rb->height = 0;
+            gl_record_error(ctx, GL_OUT_OF_MEMORY);
+            return;
+        }
+        memset(rb->pixels, 0, bytes);
+    }
+}
+
+void glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    if (target != GL_RENDERBUFFER) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    const gl_renderbuffer_object_t *rb = gl_find_renderbuffer(ctx, ctx->bound_renderbuffer);
+    if (!rb) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    const GLenum fmt = rb->internal_format;
+    switch (pname) {
+        case GL_RENDERBUFFER_WIDTH: *params = (GLint)rb->width; break;
+        case GL_RENDERBUFFER_HEIGHT: *params = (GLint)rb->height; break;
+        case GL_RENDERBUFFER_INTERNAL_FORMAT: *params = (GLint)fmt; break;
+        /* The sizes the *declared* format promises, not the storage above - a program choosing a
+         * format reads these back to find out what it got, and answering 8888 for an RGB565
+         * renderbuffer would report a precision it did not ask for and cannot rely on. */
+        case GL_RENDERBUFFER_RED_SIZE:
+            *params = (fmt == GL_RGBA4) ? 4 : (fmt == GL_RGB5_A1 || fmt == GL_RGB565) ? 5
+                    : (fmt == GL_RGBA8 || fmt == GL_RGB8) ? 8 : 0;
+            break;
+        case GL_RENDERBUFFER_GREEN_SIZE:
+            *params = (fmt == GL_RGBA4) ? 4 : (fmt == GL_RGB5_A1) ? 5 : (fmt == GL_RGB565) ? 6
+                    : (fmt == GL_RGBA8 || fmt == GL_RGB8) ? 8 : 0;
+            break;
+        case GL_RENDERBUFFER_BLUE_SIZE:
+            *params = (fmt == GL_RGBA4) ? 4 : (fmt == GL_RGB5_A1 || fmt == GL_RGB565) ? 5
+                    : (fmt == GL_RGBA8 || fmt == GL_RGB8) ? 8 : 0;
+            break;
+        case GL_RENDERBUFFER_ALPHA_SIZE:
+            *params = (fmt == GL_RGBA4) ? 4 : (fmt == GL_RGB5_A1) ? 1 : (fmt == GL_RGBA8) ? 8 : 0;
+            break;
+        case GL_RENDERBUFFER_DEPTH_SIZE:
+            *params = (fmt == GL_DEPTH_COMPONENT16_ARB) ? 16
+                    : (fmt == GL_DEPTH_COMPONENT24) ? 24 : 0;
+            break;
+        case GL_RENDERBUFFER_STENCIL_SIZE:
+            *params = (fmt == GL_STENCIL_INDEX8) ? 8 : 0;
+            break;
+        default:
+            gl_record_error(ctx, GL_INVALID_ENUM);
+            break;
+    }
+}
+
+void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
+                            GLuint texture, GLint level) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_FRAMEBUFFER) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    /* **Attaching to the window-system framebuffer is an error, not a no-op.** Name 0 is the
+     * display and has no attachment points; a program that gets here has forgotten its bind. */
+    gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, ctx->bound_framebuffer);
+    if (!fb) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    gl_fb_attachment_t *at = gl_fb_attachment_for(fb, attachment);
+    if (!at) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (textarget != GL_TEXTURE_2D &&
+        !(textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
+          textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (level < 0 || level >= OOPS_GL_MAX_TEXTURE_LEVELS) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    if (texture == 0) {
+        memset(at, 0, sizeof(*at));
+        return;
+    }
+    if (!gl_find_texture(ctx, texture)) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    at->kind = GL_FB_ATTACH_TEXTURE;
+    at->name = texture;
+    at->textarget = textarget;
+    at->level = level;
+}
+
+void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget,
+                               GLuint renderbuffer) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_FRAMEBUFFER || renderbuffertarget != GL_RENDERBUFFER) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, ctx->bound_framebuffer);
+    if (!fb) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    gl_fb_attachment_t *at = gl_fb_attachment_for(fb, attachment);
+    if (!at) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if (renderbuffer == 0) {
+        memset(at, 0, sizeof(*at));
+        return;
+    }
+    if (!gl_find_renderbuffer(ctx, renderbuffer)) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    at->kind = GL_FB_ATTACH_RENDERBUFFER;
+    at->name = renderbuffer;
+    at->textarget = 0;
+    at->level = 0;
+}
+
+void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname,
+                                           GLint *params) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params) return;
+    if (target != GL_FRAMEBUFFER) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, ctx->bound_framebuffer);
+    if (!fb) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    const gl_fb_attachment_t *at = gl_fb_attachment_for(fb, attachment);
+    if (!at) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    switch (pname) {
+        case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+            *params = (at->kind == GL_FB_ATTACH_TEXTURE) ? (GLint)GL_TEXTURE
+                    : (at->kind == GL_FB_ATTACH_RENDERBUFFER) ? (GLint)GL_RENDERBUFFER
+                    : (GLint)GL_NONE;
+            break;
+        case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+            /* **Only when something is attached.** GL says this query is an error against an
+             * empty attachment point rather than answering zero - the caller is expected to have
+             * asked for the type first. */
+            if (at->kind == GL_FB_ATTACH_NONE) {
+                gl_record_error(ctx, GL_INVALID_ENUM);
+                return;
+            }
+            *params = (GLint)at->name;
+            break;
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+            if (at->kind != GL_FB_ATTACH_TEXTURE) {
+                gl_record_error(ctx, GL_INVALID_ENUM);
+                return;
+            }
+            *params = at->level;
+            break;
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+            if (at->kind != GL_FB_ATTACH_TEXTURE) {
+                gl_record_error(ctx, GL_INVALID_ENUM);
+                return;
+            }
+            *params = (at->textarget == GL_TEXTURE_2D) ? 0 : (GLint)at->textarget;
+            break;
+        default:
+            gl_record_error(ctx, GL_INVALID_ENUM);
+            break;
+    }
+}
+
+GLenum glCheckFramebufferStatus(GLenum target) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return 0;
+    if (target != GL_FRAMEBUFFER) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return 0;
+    }
+    /* The window-system framebuffer is always complete - there is nothing to attach to it. */
+    gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, ctx->bound_framebuffer);
+    if (!fb) return GL_FRAMEBUFFER_COMPLETE;
+
+    GLsizei cw = 0, ch = 0, dw = 0, dh = 0, sw = 0, sh = 0;
+    const GLboolean has_c = gl_fb_attachment_size(ctx, &fb->color0, &cw, &ch);
+    const GLboolean has_d = gl_fb_attachment_size(ctx, &fb->depth, &dw, &dh);
+    const GLboolean has_s = gl_fb_attachment_size(ctx, &fb->stencil, &sw, &sh);
+
+    /* An attachment point that names something with no storage behind it. */
+    if ((fb->color0.kind != GL_FB_ATTACH_NONE && !has_c) ||
+        (fb->depth.kind != GL_FB_ATTACH_NONE && !has_d) ||
+        (fb->stencil.kind != GL_FB_ATTACH_NONE && !has_s)) {
+        return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+    }
+    if (!has_c && !has_d && !has_s) return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+
+    /* ES 2.0 requires every attachment to share one size; desktop GL 3.0 dropped the rule. */
+    const GLsizei w = has_c ? cw : has_d ? dw : sw;
+    const GLsizei h = has_c ? ch : has_d ? dh : sh;
+    if ((has_c && (cw != w || ch != h)) || (has_d && (dw != w || dh != h)) ||
+        (has_s && (sw != w || sh != h))) {
+        return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+    }
+
+    /*
+     * **Complete, and still not somewhere a draw can go.**
+     *
+     * Everything above is the object layer and it is right; what is not written yet is the
+     * redirection in `gl_draw_targets` that would point the colour target at this attachment
+     * instead of the display. Until it is, the honest answer is GL_FRAMEBUFFER_UNSUPPORTED,
+     * which the specification defines as exactly this - a combination of attachments this
+     * implementation cannot render to - and which callers are required to handle.
+     *
+     * Reporting GL_FRAMEBUFFER_COMPLETE instead would be the flattering answer and a false one:
+     * the caller would draw, the pixels would land on the display, and a suite reading the
+     * texture afterwards would get whatever was there before. A conformance run would score that
+     * as a pass in some cases and an unexplained failure in others. A refusal here makes dEQP
+     * report NotSupported, which is true.
+     */
+    return GL_FRAMEBUFFER_UNSUPPORTED;
+}
+
+/*
+ * **ES 2.0's explicit call, over GL 1.4's automatic one.**
+ *
+ * `gl_tex_generate_mipmap` already builds the chain, because GL_GENERATE_MIPMAP (GL 1.4, 3.8.8)
+ * has needed it since long before this - it is the same box filter over the same levels, and it
+ * already handles a volume, a cube face, GL_TEXTURE_BASE_LEVEL and GL_TEXTURE_MAX_LEVEL. The
+ * only thing ES adds is asking for it by hand rather than on every upload.
+ *
+ * So this is the entry point and the validation, and none of the filtering. A second reduction
+ * written here would have been a second answer to "what is the level above this one", and the
+ * two would have drifted.
+ */
+void glGenerateMipmap(GLenum target) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP &&
+        target != GL_TEXTURE_1D && target != GL_TEXTURE_3D) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    gl_texture_object_t *tex = gl_texture_for_target(ctx, target, GL_FALSE);
+    if (!tex) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+
+    if (target == GL_TEXTURE_CUBE_MAP) {
+        /* **Every face, and only if the cube is complete.** GL says a cube map whose six faces
+         * do not agree in size and format is an error here rather than six independent chains -
+         * a sampler reading such a map has no defined level to read from. */
+        gl_tex_view_t f0;
+        if (!tex->cube || !gl_tex_face_view(tex, 0, tex->base_level, &f0)) {
+            gl_record_error(ctx, GL_INVALID_OPERATION);
+            return;
+        }
+        for (int face = 1; face < 6; face++) {
+            gl_tex_view_t fv;
+            if (!gl_tex_face_view(tex, face, tex->base_level, &fv) ||
+                fv.width != f0.width || fv.height != f0.height ||
+                fv.internal_format != f0.internal_format) {
+                gl_record_error(ctx, GL_INVALID_OPERATION);
+                return;
+            }
+        }
+        for (int face = 0; face < 6; face++) gl_tex_generate_mipmap(ctx, tex, face);
+        return;
+    }
+
+    /* No base image is an error, not a texture with one empty chain - and it has to be checked
+     * here, because the generator answers an absent base by returning quietly. */
+    gl_tex_view_t base;
+    if (!gl_tex_level_view(tex, tex->base_level, &base)) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    gl_tex_generate_mipmap(ctx, tex, -1);
+}
+
+/* -------------------------------------------------------------------------
+ * The ES 2.0 spellings, and the calls only ES has
+ * ------------------------------------------------------------------------- */
+
+void glClearDepthf(GLclampf depth) { glClearDepth((GLclampd)depth); }
+
+void glDepthRangef(GLclampf zNear, GLclampf zFar) {
+    glDepthRange((GLclampd)zNear, (GLclampd)zFar);
+}
+
+void glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype,
+                                GLint *range, GLint *precision) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (shadertype != GL_VERTEX_SHADER && shadertype != GL_FRAGMENT_SHADER) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    /* **Every precision here is IEEE single.** ES allows a fragment shader to carry less, and
+     * the values below are what the specification names for an implementation that does not:
+     * the range and precision of binary32, and 24 bits for the integer types because that is
+     * what a float holds exactly. Nothing in this GL narrows anything to mediump. */
+    switch (precisiontype) {
+        case GL_LOW_FLOAT: case GL_MEDIUM_FLOAT: case GL_HIGH_FLOAT:
+            if (range) { range[0] = 127; range[1] = 127; }
+            if (precision) *precision = 23;
+            break;
+        case GL_LOW_INT: case GL_MEDIUM_INT: case GL_HIGH_INT:
+            if (range) { range[0] = 24; range[1] = 24; }
+            if (precision) *precision = 0;
+            break;
+        default:
+            gl_record_error(ctx, GL_INVALID_ENUM);
+            break;
+    }
+}
+
+/* A hint that the compiler's memory may be reclaimed. This compiler is part of the library and
+ * has nothing to release, and the specification allows ignoring it - a later glCompileShader
+ * must work regardless, which is what makes ignoring it correct rather than lazy. */
+void glReleaseShaderCompiler(void) { }
+
+void glShaderBinary(GLsizei count, const GLuint *shaders, GLenum binaryformat,
+                    const void *binary, GLsizei length) {
+    gl_context_t *ctx = gl_get_ctx();
+    (void)shaders;
+    (void)binary;
+    (void)binaryformat;
+    if (!ctx) return;
+    if (count < 0 || length < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    /* GL_NUM_SHADER_BINARY_FORMATS is zero here, so no value of `binaryformat` is valid and
+     * GL_INVALID_ENUM is the required answer rather than a stub's silence. */
+    gl_record_error(ctx, GL_INVALID_ENUM);
 }

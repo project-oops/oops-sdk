@@ -1295,6 +1295,187 @@ static void test_gl2_structs_run(void) {
     oops_display_close(t.disp);
 }
 
+/*
+ * Framebuffer objects: the object layer.
+ *
+ * Every check below is of state a program can read back, because that is all this layer is yet -
+ * `glCheckFramebufferStatus` deliberately reports GL_FRAMEBUFFER_UNSUPPORTED for a framebuffer
+ * that is otherwise complete, and the case at the end holds it to that. When redirection lands
+ * that case is the one that has to change, which is the point of asserting the refusal rather
+ * than skipping it.
+ */
+static void test_gl2_framebuffer_objects(void) {
+    gl2_target_t t = gl2_target();
+
+    /* Names: distinct, non-zero, live until deleted. */
+    GLuint fb[2] = {0, 0};
+    glGenFramebuffers(2, fb);
+    ASSERT_TRUE(fb[0] != 0 && fb[1] != 0 && fb[0] != fb[1]);
+    ASSERT_TRUE(glIsFramebuffer(fb[0]) == GL_TRUE);
+    ASSERT_TRUE(glIsFramebuffer(fb[0] + 1000u) == GL_FALSE);
+
+    /* **A name that was never generated is refused**, which is the ES rule - binding it must not
+     * quietly create one, or a program with a stale name draws somewhere it does not own. */
+    while (glGetError() != GL_NO_ERROR) { }
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[0] + 1000u);
+    ASSERT_TRUE(glGetError() == GL_INVALID_OPERATION);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fb[0]);
+    GLint bound = -1;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+    ASSERT_TRUE((GLuint)bound == fb[0]);
+
+    /* Nothing attached yet. */
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT);
+
+    /* A renderbuffer with a name but no storage: attached, and not renderable. */
+    GLuint rb[2] = {0, 0};
+    glGenRenderbuffers(2, rb);
+    ASSERT_TRUE(rb[0] != 0 && rb[1] != 0 && rb[0] != rb[1]);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
+
+    /* **The declared format is what the queries answer**, not the storage it was given. RGB565
+     * is one word a sample here like everything else, and reporting 8 bits a channel for it
+     * would promise a precision the program did not ask for. */
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGB565, 32, 32);
+    GLint v = -1;
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &v);
+    ASSERT_TRUE(v == 32);
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_RED_SIZE, &v);
+    ASSERT_TRUE(v == 5);
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_GREEN_SIZE, &v);
+    ASSERT_TRUE(v == 6);
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_BLUE_SIZE, &v);
+    ASSERT_TRUE(v == 5);
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_ALPHA_SIZE, &v);
+    ASSERT_TRUE(v == 0);
+
+    /* The attachment reads back as what it is. */
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &v);
+    ASSERT_TRUE(v == GL_RENDERBUFFER);
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &v);
+    ASSERT_TRUE((GLuint)v == rb[0]);
+
+    /* An empty attachment point has a type and no name, and asking for the name is an error
+     * rather than a zero - a program is expected to ask the type first. */
+    while (glGetError() != GL_NO_ERROR) { }
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &v);
+    ASSERT_TRUE(v == GL_NONE);
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &v);
+    ASSERT_TRUE(glGetError() == GL_INVALID_ENUM);
+
+    /* **ES 2.0 wants every attachment the same size**, and a depth buffer of the wrong one is
+     * the ordinary way a program gets this wrong. */
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16_ARB, 16, 16);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS);
+
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16_ARB, 32, 32);
+    /* **Complete in every rule above, and still refused.** The draw path does not redirect yet,
+     * so reporting COMPLETE would send the program's pixels to the display while it read the
+     * attachment. This assertion changes to GL_FRAMEBUFFER_COMPLETE when that lands. */
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_UNSUPPORTED);
+
+    /* **Deleting a renderbuffer detaches it everywhere**, so what was complete is not. */
+    glDeleteRenderbuffers(1, &rb[0]);
+    ASSERT_TRUE(glIsRenderbuffer(rb[0]) == GL_FALSE);
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &v);
+    ASSERT_TRUE(v == GL_NONE);
+
+    /* Deleting the bound framebuffer binds 0 - the display - in its place. */
+    glDeleteFramebuffers(1, &fb[0]);
+    ASSERT_TRUE(glIsFramebuffer(fb[0]) == GL_FALSE);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+    ASSERT_TRUE(bound == 0);
+    /* And the window-system framebuffer is always complete. */
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+    glDeleteFramebuffers(1, &fb[1]);
+    glDeleteRenderbuffers(1, &rb[1]);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
+/*
+ * `glGenerateMipmap`, checked by reading the levels back.
+ *
+ * The 4x4 image is four uniform 2x2 blocks with a different red in each, so level 1 must be
+ * exactly those four values - **an average that is right and a row stride that is wrong give
+ * different answers**, which a texture of one flat colour would not. The 2x2 image after it is
+ * the averaging arm: its single level-1 texel is the mean of four unequal values, and no
+ * addressing mistake produces it.
+ */
+static void test_gl2_generate_mipmap(void) {
+    gl2_target_t t = gl2_target();
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    uint8_t img[4 * 4 * 4];
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            const uint8_t r = (uint8_t)(40 + 40 * ((y / 2) * 2 + (x / 2)));
+            uint8_t *p = &img[(y * 4 + x) * 4];
+            p[0] = r; p[1] = 0; p[2] = 0; p[3] = 255;
+        }
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    uint8_t lvl1[2 * 2 * 4];
+    memset(lvl1, 0xab, sizeof(lvl1));
+    glGetTexImage(GL_TEXTURE_2D, 1, GL_RGBA, GL_UNSIGNED_BYTE, lvl1);
+    ASSERT_TRUE(lvl1[0 * 4] == 40);
+    ASSERT_TRUE(lvl1[1 * 4] == 80);
+    ASSERT_TRUE(lvl1[2 * 4] == 120);
+    ASSERT_TRUE(lvl1[3 * 4] == 160);
+    /* The chain runs to 1x1, and that texel is the mean of the four above. */
+    uint8_t lvl2[4];
+    memset(lvl2, 0xab, sizeof(lvl2));
+    glGetTexImage(GL_TEXTURE_2D, 2, GL_RGBA, GL_UNSIGNED_BYTE, lvl2);
+    ASSERT_TRUE(lvl2[0] == 100);  /* (40 + 80 + 120 + 160 + 2) / 4 */
+
+    /* The averaging arm: four unequal texels, one result. */
+    GLuint tex2 = 0;
+    glGenTextures(1, &tex2);
+    glBindTexture(GL_TEXTURE_2D, tex2);
+    const uint8_t quad[2 * 2 * 4] = {
+        10, 0, 0, 255,   20, 0, 0, 255,
+        30, 0, 0, 255,   41, 0, 0, 255,
+    };
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, quad);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    uint8_t one[4];
+    memset(one, 0xab, sizeof(one));
+    glGetTexImage(GL_TEXTURE_2D, 1, GL_RGBA, GL_UNSIGNED_BYTE, one);
+    ASSERT_TRUE(one[0] == 25);  /* (10 + 20 + 30 + 41 + 2) / 4 = 25 */
+    ASSERT_TRUE(one[3] == 255);
+
+    /* No base image is an error, not an empty chain. */
+    GLuint tex3 = 0;
+    glGenTextures(1, &tex3);
+    glBindTexture(GL_TEXTURE_2D, tex3);
+    while (glGetError() != GL_NO_ERROR) { }
+    glGenerateMipmap(GL_TEXTURE_2D);
+    ASSERT_TRUE(glGetError() == GL_INVALID_OPERATION);
+
+    glDeleteTextures(1, &tex);
+    glDeleteTextures(1, &tex2);
+    glDeleteTextures(1, &tex3);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 static void test_gl2_a_program_draws(void) {
     gl2_target_t t = gl2_target();
 
@@ -5903,6 +6084,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_limits_and_version_are_answered);
     RUN_TEST(test_gl2_a_program_draws);
     RUN_TEST(test_gl2_structs_run);
+    RUN_TEST(test_gl2_framebuffer_objects);
+    RUN_TEST(test_gl2_generate_mipmap);
     RUN_TEST(test_gl2_uniforms_and_varyings_reach_the_pixels);
     RUN_TEST(test_gl2_a_matrix_uniform_transforms);
     RUN_TEST(test_gl2_discard_writes_nothing);

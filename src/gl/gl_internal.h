@@ -71,6 +71,12 @@ enum {
 #define OOPS_GL_ATTRIB_STACK_CAPACITY 16
 #define OOPS_GL_CLIENT_ATTRIB_STACK_CAPACITY 16
 #define OOPS_GL_MAX_TEXTURE_OBJECTS 256
+/* Framebuffer and renderbuffer objects. Fewer than textures because a program has a handful of
+ * render targets where it has hundreds of images - Mesa sizes neither, having no fixed pool, so
+ * these are this implementation's own and reported as GL_OUT_OF_MEMORY when exhausted, the way
+ * glGenTextures does. */
+#define OOPS_GL_MAX_FRAMEBUFFER_OBJECTS 64
+#define OOPS_GL_MAX_RENDERBUFFER_OBJECTS 64
 /* Distinct sites that may submit a frame, for the per-site flush census. There are about a
    dozen; the table has slack so a new one is counted under its own name rather than silently
    folded into the unnamed remainder. Here rather than beside the other DCB sizes because the
@@ -423,6 +429,48 @@ typedef struct gl_texture_object {
     GLsizei cube_hw_dim;
     GLboolean cube_hw_dirty;
 } gl_texture_object_t;
+
+/*
+ * **Framebuffer objects.** A renderbuffer is an image with no sampling behind it: storage, a
+ * size and a format, existing only to be drawn into. A framebuffer is three attachment points
+ * naming one of those or a texture level.
+ *
+ * `pixels` is RGBA8 for a colour renderbuffer and 32 bits a sample for a depth or stencil one,
+ * which is what the rest of this GL already carries them as - a renderbuffer introduces no new
+ * pixel layout, only a second place one can live.
+ */
+typedef struct gl_renderbuffer_object {
+    GLuint id;
+    GLboolean used;
+    GLenum internal_format;
+    GLsizei width;
+    GLsizei height;
+    uint32_t *pixels;
+} gl_renderbuffer_object_t;
+
+typedef enum {
+    GL_FB_ATTACH_NONE = 0,
+    GL_FB_ATTACH_TEXTURE,
+    GL_FB_ATTACH_RENDERBUFFER
+} gl_fb_attach_kind_t;
+
+typedef struct gl_fb_attachment {
+    gl_fb_attach_kind_t kind;
+    /* The texture or renderbuffer name. Kept as a name rather than a pointer because either may
+     * be deleted while attached, and GL says the attachment goes with it - a pointer would
+     * outlive its object and this has to notice. */
+    GLuint name;
+    GLenum textarget;
+    GLint level;
+} gl_fb_attachment_t;
+
+typedef struct gl_framebuffer_object {
+    GLuint id;
+    GLboolean used;
+    gl_fb_attachment_t color0;
+    gl_fb_attachment_t depth;
+    gl_fb_attachment_t stencil;
+} gl_framebuffer_object_t;
 
 /* Evaluators. The largest order a map may have - the specification's minimum is 8, and 30 is
  * Mesa's MAX_EVAL_ORDER (main/config.h:75). */
@@ -1657,6 +1705,13 @@ typedef struct gl_context {
      * once the hardware path is up on the console, never on a host build. */
     GLboolean zs_tiled;
     gl_texture_object_t textures[OOPS_GL_MAX_TEXTURE_OBJECTS];
+    /* **Framebuffer objects, and which one a draw goes to.** `bound_framebuffer` of 0 is the
+     * window-system framebuffer - the display - and is what every draw went to before these
+     * existed; a non-zero name redirects the colour target in `gl_draw_targets`. */
+    gl_framebuffer_object_t framebuffers[OOPS_GL_MAX_FRAMEBUFFER_OBJECTS];
+    gl_renderbuffer_object_t renderbuffers[OOPS_GL_MAX_RENDERBUFFER_OBJECTS];
+    GLuint bound_framebuffer;
+    GLuint bound_renderbuffer;
     /* The proxy targets' levels - 1D, 2D, 3D, cube map: sizes and formats only, never pixels. A
      * level that would not have fitted is all zeros, which is how a proxy says no. */
     gl_tex_level_t proxy[4][OOPS_GL_MAX_TEXTURE_LEVELS];

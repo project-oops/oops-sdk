@@ -2367,6 +2367,103 @@ void glTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset
                         GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
                         const GLvoid *pixels);
 
+/*
+ * **Framebuffer objects: rendering into a texture or a renderbuffer instead of the window.**
+ *
+ * Core in OpenGL ES 2.0 and in desktop GL 3.0, and an extension (GL_EXT_framebuffer_object)
+ * before that. The names here are the **core, unsuffixed** ones, because that is what asks for
+ * them: the Khronos CTS builds its function table from `glwInitES20.inl`, which spells every one
+ * of these without a suffix, and a loader that cannot find a name reports the whole test
+ * `NotSupported` rather than failing it.
+ *
+ * Measured on 2026-09-25: oops-gl answered 122 of the 142 entry points that table asks for, and
+ * **14 of the 20 it did not were this one feature** - which is also the whole of SuperTux's
+ * `KNOWN_GAPS`. Two unrelated consumers wanting the same thing is why it is here.
+ *
+ * Enums are their literal values for the reason the `GL_DEPTH_COMPONENT16_ARB` block above
+ * gives: a hosted title sees this header and Mesa's `GL/glext.h` together, and a macro redefined
+ * with a different token sequence is a diagnostic even when the value agrees.
+ */
+#define GL_FRAMEBUFFER                          0x8D40
+#define GL_RENDERBUFFER                         0x8D41
+#define GL_RENDERBUFFER_WIDTH                   0x8D42
+#define GL_RENDERBUFFER_HEIGHT                  0x8D43
+#define GL_RENDERBUFFER_INTERNAL_FORMAT         0x8D44
+#define GL_RENDERBUFFER_RED_SIZE                0x8D50
+#define GL_RENDERBUFFER_GREEN_SIZE              0x8D51
+#define GL_RENDERBUFFER_BLUE_SIZE               0x8D52
+#define GL_RENDERBUFFER_ALPHA_SIZE              0x8D53
+#define GL_RENDERBUFFER_DEPTH_SIZE              0x8D54
+#define GL_RENDERBUFFER_STENCIL_SIZE            0x8D55
+#define GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE   0x8CD0
+#define GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME   0x8CD1
+#define GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL 0x8CD2
+#define GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE 0x8CD3
+#define GL_COLOR_ATTACHMENT0                    0x8CE0
+#define GL_DEPTH_ATTACHMENT                     0x8D00
+#define GL_STENCIL_ATTACHMENT                   0x8D20
+#define GL_FRAMEBUFFER_COMPLETE                 0x8CD5
+#define GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT    0x8CD6
+#define GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT 0x8CD7
+#define GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS    0x8CD9
+#define GL_FRAMEBUFFER_UNSUPPORTED              0x8CDD
+#define GL_FRAMEBUFFER_BINDING                  0x8CA6
+#define GL_RENDERBUFFER_BINDING                 0x8CA7
+#define GL_MAX_RENDERBUFFER_SIZE                0x84E8
+#define GL_INVALID_FRAMEBUFFER_OPERATION        0x0506
+#define GL_RGB565                               0x8D62
+#define GL_STENCIL_INDEX8                       0x8D48
+
+void glGenFramebuffers(GLsizei n, GLuint *framebuffers);
+void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers);
+void glBindFramebuffer(GLenum target, GLuint framebuffer);
+GLboolean glIsFramebuffer(GLuint framebuffer);
+void glGenRenderbuffers(GLsizei n, GLuint *renderbuffers);
+void glDeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers);
+void glBindRenderbuffer(GLenum target, GLuint renderbuffer);
+GLboolean glIsRenderbuffer(GLuint renderbuffer);
+void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
+void glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params);
+void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
+                            GLuint texture, GLint level);
+void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget,
+                               GLuint renderbuffer);
+void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname,
+                                           GLint *params);
+GLenum glCheckFramebufferStatus(GLenum target);
+void glGenerateMipmap(GLenum target);
+
+/*
+ * **The ES spellings of four calls this GL already had, and two that only ES has.**
+ *
+ * `glClearDepthf` and `glDepthRangef` take floats where the desktop calls take doubles; ES has
+ * no double, and `glwInitES20.inl` asks for these names. They are the same state.
+ *
+ * `glGetShaderPrecisionFormat`, `glReleaseShaderCompiler` and `glShaderBinary` exist because ES
+ * allows an implementation with no online compiler. This one has a compiler and no binary shader
+ * format, which the specification provides for: `GL_NUM_SHADER_BINARY_FORMATS` is zero, so
+ * `glShaderBinary` is required to report `GL_INVALID_ENUM` for any format offered, and
+ * `glReleaseShaderCompiler` is a hint that may be ignored. Those are the correct answers here,
+ * not stubs standing in for something missing.
+ */
+#define GL_LOW_FLOAT                            0x8DF0
+#define GL_MEDIUM_FLOAT                         0x8DF1
+#define GL_HIGH_FLOAT                           0x8DF2
+#define GL_LOW_INT                              0x8DF3
+#define GL_MEDIUM_INT                           0x8DF4
+#define GL_HIGH_INT                             0x8DF5
+#define GL_SHADER_COMPILER                      0x8DFA
+#define GL_SHADER_BINARY_FORMATS                0x8DF8
+#define GL_NUM_SHADER_BINARY_FORMATS            0x8DF9
+
+void glClearDepthf(GLclampf depth);
+void glDepthRangef(GLclampf zNear, GLclampf zFar);
+void glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype,
+                                GLint *range, GLint *precision);
+void glReleaseShaderCompiler(void);
+void glShaderBinary(GLsizei count, const GLuint *shaders, GLenum binaryformat,
+                    const void *binary, GLsizei length);
+
 /* The address of a GL entry point by name, which is what `glXGetProcAddress` is on a desktop and
  * what `SDL_GL_GetProcAddress` calls through to here. A title holding post-1.1 GL in function
  * pointers fills them this way and never names the symbols, so being linked in is not enough.
