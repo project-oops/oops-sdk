@@ -6817,6 +6817,27 @@ GLboolean glIsTexture(GLuint texture) {
  * caller can act on.
  * ------------------------------------------------------------------------- */
 
+/* A renderbuffer's storage comes from the GPU allocator on the console and the heap on a build
+ * machine, so releasing it has to ask which - `gl_buffer_release` on a Garlic allocation is the
+ * wrong free, and silent. */
+static void gl_renderbuffer_storage_release(gl_renderbuffer_object_t *rb) {
+    if (!rb || !rb->pixels) {
+        if (rb) rb->gpu_resident = GL_FALSE;
+        return;
+    }
+#ifndef OOPS_HOST_BUILD
+    if (rb->gpu_resident) {
+        oops_mem_free(rb->pixels);
+    } else {
+        gl_buffer_release(rb->pixels);
+    }
+#else
+    gl_buffer_release(rb->pixels);
+#endif
+    rb->pixels = NULL;
+    rb->gpu_resident = GL_FALSE;
+}
+
 /* The lookups themselves are in `gl_internal.h`, because `gl_draw_targets` needs them from
  * another file. These are the names the entry points below were written against. */
 static gl_framebuffer_object_t *gl_find_framebuffer(gl_context_t *ctx, GLuint id) {
@@ -6974,7 +6995,7 @@ void glDeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers) {
         if (id == 0) continue;
         gl_renderbuffer_object_t *rb = gl_find_renderbuffer(ctx, id);
         if (!rb) continue;
-        gl_buffer_release(rb->pixels);
+        gl_renderbuffer_storage_release(rb);
         if (ctx->bound_renderbuffer == id) ctx->bound_renderbuffer = 0;
         /* **Every attachment naming it goes too**, on every framebuffer and not only the bound
          * one, which is what GL says happens and what keeps gl_fb_attachment_size from looking
@@ -7043,15 +7064,26 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, 
      * it in its declared layout - the format is kept to answer the queries and to decide
      * completeness, and the storage is the width this GL's colour and depth buffers already are.
      * Packing RGB565 tightly would save memory a render target does not have a shortage of, and
-     * would need a second addressing path through the rasteriser. */
-    gl_buffer_release(rb->pixels);
-    rb->pixels = NULL;
+     * would need a second addressing path through the rasteriser.
+     *
+     * **Where it lives is what decides whether the console can draw into it.** A renderbuffer is
+     * a render target, so it is allocated the way this GL's other render target is - Garlic, 64KB
+     * aligned, which is what `gl_front_buffer` asks for. On this platform that address is the GPU
+     * address, so `CB_COLOR0_BASE` can be pointed straight at it; the process heap the first
+     * version of this used is not memory the command processor can reach. */
+    gl_renderbuffer_storage_release(rb);
     rb->internal_format = internalformat;
     rb->width = width;
     rb->height = height;
     if (width > 0 && height > 0) {
         const size_t bytes = (size_t)width * (size_t)height * sizeof(uint32_t);
+#ifndef OOPS_HOST_BUILD
+        rb->pixels = (uint32_t *)oops_mem_alloc(bytes, 64u * 1024u, OOPS_MEM_WC_GARLIC);
+        rb->gpu_resident = (GLboolean)(rb->pixels != NULL);
+#else
         rb->pixels = (uint32_t *)gl_buffer_alloc(bytes);
+        rb->gpu_resident = GL_FALSE;
+#endif
         if (!rb->pixels) {
             rb->width = 0;
             rb->height = 0;

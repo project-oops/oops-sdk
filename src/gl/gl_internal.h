@@ -446,6 +446,10 @@ typedef struct gl_renderbuffer_object {
     GLsizei width;
     GLsizei height;
     uint32_t *pixels;
+    /* Whether `pixels` came from the GPU allocator, which is what decides both how it is freed
+     * and whether the command processor can be pointed at it. False on a build machine, where
+     * there is no GPU and the heap is the only allocator. */
+    GLboolean gpu_resident;
 } gl_renderbuffer_object_t;
 
 typedef enum {
@@ -3353,17 +3357,22 @@ static inline gl_renderbuffer_object_t *gl_renderbuffer_slot(gl_context_t *ctx, 
 }
 
 /*
- * **Whether a framebuffer object can receive a draw at all**, which is a property of the path
- * rather than of the attachments.
+ * **Whether the path can draw into a framebuffer object at all**, before asking anything about
+ * the attachments.
  *
- * An attachment is linear RGBA8 in process memory. The scanout path addresses its colour buffer
- * through a 64KB_R_X swizzle and the hardware path builds its target descriptor from the
- * display's surface, so neither writes anywhere this can point. Redirection therefore applies to
- * the software rasteriser only, and `glCheckFramebufferStatus` reads the same predicate so that
- * what it promises and what a draw does cannot disagree.
+ * The software rasteriser can, always. The hardware path can too, and by less machinery than it
+ * looks: `gl_hw_begin_frame` takes `CB_COLOR0_BASE` from `ctx->framebuffer` and the target's
+ * extent from `ctx->width`/`ctx->height`, and `CB_COLOR0_INFO` already describes a
+ * LINEAR_GENERAL surface - so an attachment that is linear and has a GPU address is the same
+ * shape of target as the one the frame already draws into. What it needs is for the attachment
+ * to *be* GPU memory, which `gl_fbo_bound_target` checks per attachment.
+ *
+ * **The scanout path is the one that cannot.** There the colour buffer is the display's own
+ * memory in a 64KB_R_X swizzle, and an attachment is not in that swizzle - `gl_color_index`
+ * would address it one way and the command processor another.
  */
 static inline GLboolean gl_fbo_path_can_render(const gl_context_t *ctx) {
-    return (GLboolean)(ctx && !ctx->use_hardware && !ctx->color_tiled);
+    return (GLboolean)(ctx && !ctx->color_tiled);
 }
 
 /*
@@ -3383,6 +3392,10 @@ typedef struct {
     GLsizei width;
     GLsizei height;
     size_t pitch;
+    /* Whether the command processor can be pointed at these pixels. A renderbuffer says so
+     * itself; a texture's base level is GPU memory on the console and heap memory on a build
+     * machine, which `gl_tex_level_view` does not carry, so it is asked separately below. */
+    GLboolean gpu_resident;
 } gl_fb_storage_t;
 
 static inline GLboolean gl_fb_attachment_storage(gl_context_t *ctx, const gl_fb_attachment_t *at,
@@ -3391,6 +3404,7 @@ static inline GLboolean gl_fb_attachment_storage(gl_context_t *ctx, const gl_fb_
     out->width = 0;
     out->height = 0;
     out->pitch = 0;
+    out->gpu_resident = GL_FALSE;
     if (!ctx || !at || at->kind == GL_FB_ATTACH_NONE) return GL_FALSE;
 
     if (at->kind == GL_FB_ATTACH_RENDERBUFFER) {
@@ -3400,6 +3414,7 @@ static inline GLboolean gl_fb_attachment_storage(gl_context_t *ctx, const gl_fb_
         out->width = rb->width;
         out->height = rb->height;
         out->pitch = (size_t)rb->width;
+        out->gpu_resident = rb->gpu_resident;
         return GL_TRUE;
     }
 
@@ -3418,6 +3433,12 @@ static inline GLboolean gl_fb_attachment_storage(gl_context_t *ctx, const gl_fb_
     out->width = view.width;
     out->height = view.height;
     out->pitch = view.pitch;
+    /* **Only the base level is GPU memory.** `garlic_data` is the image the sampler reads and
+     * the one a render target could be pointed at; the levels above it are built on the heap by
+     * `gl_tex_generate_mipmap`. Rendering into level 3 of a texture is therefore a software-path
+     * operation, and saying so here is what stops the console promising it. */
+    out->gpu_resident = (GLboolean)(at->level == 0 && tex->garlic_data != (void *)0 &&
+                                    (const uint8_t *)tex->garlic_data == view.pixels);
     return GL_TRUE;
 }
 
@@ -3442,6 +3463,9 @@ static inline GLboolean gl_fbo_bound_target(gl_context_t *ctx, gl_fb_storage_t *
     if (!fb) return GL_FALSE;
     if (!gl_fb_attachment_storage(ctx, &fb->color0, colour)) return GL_FALSE;
     if (colour->pitch != (size_t)colour->width) return GL_FALSE;
+    /* **On the console the command processor has to be able to reach it.** The software path
+     * writes with the CPU and does not care. */
+    if (ctx->use_hardware && !colour->gpu_resident) return GL_FALSE;
 
     gl_fb_storage_t ds;
     if (gl_fb_attachment_storage(ctx, &fb->depth, &ds)) {
@@ -3449,6 +3473,13 @@ static inline GLboolean gl_fbo_bound_target(gl_context_t *ctx, gl_fb_storage_t *
             ds.height != colour->height) {
             return GL_FALSE;
         }
+        /* **A depth attachment is a software-path thing for now.** The console's depth surface
+         * is 64KB_Z_X tiled and programmed through its own registers, so pointing the depth test
+         * at a linear renderbuffer would have the rasteriser and the command processor
+         * addressing different memory. Refusing the whole framebuffer is the honest answer -
+         * drawing into the colour attachment while silently ignoring the depth attachment the
+         * program asked for would be a wrong picture rather than a refusal. */
+        if (ctx->use_hardware) return GL_FALSE;
         /* The depth renderbuffer is one word a sample, which is what the software rasteriser's
          * depth buffer is - it reads them as floats, so this names the same words that way. */
         *depth = (float *)(void *)ds.pixels;
