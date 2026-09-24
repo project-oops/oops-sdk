@@ -676,9 +676,12 @@ int *oops_errno_location(void) {
 /* The trailing -1 is `pushback`, meaning empty. It is spelled out rather than left to the
  * initialiser's implicit zero because zero is a valid character and would be handed to the first
  * read as a stray NUL. */
-static FILE s_stdout = {-1, 0, 0, 1, -1};
-static FILE s_stderr = {-1, 0, 0, 2, -1};
-static FILE s_stdin = {-1, 1, 0, 0, -1}; /* nothing to read from; at end of file from the start */
+/* The three write-buffer fields trail each of these as null, zero, zero and unbuffered: these
+ * are log streams, and `fwrite` sends a log stream to `libc_log_write` before the buffer is ever
+ * reached. */
+static FILE s_stdout = {-1, 0, 0, 1, -1, 0, 0u, 0u, 1};
+static FILE s_stderr = {-1, 0, 0, 2, -1, 0, 0u, 0u, 1};
+static FILE s_stdin = {-1, 1, 0, 0, -1, 0, 0u, 0u, 1}; /* nothing to read; at EOF from the start */
 FILE *stdout = &s_stdout;
 FILE *stderr = &s_stderr;
 FILE *stdin = &s_stdin;
@@ -714,6 +717,32 @@ static void libc_log_write(int sink, const char *s, size_t n) {
 /* `remove` was already here, a few lines down; this is its missing partner. */
 int rename(const char *from, const char *to) { return oops_fs_rename(from, to); }
 
+/*
+ * **The write buffer, because a write on this platform is a syscall.**
+ *
+ * See `<libc/stdio.h>` for what it cost not to have one: a serialiser writing a field at a time
+ * turns one frame into thousands of two-to-four-byte syscalls, measured at 2.3 seconds inside a
+ * single frame of Neverball's replay recording, while the physics it was blamed on took 0ms.
+ *
+ * 4 KiB, allocated on the stream's first buffered write and never grown - a caller writing more
+ * than that in one go is already writing in blocks and is passed straight through, which also
+ * keeps a large `fwrite` from being copied twice.
+ */
+#define LIBC_WBUF_CAP 4096u
+
+/* Empties the buffer to the descriptor. 0 on success, EOF on a failed write - and the buffer is
+ * dropped either way, because retrying it later would write it at the wrong offset. */
+static int libc_wbuf_flush(FILE *f) {
+    if (!f || !f->wbuf || f->wbuf_len == 0u) return 0;
+    const unsigned int n = f->wbuf_len;
+    f->wbuf_len = 0u;
+    if (oops_fs_write(f->fd, f->wbuf, n) < 0) {
+        f->err = 1;
+        return EOF;
+    }
+    return 0;
+}
+
 FILE *fopen(const char *path, const char *mode) {
     if (!path || !mode) return (FILE *)0;
     int flags = OOPS_O_RDONLY;
@@ -735,6 +764,10 @@ FILE *fopen(const char *path, const char *mode) {
     f->err = 0;
     f->is_log = 0;
     f->pushback = -1; /* empty; zero is a valid character, so it cannot be the empty value */
+    f->wbuf = (unsigned char *)0; /* allocated on the first buffered write, not on every open */
+    f->wbuf_len = 0u;
+    f->wbuf_cap = 0u;
+    f->nobuf = 0;
     return f;
 }
 
@@ -750,6 +783,10 @@ FILE *fdopen(int fd, const char *mode) {
     f->err = 0;
     f->is_log = 0;
     f->pushback = -1;
+    f->wbuf = (unsigned char *)0;
+    f->wbuf_len = 0u;
+    f->wbuf_cap = 0u;
+    f->nobuf = 0;
     return f;
 }
 
@@ -759,13 +796,21 @@ int fclose(FILE *f) {
         libc_log_flush(f->is_log);
         return 0;
     }
+    /* Whatever is buffered belongs in the file before the descriptor goes. */
+    const int flushed = libc_wbuf_flush(f);
+    if (f->wbuf) oops_free(f->wbuf);
     const int rc = oops_fs_close(f->fd);
     oops_free(f);
-    return (rc < 0) ? EOF : 0;
+    return (rc < 0 || flushed != 0) ? EOF : 0;
 }
 
 size_t fread(void *ptr, size_t size, size_t count, FILE *f) {
     if (!f || f->is_log || !ptr || size == 0u || count == 0u) return 0u;
+
+    /* A read has to see what this stream has written. The descriptor's offset is behind by
+       whatever is buffered, so reading before it lands would return the bytes it is about to
+       overwrite - which only bites a stream opened "r+" or "w+", and silently. */
+    if (libc_wbuf_flush(f) != 0) return 0u;
 
     /* A pushed-back character belongs to the stream, so it is delivered here too and not only
      * from `fgetc`. Taking it shortens this read by one byte and the loop above the caller asks
@@ -801,23 +846,59 @@ size_t fwrite(const void *ptr, size_t size, size_t count, FILE *f) {
         libc_log_write(f->is_log, (const char *)ptr, size * count);
         return count;
     }
-    const int64_t put = oops_fs_write(f->fd, ptr, size * count);
-    if (put < 0) {
-        f->err = 1;
-        return 0u;
+
+    const size_t bytes = size * count;
+
+    /* A block-sized write goes straight out, behind whatever is already buffered so the file
+       keeps the order the caller wrote in. */
+    if (f->nobuf || bytes >= LIBC_WBUF_CAP) {
+        if (libc_wbuf_flush(f) != 0) return 0u;
+        const int64_t put = oops_fs_write(f->fd, ptr, bytes);
+        if (put < 0) {
+            f->err = 1;
+            return 0u;
+        }
+        return (size_t)put / size;
     }
-    return (size_t)put / size;
+
+    if (!f->wbuf) {
+        f->wbuf = (unsigned char *)oops_malloc(LIBC_WBUF_CAP);
+        if (!f->wbuf) {
+            /* No buffer is a slow stream, not a broken one. */
+            const int64_t put = oops_fs_write(f->fd, ptr, bytes);
+            if (put < 0) { f->err = 1; return 0u; }
+            return (size_t)put / size;
+        }
+        f->wbuf_cap = LIBC_WBUF_CAP;
+        f->wbuf_len = 0u;
+    }
+
+    if (f->wbuf_len + bytes > f->wbuf_cap) {
+        if (libc_wbuf_flush(f) != 0) return 0u;
+    }
+
+    const unsigned char *src = (const unsigned char *)ptr;
+    for (size_t i = 0u; i < bytes; i++) {
+        f->wbuf[f->wbuf_len + i] = src[i];
+    }
+    f->wbuf_len += (unsigned int)bytes;
+    return count;
 }
 
 int fseek(FILE *f, long offset, int whence) {
     if (!f || f->is_log) return -1;
+    /* Buffered bytes are not in the file yet, so a seek before they land would put them at the
+       new offset instead of the one they were written at. */
+    if (libc_wbuf_flush(f) != 0) return -1;
     f->eof = 0;
     return (oops_fs_seek(f->fd, (int64_t)offset, whence) < 0) ? -1 : 0;
 }
 
 long ftell(FILE *f) {
     if (!f || f->is_log) return -1L;
-    return (long)oops_fs_tell(f->fd);
+    /* The descriptor's offset is behind the caller's by whatever is still buffered, and `ftell`
+       has to answer where the *stream* is - Neverball's demo header rewrite depends on it. */
+    return (long)oops_fs_tell(f->fd) + (long)f->wbuf_len;
 }
 
 /* `long` is 64 bits on this target, so these carry no more range than the pair above - see
@@ -837,6 +918,7 @@ int ferror(FILE *f) { return f ? f->err : 1; }
 int fflush(FILE *f) {
     if (f && f->is_log) libc_log_flush(f->is_log);
     else if (!f) { libc_log_flush(1); libc_log_flush(2); } /* fflush(NULL): all of them */
+    else if (f) return libc_wbuf_flush(f);
     return 0;
 }
 
@@ -867,7 +949,14 @@ int setvbuf(FILE *f, char *buf, int mode, size_t size) {
     (void)buf;
     (void)size;
     if (!f) return -1;
-    return (mode == _IONBF) ? 0 : -1;
+    /* `_IONBF` is honoured by emptying the buffer and keeping it empty; the caller's buffer and
+       size are still ignored, because the stream's own is 4 KiB and not worth a second path. */
+    if (mode == _IONBF) {
+        (void)libc_wbuf_flush(f);
+        f->nobuf = 1;
+        return 0;
+    }
+    return -1;
 }
 
 /*

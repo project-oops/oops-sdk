@@ -47,6 +47,24 @@ typedef struct oops_FILE {
      * `fgetc` knew about would silently vanish from any other read.
      */
     int pushback;
+    /*
+     * **Writes are buffered, because a write here is a syscall.**
+     *
+     * A `FILE` on this platform is a descriptor, and `fwrite` used to pass straight to
+     * `oops_fs_write`. That is fine for a program writing a block at a time and ruinous for one
+     * writing a field at a time - which is what a serialiser does. Neverball records a replay by
+     * writing each command's shorts and floats individually, so a frame became thousands of
+     * two-to-four-byte syscalls: measured at **2.3 seconds in one frame**, with the physics it
+     * was blamed on taking 0ms. The game was unplayable and nothing looked wrong.
+     *
+     * Flushed when full, by `fflush`, by `fclose`, and before any seek or read so the descriptor
+     * offset is never behind what the caller has written. `setvbuf(_IONBF)` empties and disables
+     * it, which is the one mode that was already honoured.
+     */
+    unsigned char *wbuf;
+    unsigned int wbuf_len;
+    unsigned int wbuf_cap;
+    int nobuf;
 } FILE;
 
 extern FILE *stdout;
