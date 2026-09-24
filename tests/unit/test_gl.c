@@ -12547,11 +12547,10 @@ static void test_glsl_preprocessor_refuses_by_name(void) {
   ASSERT_TRUE(glsl_pp_to_string("#error something went wrong\n", &err, NULL) == NULL);
   ASSERT_TRUE(err != NULL);
 
-  /* **A function-like macro is refused rather than read as an object-like one** whose body
-   * happens to start with a parenthesis - that would expand to something that compiles and is
-   * wrong. The `(` must be adjacent to the name; with a space it is an object-like body. */
-  ASSERT_TRUE(glsl_pp_to_string("#define F(x) x\n", &err, NULL) == NULL);
-  ASSERT_TRUE(err != NULL);
+  /* **The `(` must be adjacent to the name.** `#define F (x)` is object-like with a body that
+   * starts with a parenthesis; `#define F(x)` takes an argument. The two differ by one space
+   * and by everything else, and reading one as the other expands to something that compiles
+   * and is wrong. */
   const char *s = glsl_pp_to_string("#define F (x)\nF;", &err, NULL);
   ASSERT_TRUE(s != NULL && strcmp(s, "( x ) ;") == 0);
 
@@ -12574,6 +12573,66 @@ static void test_glsl_preprocessor_refuses_by_name(void) {
   ASSERT_TRUE(s != NULL && strcmp(s, "after ;") == 0);
   s = glsl_pp_to_string("#extension GL_ARB_foo : enable\nafter;", &err, NULL);
   ASSERT_TRUE(s != NULL && strcmp(s, "after ;") == 0);
+}
+
+/*
+ * **Function-like macros**, which this front end refused until 2026-09-24. The two that matter
+ * beyond plain substitution are nesting inside arguments, and a bare name that is not a call.
+ */
+static void test_glsl_preprocessor_function_like_macros(void) {
+  const char *err = NULL;
+  const char *s;
+
+  s = glsl_pp_to_string("#define ID(x) x\nID(7);", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "7 ;") == 0);
+  s = glsl_pp_to_string("#define ADD(a,b) ((a)+(b))\nADD(1,2);", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "( ( 1 ) + ( 2 ) ) ;") == 0);
+
+  /* A parameter used more than once, and one used not at all. */
+  s = glsl_pp_to_string("#define SQ(x) ((x)*(x))\nSQ(a);", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "( ( a ) * ( a ) ) ;") == 0);
+  s = glsl_pp_to_string("#define FIRST(a,b) a\nFIRST(p,q);", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "p ;") == 0);
+
+  /* **Commas inside nested parentheses are not separators.** `F(g(a,b), c)` is two arguments,
+   * not three - the mistake that makes a working macro wrong rather than failing. */
+  s = glsl_pp_to_string("#define SECOND(a,b) b\nSECOND(g(1,2),z);", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "z ;") == 0);
+
+  /* Zero parameters still needs the parentheses to expand. */
+  s = glsl_pp_to_string("#define NOW() 5\nNOW();", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "5 ;") == 0);
+
+  /* **A bare name is not a call and is emitted unchanged**, which is what lets a macro share a
+   * name with something that is not being called here. */
+  s = glsl_pp_to_string("#define F(x) x\nF;", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "F ;") == 0);
+
+  /* A macro body calling another macro. */
+  s = glsl_pp_to_string("#define TWICE(x) ((x)+(x))\n#define Q(y) TWICE(y)\nQ(3);", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "( ( 3 ) + ( 3 ) ) ;") == 0);
+
+  /* An empty argument is an argument. */
+  s = glsl_pp_to_string("#define WRAP(x) [x]\nWRAP();", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "[ ] ;") == 0);
+
+  /* And in a `#if`, through the same substitution. */
+  s = glsl_pp_to_string("#define MAX(a,b) ((a)>(b)?(a):(b))\n#if MAX(3,5) == 5\nyes;\n#endif",
+                        &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
+  s = glsl_pp_to_string("#define F(x) x\n#if F\nyes;\n#else\nno;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "no ;") == 0); /* not a call, so an undefined name: 0 */
+
+  /* **Arity is checked**, because padding or dropping silently expands to something that
+   * compiles. */
+  ASSERT_TRUE(glsl_pp_to_string("#define ADD(a,b) a+b\nADD(1);", &err, NULL) == NULL);
+  ASSERT_TRUE(glsl_pp_to_string("#define ADD(a,b) a+b\nADD(1,2,3);", &err, NULL) == NULL);
+  ASSERT_TRUE(glsl_pp_to_string("#define NOW() 5\nNOW(1);", &err, NULL) == NULL);
+  ASSERT_TRUE(glsl_pp_to_string("#define ID(x) x\nID(1;", &err, NULL) == NULL);
+  ASSERT_TRUE(glsl_pp_to_string("#define BAD(a,a) a\n", &err, NULL) == NULL);
+  ASSERT_TRUE(glsl_pp_to_string("#define BAD(1) x\n", &err, NULL) == NULL);
+  ASSERT_TRUE(glsl_pp_to_string("#define BAD(a b) a\n", &err, NULL) == NULL);
+  ASSERT_TRUE(err != NULL);
 }
 
 /*
@@ -14111,6 +14170,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_glsl_preprocessor_expands_and_records);
     RUN_TEST(test_glsl_preprocessor_nests_conditionals);
     RUN_TEST(test_glsl_preprocessor_refuses_by_name);
+    RUN_TEST(test_glsl_preprocessor_function_like_macros);
     RUN_TEST(test_glsl_preprocessor_evaluates_if);
     RUN_TEST(test_glsl_sema_types_the_operators);
     RUN_TEST(test_glsl_sema_checks_swizzles);

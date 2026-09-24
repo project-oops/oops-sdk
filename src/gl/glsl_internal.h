@@ -206,6 +206,12 @@ typedef struct {
 #define GLSL_MAX_COND_DEPTH 32
 #define GLSL_MAX_PENDING 128
 
+/* **A function-like macro's parameters are names, and the body refers to them by position.**
+ * Substitution compares each body token against these, so a body token that is a parameter is
+ * replaced by the argument at the same index. Eight is past anything a shader's `MAX(a,b)` or
+ * `LERP(a,b,t)` uses, and a ninth is refused rather than silently dropped. */
+#define GLSL_MAX_MACRO_PARAMS 8
+
 typedef struct {
     const char *name;
     size_t name_len;
@@ -213,6 +219,13 @@ typedef struct {
     int32_t token_count;
     GLboolean in_use;      /* defined at all */
     GLboolean expanding;   /* **currently being expanded**: stops `#define A A` looping */
+    /* **Function-like, which is not the same as "takes no arguments".** `#define F() x` is
+     * function-like with zero parameters and must still be written `F()` to expand; `#define F x`
+     * is object-like and expands on sight. One flag cannot be inferred from `param_count`. */
+    GLboolean function_like;
+    int param_count;
+    const char *param_name[GLSL_MAX_MACRO_PARAMS];
+    size_t param_len[GLSL_MAX_MACRO_PARAMS];
 } glsl_macro_t;
 
 /* Tagged, so the parser above can hold a pointer to one before it is defined. */

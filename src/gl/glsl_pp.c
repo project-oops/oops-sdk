@@ -141,15 +141,53 @@ static void do_define(glsl_pp_t *pp, glsl_token_t *tok, int line) {
     m->expanding = GL_FALSE;
     m->first_token = pp->pool_count;
     m->token_count = 0;
+    m->function_like = GL_FALSE;
+    m->param_count = 0;
 
     GLboolean have = raw_next(pp, tok);
-    /* **A `(` straight after the name makes it function-like**, which this does not do. Caught
-     * here rather than silently treated as an object-like macro whose body starts with a
-     * parenthesis - that would expand to something that compiles and is wrong. */
+    /* **A `(` straight after the name makes it function-like**, and the adjacency is the whole
+     * test: `#define F(x) x` takes an argument, `#define F (x)` is object-like with a body that
+     * begins with a parenthesis. The two differ by one space and by everything else. */
     if (have && tok->line == line && tok->type == GLSL_TOK_LPAREN &&
         tok->text == name + name_len) {
-        pp_fail(pp, "function-like macros are not handled yet", line);
-        return;
+        m->function_like = GL_TRUE;
+        have = raw_next(pp, tok);
+        if (have && tok->line == line && tok->type == GLSL_TOK_RPAREN) {
+            have = raw_next(pp, tok);          /* `#define F() ...` - zero parameters */
+        } else {
+            for (;;) {
+                if (!have || tok->line != line || tok->type != GLSL_TOK_IDENTIFIER) {
+                    pp_fail(pp, "#define parameter list wants a name", line);
+                    return;
+                }
+                if (m->param_count >= GLSL_MAX_MACRO_PARAMS) {
+                    pp_fail(pp, "too many macro parameters", line);
+                    return;
+                }
+                /* A parameter named twice would make substitution ambiguous, and the first
+                 * would silently win. */
+                for (int i = 0; i < m->param_count; i++) {
+                    if (same_word(m->param_name[i], m->param_len[i], tok->text, tok->length)) {
+                        pp_fail(pp, "#define names the same parameter twice", line);
+                        return;
+                    }
+                }
+                m->param_name[m->param_count] = tok->text;
+                m->param_len[m->param_count] = tok->length;
+                m->param_count++;
+                have = raw_next(pp, tok);
+                if (have && tok->line == line && tok->type == GLSL_TOK_COMMA) {
+                    have = raw_next(pp, tok);
+                    continue;
+                }
+                if (have && tok->line == line && tok->type == GLSL_TOK_RPAREN) {
+                    have = raw_next(pp, tok);
+                    break;
+                }
+                pp_fail(pp, "#define parameter list wants `,` or `)`", line);
+                return;
+            }
+        }
     }
     while (have && tok->line == line && tok->type != GLSL_TOK_EOF) {
         if (pp->pool_count >= GLSL_MAX_MACRO_TOKENS) {
@@ -206,6 +244,26 @@ static void do_version(glsl_pp_t *pp, glsl_token_t *tok, int line) {
 
 #define GLSL_PP_MAX_EXPR 128
 #define GLSL_PP_MAX_EXPANSIONS 256
+
+/* **Declared here and defined below**, because a `#if` expression may call a function-like macro
+ * and the argument machinery is written next to the stream path that is its other caller. One
+ * substitution serves both, so `MAX(a,b)` means the same thing in a condition as in code. */
+#define GLSL_PP_MAX_ARG_TOKENS 128
+
+typedef struct pp_args {
+    glsl_token_t tok[GLSL_PP_MAX_ARG_TOKENS];
+    int start[GLSL_MAX_MACRO_PARAMS];
+    int len[GLSL_MAX_MACRO_PARAMS];
+    int count; /* arguments actually supplied */
+    int used;  /* tokens in `tok` */
+} pp_args_t;
+
+static GLboolean pp_args_begin(pp_args_t *a);
+static GLboolean pp_args_open(glsl_pp_t *pp, pp_args_t *a, int line);
+static GLboolean pp_args_push(glsl_pp_t *pp, pp_args_t *a, const glsl_token_t *t, int line);
+static GLboolean pp_args_check(glsl_pp_t *pp, const glsl_macro_t *m, const pp_args_t *a, int line);
+static int pp_subst(glsl_pp_t *pp, const glsl_macro_t *m, const pp_args_t *a, glsl_token_t *out,
+                    int max, int line);
 
 /* Collects what is left of a directive's line. `tok` holds the directive name on entry and the
  * first token of the next line on exit, which is the same contract every `do_*` here keeps. */
@@ -277,18 +335,58 @@ static int pp_expand_expr(glsl_pp_t *pp, glsl_token_t *buf, int n, int line) {
             pp_fail(pp, "macro expansion in a preprocessor expression does not terminate", line);
             return -1;
         }
-        const int grow = (int)m->token_count - 1;
+
+        /* How much of `buf` this call occupies, and what it turns into. For an object-like macro
+         * that is the name and the body; for a function-like one it is the whole `F(a, b)` and
+         * the body with its arguments substituted. */
+        glsl_token_t body[GLSL_PP_MAX_EXPR];
+        int consumed = 1, produced;
+        if (m->function_like) {
+            /* **A function-like macro's name with no `(` after it is not a call** and stays an
+             * identifier - which the evaluator then reads as 0, exactly as it does any other
+             * undefined name. */
+            if (i + 1 >= n || buf[i + 1].type != GLSL_TOK_LPAREN) continue;
+            pp_args_t args;
+            pp_args_begin(&args);
+            if (!pp_args_open(pp, &args, line)) return -1;
+            int depth = 0, j = i + 2;
+            for (;; j++) {
+                if (j >= n) {
+                    pp_fail(pp, "macro call without a closing `)`", line);
+                    return -1;
+                }
+                if (buf[j].type == GLSL_TOK_LPAREN) depth++;
+                if (buf[j].type == GLSL_TOK_RPAREN) {
+                    if (depth == 0) break;
+                    depth--;
+                }
+                if (buf[j].type == GLSL_TOK_COMMA && depth == 0) {
+                    if (!pp_args_open(pp, &args, line)) return -1;
+                    continue;
+                }
+                if (!pp_args_push(pp, &args, &buf[j], line)) return -1;
+                args.len[args.count - 1]++;
+            }
+            if (!pp_args_check(pp, m, &args, line)) return -1;
+            consumed = j - i + 1;
+            produced = pp_subst(pp, m, &args, body, GLSL_PP_MAX_EXPR, line);
+            if (produced < 0) return -1;
+        } else {
+            produced = (int)m->token_count;
+            for (int k = 0; k < produced; k++) body[k] = pp->pool[m->first_token + k];
+        }
+
+        const int grow = produced - consumed;
         if (n + grow > GLSL_PP_MAX_EXPR) {
             pp_fail(pp, "preprocessor expression too long", line);
             return -1;
         }
-        /* Splice the body in place of the name. */
         if (grow > 0) {
-            for (int k = n - 1; k > i; k--) buf[k + grow] = buf[k];
+            for (int k = n - 1; k >= i + consumed; k--) buf[k + grow] = buf[k];
         } else if (grow < 0) {
-            for (int k = i + 1; k < n; k++) buf[k + grow] = buf[k];
+            for (int k = i + consumed; k < n; k++) buf[k + grow] = buf[k];
         }
-        for (int32_t k = 0; k < m->token_count; k++) buf[i + k] = pp->pool[m->first_token + k];
+        for (int k = 0; k < produced; k++) buf[i + k] = body[k];
         n += grow;
         i--; /* re-examine from here: the body may itself start with a macro */
     }
@@ -725,16 +823,132 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
     pp_fail(pp, "unknown preprocessor directive", line);
 }
 
-/* Queues a macro's body for the next reads. */
-static GLboolean expand(glsl_pp_t *pp, glsl_macro_t *m) {
-    int room = GLSL_MAX_PENDING - pp->pending_tail;
-    if (m->token_count > room) {
+/* -------------------------------------------------------------------------
+ * Function-like macros
+ *
+ * One argument reader per source - the token stream, and the flat array a `#if` expression lives
+ * in - and one substitution shared between them, so `#define MAX(a,b) ((a)>(b)?(a):(b))` means
+ * the same thing in code as it does in a condition.
+ * ------------------------------------------------------------------------- */
+
+static GLboolean pp_args_begin(pp_args_t *a) {
+    a->count = 0;
+    a->used = 0;
+    return GL_TRUE;
+}
+
+static GLboolean pp_args_push(glsl_pp_t *pp, pp_args_t *a, const glsl_token_t *t, int line) {
+    if (a->used >= GLSL_PP_MAX_ARG_TOKENS) {
+        pp_fail(pp, "macro argument too long", line);
+        return GL_FALSE;
+    }
+    a->tok[a->used++] = *t;
+    return GL_TRUE;
+}
+
+static GLboolean pp_args_open(glsl_pp_t *pp, pp_args_t *a, int line) {
+    if (a->count >= GLSL_MAX_MACRO_PARAMS) {
+        pp_fail(pp, "too many macro arguments", line);
+        return GL_FALSE;
+    }
+    a->start[a->count] = a->used;
+    a->len[a->count] = 0;
+    a->count++;
+    return GL_TRUE;
+}
+
+/* Checks the count once the list is closed. An arity mismatch is a hard error rather than a
+ * silent pad-or-drop, because both of those expand to something that compiles. */
+static GLboolean pp_args_check(glsl_pp_t *pp, const glsl_macro_t *m, const pp_args_t *a, int line) {
+    int supplied = a->count;
+    /* `F()` for a one-parameter macro is one empty argument, which is what C and GLSL both say;
+     * `F()` for a zero-parameter macro is none. */
+    if (m->param_count == 0 && supplied == 1 && a->len[0] == 0) supplied = 0;
+    if (supplied != m->param_count) {
+        pp_fail(pp, "macro called with the wrong number of arguments", line);
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* Substitutes the arguments into the body. A body token that names a parameter becomes that
+ * argument's tokens; everything else is copied. */
+static int pp_subst(glsl_pp_t *pp, const glsl_macro_t *m, const pp_args_t *a, glsl_token_t *out,
+                    int max, int line) {
+    int n = 0;
+    for (int32_t i = 0; i < m->token_count; i++) {
+        const glsl_token_t *bt = &pp->pool[m->first_token + i];
+        int p = -1;
+        if (bt->type == GLSL_TOK_IDENTIFIER) {
+            for (int k = 0; k < m->param_count; k++) {
+                if (same_word(m->param_name[k], m->param_len[k], bt->text, bt->length)) { p = k; break; }
+            }
+        }
+        if (p < 0) {
+            if (n >= max) { pp_fail(pp, "macro expansion too large", line); return -1; }
+            out[n++] = *bt;
+            continue;
+        }
+        for (int k = 0; k < a->len[p]; k++) {
+            if (n >= max) { pp_fail(pp, "macro expansion too large", line); return -1; }
+            out[n++] = a->tok[a->start[p] + k];
+        }
+    }
+    return n;
+}
+
+/*
+ * Reads `( arg , arg )` off the stream. The caller has already seen the `(`.
+ *
+ * **Nesting is counted and commas inside it are not separators**, so `F(g(a,b), c)` is two
+ * arguments and not three - the mistake that turns a working macro into a wrong one rather than
+ * a failing one.
+ */
+static GLboolean pp_read_args_stream(glsl_pp_t *pp, glsl_macro_t *m, pp_args_t *a, int line) {
+    pp_args_begin(a);
+    if (!pp_args_open(pp, a, line)) return GL_FALSE;
+    int depth = 0;
+    for (;;) {
+        glsl_token_t t;
+        if (!raw_next(pp, &t) || t.type == GLSL_TOK_EOF) {
+            pp_fail(pp, "macro call without a closing `)`", line);
+            return GL_FALSE;
+        }
+        if (t.type == GLSL_TOK_LPAREN) depth++;
+        if (t.type == GLSL_TOK_RPAREN) {
+            if (depth == 0) break;
+            depth--;
+        }
+        if (t.type == GLSL_TOK_COMMA && depth == 0) {
+            if (!pp_args_open(pp, a, line)) return GL_FALSE;
+            continue;
+        }
+        if (!pp_args_push(pp, a, &t, line)) return GL_FALSE;
+        a->len[a->count - 1]++;
+    }
+    return pp_args_check(pp, m, a, line);
+}
+
+/* Queues a macro's body for the next reads. For a function-like macro the caller has already
+ * confirmed and consumed the `(`. */
+static GLboolean expand(glsl_pp_t *pp, glsl_macro_t *m, const pp_args_t *args) {
+    glsl_token_t body[GLSL_PP_MAX_ARG_TOKENS];
+    const glsl_token_t *src;
+    int count;
+    if (m->function_like) {
+        count = pp_subst(pp, m, args, body, GLSL_PP_MAX_ARG_TOKENS, pp->error_line);
+        if (count < 0) return GL_FALSE;
+        src = body;
+    } else {
+        src = &pp->pool[m->first_token];
+        count = (int)m->token_count;
+    }
+    const int room = GLSL_MAX_PENDING - pp->pending_tail;
+    if (count > room) {
         pp_fail(pp, "macro expansion too large", pp->error_line);
         return GL_FALSE;
     }
-    for (int32_t i = 0; i < m->token_count; i++) {
-        pp->pending[pp->pending_tail++] = pp->pool[m->first_token + i];
-    }
+    for (int i = 0; i < count; i++) pp->pending[pp->pending_tail++] = src[i];
     m->expanding = GL_TRUE;
     return GL_TRUE;
 }
@@ -791,12 +1005,34 @@ GLboolean glsl_pp_next(glsl_pp_t *pp, glsl_token_t *out) {
             glsl_macro_t *m = find_macro(pp, tok.text, tok.length);
             /* **Not while it is already expanding**: `#define A A` would otherwise loop. */
             if (m && !m->expanding) {
+                pp_args_t args;
+                if (m->function_like) {
+                    /* **A function-like macro's name on its own is not a call**, and must be
+                     * emitted unchanged - `#define F(x) x` leaves a bare `F` alone, which is
+                     * what lets a macro share a name with something else that is not called.
+                     * So the next token is read to look for `(` and put back if it is not one.
+                     * `held` is free here: `raw_next` above has just drained it. */
+                    glsl_token_t after;
+                    const GLboolean got = raw_next(pp, &after);
+                    if (!got || after.type != GLSL_TOK_LPAREN) {
+                        if (got) { pp->held = after; pp->has_held = GL_TRUE; }
+                        *out = tok;
+                        return GL_TRUE;
+                    }
+                    if (!pp_read_args_stream(pp, m, &args, tok.line)) {
+                        out->type = GLSL_TOK_ERROR;
+                        out->error = pp->error;
+                        return GL_FALSE;
+                    }
+                } else {
+                    pp_args_begin(&args);
+                }
                 if (m->token_count == 0) {
                     /* An empty macro expands to nothing, so read on rather than emitting it. */
                     m->expanding = GL_TRUE;
                     continue;
                 }
-                if (!expand(pp, m)) {
+                if (!expand(pp, m, &args)) {
                     out->type = GLSL_TOK_ERROR;
                     out->error = pp->error;
                     return GL_FALSE;
