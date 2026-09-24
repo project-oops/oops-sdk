@@ -1154,6 +1154,112 @@ static void draw_quad(GLint loc, float z) {
     glEnd();
 }
 
+/*
+ * **Structs, run rather than type-checked.** The front end accepting one says nothing about the
+ * interpreter placing its members where sema said they were - and the two agreeing is the whole
+ * contract, because a member read from the wrong place gives a colour rather than an error.
+ *
+ * Each shader below puts a different member into a different channel, so a layout that is off by
+ * one names itself: the channels come back rotated rather than merely wrong.
+ */
+static void test_gl2_structs_run(void) {
+    gl2_target_t t = gl2_target();
+
+    /* Construct, then read each member back into its own channel. */
+    {
+        const GLuint prog = linked_program(
+            "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+            "struct C { float r; float g; float b; };\n"
+            "void main() {\n"
+            "  C c = C(0.25, 0.5, 0.75);\n"
+            "  gl_FragColor = vec4(c.r, c.g, c.b, 1.0);\n"
+            "}\n");
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);     /* 0.25 */
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);   /* 0.50 */
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);   /* 0.75 */
+    }
+
+    /* A member that is a vector, and a swizzle of it - the two meanings of `.` in one line. */
+    {
+        const GLuint prog = linked_program(
+            "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+            "struct M { float a; vec3 v; };\n"
+            "void main() {\n"
+            "  M m = M(0.0, vec3(0.25, 0.5, 0.75));\n"
+            "  gl_FragColor = vec4(m.v.x, m.v.y, m.v.z, 1.0);\n"
+            "}\n");
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);
+    }
+
+    /* **Assignment copies the whole struct**, not its first component. Writing to the copy must
+     * not disturb the original, which is what a shared pointer would do. */
+    {
+        const GLuint prog = linked_program(
+            "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+            "struct C { float r; float g; float b; };\n"
+            "void main() {\n"
+            "  C a = C(0.25, 0.5, 0.75);\n"
+            "  C b = a;\n"
+            "  b.r = 1.0;\n"
+            "  gl_FragColor = vec4(a.r, b.g, b.b, 1.0);\n"
+            "}\n");
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);     /* a.r still 0.25 */
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);
+    }
+
+    /* A nested struct, where the inner one's position is added to the outer one's. */
+    {
+        const GLuint prog = linked_program(
+            "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+            "struct In { float x; float y; };\n"
+            "struct Out { float lead; In in2; };\n"
+            "void main() {\n"
+            "  Out o = Out(0.25, In(0.5, 0.75));\n"
+            "  gl_FragColor = vec4(o.lead, o.in2.x, o.in2.y, 1.0);\n"
+            "}\n");
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);
+    }
+
+    /* Through a function, by value in and by value out. */
+    {
+        const GLuint prog = linked_program(
+            "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+            "struct C { float r; float g; float b; };\n"
+            "C darken(C c) { return C(c.r * 0.5, c.g * 0.5, c.b * 0.5); }\n"
+            "void main() {\n"
+            "  C c = darken(C(0.5, 1.0, 1.5));\n"
+            "  gl_FragColor = vec4(c.r, c.g, c.b, 1.0);\n"
+            "}\n");
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);     /* 0.5  * 0.5 = 0.25 */
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);   /* 1.0  * 0.5 = 0.50 */
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);   /* 1.5  * 0.5 = 0.75 */
+    }
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 static void test_gl2_a_program_draws(void) {
     gl2_target_t t = gl2_target();
 
@@ -5654,6 +5760,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_vertex_attrib_state);
     RUN_TEST(test_gl2_limits_and_version_are_answered);
     RUN_TEST(test_gl2_a_program_draws);
+    RUN_TEST(test_gl2_structs_run);
     RUN_TEST(test_gl2_uniforms_and_varyings_reach_the_pixels);
     RUN_TEST(test_gl2_a_matrix_uniform_transforms);
     RUN_TEST(test_gl2_discard_writes_nothing);

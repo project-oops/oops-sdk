@@ -108,6 +108,12 @@ typedef struct {
  * see `struct_name` on `glsl_parser_t`. */
 #define GLSL_MAX_STRUCTS 16
 #define GLSL_MAX_STRUCT_MEMBERS 16
+/* **How large a struct may be, in components.** A struct is a value - constructed, assigned,
+ * passed and returned whole - and the interpreter carries a value in a fixed array on the stack
+ * that every expression it evaluates pays for. This is that array's width, enforced here at
+ * compile time so an oversized struct is a diagnostic naming itself rather than a copy that
+ * silently stops partway. `mat4` is 16 of these, so it is two of the largest built-in type. */
+#define GLSL_MAX_STRUCT_COMPONENTS 32
 #define GLSL_NO_NODE (-1)
 
 typedef enum {
@@ -1017,6 +1023,14 @@ struct glsl_unit {
     int version;           /* what `#version` said, or 0 when there was none */
     int32_t root;          /* the GLSL_NODE_UNIT */
     glsl_ast_t ast;
+    /* **The struct table, carried out of the semantic pass.** Sema is transient - it exists for
+     * the length of a compile - but the interpreter needs a struct's size and its members'
+     * positions every time it touches one, and re-deriving them from the AST at each access
+     * would be the same computation done differently, which is how two layouts start to
+     * disagree. The member names point into `source`, which this unit owns, so they stay valid
+     * exactly as long as the tree that refers to them. */
+    glsl_struct_t structs[GLSL_MAX_STRUCTS];
+    int struct_count;
 };
 
 /* Preprocesses, parses and checks `src`, returning a unit with one reference - or NULL, having

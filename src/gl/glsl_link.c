@@ -253,6 +253,13 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
         gl_glsl_unit_release(u);
         return (glsl_unit_t *)0;
     }
+    /* **Carried out before the semantic pass is freed**, because the interpreter needs a
+     * struct's size and its members' positions on every access and sema is about to stop
+     * existing. Copied rather than recomputed: one layout, decided once in `check_struct_def`.
+     * The names inside point into `u->source`, which outlives both. */
+    u->struct_count = sema->struct_count;
+    for (int i = 0; i < sema->struct_count; i++) u->structs[i] = sema->structs[i];
+
     gl_heap_free(sema);
     return u;
 }

@@ -57,9 +57,21 @@
  * Values and places
  * ------------------------------------------------------------------------- */
 
+/*
+ * **How wide a value may be**, which was 16 for `mat4` and is now larger because a struct is a
+ * value too - constructed, assigned, passed and returned whole.
+ *
+ * A *variable* of any size fits: those live in the arena and are addressed through a pointer.
+ * This is the width of a value in flight, and it is a stack cost paid by every expression the
+ * interpreter evaluates, so it is a real number rather than a generous one. `glsl_sema` refuses
+ * a struct larger than this at compile time, by name, so the limit is a diagnostic and never a
+ * silently truncated copy.
+ */
+#define EXEC_MAX_VAL_FLOATS 32
+
 typedef struct {
     glsl_type_t type;
-    float v[16];
+    float v[EXEC_MAX_VAL_FLOATS];
 } exec_val_t;
 
 /* An assignable location. `map` exists for a swizzle, where the components a reference covers
@@ -138,10 +150,63 @@ static int comps_of(glsl_type_t t) {
     return (n > 0) ? n : 1;
 }
 
+/* The struct a type names in this unit, or NULL. The table was copied out of the semantic pass
+ * when the unit compiled - see `struct glsl_unit`. */
+static const glsl_struct_t *exec_struct(const exec_t *e, glsl_type_t t) {
+    if (!e->unit || !glsl_type_is_struct(t)) return (const glsl_struct_t *)0;
+    const int i = glsl_struct_index(t);
+    if (i < 0 || i >= e->unit->struct_count) return (const glsl_struct_t *)0;
+    return &e->unit->structs[i];
+}
+
+/* **The size of anything this interpreter can hold**, which `comps_of` alone cannot answer: a
+ * struct's size lives in the unit's table beside it. */
+static int exec_comps(const exec_t *e, glsl_type_t t) {
+    const glsl_struct_t *st = exec_struct(e, t);
+    return st ? st->components : comps_of(t);
+}
+
+/* The struct a name refers to in this unit, or GLSL_TYPE_ERROR. */
+static glsl_type_t exec_struct_by_name(const exec_t *e, const char *name, size_t len) {
+    if (!e->unit) return GLSL_TYPE_ERROR;
+    for (int i = 0; i < e->unit->struct_count; i++) {
+        const glsl_struct_t *st = &e->unit->structs[i];
+        if (st->name_len != len) continue;
+        size_t k = 0;
+        while (k < len && st->name[k] == name[k]) k++;
+        if (k == len) return glsl_struct_type(i);
+    }
+    return GLSL_TYPE_ERROR;
+}
+
+/* **The type a declaration or parameter node writes**, the interpreter's copy of sema's
+ * `node_declared_type`: the token, unless the token is an identifier and then the struct it
+ * names. The two have to agree, which is why both read the same table. */
+static glsl_type_t exec_node_type(const exec_t *e, const glsl_node_t *n) {
+    if (n->type_tok == GLSL_TOK_IDENTIFIER && n->type_name) {
+        return exec_struct_by_name(e, n->type_name, n->type_name_len);
+    }
+    return glsl_type_from_token(n->type_tok);
+}
+
+/* The member of a struct type, or NULL. */
+static const glsl_struct_member_t *exec_member(const exec_t *e, glsl_type_t t,
+                                               const char *name, size_t len) {
+    const glsl_struct_t *st = exec_struct(e, t);
+    if (!st) return (const glsl_struct_member_t *)0;
+    for (int i = 0; i < st->member_count; i++) {
+        if (st->member[i].name_len != len) continue;
+        size_t k = 0;
+        while (k < len && st->member[i].name[k] == name[k]) k++;
+        if (k == len) return &st->member[i];
+    }
+    return (const glsl_struct_member_t *)0;
+}
+
 static exec_val_t val_zero(glsl_type_t t) {
     exec_val_t v;
     v.type = t;
-    for (int i = 0; i < 16; i++) v.v[i] = 0.0f;
+    for (int i = 0; i < EXEC_MAX_VAL_FLOATS; i++) v.v[i] = 0.0f;
     return v;
 }
 
@@ -189,7 +254,7 @@ static float *declare(exec_t *e, const char *name, size_t len, glsl_type_t type,
         fail(e, "too many variables live in this shader");
         return (float *)0;
     }
-    const int need = comps_of(type) * ((array > 0) ? array : 1);
+    const int need = exec_comps(e, type) * ((array > 0) ? array : 1);
     if (e->arena_used + need > EXEC_ARENA_FLOATS) {
         fail(e, "this shader needs more storage than an invocation has");
         return (float *)0;
@@ -323,7 +388,10 @@ static exec_place_t place_of_rw(exec_t *e, int32_t node, GLboolean for_write) {
             return p;
         }
         p.addr = v->store;
-        p.comps = comps_of(v->type);
+        /* `exec_comps`, so a struct's place covers the whole struct. `comps_of` answers 1 for
+         * one, which would make `s = t` copy a single component and a member read past the
+         * first look like a read past the end. */
+        p.comps = exec_comps(e, v->type);
         p.type = v->type;
         return p;
     }
@@ -366,6 +434,22 @@ static exec_place_t place_of_rw(exec_t *e, int32_t node, GLboolean for_write) {
     if (n->kind == GLSL_NODE_FIELD) {
         exec_place_t bp = place_of_rw(e, n->a, for_write);
         if (!bp.addr) return p;
+        /* **A struct member is a run, not a map.** Members lie end to end in the order they were
+         * declared - the layout sema fixed - so a member is its base plus its position, and it
+         * is assignable whole. The swizzle machinery below is for vectors and its `map` has
+         * four entries, which a member of any size would not fit through. */
+        const glsl_struct_member_t *mem = exec_member(e, bp.type, n->text, n->length);
+        if (mem) {
+            p.addr = bp.addr + mem->offset;
+            p.comps = exec_comps(e, mem->type) * ((mem->array_size > 0) ? mem->array_size : 1);
+            p.type = mem->type;
+            p.swizzled = GL_FALSE;
+            return p;
+        }
+        if (glsl_type_is_struct(bp.type)) {
+            fail(e, "this struct has no member of that name");
+            return place_none();
+        }
         if (n->length == 0u || n->length > 4u) { fail(e, "a swizzle of no use"); return p; }
         p.addr = bp.addr;
         p.comps = (int)n->length;
@@ -403,19 +487,24 @@ static exec_place_t place_of(exec_t *e, int32_t node) {
 
 static void place_write(exec_t *e, const exec_place_t *p, const exec_val_t *v) {
     if (!p->addr) return;
-    const int n = comps_of(v->type);
+    /* **`exec_comps`, because `comps_of` reports 1 for a struct** - and a width of 1 is the
+     * broadcast case below, which would copy the struct's first component across the whole of
+     * it. A struct assignment is a straight copy of its components. */
+    const int n = exec_comps(e, v->type);
     /* A scalar assigned to a wider place broadcasts, which is only reachable through a
      * constructor here; anything else the semantic stage already refused. */
     for (int i = 0; i < p->comps; i++) {
-        const float f = (n == 1) ? v->v[0] : ((i < n) ? v->v[i] : 0.0f);
+        const float f = (n == 1) ? v->v[0]
+                                 : ((i < n && i < EXEC_MAX_VAL_FLOATS) ? v->v[i] : 0.0f);
         p->addr[p->swizzled ? p->map[i] : i] = f;
     }
-    (void)e;
 }
 
 static exec_val_t place_read(const exec_place_t *p) {
     exec_val_t v = val_zero(p->type);
-    for (int i = 0; i < p->comps; i++) v.v[i] = p->addr[p->swizzled ? p->map[i] : i];
+    for (int i = 0; i < p->comps && i < EXEC_MAX_VAL_FLOATS; i++) {
+        v.v[i] = p->addr[p->swizzled ? p->map[i] : i];
+    }
     return v;
 }
 
@@ -1100,7 +1189,10 @@ static exec_val_t eval(exec_t *e, int32_t node) {
                 return out;
             }
             if (v->store) {
-                for (int i = 0; i < comps_of(v->type); i++) out.v[i] = v->store[i];
+                /* `exec_comps` rather than `comps_of`, so reading a struct variable copies the
+                 * whole of it and not the one component a non-struct type would report. */
+                const int n_comp = exec_comps(e, v->type);
+                for (int i = 0; i < n_comp && i < EXEC_MAX_VAL_FLOATS; i++) out.v[i] = v->store[i];
             }
             return out;
         }
@@ -1305,6 +1397,31 @@ static exec_val_t eval(exec_t *e, int32_t node) {
             for (size_t i = 0; i < sizeof(ctors) / sizeof(ctors[0]); i++) {
                 if (is_name(callee, ctors[i].name)) return construct(e, ctors[i].type, n->b);
             }
+
+            /* **A struct constructor lays its arguments out end to end**, which is the layout
+             * itself: one argument per member, each written at that member's position. Sema has
+             * already checked the count and the types, so this only has to copy. */
+            {
+                const glsl_type_t st_type =
+                    exec_struct_by_name(e, callee->text, callee->length);
+                const glsl_struct_t *st = exec_struct(e, st_type);
+                if (st) {
+                    exec_val_t out = val_zero(st_type);
+                    int i = 0;
+                    for (int32_t a = n->b; a != GLSL_NO_NODE && i < st->member_count;
+                         a = ast->nodes[a].sibling, i++) {
+                        const exec_val_t av = eval(e, a);
+                        if (e->error) return val_zero(GLSL_TYPE_ERROR);
+                        const int w = exec_comps(e, st->member[i].type);
+                        for (int k = 0; k < w; k++) {
+                            const int at = st->member[i].offset + k;
+                            if (at < EXEC_MAX_VAL_FLOATS) out.v[at] = av.v[k];
+                        }
+                    }
+                    return out;
+                }
+            }
+
             GLboolean handled = GL_FALSE;
             const exec_val_t bi = call_builtin(e, callee, n->b, &handled);
             if (handled) return bi;
@@ -1350,7 +1467,7 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
             return (GLboolean)(e->error == (const char *)0);
 
         case GLSL_NODE_DECL: {
-            const glsl_type_t t = glsl_type_from_token(n->type_tok);
+            const glsl_type_t t = exec_node_type(e, n);
             int elements = 0;
             if (n->array_size != GLSL_NO_NODE) {
                 const glsl_node_t *sz = &ast->nodes[n->array_size];
@@ -1363,7 +1480,10 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
             if (has_init) init = eval(e, n->a);
             float *store = declare(e, n->text, n->length, t, elements);
             if (store && has_init) {
-                for (int i = 0; i < comps_of(t); i++) store[i] = init.v[i];
+                /* `exec_comps`, or a struct initialiser copies its first component and leaves
+                 * the rest zero - which reads as a shader that ran and drew the wrong colour. */
+                const int n_comp = exec_comps(e, t);
+                for (int i = 0; i < n_comp && i < EXEC_MAX_VAL_FLOATS; i++) store[i] = init.v[i];
             }
             return (GLboolean)(e->error == (const char *)0);
         }

@@ -1009,6 +1009,12 @@ static GLboolean check_struct_def(glsl_sema_t *s, int32_t d) {
         sema_fail(s, "a struct must have at least one member", d);
         return GL_FALSE;
     }
+    /* Checked once the whole thing is measured, so the message is about the struct rather than
+     * about whichever member happened to cross the line. */
+    if (st->components > GLSL_MAX_STRUCT_COMPONENTS) {
+        sema_fail(s, "this struct is larger than a value this implementation can carry", d);
+        return GL_FALSE;
+    }
     s->struct_count++;
     return GL_TRUE;
 }
