@@ -177,6 +177,10 @@ int oops_keyboard_available(void) {
 }
 
 int oops_keyboard_init(void) {
+  /* The `input` channel of `/app0/oops-log` - see `oops_log_channel_level`. Same arrangement as
+   * oops-gl's: asked for here, so logging depends on nothing, and an explicit
+   * `oops_input_set_log_level` afterwards still wins. */
+  s_input_log_level = (int)oops_log_channel_level("input", (oops_log_level_t)s_input_log_level);
   if (!s_keyboard_module_loaded) {
     if (sceSysmoduleLoadModule && oops_symbol_is_resolved((const void *)sceSysmoduleLoadModule)) {
       (void)sceSysmoduleLoadModule(0x0106); /* OOPS_SYSMODULE_KEYBOARD */

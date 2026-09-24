@@ -51,6 +51,33 @@ const char *oops_log_get_app_id(void);
 void oops_log_set_level(oops_log_level_t level);
 oops_log_level_t oops_log_get_level(void);
 
+/*
+ * **The verbosity a launch asked for, per subsystem, without a rebuild.**
+ *
+ * A port's first walls are all the same wall: something is slow, or something renders wrong, and
+ * the library that knows why is quiet because a useful log level is a compile-time decision made
+ * on a build machine. Turning it up means a rebuild, a repackage and a restore - minutes, for a
+ * number that was measured all along and simply not printed.
+ *
+ * So the level is read from a file the console can carry: `/app0/oops-log`, one `channel=level`
+ * per line, `#` to end-of-line for comments. Levels are named (`none`, `error`, `warn`, `info`,
+ * `debug`, `trace`) or the digits 0-5; unknown text leaves the fallback in place rather than
+ * silencing a subsystem by typo.
+ *
+ *     system=info      # oops_log_* itself
+ *     gl=debug         # oops-gl's per-flip frame accounting
+ *     input=warn
+ *
+ * **Each subsystem asks; nothing is pushed at it.** `oops-gl` calls this for `"gl"`, the input
+ * layer for `"input"`, and a title may use any name it likes for its own - so this function
+ * depends on no subsystem and every subsystem depends only on logging. A payload that links
+ * neither still links this.
+ *
+ * Absent file, absent channel and unreadable value all return `fallback`, so a title that ships
+ * without one behaves exactly as it did. The file is read once, on the first call.
+ */
+oops_log_level_t oops_log_channel_level(const char *channel, oops_log_level_t fallback);
+
 void oops_log(const char *fmt, ...)
     __attribute__((format(printf, 1, 2)));
 void oops_klog(const char *tag, const char *msg);

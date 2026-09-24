@@ -514,6 +514,10 @@ void oops_log_init(const char *app_id) {
     s_app_id[0] = '\0';
     s_app_id_resolved = 0;
   }
+  /* The `system` channel, if the launch asked for one. Every other subsystem asks for its own
+   * when it starts; this is logging asking for logging's. A title that calls
+   * `oops_log_set_level` afterwards still wins, which is the order a caller would expect. */
+  oops_log_set_level(oops_log_channel_level("system", oops_log_get_level()));
 }
 
 const char *oops_log_get_app_id(void) {
@@ -579,6 +583,93 @@ void oops_log_set_level(oops_log_level_t level) {
 
 oops_log_level_t oops_log_get_level(void) {
   return s_log_level;
+}
+
+/* ---------------------------------------------------------------------------
+ * `/app0/oops-log`: the verbosity a launch asked for. See `<oops/system.h>`.
+ *
+ * Held as the file's own bytes rather than parsed into a table, because the table would need a
+ * maximum number of channels and a maximum name length, and a linear scan of a file this size is
+ * done once per subsystem at startup. The whole point is that adding a channel needs no change
+ * here.
+ * --------------------------------------------------------------------------- */
+
+static char s_log_cfg[512];
+static int s_log_cfg_read = 0;
+
+static void oops_log_cfg_load(void) {
+  if (s_log_cfg_read) return;
+  s_log_cfg_read = 1;
+  s_log_cfg[0] = '\0';
+#ifndef OOPS_HOST_BUILD
+  int fd = oops_fs_open("/app0/oops-log", OOPS_O_RDONLY, 0);
+  if (fd < 0) return;
+  int64_t n = oops_fs_read(fd, s_log_cfg, sizeof(s_log_cfg) - 1);
+  oops_fs_close(fd);
+  s_log_cfg[(n > 0) ? (size_t)n : 0u] = '\0';
+#endif
+}
+
+/* A level by name or digit, or `fallback` for anything else - a typo must not silence a
+ * subsystem, which is the failure that would be hardest to notice from the log it produces. */
+static oops_log_level_t oops_log_level_of(const char *s, size_t len,
+                                          oops_log_level_t fallback) {
+  static const struct {
+    const char *name;
+    oops_log_level_t level;
+  } names[] = {
+      {"none", OOPS_LOG_NONE},   {"error", OOPS_LOG_ERROR}, {"warn", OOPS_LOG_WARN},
+      {"info", OOPS_LOG_INFO},   {"debug", OOPS_LOG_DEBUG}, {"trace", OOPS_LOG_TRACE},
+  };
+  if (len == 1u && s[0] >= '0' && s[0] <= '5') {
+    return (oops_log_level_t)(s[0] - '0');
+  }
+  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+    if (obs_strlen(names[i].name) == len && obs_strncmp(s, names[i].name, len) == 0) {
+      return names[i].level;
+    }
+  }
+  return fallback;
+}
+
+oops_log_level_t oops_log_channel_level(const char *channel, oops_log_level_t fallback) {
+  if (channel == NULL || *channel == '\0') return fallback;
+  oops_log_cfg_load();
+  if (s_log_cfg[0] == '\0') return fallback;
+
+  const size_t want = obs_strlen(channel);
+  const char *p = s_log_cfg;
+  while (*p != '\0') {
+    /* One line, with `#` ending it. Leading blanks are skipped so an indented file reads. */
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    const char *line = p;
+    while (*p != '\0' && *p != '\n') p++;
+    const char *end = p;
+    for (const char *h = line; h < end; h++) {
+      if (*h == '#') { end = h; break; }
+    }
+
+    const char *eq = (const char *)0;
+    for (const char *c = line; c < end; c++) {
+      if (*c == '=') { eq = c; break; }
+    }
+    if (eq != (const char *)0) {
+      /* The name, without the blanks either side of it. */
+      const char *ns = line;
+      const char *ne = eq;
+      while (ns < ne && (*ns == ' ' || *ns == '\t')) ns++;
+      while (ne > ns && (ne[-1] == ' ' || ne[-1] == '\t')) ne--;
+      if ((size_t)(ne - ns) == want && obs_strncmp(ns, channel, want) == 0) {
+        const char *vs = eq + 1;
+        const char *ve = end;
+        while (vs < ve && (*vs == ' ' || *vs == '\t')) vs++;
+        while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t' || ve[-1] == '\r')) ve--;
+        return oops_log_level_of(vs, (size_t)(ve - vs), fallback);
+      }
+    }
+    if (*p == '\n') p++;
+  }
+  return fallback;
 }
 
 void oops_klog_level(oops_log_level_t level, const char *tag, const char *msg) {

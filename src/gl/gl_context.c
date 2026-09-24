@@ -917,6 +917,12 @@ static void gl_suspend_drain(void);
 void *glContextCreate(struct oops_display *disp) {
     if (!disp) return NULL;
 
+    /* **The `gl` channel of `/app0/oops-log`**, so a launch can turn the frame accounting below
+     * on without a rebuild - see `oops_log_channel_level`. Asked here rather than pushed from the
+     * logging module, which keeps the dependency one way: oops-gl needs logging, logging needs
+     * nothing. A title calling `oops_gl_set_log_level` afterwards still wins. */
+    gl_log_level = (int)oops_log_channel_level("gl", (oops_log_level_t)gl_log_level);
+
     unsigned int w = oops_display_get_width(disp);
     unsigned int h = oops_display_get_height(disp);
     if (!w || !h) {

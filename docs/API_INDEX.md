@@ -1024,6 +1024,7 @@ If what you are about to write is already here under another name, use that one.
 - `oops_kprintf`
 - `oops_kprintf_level`
 - `oops_log`
+- `oops_log_channel_level`
 - `oops_log_close_disk_sink`
 - `oops_log_enable_disk_sink`
 - `oops_log_get_app_id`
