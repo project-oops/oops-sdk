@@ -12532,12 +12532,16 @@ static void test_glsl_preprocessor_nests_conditionals(void) {
 static void test_glsl_preprocessor_refuses_by_name(void) {
   const char *err = NULL;
 
-  ASSERT_TRUE(glsl_pp_to_string("#if 1\nx;\n#endif\n", &err, NULL) == NULL);
+  /* **`#extension ... : require` is the one spelling that must still fail**, because this front
+   * end implements no extensions and `require` is the word that says a shader will not work
+   * without one. `enable`, `warn` and `disable` ask for nothing that cannot be given. */
+  ASSERT_TRUE(glsl_pp_to_string("#extension GL_ARB_foo : require\n", &err, NULL) == NULL);
   ASSERT_TRUE(err != NULL);
-  ASSERT_TRUE(glsl_pp_to_string("#extension GL_ARB_foo : enable\n", &err, NULL) == NULL);
+  ASSERT_TRUE(glsl_pp_to_string("#extension GL_ARB_foo : sideways\n", &err, NULL) == NULL);
   ASSERT_TRUE(err != NULL);
-  ASSERT_TRUE(glsl_pp_to_string("#pragma optimize(on)\n", &err, NULL) == NULL);
+  ASSERT_TRUE(glsl_pp_to_string("#extension GL_ARB_foo\n", &err, NULL) == NULL);
   ASSERT_TRUE(err != NULL);
+
   ASSERT_TRUE(glsl_pp_to_string("#nonsense\n", &err, NULL) == NULL);
   ASSERT_TRUE(err != NULL);
   ASSERT_TRUE(glsl_pp_to_string("#error something went wrong\n", &err, NULL) == NULL);
@@ -12558,9 +12562,110 @@ static void test_glsl_preprocessor_refuses_by_name(void) {
   ASSERT_TRUE(err != NULL);
 
   /* A directive inside a dark branch is ignored entirely, including one that would otherwise
-   * be refused: a `#pragma` in a branch that is not compiled has not been asked for. */
-  s = glsl_pp_to_string("#ifdef OFF\n#pragma whatever\n#endif\nafter;", &err, NULL);
+   * be refused: a `#extension ... : require` in a branch that is not compiled has not been
+   * asked for. */
+  s = glsl_pp_to_string("#ifdef OFF\n#extension GL_ARB_foo : require\n#endif\nafter;", &err, NULL);
   ASSERT_TRUE(s != NULL && strcmp(s, "after ;") == 0);
+
+  /* `#pragma` and `#line` are accepted and change nothing. */
+  s = glsl_pp_to_string("#pragma optimize(on)\nafter;", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "after ;") == 0);
+  s = glsl_pp_to_string("#line 42\nafter;", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "after ;") == 0);
+  s = glsl_pp_to_string("#extension GL_ARB_foo : enable\nafter;", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "after ;") == 0);
+}
+
+/*
+ * **`#if`, which is the directive a real shader reaches for and this front end refused until
+ * 2026-09-24.** The three passes are what these assert: `defined` before expansion, macros
+ * after it, and an undefined name left over is 0.
+ */
+static void test_glsl_preprocessor_evaluates_if(void) {
+  const char *err = NULL;
+  const char *s;
+
+  /* Constants and the branch each one picks. */
+  s = glsl_pp_to_string("#if 1\nyes;\n#else\nno;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
+  s = glsl_pp_to_string("#if 0\nyes;\n#else\nno;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "no ;") == 0);
+
+  /* Arithmetic, comparison, precedence and parentheses. */
+  s = glsl_pp_to_string("#if 2 + 3 * 4 == 14\nyes;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
+  s = glsl_pp_to_string("#if (2 + 3) * 4 == 14\nyes;\n#else\nno;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "no ;") == 0);
+  s = glsl_pp_to_string("#if !0 && (1 || 0) && 7 % 4 == 3\nyes;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
+  s = glsl_pp_to_string("#if 1 ? 0 : 1\nyes;\n#else\nno;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "no ;") == 0);
+
+  /* `defined`, both spellings, and **before expansion**: `defined A` asks whether A is a macro,
+   * it does not expand A and ask about the result. */
+  s = glsl_pp_to_string("#define A 0\n#if defined A\nyes;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
+  s = glsl_pp_to_string("#define A 0\n#if defined(A) && !A\nyes;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
+  s = glsl_pp_to_string("#if defined(NOPE)\nyes;\n#else\nno;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "no ;") == 0);
+
+  /* A macro in the expression expands; a name that is not a macro is 0. */
+  s = glsl_pp_to_string("#define N 3\n#if N * 2 == 6\nyes;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
+  s = glsl_pp_to_string("#if NEVER_SET\nyes;\n#else\nno;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "no ;") == 0);
+
+  /* `__VERSION__` is predefined, because `#if __VERSION__ >= 120` is the commonest use there is
+   * and an undefined name would be 0 - quietly taking the other branch. */
+  s = glsl_pp_to_string("#version 120\n#if __VERSION__ >= 120\nyes;\n#else\nno;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
+  s = glsl_pp_to_string("#version 110\n#if __VERSION__ >= 120\nyes;\n#else\nno;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "no ;") == 0);
+
+  /* `#elif`: the first true arm wins and no later one is taken. */
+  s = glsl_pp_to_string("#if 0\na;\n#elif 1\nb;\n#elif 1\nc;\n#else\nd;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "b ;") == 0);
+  s = glsl_pp_to_string("#if 0\na;\n#elif 0\nb;\n#else\nd;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "d ;") == 0);
+  s = glsl_pp_to_string("#if 1\na;\n#elif 1\nb;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "a ;") == 0);
+
+  /* Nesting, and a dark outer region keeping an inner one dark however it reads. */
+  s = glsl_pp_to_string("#if 0\n#if 1\na;\n#endif\n#else\nb;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "b ;") == 0);
+
+  /* **A dark arm's expression is never evaluated.** It may divide by zero or name a macro that
+   * only exists in the other arm; failing the compile on an expression nobody asked for would
+   * be wrong. */
+  s = glsl_pp_to_string("#if 1\na;\n#elif 1/0\nb;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "a ;") == 0);
+  s = glsl_pp_to_string("#ifdef OFF\n#if 1/0\na;\n#endif\n#endif\nafter;", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "after ;") == 0);
+
+  /* What it refuses, and each one for a reason a wrong answer would otherwise hide. */
+  ASSERT_TRUE(glsl_pp_to_string("#if\nx;\n#endif", &err, NULL) == NULL);        /* no expression */
+  ASSERT_TRUE(glsl_pp_to_string("#if 1/0\nx;\n#endif", &err, NULL) == NULL);    /* divide by zero */
+  ASSERT_TRUE(glsl_pp_to_string("#if (1\nx;\n#endif", &err, NULL) == NULL);     /* unclosed paren */
+  ASSERT_TRUE(glsl_pp_to_string("#if 1 1\nx;\n#endif", &err, NULL) == NULL);    /* trailing rubbish */
+  ASSERT_TRUE(glsl_pp_to_string("#if 1.5 > 1\nx;\n#endif", &err, NULL) == NULL);/* integer only */
+  ASSERT_TRUE(glsl_pp_to_string("#elif 1\nx;\n#endif", &err, NULL) == NULL);    /* no #if */
+  ASSERT_TRUE(glsl_pp_to_string("#if defined\nx;\n#endif", &err, NULL) == NULL);
+  ASSERT_TRUE(glsl_pp_to_string("#if defined(A\nx;\n#endif", &err, NULL) == NULL);
+  ASSERT_TRUE(err != NULL);
+
+  /* **`<<` is refused rather than read as two `<`.** GLSL 1.10 has no shift token, so `1 << 2`
+   * would otherwise evaluate as `(1 < (< 2))` - nonsense that still produces a number and still
+   * picks a branch. */
+  ASSERT_TRUE(glsl_pp_to_string("#if (1 << 2) == 4\nx;\n#endif", &err, NULL) == NULL);
+  ASSERT_TRUE(err != NULL);
+  /* A genuine `<` is untouched by that guard. */
+  s = glsl_pp_to_string("#if 1 < 2\nyes;\n#endif", &err, NULL);
+  ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
+
+  /* A macro that expands to itself stops at the budget rather than the stack. */
+  ASSERT_TRUE(glsl_pp_to_string("#define R R\n#if R\nx;\n#endif", &err, NULL) == NULL);
+  ASSERT_TRUE(err != NULL);
 }
 
 /* -------------------------------------------------------------------------
@@ -14006,6 +14111,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_glsl_preprocessor_expands_and_records);
     RUN_TEST(test_glsl_preprocessor_nests_conditionals);
     RUN_TEST(test_glsl_preprocessor_refuses_by_name);
+    RUN_TEST(test_glsl_preprocessor_evaluates_if);
     RUN_TEST(test_glsl_sema_types_the_operators);
     RUN_TEST(test_glsl_sema_checks_swizzles);
     RUN_TEST(test_glsl_sema_checks_constructors);

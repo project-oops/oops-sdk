@@ -186,6 +186,346 @@ static void do_version(glsl_pp_t *pp, glsl_token_t *tok, int line) {
     skip_to_end_of_line(pp, tok, line);
 }
 
+/* -------------------------------------------------------------------------
+ * `#if` and `#elif`: a constant expression over integers
+ *
+ * The grammar is C's, as the specification says, minus the parts GLSL 1.10 has no tokens for -
+ * see the shift note in `pp_eval_shift_guard`. Evaluation is in three passes over the directive's
+ * line, and the order of the first two is the whole of why `defined` works:
+ *
+ *   1. `defined X` and `defined(X)` become 1 or 0. **Before expansion**, because `defined FOO`
+ *      must ask whether FOO is a macro, not expand it first and ask about whatever came out.
+ *   2. Macros expand. What is left that is still an identifier is 0, which the specification
+ *      requires and which is what makes `#if UNSET_THING` take the else branch rather than fail.
+ *   3. The result is evaluated by precedence.
+ *
+ * All of it happens in fixed arrays. A preprocessor expression that needs more than
+ * `GLSL_PP_MAX_EXPR` tokens is refused rather than truncated, because a truncated expression
+ * evaluates to something and silently picks a branch.
+ * ------------------------------------------------------------------------- */
+
+#define GLSL_PP_MAX_EXPR 128
+#define GLSL_PP_MAX_EXPANSIONS 256
+
+/* Collects what is left of a directive's line. `tok` holds the directive name on entry and the
+ * first token of the next line on exit, which is the same contract every `do_*` here keeps. */
+static int pp_collect_line(glsl_pp_t *pp, glsl_token_t *tok, int line, glsl_token_t *buf, int max) {
+    int n = 0;
+    GLboolean have = raw_next(pp, tok);
+    while (have && tok->line == line && tok->type != GLSL_TOK_EOF) {
+        if (n >= max) {
+            pp_fail(pp, "preprocessor expression too long", line);
+            return -1;
+        }
+        buf[n++] = *tok;
+        have = raw_next(pp, tok);
+    }
+    if (!have) tok->type = GLSL_TOK_EOF;
+    return n;
+}
+
+/* Makes an integer token out of thin air. `text`/`length` are left pointing at the token it
+ * replaces, so a diagnostic still names something that exists in the source. */
+static glsl_token_t pp_int_token(const glsl_token_t *like, int32_t v) {
+    glsl_token_t t = *like;
+    t.type = GLSL_TOK_INTCONST;
+    t.value = (double)v;
+    return t;
+}
+
+/* Pass 1: `defined X` and `defined ( X )`. */
+static int pp_resolve_defined(glsl_pp_t *pp, const glsl_token_t *in, int n, glsl_token_t *out,
+                              int line) {
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        if (!(in[i].type == GLSL_TOK_IDENTIFIER && same_word(in[i].text, in[i].length, "defined", 7))) {
+            out[m++] = in[i];
+            continue;
+        }
+        int j = i + 1;
+        GLboolean paren = GL_FALSE;
+        if (j < n && in[j].type == GLSL_TOK_LPAREN) { paren = GL_TRUE; j++; }
+        if (j >= n || in[j].type != GLSL_TOK_IDENTIFIER) {
+            pp_fail(pp, "`defined` without a name", line);
+            return -1;
+        }
+        const GLboolean d = (GLboolean)(find_macro(pp, in[j].text, in[j].length) != (glsl_macro_t *)0);
+        glsl_token_t v = pp_int_token(&in[j], d ? 1 : 0);
+        j++;
+        if (paren) {
+            if (j >= n || in[j].type != GLSL_TOK_RPAREN) {
+                pp_fail(pp, "`defined(` without `)`", line);
+                return -1;
+            }
+            j++;
+        }
+        out[m++] = v;
+        i = j - 1;
+    }
+    return m;
+}
+
+/* Pass 2: expand macros. Bounded rather than recursive - a macro that expands to itself stops
+ * at the budget with a named failure instead of running out of stack. */
+static int pp_expand_expr(glsl_pp_t *pp, glsl_token_t *buf, int n, int line) {
+    int budget = GLSL_PP_MAX_EXPANSIONS;
+    for (int i = 0; i < n; i++) {
+        if (buf[i].type != GLSL_TOK_IDENTIFIER) continue;
+        glsl_macro_t *m = find_macro(pp, buf[i].text, buf[i].length);
+        if (!m) continue;
+        if (--budget < 0) {
+            pp_fail(pp, "macro expansion in a preprocessor expression does not terminate", line);
+            return -1;
+        }
+        const int grow = (int)m->token_count - 1;
+        if (n + grow > GLSL_PP_MAX_EXPR) {
+            pp_fail(pp, "preprocessor expression too long", line);
+            return -1;
+        }
+        /* Splice the body in place of the name. */
+        if (grow > 0) {
+            for (int k = n - 1; k > i; k--) buf[k + grow] = buf[k];
+        } else if (grow < 0) {
+            for (int k = i + 1; k < n; k++) buf[k + grow] = buf[k];
+        }
+        for (int32_t k = 0; k < m->token_count; k++) buf[i + k] = pp->pool[m->first_token + k];
+        n += grow;
+        i--; /* re-examine from here: the body may itself start with a macro */
+    }
+    return n;
+}
+
+typedef struct {
+    glsl_pp_t *pp;
+    const glsl_token_t *t;
+    int n, i, line;
+    GLboolean bad;
+} pp_eval_t;
+
+static int32_t pp_eval_ternary(pp_eval_t *e);
+
+static glsl_token_type_t pp_peek(const pp_eval_t *e) {
+    return e->i < e->n ? e->t[e->i].type : GLSL_TOK_EOF;
+}
+
+/*
+ * **`<<` and `>>` are refused rather than mis-read.**
+ *
+ * GLSL 1.10 has no shift operators, so the lexer has no token for them and `1 << 2` arrives as
+ * two `<` in a row. Evaluated naively that is `(1 < (< 2))`, which is nonsense that still
+ * produces a number and still picks a branch. The two are adjacent in the source text, which is
+ * what tells them apart from `a < <b>` - impossible here anyway - so they are detected and named.
+ */
+static GLboolean pp_eval_shift_guard(pp_eval_t *e) {
+    if (e->i + 1 >= e->n) return GL_FALSE;
+    const glsl_token_t *a = &e->t[e->i], *b = &e->t[e->i + 1];
+    const GLboolean both_lt = (GLboolean)(a->type == GLSL_TOK_LT && b->type == GLSL_TOK_LT);
+    const GLboolean both_gt = (GLboolean)(a->type == GLSL_TOK_GT && b->type == GLSL_TOK_GT);
+    if ((both_lt || both_gt) && b->text == a->text + 1) {
+        pp_fail(e->pp, "<< and >> are not preprocessor operators this front end has", e->line);
+        e->bad = GL_TRUE;
+        return GL_TRUE;
+    }
+    return GL_FALSE;
+}
+
+static int32_t pp_eval_primary(pp_eval_t *e) {
+    if (e->bad) return 0;
+    if (e->i >= e->n) {
+        pp_fail(e->pp, "preprocessor expression ends early", e->line);
+        e->bad = GL_TRUE;
+        return 0;
+    }
+    const glsl_token_t *t = &e->t[e->i];
+    switch (t->type) {
+        case GLSL_TOK_INTCONST: e->i++; return (int32_t)t->value;
+        case GLSL_TOK_KW_TRUE:  e->i++; return 1;
+        case GLSL_TOK_KW_FALSE: e->i++; return 0;
+        case GLSL_TOK_LPAREN: {
+            e->i++;
+            const int32_t v = pp_eval_ternary(e);
+            if (!e->bad && pp_peek(e) != GLSL_TOK_RPAREN) {
+                pp_fail(e->pp, "preprocessor expression missing `)`", e->line);
+                e->bad = GL_TRUE;
+            } else if (!e->bad) {
+                e->i++;
+            }
+            return v;
+        }
+        case GLSL_TOK_IDENTIFIER:
+            /* **`__VERSION__`, because `#if __VERSION__ >= 120` is the commonest use of `#if`
+             * there is** and an undefined identifier is 0 - which would silently take the wrong
+             * branch rather than fail. The specification requires it to be predefined. */
+            if (same_word(t->text, t->length, "__VERSION__", 11)) {
+                e->i++;
+                return (int32_t)(e->pp->version ? e->pp->version : 110);
+            }
+            /* Anything else still an identifier here is a macro that was never defined, and the
+             * specification says that is 0. */
+            e->i++;
+            return 0;
+        case GLSL_TOK_FLOATCONST:
+            pp_fail(e->pp, "a preprocessor expression is integer only", e->line);
+            e->bad = GL_TRUE;
+            return 0;
+        default:
+            pp_fail(e->pp, "this is not allowed in a preprocessor expression", e->line);
+            e->bad = GL_TRUE;
+            return 0;
+    }
+}
+
+static int32_t pp_eval_unary(pp_eval_t *e) {
+    if (e->bad) return 0;
+    switch (pp_peek(e)) {
+        case GLSL_TOK_PLUS:  e->i++; return pp_eval_unary(e);
+        case GLSL_TOK_MINUS: e->i++; return -pp_eval_unary(e);
+        case GLSL_TOK_BANG:  e->i++; return pp_eval_unary(e) ? 0 : 1;
+        case GLSL_TOK_TILDE: e->i++; return ~pp_eval_unary(e);
+        default: return pp_eval_primary(e);
+    }
+}
+
+static int32_t pp_eval_mul(pp_eval_t *e) {
+    int32_t v = pp_eval_unary(e);
+    for (;;) {
+        if (e->bad) return 0;
+        const glsl_token_type_t op = pp_peek(e);
+        if (op != GLSL_TOK_STAR && op != GLSL_TOK_SLASH && op != GLSL_TOK_PERCENT) return v;
+        e->i++;
+        const int32_t r = pp_eval_unary(e);
+        if (e->bad) return 0;
+        if ((op == GLSL_TOK_SLASH || op == GLSL_TOK_PERCENT) && r == 0) {
+            pp_fail(e->pp, "division by zero in a preprocessor expression", e->line);
+            e->bad = GL_TRUE;
+            return 0;
+        }
+        v = op == GLSL_TOK_STAR ? v * r : op == GLSL_TOK_SLASH ? v / r : v % r;
+    }
+}
+
+static int32_t pp_eval_add(pp_eval_t *e) {
+    int32_t v = pp_eval_mul(e);
+    for (;;) {
+        if (e->bad) return 0;
+        const glsl_token_type_t op = pp_peek(e);
+        if (op != GLSL_TOK_PLUS && op != GLSL_TOK_MINUS) return v;
+        e->i++;
+        const int32_t r = pp_eval_mul(e);
+        v = op == GLSL_TOK_PLUS ? v + r : v - r;
+    }
+}
+
+static int32_t pp_eval_rel(pp_eval_t *e) {
+    int32_t v = pp_eval_add(e);
+    for (;;) {
+        if (e->bad || pp_eval_shift_guard(e)) return 0;
+        const glsl_token_type_t op = pp_peek(e);
+        if (op != GLSL_TOK_LT && op != GLSL_TOK_GT && op != GLSL_TOK_LE && op != GLSL_TOK_GE) {
+            return v;
+        }
+        e->i++;
+        const int32_t r = pp_eval_add(e);
+        v = op == GLSL_TOK_LT ? (v < r) : op == GLSL_TOK_GT ? (v > r)
+                                        : op == GLSL_TOK_LE ? (v <= r) : (v >= r);
+    }
+}
+
+static int32_t pp_eval_eq(pp_eval_t *e) {
+    int32_t v = pp_eval_rel(e);
+    for (;;) {
+        if (e->bad) return 0;
+        const glsl_token_type_t op = pp_peek(e);
+        if (op != GLSL_TOK_EQ && op != GLSL_TOK_NE) return v;
+        e->i++;
+        const int32_t r = pp_eval_rel(e);
+        v = op == GLSL_TOK_EQ ? (v == r) : (v != r);
+    }
+}
+
+static int32_t pp_eval_band(pp_eval_t *e) {
+    int32_t v = pp_eval_eq(e);
+    while (!e->bad && pp_peek(e) == GLSL_TOK_AMP) { e->i++; v &= pp_eval_eq(e); }
+    return e->bad ? 0 : v;
+}
+
+static int32_t pp_eval_bxor(pp_eval_t *e) {
+    int32_t v = pp_eval_band(e);
+    while (!e->bad && pp_peek(e) == GLSL_TOK_CARET) { e->i++; v ^= pp_eval_band(e); }
+    return e->bad ? 0 : v;
+}
+
+static int32_t pp_eval_bor(pp_eval_t *e) {
+    int32_t v = pp_eval_bxor(e);
+    while (!e->bad && pp_peek(e) == GLSL_TOK_PIPE) { e->i++; v |= pp_eval_bxor(e); }
+    return e->bad ? 0 : v;
+}
+
+/* **Both sides are evaluated.** Short-circuiting would be wrong here in a way it is not in the
+ * language: a preprocessor expression has no side effects, and evaluating the right of a false
+ * `&&` is how a malformed operand is still reported rather than hidden by the operand before it. */
+static int32_t pp_eval_land(pp_eval_t *e) {
+    int32_t v = pp_eval_bor(e);
+    while (!e->bad && pp_peek(e) == GLSL_TOK_AND_AND) {
+        e->i++;
+        const int32_t r = pp_eval_bor(e);
+        v = (v && r);
+    }
+    return e->bad ? 0 : v;
+}
+
+static int32_t pp_eval_lor(pp_eval_t *e) {
+    int32_t v = pp_eval_land(e);
+    while (!e->bad && pp_peek(e) == GLSL_TOK_OR_OR) {
+        e->i++;
+        const int32_t r = pp_eval_land(e);
+        v = (v || r);
+    }
+    return e->bad ? 0 : v;
+}
+
+static int32_t pp_eval_ternary(pp_eval_t *e) {
+    const int32_t c = pp_eval_lor(e);
+    if (e->bad || pp_peek(e) != GLSL_TOK_QUESTION) return c;
+    e->i++;
+    const int32_t a = pp_eval_ternary(e);
+    if (!e->bad && pp_peek(e) != GLSL_TOK_COLON) {
+        pp_fail(e->pp, "`?` without `:` in a preprocessor expression", e->line);
+        e->bad = GL_TRUE;
+        return 0;
+    }
+    if (e->bad) return 0;
+    e->i++;
+    const int32_t b = pp_eval_ternary(e);
+    return c ? a : b;
+}
+
+/* The whole of it: collect the line, resolve `defined`, expand, evaluate. Returns the value, or
+ * 0 with `pp->error` set. */
+static int32_t pp_eval_condition(glsl_pp_t *pp, glsl_token_t *tok, int line) {
+    glsl_token_t raw[GLSL_PP_MAX_EXPR], work[GLSL_PP_MAX_EXPR];
+    const int n = pp_collect_line(pp, tok, line, raw, GLSL_PP_MAX_EXPR);
+    if (n < 0) return 0;
+    if (n == 0) {
+        pp_fail(pp, "#if with no expression", line);
+        return 0;
+    }
+    int m = pp_resolve_defined(pp, raw, n, work, line);
+    if (m < 0) return 0;
+    m = pp_expand_expr(pp, work, m, line);
+    if (m < 0) return 0;
+
+    pp_eval_t e;
+    e.pp = pp; e.t = work; e.n = m; e.i = 0; e.line = line; e.bad = GL_FALSE;
+    const int32_t v = pp_eval_ternary(&e);
+    if (e.bad) return 0;
+    if (e.i != m) {
+        pp_fail(pp, "trailing rubbish in a preprocessor expression", line);
+        return 0;
+    }
+    return v;
+}
+
 /* Reads one directive. `tok` holds the token after `#` on entry and the first token of the next
  * line on exit. */
 static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
@@ -196,6 +536,59 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
 
     /* **Conditionals are read even while skipping**, so nesting stays balanced. Everything
      * else is obeyed only when output is live. */
+    /* **`#if` is read even while skipping**, like `#ifdef`, so nesting stays balanced - but its
+     * *expression* is not evaluated in a dark region. That is not an optimisation: a branch that
+     * is not being compiled may well divide by zero or name a macro that only exists in the other
+     * arm, and evaluating it would fail the compile on an expression nobody asked for. */
+    if (tok_is(tok, "if")) {
+        if (pp->cond_depth >= GLSL_MAX_COND_DEPTH) {
+            pp_fail(pp, "conditionals nested too deeply", line);
+            return;
+        }
+        const GLboolean live = emitting(pp);
+        GLboolean on = GL_FALSE;
+        if (live) {
+            on = (GLboolean)(pp_eval_condition(pp, tok, line) != 0);
+            if (pp->error) return;
+        } else {
+            skip_to_end_of_line(pp, tok, line);
+            if (!raw_next(pp, tok)) tok->type = GLSL_TOK_EOF;
+        }
+        pp->emitting[pp->cond_depth] = (GLboolean)(live && on);
+        pp->taken[pp->cond_depth] = (GLboolean)(live && on);
+        pp->cond_depth++;
+        if (live) skip_to_end_of_line(pp, tok, line);
+        return;
+    }
+
+    if (tok_is(tok, "elif")) {
+        if (pp->cond_depth == 0) {
+            pp_fail(pp, "#elif with no #if", line);
+            return;
+        }
+        const int top = pp->cond_depth - 1;
+        GLboolean outer_live = GL_TRUE;
+        for (int i = 0; i < top; i++) {
+            if (!pp->emitting[i]) outer_live = GL_FALSE;
+        }
+        /* **Only evaluated when it could matter**: the enclosing region is live and no earlier
+         * arm of this conditional has been taken. Otherwise the expression is skipped unread,
+         * for the same reason `#if` skips one in a dark region. */
+        const GLboolean could = (GLboolean)(outer_live && !pp->taken[top]);
+        GLboolean on = GL_FALSE;
+        if (could) {
+            on = (GLboolean)(pp_eval_condition(pp, tok, line) != 0);
+            if (pp->error) return;
+        } else {
+            skip_to_end_of_line(pp, tok, line);
+            if (!raw_next(pp, tok)) tok->type = GLSL_TOK_EOF;
+        }
+        pp->emitting[top] = (GLboolean)(could && on);
+        if (pp->emitting[top]) pp->taken[top] = GL_TRUE;
+        if (could) skip_to_end_of_line(pp, tok, line);
+        return;
+    }
+
     if (tok_is(tok, "ifdef") || tok_is(tok, "ifndef")) {
         GLboolean want_defined = tok_is(tok, "ifdef");
         if (pp->cond_depth >= GLSL_MAX_COND_DEPTH) {
@@ -263,21 +656,72 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
         return;
     }
 
-    /* **Refused by name, not skipped.** A skipped `#extension` compiles a shader that asked for
-     * something it did not get; a skipped `#if` takes the wrong branch. Both are worse than a
-     * compile error that names the directive. */
-    if (tok_is(tok, "if") || tok_is(tok, "elif")) {
-        pp_fail(pp, "#if and #elif are not handled yet; use #ifdef", line);
-        return;
-    }
+    /*
+     * **`#extension`, and the one behaviour that must still fail.**
+     *
+     * This front end implements no extensions, so the honest answer to every name is "you do not
+     * have it". The specification says how to say that: `require` on an unsupported extension is
+     * an error, and `enable` is a warning that compiles on without it. `warn` and `disable` ask
+     * for nothing. `all : require` and `all : enable` are errors by name.
+     *
+     * So `require` is refused and the rest are accepted and ignored - which is not the same as
+     * skipping the directive, the thing the comment here used to warn against. A skipped
+     * `#extension GL_OES_foo : require` compiles a shader that asked for something it did not
+     * get; refusing exactly that spelling is what stops it, and waving through `: enable` is
+     * what the specification asks for rather than a shortcut.
+     */
     if (tok_is(tok, "extension")) {
-        pp_fail(pp, "#extension is not handled yet", line);
+        glsl_token_t name = *tok;
+        if (!raw_next(pp, tok) || tok->line != line || tok->type != GLSL_TOK_IDENTIFIER) {
+            pp_fail(pp, "#extension with no extension name", line);
+            return;
+        }
+        name = *tok;
+        (void)name;
+        if (!raw_next(pp, tok) || tok->line != line || tok->type != GLSL_TOK_COLON) {
+            pp_fail(pp, "#extension without `: behaviour`", line);
+            return;
+        }
+        if (!raw_next(pp, tok) || tok->line != line || tok->type != GLSL_TOK_IDENTIFIER) {
+            pp_fail(pp, "#extension without a behaviour", line);
+            return;
+        }
+        if (same_word(tok->text, tok->length, "require", 7)) {
+            pp_fail(pp, "#extension ... : require - this front end has no extensions", line);
+            return;
+        }
+        if (!same_word(tok->text, tok->length, "enable", 6) &&
+            !same_word(tok->text, tok->length, "warn", 4) &&
+            !same_word(tok->text, tok->length, "disable", 7)) {
+            pp_fail(pp, "#extension behaviour must be require, enable, warn or disable", line);
+            return;
+        }
+        if (!raw_next(pp, tok)) tok->type = GLSL_TOK_EOF;
+        skip_to_end_of_line(pp, tok, line);
         return;
     }
-    if (tok_is(tok, "pragma") || tok_is(tok, "line")) {
-        pp_fail(pp, "#pragma and #line are not handled yet", line);
+
+    /* **`#pragma` is ignored, which is what the specification says to do with one you do not
+     * recognise** - and this recognises none. `optimize`, `debug` and `STDGL` all change nothing
+     * here, so obeying them and ignoring them are the same thing. */
+    if (tok_is(tok, "pragma")) {
+        if (!raw_next(pp, tok)) tok->type = GLSL_TOK_EOF;
+        skip_to_end_of_line(pp, tok, line);
         return;
     }
+
+    /* **`#line` is accepted and does not move the line numbers**, and that is a real limitation
+     * rather than a silent one. Honouring it means renumbering what the lexer reports, and the
+     * only thing that reads those numbers here is a diagnostic - so the cost of ignoring it is
+     * that an error in a shader assembled from pieces names the physical line rather than the
+     * one `#line` claims. No shader compiles differently for it. Refusing the directive outright
+     * would be worse: a generated shader that carries `#line` is otherwise perfectly ordinary. */
+    if (tok_is(tok, "line")) {
+        if (!raw_next(pp, tok)) tok->type = GLSL_TOK_EOF;
+        skip_to_end_of_line(pp, tok, line);
+        return;
+    }
+
     pp_fail(pp, "unknown preprocessor directive", line);
 }
 
