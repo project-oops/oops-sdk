@@ -728,6 +728,24 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             }
             glsl_emit_export_mrt0(&code, GL_PS_EXPORT_BASE);
             glsl_emit_endpgm(&code);
+            /*
+             * **Room for a second export, so a draw into two colour buffers can have one.**
+             *
+             * These five words are byte-identical to `gl_ps_export_words(GL_FALSE)`'s first
+             * five, and the two `s_nop`s take the tail to `GL_PS_EXPORT_WORDS` - which is what
+             * lets the draw path write the two-target form over it in place when `fb_also` is
+             * bound, exactly as it already does for the payload's fixed-function shaders.
+             *
+             * Without the room, `glDrawBuffer(GL_FRONT_AND_BACK)` under a compiled program set
+             * `CB_SHADER_MASK` to 0xff and `SPI_SHADER_COL_FORMAT` to 0x44 - telling the colour
+             * block to expect two exports - while the shader made one. gl2-probe's
+             * `two-draw-buffers` measured the consequence as a front buffer holding exactly its
+             * pre-draw colour: not a wrong blend, an absent write.
+             *
+             * Nothing runs after `s_endpgm`, so on a one-target draw these are never reached.
+             */
+            glsl_emit_nop(&code);
+            glsl_emit_nop(&code);
         }
     }
 

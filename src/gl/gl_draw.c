@@ -4386,13 +4386,30 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
         if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u) {
             uint32_t *const ps_slot =
                 (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_GL2_OFFSET);
-            if (ctx->hw_ps_resident != prog->hw_ps_serial) {
+            /*
+             * **The compiled shader's export tail is swapped here, not by `gl_ps_patch_export`.**
+             *
+             * That one runs earlier in the draw and patches the payload's two fixed-function
+             * shaders at their fixed offsets; a compiled shader's export sits at whatever offset
+             * its own length puts it, and the upload below would overwrite anything patched in
+             * before it. So the target count joins the serial in deciding whether the slot is
+             * stale: the same program drawn into one buffer and then into two needs the words
+             * rewritten even though it is the same program.
+             */
+            const GLboolean both = (GLboolean)(ctx->fb_also != (uint32_t *)0);
+            if (ctx->hw_ps_resident != prog->hw_ps_serial || ctx->hw_ps_resident_both != both) {
                 gl_ps_sync_payload_edit(ctx, ps_slot, prog->hw_ps, prog->hw_ps_words);
                 memcpy(ps_slot, prog->hw_ps, prog->hw_ps_words * sizeof(uint32_t));
+                /* `glsl_ps.c` ends every compiled shader with the one-target export tail and
+                 * two `s_nop`s of room, so the two-target form is the same length and goes in
+                 * over it. */
+                memcpy(ps_slot + prog->hw_ps_words - GL_PS_EXPORT_WORDS,
+                       gl_ps_export_words(both), GL_PS_EXPORT_WORDS * sizeof(uint32_t));
                 /* Everything after the shader is left as it was; `s_endpgm` is the last word it
                  * wrote, so nothing beyond it is reachable. */
                 gl_ps_flush_shaders(ctx);
                 ctx->hw_ps_resident = prog->hw_ps_serial;
+                ctx->hw_ps_resident_both = both;
                 if (!ctx->hw_frame_active) gl_hw_begin_frame(ctx);
             }
         }

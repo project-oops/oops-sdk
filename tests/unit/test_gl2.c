@@ -2153,17 +2153,29 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
      * shader that never looks at it. */
     ASSERT_EQ(input_ena, 0x00000002u);
 
-    /* The epilogue, whatever the body did in between: the colour into v4..v7, the export, and
-     * `s_endpgm`. */
-    ASSERT_EQ(words[count - 1u], 0xbf810000u); /* s_endpgm */
-    ASSERT_EQ(words[count - 2u], 0x00000504u); /* v4, v5 - the two packed registers */
-    ASSERT_EQ(words[count - 3u], 0xf8001c0fu); /* exp mrt0 ... done compr vm */
-    ASSERT_EQ(words[count - 4u], 0x5e0a0f06u); /* v_cvt_pkrtz_f16_f32 v5, v6, v7 */
-    ASSERT_EQ(words[count - 5u], 0x5e080b04u); /* v_cvt_pkrtz_f16_f32 v4, v4, v5 */
+    /* The epilogue, whatever the body did in between: the colour into v4..v7, the export,
+     * `s_endpgm`, and two `s_nop`s of room past it.
+     *
+     * **The room is what lets a second colour target have an export.** The tail is exactly
+     * `GL_PS_EXPORT_WORDS` long and byte-identical to `gl_ps_export_words(GL_FALSE)`, so the
+     * draw path can write the two-target form over it in place when `fb_also` is bound. Nothing
+     * runs after `s_endpgm`, so the padding costs a one-target draw nothing. */
+    ASSERT_EQ(words[count - 1u], 0xbf800000u); /* s_nop 0, past the end */
+    ASSERT_EQ(words[count - 2u], 0xbf800000u); /* s_nop 0, past the end */
+    ASSERT_EQ(words[count - 3u], 0xbf810000u); /* s_endpgm */
+    ASSERT_EQ(words[count - 4u], 0x00000504u); /* v4, v5 - the two packed registers */
+    ASSERT_EQ(words[count - 5u], 0xf8001c0fu); /* exp mrt0 ... done compr vm */
+    ASSERT_EQ(words[count - 6u], 0x5e0a0f06u); /* v_cvt_pkrtz_f16_f32 v5, v6, v7 */
+    ASSERT_EQ(words[count - 7u], 0x5e080b04u); /* v_cvt_pkrtz_f16_f32 v4, v4, v5 */
+    /* And the whole tail is the shared one, so the swap is a copy and not a translation. */
+    for (uint32_t i = 0u; i < GL_PS_EXPORT_WORDS; i++) {
+        ASSERT_EQ(words[count - GL_PS_EXPORT_WORDS + i], gl_ps_export_words(GL_FALSE)[i]);
+    }
     for (uint32_t i = 0; i < 4u; i++) {
-        /* v_mov_b32 v4+i, <colour>+i - the opcode and destination are what matter here. Two
-           words further back than it used to be, for the two packing instructions above. */
-        const uint32_t w = words[count - 9u + i];
+        /* v_mov_b32 v4+i, <colour>+i - the opcode and destination are what matter here. They sit
+           just above the export tail, which is `GL_PS_EXPORT_WORDS` long however many targets
+           the draw ends up having. */
+        const uint32_t w = words[count - GL_PS_EXPORT_WORDS - 4u + i];
         ASSERT_EQ(w >> 25, 0x3fu);                   /* VOP1 */
         ASSERT_EQ((w >> 17) & 0xffu, 4u + i);        /* into v4..v7 */
         ASSERT_EQ((w >> 9) & 0xffu, 1u);             /* v_mov_b32 */
@@ -3456,7 +3468,8 @@ static void test_gl2_a_branched_loop_carries_its_trip_guard(void) {
     /* The jump goes back into the shader, not past its start, and not forward. */
     ASSERT_TRUE(back_target < back_at);
     /* And the ceiling is the trip count this loop was measured to have, not a round number. */
-    ASSERT_EQ(words[count - 1u], 0xbf810000u); /* still ends properly */
+    /* Still ends properly: `s_endpgm` with the export tail's two words of room after it. */
+    ASSERT_EQ(words[count - 3u], 0xbf810000u);
     {
         GLboolean found = GL_FALSE;
         for (uint32_t i = 0; i + 1u < count; i++) {

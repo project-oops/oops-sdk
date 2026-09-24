@@ -4959,6 +4959,104 @@ static void test_pm4_gl_front_buffer_targets(void) {
  * The test is the stream, not the pixels: two `DMA_DATA` packets after the fence wait, one per
  * target, and a tag on each copy naming the buffer it holds.
  */
+/*
+ * **A compiled shader drawing into two colour buffers exports to both of them.**
+ *
+ * The payload's two fixed-function pixel shaders have had a two-target export since 2026-09-20,
+ * patched in by `gl_ps_patch_export`. A *compiled* GL 2.0 shader did not: `glsl_ps.c` emitted one
+ * `exp mrt0 ... done` and the draw path uploaded it unchanged, while the same draw set
+ * `CB_SHADER_MASK` to 0xff and `SPI_SHADER_COL_FORMAT` to 0x44 - telling the colour block to
+ * expect two exports from a shader that made one.
+ *
+ * gl2-probe's `two-draw-buffers` measured that on hardware as a front buffer holding *exactly*
+ * its pre-draw colour after a blended two-target draw: not a wrong blend, an absent write. This
+ * is that check's unit-test half, and it asserts the two things the hardware cannot show
+ * separately - that the two-target words go in, and that they come back out again when the draw
+ * returns to one buffer, because the slot is state and a stale second export writes a buffer GL
+ * no longer names.
+ */
+static void test_pm4_gl_compiled_shader_exports_to_both_colour_targets(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[4096];
+  static _Alignas(64) uint32_t fence[4] = {0x11111111u};
+  static _Alignas(64) uint32_t canary[16];
+  static uint32_t readback[64 * 64];
+  static uint32_t readback_also[64 * 64];
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 4096;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+  ctx->readback = readback;
+  ctx->readback_also = readback_also;
+  glContextSetVersion(2, 0);
+
+  const GLuint prog = pm4_linked_program(
+      "attribute vec3 pos;\n"
+      "void main() { gl_Position = vec4(pos, 1.0); }\n",
+      "void main() { gl_FragColor = vec4(0.25, 0.5, 0.75, 1.0); }\n");
+  ASSERT_TRUE(prog != 0u);
+  glUseProgram(prog);
+
+  const gl_program_object_t *const po = gl_find_program(ctx, prog);
+  ASSERT_TRUE(po != NULL);
+  ASSERT_TRUE(po->hw_ps_words > GL_PS_EXPORT_WORDS);
+  const uint32_t *const slot =
+      (const uint32_t *)((const char *)ctx->gpu_payload + OOPS_GL_PS_GL2_OFFSET);
+  const uint32_t *const tail = slot + po->hw_ps_words - GL_PS_EXPORT_WORDS;
+
+  /* One buffer: the one-target tail, which is what the generator emitted. */
+  glDrawBuffer(GL_BACK);
+  pm4_draw_quad(prog);
+  ASSERT_TRUE(ctx->fb_also == NULL);
+  for (uint32_t i = 0u; i < GL_PS_EXPORT_WORDS; i++) {
+    ASSERT_EQ(tail[i], gl_ps_export_words(GL_FALSE)[i]);
+  }
+
+  /* Two buffers, same program: the serial has not changed, so only the target count can have
+   * made the slot stale - which is the case the residency check exists for. */
+  glDrawBuffer(GL_FRONT_AND_BACK);
+  ASSERT_EQ(glGetError(), GL_NO_ERROR);
+  pm4_draw_quad(prog);
+  ASSERT_TRUE(ctx->fb_also != NULL);
+  for (uint32_t i = 0u; i < GL_PS_EXPORT_WORDS; i++) {
+    ASSERT_EQ(tail[i], gl_ps_export_words(GL_TRUE)[i]);
+  }
+  /* Named rather than only compared, so a change to both arrays at once cannot pass here. */
+  ASSERT_EQ(tail[2], 0xf800140fu); /* exp mrt0, v4, v5 compr vm - not done */
+  ASSERT_EQ(tail[4], 0xf8001c1fu); /* exp mrt1, v4, v5 done compr vm */
+  ASSERT_EQ(tail[6], 0xbf810000u); /* s_endpgm, now the seventh word */
+
+  /* And back to one, because the slot is state. */
+  glDrawBuffer(GL_BACK);
+  pm4_draw_quad(prog);
+  ASSERT_TRUE(ctx->fb_also == NULL);
+  for (uint32_t i = 0u; i < GL_PS_EXPORT_WORDS; i++) {
+    ASSERT_EQ(tail[i], gl_ps_export_words(GL_FALSE)[i]);
+  }
+
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+  ctx->readback = NULL;
+  ctx->readback_also = NULL;
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
   oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
   void *ctx_handle = glContextCreate(disp);
@@ -5329,6 +5427,7 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_stencil_reaches_its_registers);
   RUN_TEST(test_pm4_gl_zs_tiling_is_a_permutation);
   RUN_TEST(test_pm4_gl_front_buffer_targets);
+  RUN_TEST(test_pm4_gl_compiled_shader_exports_to_both_colour_targets);
   RUN_TEST(test_pm4_gl_both_colour_targets_are_copied_back);
   RUN_TEST(test_pm4_gl_polygon_stipple_discards_in_the_shader);
   RUN_TEST(test_pm4_gl_scanout_path_targets);

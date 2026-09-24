@@ -2845,6 +2845,34 @@ void gl_ps_patch_stipple(gl_context_t *ctx, GLboolean on) {
  * after `glDrawBuffer(GL_BACK)` must stop exporting to the second target, and a stale export
  * writes a buffer GL no longer names.
  */
+/* **The export tail, shared by the payload's fixed-function shaders and by a compiled one.**
+ *
+ * Both forms are exactly `GL_PS_EXPORT_WORDS` long so that either can be written over the other
+ * in place - the one-target form pays for that with two `s_nop`s past its `s_endpgm`, which are
+ * never reached. A compiled GL 2.0 shader ends with the same seven words for the same reason:
+ * `glsl_ps.c` emits the one-target form and reserves the room, and the draw path swaps in the
+ * two-target form when there are two colour buffers.
+ *
+ * The registers are `GL_PS_EXPORT_BASE`'s four in both cases, so the words are identical and not
+ * merely equivalent. */
+const uint32_t *gl_ps_export_words(GLboolean both) {
+    static const uint32_t one[GL_PS_EXPORT_WORDS] = {
+        0x5e080b04u,              /* v_cvt_pkrtz_f16_f32 v4, v4, v5   - (R,G) */
+        0x5e0a0f06u,              /* v_cvt_pkrtz_f16_f32 v5, v6, v7   - (B,A) */
+        0xf8001c0fu,              /* exp mrt0, v4, v5, off, off done compr vm */
+        0x00000504u, 0xbf810000u, /* s_endpgm */
+        0xbf800000u, 0xbf800000u, /* s_nop 0, past the end */
+    };
+    static const uint32_t two[GL_PS_EXPORT_WORDS] = {
+        0x5e080b04u,              /* v_cvt_pkrtz_f16_f32 v4, v4, v5   - (R,G) */
+        0x5e0a0f06u,              /* v_cvt_pkrtz_f16_f32 v5, v6, v7   - (B,A) */
+        0xf800140fu,              /* exp mrt0, v4, v5 compr vm - no done: it is not the last */
+        0x00000504u, 0xf8001c1fu, /* exp mrt1, v4, v5 done compr vm */
+        0x00000504u, 0xbf810000u, /* s_endpgm */
+    };
+    return both ? two : one;
+}
+
 void gl_ps_patch_export(gl_context_t *ctx, GLboolean both) {
     if (!ctx || !ctx->gpu_payload) return;
     /* **The colour leaves as two packed half-float registers, not four floats.**
@@ -2869,21 +2897,7 @@ void gl_ps_patch_export(gl_context_t *ctx, GLboolean both) {
      * (256 + VSRC0)`, and the export is `[0x0f,0x1c,0x00,0xf8]` with COMPR and VM set.
      *
      * tools/shader/mrt1-export.s is the cross-check for the two-target form. */
-    static const uint32_t one[GL_PS_EXPORT_WORDS] = {
-        0x5e080b04u,              /* v_cvt_pkrtz_f16_f32 v4, v4, v5   - (R,G) */
-        0x5e0a0f06u,              /* v_cvt_pkrtz_f16_f32 v5, v6, v7   - (B,A) */
-        0xf8001c0fu,              /* exp mrt0, v4, v5, off, off done compr vm */
-        0x00000504u, 0xbf810000u, /* s_endpgm */
-        0xbf800000u, 0xbf800000u, /* s_nop 0, past the end */
-    };
-    static const uint32_t two[GL_PS_EXPORT_WORDS] = {
-        0x5e080b04u,              /* v_cvt_pkrtz_f16_f32 v4, v4, v5   - (R,G) */
-        0x5e0a0f06u,              /* v_cvt_pkrtz_f16_f32 v5, v6, v7   - (B,A) */
-        0xf800140fu,              /* exp mrt0, v4, v5 compr vm - no done: it is not the last */
-        0x00000504u, 0xf8001c1fu, /* exp mrt1, v4, v5 done compr vm */
-        0x00000504u, 0xbf810000u, /* s_endpgm */
-    };
-    const uint32_t *words = both ? two : one;
+    const uint32_t *words = gl_ps_export_words(both);
     uint32_t *const ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
     uint32_t *const ps_untex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_UNTEX_OFFSET);
     uint32_t *const slots[2] = {ps_tex + GL_PS_EXPORT_TEX, ps_untex + GL_PS_EXPORT_UNTEX};

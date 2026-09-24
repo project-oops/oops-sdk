@@ -1431,6 +1431,10 @@ typedef struct gl_context {
      * By serial and not by name - see `hw_ps_serial` on the program, which carries what asking
      * by name cost. */
     uint64_t hw_ps_resident;
+    /* **Which export tail the resident compiled shader was uploaded with.** One program drawn
+     * into one colour buffer and then into two is the same serial and needs different words, so
+     * the serial alone cannot say whether the slot is current. */
+    GLboolean hw_ps_resident_both;
     /* The next serial to issue, so no two compiled shaders are ever confused for each other.
      * Starts at 1; 0 is "no shader". */
     uint64_t hw_ps_next_serial;
@@ -2337,6 +2341,9 @@ void gl_ps_patch_fog(gl_context_t *ctx);
  * writes only on a change. */
 void gl_ps_patch_sum(gl_context_t *ctx, GLboolean on);
 void gl_ps_patch_export(gl_context_t *ctx, GLboolean both);
+/* The `GL_PS_EXPORT_WORDS`-long export tail for one colour target or two. Both forms are the
+ * same length so either can be written over the other in place - see the definition. */
+const uint32_t *gl_ps_export_words(GLboolean both);
 void gl_ps_patch_stipple(gl_context_t *ctx, GLboolean on);
 void gl_ps_patch_unit1(gl_context_t *ctx, GLboolean on);
 /* Which of the five sample forms the slot holds - the enumerators are not hardware values; the
