@@ -60,7 +60,7 @@ the rest), are laid out in the **[Porting Guide](docs/PORTING.md)**.
 
 ## The subsystems
 
-`oops-sdk` covers display, 2D drawing, fixed-function 3D, audio, input, memory, timing,
+`oops-sdk` covers display, 2D drawing, fixed-function and programmable 3D, audio, input, memory, timing,
 threading, filesystem, networking and save data, among others. Include the unified header
 `<oops/oops.h>`, or an individual subsystem header. Every subsystem — its APIs, return codes and
 hardware notes — is documented in the **[API Reference](docs/API_REFERENCE.md)** and indexed in
