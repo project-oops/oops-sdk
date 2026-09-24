@@ -1174,6 +1174,7 @@ static void test_gl2_structs_run(void) {
             "  C c = C(0.25, 0.5, 0.75);\n"
             "  gl_FragColor = vec4(c.r, c.g, c.b, 1.0);\n"
             "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(prog);
         draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
         const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
@@ -1191,6 +1192,7 @@ static void test_gl2_structs_run(void) {
             "  M m = M(0.0, vec3(0.25, 0.5, 0.75));\n"
             "  gl_FragColor = vec4(m.v.x, m.v.y, m.v.z, 1.0);\n"
             "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(prog);
         draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
         const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
@@ -1211,6 +1213,7 @@ static void test_gl2_structs_run(void) {
             "  b.r = 1.0;\n"
             "  gl_FragColor = vec4(a.r, b.g, b.b, 1.0);\n"
             "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(prog);
         draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
         const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
@@ -1229,6 +1232,7 @@ static void test_gl2_structs_run(void) {
             "  Out o = Out(0.25, In(0.5, 0.75));\n"
             "  gl_FragColor = vec4(o.lead, o.in2.x, o.in2.y, 1.0);\n"
             "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(prog);
         draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
         const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
@@ -1247,12 +1251,43 @@ static void test_gl2_structs_run(void) {
             "  C c = darken(C(0.5, 1.0, 1.5));\n"
             "  gl_FragColor = vec4(c.r, c.g, c.b, 1.0);\n"
             "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(prog);
         draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
         const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
         ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);     /* 0.5  * 0.5 = 0.25 */
         ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);   /* 1.0  * 0.5 = 0.50 */
         ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);   /* 1.5  * 0.5 = 0.75 */
+    }
+
+    /* **A struct through a function**, the shape gl2-probe's `structs/function` arm draws.
+     *
+     * The parameter is the thing under test. Declaring it needs the struct-aware type reading;
+     * with the token's own type it comes out ERROR, `declare` refuses it, and the interpreter
+     * abandons the shader - `main` draws nothing at all rather than drawing something wrong.
+     *
+     * The first version of this case could not fail, and the reason is the clear above rather
+     * than anything in the shader: every case in this test draws the same colour, so one that
+     * drew nothing kept the previous case's pixel and passed on it. That is what gl2-probe
+     * caught and this did not - its arms clear to a background colour between them. */
+    {
+        const GLuint prog = linked_program(
+            "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+            "struct C { float r; float g; float b; };\n"
+            "uniform float src;\n"
+            "C half_of(C c) { return C(c.r * 0.5, c.g * 0.5, c.b * 0.5); }\n"
+            "void main() {\n"
+            "  C c = half_of(C(src, src * 2.0, src * 3.0));\n"
+            "  gl_FragColor = vec4(c.r, c.g, c.b, 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        glUniform1f(glGetUniformLocation(prog, "src"), 0.5f);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);
     }
 
     glUseProgram(0);

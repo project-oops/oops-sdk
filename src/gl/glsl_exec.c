@@ -1005,11 +1005,17 @@ static exec_val_t call_user(exec_t *e, int32_t fn, int32_t first_arg) {
     for (int32_t p = f->b; p != GLSL_NO_NODE && pi < argc; p = ast->nodes[p].sibling, pi++) {
         const glsl_node_t *pn = &ast->nodes[p];
         if (pn->length == 0u) continue;
-        const glsl_type_t pt = glsl_type_from_token(pn->type_tok);
+        /* **`exec_node_type`, or a struct parameter is not a type at all.** A struct names its
+         * type with an identifier, and `glsl_type_from_token` answers ERROR for one; `declare`
+         * then refuses it and this loop breaks, which abandons the call and with it the rest of
+         * the shader. The symptom is a fragment shader that draws nothing rather than one that
+         * draws the wrong colour - so it is only visible against a known background. */
+        const glsl_type_t pt = exec_node_type(e, pn);
         float *store = declare(e, pn->text, pn->length, pt, 0);
         if (!store) break;
         if (pn->qualifier != GLSL_TOK_KW_OUT) {
-            for (int i = 0; i < comps_of(pt); i++) store[i] = argv[pi].v[i];
+            const int w = exec_comps(e, pt);
+            for (int i = 0; i < w && i < EXEC_MAX_VAL_FLOATS; i++) store[i] = argv[pi].v[i];
         }
         if (pn->qualifier == GLSL_TOK_KW_OUT || pn->qualifier == GLSL_TOK_KW_INOUT) {
             argp[pi] = place_of(e, argn[pi]);
@@ -1018,7 +1024,7 @@ static exec_val_t call_user(exec_t *e, int32_t fn, int32_t first_arg) {
 
     const exec_flow_t saved_flow = e->flow;
     e->flow = FLOW_NORMAL;
-    e->ret = val_zero(glsl_type_from_token(f->type_tok));
+    e->ret = val_zero(exec_node_type(e, f));
     for (int32_t st = ast->nodes[f->c].a; st != GLSL_NO_NODE; st = ast->nodes[st].sibling) {
         if (!exec_stmt(e, st)) break;
         if (e->flow != FLOW_NORMAL) break;
@@ -1035,7 +1041,8 @@ static exec_val_t call_user(exec_t *e, int32_t fn, int32_t first_arg) {
         exec_var_t *v = lookup(e, pn->text, pn->length);
         if (!v || !v->store || !argp[pi].addr) continue;
         exec_val_t back = val_zero(v->type);
-        for (int i = 0; i < comps_of(v->type); i++) back.v[i] = v->store[i];
+        const int bw = exec_comps(e, v->type);
+        for (int i = 0; i < bw && i < EXEC_MAX_VAL_FLOATS; i++) back.v[i] = v->store[i];
         place_write(e, &argp[pi], &back);
     }
     scope_pop(e);
