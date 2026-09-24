@@ -92,6 +92,14 @@ int fgetc(FILE *f);
 int getc(FILE *f);
 char *fgets(char *buf, int size, FILE *f);
 int fputc(int c, FILE *f);
+/* `putc` is `fputc`, and `getc` above is `fgetc` - C allows both to be macros evaluating the
+ * stream more than once, and neither is, which is the stricter promise. The pair had been split:
+ * `getc` was here and `putc` was not, so a port writing a file a byte at a time - Extreme Tux
+ * Racer's `common.cpp`, saving a course - compiled against libc++'s `<cstdio>`, found
+ * `using ::putc` resolving to nothing, and failed on a name every C library has. */
+int putc(int c, FILE *f);
+int putchar(int c);
+int getchar(void);
 int fputs(const char *s, FILE *f);
 int puts(const char *s);
 int remove(const char *path);

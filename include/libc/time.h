@@ -78,6 +78,20 @@ struct tm *localtime_r(const time_t *t, struct tm *out);
 time_t mktime(struct tm *tm);
 size_t strftime(char *buf, size_t max, const char *format, const struct tm *tm);
 
+/* C's fixed rendering, `Www Mmm dd hh:mm:ss yyyy\n` - twenty-six bytes including the terminator,
+ * which is the size `buf` must have. The plain forms return one static buffer each, as C says
+ * they do; prefer the `_r` forms, which are this SDK's and have no such corner.
+ *
+ * These arrive because Extreme Tux Racer stamps a saved course with `asctime (localtime (...))`
+ * and libc++'s `<ctime>` resolved `using ::asctime` to nothing. `strftime` was already here and
+ * cannot stand in for them portably: the day field is space-padded, which is `%e`, an extension
+ * rather than one of the conversions that function carries. */
+char *asctime(const struct tm *tm);
+char *asctime_r(const struct tm *tm, char *buf);
+char *ctime(const time_t *t);
+char *ctime_r(const time_t *t, char *buf);
+double difftime(time_t end, time_t start);
+
 #ifdef __cplusplus
 }
 #endif

@@ -996,6 +996,12 @@ int fputc(int c, FILE *f) {
     return (fwrite(&ch, 1u, 1u, f) == 1u) ? c : EOF;
 }
 
+/* Functions rather than macros, so the stream argument is evaluated once - `putc(c, streams[i++])`
+ * means what it reads as here. See the note beside their declarations. */
+int putc(int c, FILE *f) { return fputc(c, f); }
+int putchar(int c) { return fputc(c, stdout); }
+int getchar(void) { return fgetc(stdin); }
+
 int fputs(const char *s, FILE *f) {
     if (!s) return EOF;
     const size_t n = obs_strlen(s);
@@ -1409,6 +1415,54 @@ size_t strftime(char *buf, size_t max, const char *format, const struct tm *tm) 
 
 clock_t clock(void) {
     return (clock_t)(oops_time_get_ns() / 1000ull); /* CLOCKS_PER_SEC is 1,000,000 */
+}
+
+/* ---------------------------------------------------------------------------
+ * The calendar as text: asctime, ctime, difftime
+ *
+ * C fixes this rendering exactly - `Www Mmm dd hh:mm:ss yyyy\n`, twenty-six bytes with the
+ * terminator - so this is transcription and not a choice of format. `strftime` above could
+ * express it, but not portably: the day-of-month field is space-padded, which is `%e`, and that
+ * is an extension rather than one of the conversions that function documents itself as carrying.
+ *
+ * `s_wday_short` and `s_mon_short` are already here for `strftime`, which is most of the work.
+ *
+ * **The indices are clamped before they reach those tables.** A `struct tm` that a caller filled
+ * in by hand - rather than one `gmtime` produced - can carry any `tm_wday` at all, and C says the
+ * result is undefined rather than saying it is a read off the end of a seven-element array. A
+ * fault here would be a long way from the mistake that caused it.
+ * --------------------------------------------------------------------------- */
+
+char *asctime_r(const struct tm *tm, char *buf) {
+    if (!tm || !buf) return (char *)0;
+    const int wd = (tm->tm_wday >= 0 && tm->tm_wday < 7) ? tm->tm_wday : 0;
+    const int mo = (tm->tm_mon >= 0 && tm->tm_mon < 12) ? tm->tm_mon : 0;
+    (void)oops_snprintf(buf, 26u, "%s %s%3d %02d:%02d:%02d %d\n", s_wday_short[wd],
+                        s_mon_short[mo], tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec,
+                        tm->tm_year + 1900);
+    return buf;
+}
+
+/* One static buffer, which is what C specifies and what makes these the two calls in this file a
+ * second thread can tread on. The `_r` forms above and beside them are the ones to reach for. */
+char *asctime(const struct tm *tm) {
+    static char s_asctime[26];
+    return asctime_r(tm, s_asctime);
+}
+
+char *ctime_r(const time_t *t, char *buf) {
+    struct tm tmp;
+    if (!t || !buf || !localtime_r(t, &tmp)) return (char *)0;
+    return asctime_r(&tmp, buf);
+}
+
+char *ctime(const time_t *t) {
+    static char s_ctime[26];
+    return ctime_r(t, s_ctime);
+}
+
+double difftime(time_t end, time_t start) {
+    return (double)end - (double)start;
 }
 
 /* ---------------------------------------------------------------------------
