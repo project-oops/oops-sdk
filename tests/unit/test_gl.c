@@ -13022,6 +13022,59 @@ static void test_glsl_sema_structs(void) {
       "struct S { float a; };\nvoid main() { S s; float f = s.x; }") != NULL);
 }
 
+/*
+ * **A struct's constructor is stricter than any built-in one.** `vec4(1.0)` fills and
+ * `vec4(v3, 1.0)` gathers; a struct takes one argument per member, in order, each assignable to
+ * that member - no filling, no gathering, no truncation.
+ */
+static void test_glsl_sema_struct_constructors(void) {
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; vec3 b; };\nvoid main() { S s = S(1.0, vec3(0.0)); }") == NULL);
+
+  /* Assignment between two of the same struct, and equality. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; };\nvoid main() { S x = S(1.0); S y = x; }") == NULL);
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; };\n"
+      "void main() { S x = S(1.0); S y = S(2.0); bool e = (x == y); }") == NULL);
+
+  /* A nested struct's constructor takes the inner struct as one argument. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct A { vec2 p; }; struct B { A inner; float w; };\n"
+      "void main() { B b = B(A(vec2(0.0)), 1.0); }") == NULL);
+
+  /* A struct passed to and returned from a function. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; };\n"
+      "S bump(S v) { return S(v.a + 1.0); }\n"
+      "void main() { S s = bump(S(1.0)); }") == NULL);
+
+  /* **Arity is exact in both directions**, because neither filling nor dropping is a thing a
+   * struct constructor does. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; vec3 b; };\nvoid main() { S s = S(1.0); }") != NULL);
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; };\nvoid main() { S s = S(1.0, 2.0); }") != NULL);
+
+  /* And each argument must match its member. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; vec3 b; };\nvoid main() { S s = S(1.0, 2.0); }") != NULL);
+
+  /* Two different structs are not interchangeable however alike they look. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct A { float a; }; struct B { float a; };\n"
+      "void main() { A x = A(1.0); B y = x; }") != NULL);
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct A { float a; }; struct B { float a; };\n"
+      "void main() { A x = A(1.0); B y = B(1.0); bool e = (x == y); }") != NULL);
+
+  /* **A struct with an array member has no constructor**, because GLSL 1.10 has no
+   * array-valued expression to pass for one. Saying so beats accepting an argument that fills
+   * only the first element. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a[2]; };\nvoid main() { S s = S(1.0); }") != NULL);
+}
+
 static void test_glsl_sema_scopes_and_shadowing(void) {
   glsl_sema_init(&g_glsl_sema, &g_glsl_ast);
 
@@ -14307,6 +14360,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_glsl_sema_checks_swizzles);
     RUN_TEST(test_glsl_sema_checks_constructors);
     RUN_TEST(test_glsl_sema_structs);
+    RUN_TEST(test_glsl_sema_struct_constructors);
     RUN_TEST(test_glsl_sema_scopes_and_shadowing);
     RUN_TEST(test_glsl_sema_checks_lvalues);
     RUN_TEST(test_glsl_sema_checks_statements);

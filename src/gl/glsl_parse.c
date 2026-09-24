@@ -965,17 +965,26 @@ static int32_t parse_parameter_list(glsl_parser_t *p) {
             qualifier = p->tok.type;
             bump(p);
         }
-        if (!is_type_name(p->tok.type)) {
-            fail(p, "expected a parameter type");
+        /* **A parameter may be a struct**, so the same three-way type specifier the declarations
+         * use applies here. `struct S { ... } f(...)` - a definition in a parameter's type - is
+         * not GLSL, and `parse_type_specifier` would accept one; a definition here would also
+         * have nowhere to be chained. So it is refused by name rather than half-supported. */
+        if (check(p, GLSL_TOK_KW_STRUCT)) {
+            fail(p, "a struct may not be defined in a parameter list");
             return GLSL_NO_NODE;
         }
-        glsl_token_type_t type_tok = p->tok.type;
-        bump(p);
+        glsl_token_type_t type_tok = GLSL_TOK_EOF;
+        const char *type_name = (const char *)0;
+        size_t type_name_len = 0;
+        (void)parse_type_specifier(p, &type_tok, &type_name, &type_name_len);
+        if (p->error) return GLSL_NO_NODE;
 
         int32_t at = node_new(p, GLSL_NODE_PARAM);
         if (at == GLSL_NO_NODE) return at;
         p->ast->nodes[at].qualifier = qualifier;
         p->ast->nodes[at].type_tok = type_tok;
+        p->ast->nodes[at].type_name = type_name;
+        p->ast->nodes[at].type_name_len = type_name_len;
         /* The name is optional in a prototype. */
         if (check(p, GLSL_TOK_IDENTIFIER)) {
             p->ast->nodes[at].text = p->tok.text;
@@ -1048,6 +1057,10 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
         p->ast->nodes[at].text = name;
         p->ast->nodes[at].length = name_len;
         p->ast->nodes[at].type_tok = type_tok;
+        /* The return type, which may be a struct - `S bump(S v)`. Without this the function is
+         * declared with an unresolvable return type and every call to it fails. */
+        p->ast->nodes[at].type_name = type_name;
+        p->ast->nodes[at].type_name_len = type_name_len;
         p->ast->nodes[at].qualifier = qualifier;
         p->ast->nodes[at].line = name_line;
         p->ast->nodes[at].column = name_col;

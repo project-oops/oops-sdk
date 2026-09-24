@@ -622,6 +622,50 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
             }
             if (ctor != GLSL_TYPE_ERROR) return constructor_type(s, ctor, n->b, node);
 
+            /*
+             * **A struct constructor, which is stricter than every built-in one.**
+             *
+             * `vec4(1.0)` fills, `vec4(v3, 1.0)` gathers, `mat3(m4)` truncates - the built-in
+             * constructors are a small language of their own. A struct's is none of that: one
+             * argument per member, in order, each assignable to that member (1.10, 5.4.3).
+             * Writing it as another case of `constructor_type` would have meant teaching that
+             * function to sometimes stop doing the thing it exists to do.
+             */
+            {
+                const glsl_type_t st_type =
+                    struct_type_by_name(s, callee->text, callee->length);
+                if (st_type != GLSL_TYPE_ERROR) {
+                    const glsl_struct_t *st = glsl_struct_of(s, st_type);
+                    int i = 0;
+                    for (int32_t a = n->b; a != GLSL_NO_NODE; a = s->ast->nodes[a].sibling, i++) {
+                        const glsl_type_t at = glsl_type_of(s, a);
+                        if (at == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
+                        if (i >= st->member_count) {
+                            sema_fail(s, "too many arguments for this struct's constructor", node);
+                            return GLSL_TYPE_ERROR;
+                        }
+                        /* **An array member cannot be given a value here.** GLSL 1.10 has no
+                         * array-valued expression, so there is nothing that could be passed for
+                         * one - a constructor for such a struct cannot be written at all, and
+                         * saying so beats accepting an argument that fills only the first
+                         * element. */
+                        if (st->member[i].array_size > 0) {
+                            sema_fail(s, "a struct with an array member has no constructor", node);
+                            return GLSL_TYPE_ERROR;
+                        }
+                        if (!glsl_type_accepts(s, st->member[i].type, at)) {
+                            sema_fail(s, "this argument does not match the struct's member", a);
+                            return GLSL_TYPE_ERROR;
+                        }
+                    }
+                    if (i != st->member_count) {
+                        sema_fail(s, "too few arguments for this struct's constructor", node);
+                        return GLSL_TYPE_ERROR;
+                    }
+                    return st_type;
+                }
+            }
+
             /* **The built-in library, before the symbol table.** `sin`, `dot` and `texture2D`
              * are not declared anywhere - they are overloaded over genType, which one signature
              * per name cannot express - so they are resolved by rule, like the constructors
@@ -1156,10 +1200,23 @@ GLboolean glsl_check_unit(glsl_sema_t *s, int32_t unit) {
         return GL_FALSE;
     }
 
-    /* **Two passes over the top level.** Every function is declared before any body is
-     * checked, so a function may call one defined later in the file - which is ordinary in a
-     * shader and would otherwise be an undeclared-name error depending on the order somebody
-     * happened to write them in. */
+    /* **Three passes over the top level**, and the order of the first two is load-bearing.
+     *
+     * Structs are recorded first, because a function's signature may be written in terms of one
+     * - `S bump(S v)` - and the second pass resolves those types. With the struct pass second,
+     * `S` was not yet a type when `bump` was declared, and a shader that passes a struct to a
+     * function failed with "declaration of an unknown type" while the same struct worked
+     * perfectly as a local. Found by its own test.
+     *
+     * Then every function is declared before any body is checked, so a function may call one
+     * defined later in the file - ordinary in a shader, and otherwise an undeclared-name error
+     * that depends on the order somebody happened to write them in. */
+    for (int32_t d = u->a; d != GLSL_NO_NODE; d = s->ast->nodes[d].sibling) {
+        if (s->ast->nodes[d].kind == GLSL_NODE_STRUCT_DEF) {
+            if (!check_struct_def(s, d)) return GL_FALSE;
+        }
+    }
+
     for (int32_t d = u->a; d != GLSL_NO_NODE; d = s->ast->nodes[d].sibling) {
         if (s->ast->nodes[d].kind == GLSL_NODE_FUNCTION) {
             if (!glsl_declare_function(s, d)) return GL_FALSE;
@@ -1168,12 +1225,8 @@ GLboolean glsl_check_unit(glsl_sema_t *s, int32_t unit) {
 
     for (int32_t d = u->a; d != GLSL_NO_NODE; d = s->ast->nodes[d].sibling) {
         const glsl_node_t *n = &s->ast->nodes[d];
-        /* **Before the declarations, because a declaration may be of it.** The parser puts a
-         * definition ahead of the variables it types, and this walk is in that order. */
-        if (n->kind == GLSL_NODE_STRUCT_DEF) {
-            if (!check_struct_def(s, d)) return GL_FALSE;
-            continue;
-        }
+        /* Already recorded by the first pass above. */
+        if (n->kind == GLSL_NODE_STRUCT_DEF) continue;
         if (n->kind == GLSL_NODE_DECL) {
             if (!check_declarator(s, d)) return GL_FALSE;
             continue;
