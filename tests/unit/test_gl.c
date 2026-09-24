@@ -12956,6 +12956,72 @@ static void test_glsl_sema_checks_constructors(void) {
 }
 
 /* Scopes: an inner declaration shadows an outer one, and dies with its block. */
+/* Parses and checks a whole unit, returning the error or NULL. */
+static const char *glsl_unit_sema_error(const char *src) {
+  glsl_parser_t p;
+  glsl_parser_init(&p, &g_glsl_ast, src, strlen(src));
+  int32_t root = glsl_parse_translation_unit(&p);
+  if (p.error || root == GLSL_NO_NODE) return p.error ? p.error : "parse failed";
+  glsl_sema_init(&g_glsl_sema, &g_glsl_ast);
+  if (!glsl_check_unit(&g_glsl_sema, root)) {
+    return g_glsl_sema.error ? g_glsl_sema.error : "check failed";
+  }
+  return NULL;
+}
+
+/*
+ * **What sema knows about a struct**: its members, their types, and where each one sits.
+ *
+ * The layout asserted here is the contract both back ends read - the interpreter indexes a float
+ * array with these offsets and the code generator adds them to a register base - so a change
+ * that moves a member has to change this test, which is the point of asserting the numbers
+ * rather than only that a member exists.
+ */
+static void test_glsl_sema_structs(void) {
+  ASSERT_TRUE(glsl_unit_sema_error("struct S { float a; vec3 b; }; void main() { S s; }") == NULL);
+
+  /* Members are laid out end to end in declaration order. */
+  ASSERT_TRUE(glsl_unit_sema_error("struct S { float a; vec3 b; vec4 c; };") == NULL);
+  ASSERT_EQ(g_glsl_sema.struct_count, 1);
+  const glsl_struct_t *st = &g_glsl_sema.structs[0];
+  ASSERT_EQ(st->member_count, 3);
+  ASSERT_EQ(st->components, 8);            /* 1 + 3 + 4 */
+  ASSERT_EQ(st->member[0].offset, 0);
+  ASSERT_EQ(st->member[1].offset, 1);
+  ASSERT_EQ(st->member[2].offset, 4);
+  ASSERT_EQ((int)st->member[1].type, (int)GLSL_TYPE_VEC3);
+
+  /* An array member takes its element count, and a nested struct its whole size. */
+  ASSERT_TRUE(glsl_unit_sema_error("struct S { float a[4]; float b; };") == NULL);
+  ASSERT_EQ(g_glsl_sema.structs[0].components, 5);
+  ASSERT_EQ(g_glsl_sema.structs[0].member[1].offset, 4);
+  ASSERT_TRUE(glsl_unit_sema_error("struct A { vec3 p; }; struct B { A inner; float w; };") == NULL);
+  ASSERT_EQ(g_glsl_sema.struct_count, 2);
+  ASSERT_EQ(g_glsl_sema.structs[1].components, 4);
+  ASSERT_EQ(g_glsl_sema.structs[1].member[1].offset, 3);
+
+  /* **A member read has the member's type**, which is how `.` stops being a swizzle. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; vec3 b; };\n"
+      "void main() { S s; float f = s.a; vec3 v = s.b; }") == NULL);
+
+  /* And a swizzle of a member still works, because the base of that one is a vector. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { vec3 b; };\nvoid main() { S s; float f = s.b.x; }") == NULL);
+
+  /* What it refuses. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; };\nvoid main() { S s; float f = s.nope; }") != NULL);
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; };\nvoid main() { S s; vec3 v = s.a; }") != NULL);
+  ASSERT_TRUE(glsl_unit_sema_error("void main() { Missing m; }") != NULL);
+  ASSERT_TRUE(glsl_unit_sema_error("struct S { float a; float a; };") != NULL);
+  ASSERT_TRUE(glsl_unit_sema_error("struct S { sampler2D s; };") != NULL);
+  /* A swizzle asked of a struct is not a swizzle, and says so as a member error. */
+  ASSERT_TRUE(glsl_unit_sema_error(
+      "struct S { float a; };\nvoid main() { S s; float f = s.x; }") != NULL);
+}
+
 static void test_glsl_sema_scopes_and_shadowing(void) {
   glsl_sema_init(&g_glsl_sema, &g_glsl_ast);
 
@@ -14240,6 +14306,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_glsl_sema_types_the_operators);
     RUN_TEST(test_glsl_sema_checks_swizzles);
     RUN_TEST(test_glsl_sema_checks_constructors);
+    RUN_TEST(test_glsl_sema_structs);
     RUN_TEST(test_glsl_sema_scopes_and_shadowing);
     RUN_TEST(test_glsl_sema_checks_lvalues);
     RUN_TEST(test_glsl_sema_checks_statements);

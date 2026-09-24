@@ -453,6 +453,9 @@ const glsl_struct_t *glsl_struct_of(const glsl_sema_t *s, glsl_type_t t);
 /* The member `name` of struct type `t`, or NULL. */
 const glsl_struct_member_t *glsl_struct_member(const glsl_sema_t *s, glsl_type_t t,
                                                const char *name, size_t len);
+/* **The size of anything, including a struct.** `glsl_type_components` takes a type alone and a
+ * struct's size lives in the table beside it, so every caller that may see one asks this. */
+int glsl_type_components_of(const glsl_sema_t *s, glsl_type_t t);
 
 void glsl_sema_init(glsl_sema_t *s, glsl_ast_t *ast);
 /* The type a token names, or GLSL_TYPE_ERROR if it names no type. */

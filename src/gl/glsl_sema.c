@@ -58,6 +58,10 @@ void glsl_sema_init(glsl_sema_t *s, glsl_ast_t *ast) {
     s->loop_depth = 0;
     s->stage = 0u;
     s->version = 0;   /* unstated: 1.10's rules, which convert nothing */
+    /* **Cleared for the same reason the parser's name list is**: the caller's `glsl_sema_t` is
+     * often a stack local and is not zeroed, and a stale count here would have `glsl_struct_of`
+     * hand back a struct made of whatever the stack held. */
+    s->struct_count = 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -130,6 +134,50 @@ static GLboolean is_scalar(glsl_type_t t) {
 }
 static GLboolean is_sampler(glsl_type_t t) {
     return (GLboolean)(t >= GLSL_TYPE_SAMPLER1D && t <= GLSL_TYPE_SAMPLER2DSHADOW);
+}
+
+/* -------------------------------------------------------------------------
+ * Structs
+ * ------------------------------------------------------------------------- */
+
+const glsl_struct_t *glsl_struct_of(const glsl_sema_t *s, glsl_type_t t) {
+    if (!s || !glsl_type_is_struct(t)) return (const glsl_struct_t *)0;
+    const int i = glsl_struct_index(t);
+    if (i < 0 || i >= s->struct_count) return (const glsl_struct_t *)0;
+    return &s->structs[i];
+}
+
+const glsl_struct_member_t *glsl_struct_member(const glsl_sema_t *s, glsl_type_t t,
+                                               const char *name, size_t len) {
+    const glsl_struct_t *st = glsl_struct_of(s, t);
+    if (!st) return (const glsl_struct_member_t *)0;
+    for (int i = 0; i < st->member_count; i++) {
+        if (st->member[i].name_len != len) continue;
+        size_t k = 0;
+        while (k < len && st->member[i].name[k] == name[k]) k++;
+        if (k == len) return &st->member[i];
+    }
+    return (const glsl_struct_member_t *)0;
+}
+
+/* The struct a name refers to, or GLSL_TYPE_ERROR. */
+static glsl_type_t struct_type_by_name(const glsl_sema_t *s, const char *name, size_t len) {
+    for (int i = 0; i < s->struct_count; i++) {
+        if (s->structs[i].name_len != len) continue;
+        size_t k = 0;
+        while (k < len && s->structs[i].name[k] == name[k]) k++;
+        if (k == len) return glsl_struct_type(i);
+    }
+    return GLSL_TYPE_ERROR;
+}
+
+/* **The size of anything, including a struct**, which `glsl_type_components` cannot answer on
+ * its own: it takes a type and a struct's size lives in the table beside it. Every caller that
+ * may see a struct asks this one instead. */
+int glsl_type_components_of(const glsl_sema_t *s, glsl_type_t t) {
+    const glsl_struct_t *st = glsl_struct_of(s, t);
+    if (st) return st->components;
+    return glsl_type_components(t);
 }
 
 int glsl_type_components(glsl_type_t t) {
@@ -480,8 +528,26 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
             return sym->type;
         }
 
-        case GLSL_NODE_FIELD:
-            return swizzle_type(s, glsl_type_of(s, n->a), n->text, n->length, node);
+        case GLSL_NODE_FIELD: {
+            const glsl_type_t base = glsl_type_of(s, n->a);
+            if (base == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
+            /* **A struct member and a swizzle are the same syntax and different questions.**
+             * `v.xy` asks for components of a vector; `s.a` asks for a named member. The base's
+             * type decides which, and asking the wrong one produces a confusing diagnostic
+             * rather than a wrong answer - `swizzle_type` would report that `a` is not a
+             * component set. */
+            if (glsl_type_is_struct(base)) {
+                const glsl_struct_member_t *m = glsl_struct_member(s, base, n->text, n->length);
+                if (!m) {
+                    sema_fail(s, "this struct has no member of that name", node);
+                    return GLSL_TYPE_ERROR;
+                }
+                /* An array member's type is its element type, exactly as an array variable's is
+                 * in the symbol table - indexing is the only thing either can do. */
+                return m->type;
+            }
+            return swizzle_type(s, base, n->text, n->length, node);
+        }
 
         case GLSL_NODE_INDEX: {
             /* **An array name is resolved before its type is**, because a name declared
@@ -811,9 +877,101 @@ static GLboolean check_condition(glsl_sema_t *s, int32_t node, const char *where
  * and `sibling` is also how the enclosing statement or unit list is walked - so whoever is
  * walking that list reaches the second declarator on its own. Following the chain here as well
  * would declare every name twice and report a redeclaration that the source does not contain. */
+/* **The type a declaration or parameter node writes**, which is its token unless the token is an
+ * identifier - and then it is the struct that identifier names. Every place that used to call
+ * `glsl_type_from_token` on a node calls this, so a struct is accepted wherever a type is. */
+static glsl_type_t node_declared_type(const glsl_sema_t *s, const glsl_node_t *n) {
+    if (n->type_tok == GLSL_TOK_IDENTIFIER && n->type_name) {
+        return struct_type_by_name(s, n->type_name, n->type_name_len);
+    }
+    return glsl_type_from_token(n->type_tok);
+}
+
+/*
+ * `struct S { ... };` - records the type, its members and their offsets.
+ *
+ * **Layout is members end to end, in declaration order**, and the offsets computed here are what
+ * both back ends use: the interpreter indexes a float array with them and the code generator
+ * adds them to a register base. One layout, decided once, or the two would disagree about where
+ * `s.b` is and only one of them would be wrong at a time.
+ */
+static GLboolean check_struct_def(glsl_sema_t *s, int32_t d) {
+    const glsl_node_t *n = &s->ast->nodes[d];
+    if (struct_type_by_name(s, n->text, n->length) != GLSL_TYPE_ERROR) {
+        sema_fail(s, "a struct with this name is already declared", d);
+        return GL_FALSE;
+    }
+    if (s->struct_count >= GLSL_MAX_STRUCTS) {
+        sema_fail(s, "too many struct declarations", d);
+        return GL_FALSE;
+    }
+    glsl_struct_t *st = &s->structs[s->struct_count];
+    st->name = n->text;
+    st->name_len = n->length;
+    st->member_count = 0;
+    st->components = 0;
+
+    for (int32_t m = n->a; m != GLSL_NO_NODE; m = s->ast->nodes[m].sibling) {
+        const glsl_node_t *mn = &s->ast->nodes[m];
+        if (st->member_count >= GLSL_MAX_STRUCT_MEMBERS) {
+            sema_fail(s, "too many struct members", m);
+            return GL_FALSE;
+        }
+        const glsl_type_t mt = node_declared_type(s, mn);
+        if (mt == GLSL_TYPE_ERROR) {
+            sema_fail(s, "struct member of an unknown type", m);
+            return GL_FALSE;
+        }
+        if (mt == GLSL_TYPE_VOID) {
+            sema_fail(s, "a struct member cannot be void", m);
+            return GL_FALSE;
+        }
+        /* A sampler has no components and cannot be stored, so a struct holding one has no
+         * layout to give it. GLSL 1.10 allows it in principle; this back end does not have
+         * anywhere to put it, and says so rather than computing a size of zero. */
+        if (glsl_type_is_sampler(mt)) {
+            sema_fail(s, "a struct member cannot be a sampler here", m);
+            return GL_FALSE;
+        }
+        int count = 1;
+        if (mn->array_size != GLSL_NO_NODE) {
+            const glsl_node_t *sz = &s->ast->nodes[mn->array_size];
+            if (sz->kind != GLSL_NODE_INTCONST || (int)sz->value <= 0) {
+                sema_fail(s, "a struct member array needs a positive constant size", m);
+                return GL_FALSE;
+            }
+            count = (int)sz->value;
+        }
+        const int one = glsl_type_components_of(s, mt);
+        for (int i = 0; i < st->member_count; i++) {
+            if (st->member[i].name_len == mn->length) {
+                size_t k = 0;
+                while (k < mn->length && st->member[i].name[k] == mn->text[k]) k++;
+                if (k == mn->length) {
+                    sema_fail(s, "a struct names the same member twice", m);
+                    return GL_FALSE;
+                }
+            }
+        }
+        glsl_struct_member_t *mem = &st->member[st->member_count++];
+        mem->name = mn->text;
+        mem->name_len = mn->length;
+        mem->type = mt;
+        mem->array_size = (mn->array_size != GLSL_NO_NODE) ? count : 0;
+        mem->offset = st->components;
+        st->components += one * count;
+    }
+    if (st->member_count == 0) {
+        sema_fail(s, "a struct must have at least one member", d);
+        return GL_FALSE;
+    }
+    s->struct_count++;
+    return GL_TRUE;
+}
+
 static GLboolean check_declarator(glsl_sema_t *s, int32_t d) {
     const glsl_node_t *n = &s->ast->nodes[d];
-    glsl_type_t t = glsl_type_from_token(n->type_tok);
+    glsl_type_t t = node_declared_type(s, n);
     if (t == GLSL_TYPE_ERROR) {
         sema_fail(s, "declaration of an unknown type", d);
         return GL_FALSE;
@@ -868,6 +1026,13 @@ static GLboolean check_statement(glsl_sema_t *s, int32_t node) {
 
         case GLSL_NODE_DECL:
             return check_declarator(s, node);
+
+        /* A struct declared inside a function. Its type is recorded in the unit's table rather
+         * than a scoped one: GLSL 1.10 has no way to declare two structs of the same name in
+         * different scopes without `check_struct_def` refusing the second, so one table holds
+         * everything and the refusal is what keeps it unambiguous. */
+        case GLSL_NODE_STRUCT_DEF:
+            return check_struct_def(s, node);
 
         case GLSL_NODE_EXPR_STMT:
             return check_expression(s, n->a);
@@ -958,7 +1123,7 @@ static GLboolean check_statement(glsl_sema_t *s, int32_t node) {
  * result was passed to a constructor. */
 GLboolean glsl_declare_function(glsl_sema_t *s, int32_t node) {
     const glsl_node_t *n = &s->ast->nodes[node];
-    glsl_type_t ret = glsl_type_from_token(n->type_tok);
+    glsl_type_t ret = node_declared_type(s, n);
     if (ret == GLSL_TYPE_ERROR) {
         sema_fail(s, "function with an unknown return type", node);
         return GL_FALSE;
@@ -972,7 +1137,7 @@ GLboolean glsl_declare_function(glsl_sema_t *s, int32_t node) {
             sema_fail(s, "too many parameters", node);
             return GL_FALSE;
         }
-        glsl_type_t pt = glsl_type_from_token(s->ast->nodes[p].type_tok);
+        glsl_type_t pt = node_declared_type(s, &s->ast->nodes[p]);
         if (pt == GLSL_TYPE_ERROR || pt == GLSL_TYPE_VOID) {
             sema_fail(s, "parameter with an unusable type", p);
             return GL_FALSE;
@@ -1003,6 +1168,12 @@ GLboolean glsl_check_unit(glsl_sema_t *s, int32_t unit) {
 
     for (int32_t d = u->a; d != GLSL_NO_NODE; d = s->ast->nodes[d].sibling) {
         const glsl_node_t *n = &s->ast->nodes[d];
+        /* **Before the declarations, because a declaration may be of it.** The parser puts a
+         * definition ahead of the variables it types, and this walk is in that order. */
+        if (n->kind == GLSL_NODE_STRUCT_DEF) {
+            if (!check_struct_def(s, d)) return GL_FALSE;
+            continue;
+        }
         if (n->kind == GLSL_NODE_DECL) {
             if (!check_declarator(s, d)) return GL_FALSE;
             continue;
@@ -1014,11 +1185,11 @@ GLboolean glsl_check_unit(glsl_sema_t *s, int32_t unit) {
          * statement, so a parameter and a top-level local of the same name collide - which is
          * what GLSL says. */
         glsl_scope_push(s);
-        s->current_return = glsl_type_from_token(n->type_tok);
+        s->current_return = node_declared_type(s, n);
         for (int32_t p = n->b; p != GLSL_NO_NODE; p = s->ast->nodes[p].sibling) {
             const glsl_node_t *pn = &s->ast->nodes[p];
             if (pn->length == 0u) continue; /* unnamed parameter in a definition: nothing to bind */
-            glsl_type_t pt = glsl_type_from_token(pn->type_tok);
+            glsl_type_t pt = node_declared_type(s, pn);
             if (!glsl_declare(s, pn->text, pn->length, pt, GL_FALSE)) {
                 glsl_scope_pop(s);
                 return GL_FALSE;
