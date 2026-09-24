@@ -356,6 +356,51 @@ static void test_pm4_synthetic_valid_stream(void) {
   ASSERT_EQ(report.last_draw_index_count, 3u);
 }
 
+/*
+ * Confirms the 5 core PM4 packet headers and dword lengths emitted by agc_draw.c
+ * and agc_compute.c match the vendor library (libSceAgc) output measured on physical
+ * hardware during obSCEne sweep 20260914-100833 (REQ-20260914T0946Z-50f6):
+ *
+ * 1. sceAgcCbReleaseMem:          0xc0064900 (32 B, 8 dwords: header + 7 payload dwords)
+ * 2. sceAgcDcbDrawIndexAuto:       0xc0012d00 (12 B, 3 dwords: header + 2 payload dwords)
+ * 3. sceAgcDcbSetNumInstances:     0xc0002f00 ( 8 B, 2 dwords: header + 1 payload dword)
+ * 4. sceAgcDcbSetCxRegisterDirect: 0xc0016900 (12 B, 3 dwords: header + 2 payload dwords)
+ * 5. sceAgcDcbSetUcRegisterDirect: 0xc0017900 (12 B, 3 dwords: header + 2 payload dwords)
+ *
+ * Verifies count field encoding: Type-3 header bits [29:16] store (total_payload_dwords - 1).
+ */
+static void test_pm4_vendor_measured_packet_headers(void) {
+  /* 1. ReleaseMem: opcode 0x49, count 6 -> 8 dwords total (32 bytes) */
+  const uint32_t hdr_release_mem = 0xc0064900u;
+  ASSERT_EQ((hdr_release_mem >> 30) & 3u, 3u);             /* Type 3 */
+  ASSERT_EQ((hdr_release_mem >> 8) & 0xffu, 0x49u);        /* RELEASE_MEM */
+  ASSERT_EQ(((hdr_release_mem >> 16) & 0x3fffu) + 2u, 8u); /* 8 dwords total */
+
+  /* 2. DrawIndexAuto: opcode 0x2d, count 1 -> 3 dwords total (12 bytes) */
+  const uint32_t hdr_draw_index_auto = 0xc0012d00u;
+  ASSERT_EQ((hdr_draw_index_auto >> 30) & 3u, 3u);
+  ASSERT_EQ((hdr_draw_index_auto >> 8) & 0xffu, 0x2du);
+  ASSERT_EQ(((hdr_draw_index_auto >> 16) & 0x3fffu) + 2u, 3u);
+
+  /* 3. SetNumInstances: opcode 0x2f, count 0 -> 2 dwords total (8 bytes) */
+  const uint32_t hdr_num_instances = 0xc0002f00u;
+  ASSERT_EQ((hdr_num_instances >> 30) & 3u, 3u);
+  ASSERT_EQ((hdr_num_instances >> 8) & 0xffu, 0x2fu);
+  ASSERT_EQ(((hdr_num_instances >> 16) & 0x3fffu) + 2u, 2u);
+
+  /* 4. SetCxRegisterDirect: opcode 0x69, count 1 -> 3 dwords total (12 bytes) */
+  const uint32_t hdr_set_cx = 0xc0016900u;
+  ASSERT_EQ((hdr_set_cx >> 30) & 3u, 3u);
+  ASSERT_EQ((hdr_set_cx >> 8) & 0xffu, 0x69u);
+  ASSERT_EQ(((hdr_set_cx >> 16) & 0x3fffu) + 2u, 3u);
+
+  /* 5. SetUcRegisterDirect: opcode 0x79, count 1 -> 3 dwords total (12 bytes) */
+  const uint32_t hdr_set_uc = 0xc0017900u;
+  ASSERT_EQ((hdr_set_uc >> 30) & 3u, 3u);
+  ASSERT_EQ((hdr_set_uc >> 8) & 0xffu, 0x79u);
+  ASSERT_EQ(((hdr_set_uc >> 16) & 0x3fffu) + 2u, 3u);
+}
+
 static void test_pm4_detects_truncated_buffer(void) {
   uint32_t truncated[] = {
     /* Header claims 4 words payload (count field 3), but only 2 follow */
@@ -3403,6 +3448,138 @@ static void test_pm4_gl_descriptor_ring_wraps_into_a_submission(void) {
   oops_display_close(disp);
 }
 
+/*
+ * **A slot is two descriptors, and the second one has to be able to move it.**
+ *
+ * The ring's change detection compared unit 0's descriptor against the slot and nothing else
+ * until 2026-09-24. That is correct whenever the texture that varies is the one on unit 0, which
+ * is every arrangement the suite had - and wrong for the one a real port uses.
+ *
+ * Neverball's is this: `tex_env_shadow` puts a single shadow texture on unit 0 for the whole of
+ * a pass and the per-surface material on unit 1, which `tex_env_select` picks whenever
+ * `GL_MAX_TEXTURE_UNITS` is at least 2 - and this library honestly reports 2. So unit 0's
+ * descriptor was identical on every draw, the slot never advanced, and each draw overwrote the
+ * previous one's unit-1 descriptor in the slot they all pointed at. At the submit they sampled
+ * whichever material was written last, so the whole shadowed level wore one texture.
+ *
+ * The signature that made it hard to see: every direct read-back said the descriptors were
+ * correct, and they were - at the moment they were written. What was wrong was *when* the GPU
+ * read them, which no read-back from the CPU can show. The thing that moved the fault was the
+ * vertex ring's size, because that sets how many draws share a submit and therefore how many
+ * surfaces share one stale descriptor.
+ *
+ * So: unit 0 fixed, unit 1 changed, and the slot must advance. Two sizes rather than two names,
+ * as the test above uses, because the host allocator hands two 1x1 textures the same address and
+ * there would be no difference in the descriptor to notice.
+ */
+static void test_pm4_gl_second_unit_moves_the_descriptor_slot(void) {
+  oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+  void *ctx_handle = glContextCreate(disp);
+  gl_context_t *ctx = (gl_context_t *)ctx_handle;
+  static _Alignas(4096) uint32_t dcb[4096];
+  static _Alignas(256) uint8_t payload[0x4000];
+  static _Alignas(256) uint8_t vbo[8192];
+  static _Alignas(64) uint32_t fence[4] = {0x11111111u};
+  static _Alignas(64) uint32_t canary[16];
+  memset(dcb, 0, sizeof(dcb));
+  memset(payload, 0, sizeof(payload));
+  ctx->dcb_mem = dcb;
+  ctx->dcb_capacity_dw = 4096;
+  ctx->dcb_words = 0;
+  ctx->gpu_payload = payload;
+  ctx->vbo_mem = vbo;
+  ctx->fence = fence;
+  ctx->canary = &canary;
+  ctx->use_hardware = GL_TRUE;
+  ctx->hw_frame_active = GL_FALSE;
+  ctx->hw_multitex = GL_TRUE;
+
+  static const GLubyte grey[4 * 4 * 4] = {128, 128, 128, 255};
+  static const GLubyte red[4] = {255, 0, 0, 255};
+  static const GLubyte green[2 * 2 * 4] = {0, 255, 0, 255, 0, 255, 0, 255,
+                                           0, 255, 0, 255, 0, 255, 0, 255};
+  GLuint t[3] = {0, 0, 0};
+  glGenTextures(3, t);
+  const GLsizei dim[3] = {4, 1, 2};
+  const GLubyte *src[3] = {grey, red, green};
+  for (int i = 0; i < 3; i++) {
+    glBindTexture(GL_TEXTURE_2D, t[i]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, dim[i], dim[i], 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 src[i]);
+  }
+
+  /* Unit 0: the shadow texture, bound once and never changed - as `shad_draw_set` binds it. */
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, t[0]);
+  glEnable(GL_TEXTURE_2D);
+  /* Unit 1: the material, which `r_apply_mtrl` rebinds per mesh. */
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D, t[1]);
+  glEnable(GL_TEXTURE_2D);
+
+  #define TRI2() do { glBegin(GL_TRIANGLES); \
+    glMultiTexCoord2f(GL_TEXTURE0, 0.0f, 0.0f); glMultiTexCoord2f(GL_TEXTURE1, 0.0f, 0.0f); \
+    glVertex3f(-0.5f, -0.5f, 0.5f); \
+    glMultiTexCoord2f(GL_TEXTURE0, 1.0f, 0.0f); glMultiTexCoord2f(GL_TEXTURE1, 1.0f, 0.0f); \
+    glVertex3f(0.5f, -0.5f, 0.5f); \
+    glMultiTexCoord2f(GL_TEXTURE0, 0.5f, 1.0f); glMultiTexCoord2f(GL_TEXTURE1, 0.5f, 1.0f); \
+    glVertex3f(0.0f, 0.5f, 0.5f); glEnd(); } while (0)
+
+  ctx->hw_failed = GL_FALSE;
+  TRI2();
+  ASSERT_EQ(ctx->hw_desc_slot, 0u);
+  /* The draw really did take two units, or the rest of this test is about one. */
+  ASSERT_EQ(gl_unit_texture_id(ctx, 0u), t[0]);
+  ASSERT_EQ(gl_unit_texture_id(ctx, 1u), t[1]);
+
+  /* **Only the material changes.** Unit 0 is untouched, so the comparison that looked at unit 0
+   * alone answered "nothing moved" here and left this draw in slot 0 with the one above it. */
+  glBindTexture(GL_TEXTURE_2D, t[2]);
+  ctx->hw_failed = GL_FALSE;
+  TRI2();
+  ASSERT_EQ(ctx->hw_desc_slot, 1u);
+  ASSERT_EQ(ctx->triangles_drawn, 2u);
+
+  /* And the two slots hold the two materials, which is the property the slot index stands for:
+   * the first draw's descriptor is still there for the GPU to read at the submit. */
+  {
+    const uint32_t *s0u1 = (const uint32_t *)(payload + gl_hw_desc_slot_offset(0u) +
+                                              OOPS_GL_DESC_UNIT_STRIDE);
+    const uint32_t *s1u1 = (const uint32_t *)(payload + gl_hw_desc_slot_offset(1u) +
+                                              OOPS_GL_DESC_UNIT_STRIDE);
+    ASSERT_TRUE(memcmp(s0u1, s1u1, 32) != 0);
+  }
+
+  /* **And the detector that missed it now fires.** Put both draws in one slot by hand and the
+   * unit-1 half re-points: the arm has to report that, because reporting zero through exactly
+   * this is what it did for a day. */
+  ctx->hw_slot_collisions = 0u;
+  ctx->hw_slot_tex[1] = t[0];
+  ctx->hw_slot_tex1[1] = t[1];
+  ctx->hw_desc_slot = 1u;
+  ctx->hw_failed = GL_FALSE;
+  TRI2();
+  ASSERT_TRUE(ctx->hw_slot_collisions > 0u);
+  #undef TRI2
+
+  glDisable(GL_TEXTURE_2D);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  glActiveTexture(GL_TEXTURE0);
+  glDisable(GL_TEXTURE_2D);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  glDeleteTextures(3, t);
+  ctx->use_hardware = GL_FALSE;
+  ctx->dcb_mem = NULL;
+  ctx->gpu_payload = NULL;
+  ctx->vbo_mem = NULL;
+  ctx->fence = NULL;
+  ctx->canary = NULL;
+  glContextDestroy(ctx_handle);
+  oops_display_close(disp);
+}
+
 /* glLogicOp reaches CB_COLOR_CONTROL and glBlendColor reaches CB_BLEND_RED..ALPHA.
  *
  * The logic op's register value is radeonsi's (si_state.c:341, :365-368, :545-549): the Mesa
@@ -3583,9 +3760,9 @@ static void test_pm4_gl_logic_op_and_blend_constant_reach_their_registers(void) 
 /* A frame of more triangles than the vertex ring holds is submitted before the ring is reused.
  *
  * Each triangle's vertices sit in their own ring slot until the stream runs at the flush, so the
- * 451st triangle of a stream must not land in the 1st one's slot while the 1st is still unread.
- * On the host there is no driver, so the flush is observed by what it resets - the stream's
- * triangle count and its length - rather than by a submission.
+ * last triangle of a stream must not land in the 1st one's slot while the 1st is still unread.
+ * Driven by setting the cursor to the last slot, like the descriptor ring test: what is under
+ * test is the boundary, and 29,127 draws would test the command buffer limit instead.
  */
 static void test_pm4_gl_vertex_ring_submits_before_it_wraps(void) {
   oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
@@ -3594,7 +3771,7 @@ static void test_pm4_gl_vertex_ring_submits_before_it_wraps(void) {
 
   static _Alignas(4096) uint32_t dcb[32768];
   static _Alignas(256) uint8_t payload[0x4000];
-  static _Alignas(256) uint8_t vbo[65536];
+  uint8_t *vbo = (uint8_t *)calloc(1, OOPS_GL_VBO_RING_BYTES + 4096);
   static _Alignas(64) uint32_t fence[4] = {0x11111111u}; /* flush writes [0] and the clock at [2..3] */
   static _Alignas(64) uint32_t canary[16];
 
@@ -3609,7 +3786,16 @@ static void test_pm4_gl_vertex_ring_submits_before_it_wraps(void) {
   ctx->use_hardware = GL_TRUE;
   ctx->hw_frame_active = GL_FALSE;
 
-  for (uint32_t i = 0; i < OOPS_GL_VBO_RING_TRIANGLES; i++) pm4_draw_one_triangle();
+  /* **The bound this test is about, set rather than assumed.** `gl_vbo_ring_bytes` defaults to
+   * 64 KiB and not to the whole ring - correct beats fast until the fault that appears at one
+   * flush a frame is found, see its definition. This test is about the wrap itself, so it drives
+   * the full allocation, which is what it has already allocated above. */
+  gl_vbo_ring_bytes = OOPS_GL_VBO_RING_BYTES;
+
+  /* Put cursor near the end to test the wrap boundary without overflowing DCB */
+  ctx->hw_vbo_cursor = (OOPS_GL_VBO_RING_TRIANGLES - 10u) * 144u;
+  ctx->triangles_drawn = OOPS_GL_VBO_RING_TRIANGLES - 10u;
+  for (uint32_t i = 0; i < 10u; i++) pm4_draw_one_triangle();
   /* Full, and still one stream: the command buffer is nowhere near its own limit. */
   ASSERT_EQ(ctx->triangles_drawn, OOPS_GL_VBO_RING_TRIANGLES);
   const uint32_t words_full = ctx->dcb_words;
@@ -3626,6 +3812,7 @@ static void test_pm4_gl_vertex_ring_submits_before_it_wraps(void) {
   ctx->vbo_mem = NULL;
   ctx->fence = NULL;
   ctx->canary = NULL;
+  free(vbo);
   glContextDestroy(ctx_handle);
   oops_display_close(disp);
 }
@@ -4594,19 +4781,37 @@ static void test_pm4_gl_colour_sum_takes_the_third_parameter(void) {
     ASSERT_TRUE(colour[0] == 1.0f && colour[1] == 1.0f && colour[2] == 1.0f);
   }
 
-  /* No secondary colour: back to two parameters, and the slot is nothing again. */
+  /*
+   * **A zero secondary colour does not turn the sum off** (changed 2026-09-24).
+   *
+   * It did until then: the draw scanned its three vertices and dropped back to two parameters
+   * when none of them carried a highlight. That is per-triangle, and under specular lighting it
+   * alternates across a lit surface - so the slot was rewritten 686 times in a Neverball frame,
+   * and each rewrite calls `gl_ps_flush_shaders`, which evicts all three shader ranges. Forty
+   * thousand cache lines a frame to avoid adding zero.
+   *
+   * So the slot now follows `GL_COLOR_SUM` itself. The third parameter stays, the vertex stays
+   * 64 bytes, and the shader adds the zero the vertex carries - which is what the assertion on
+   * `p2` below is for: the sum is still *correct*, it is merely no longer switched.
+   */
   glSecondaryColor3f(0.0f, 0.0f, 0.0f);
   TRI();
-  ASSERT_EQ(ctx->hw_params, 2u);
-  ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0xc8u), (uint32_t)(pv >> 8));
-  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b1u), 2u);
-  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x193u), 0u);
-  ASSERT_EQ(ps_tex[GL_PS_SUM_SLOT_TEX], 0xbf800000u);
-  /* And the sum switched off after a draw that summed: the slot empties with it, or it would
-   * add whatever a two-parameter draw leaves in attr2. */
-  glSecondaryColor3f(0.5f, 0.25f, 0.0f);
-  TRI();
+  ASSERT_EQ(ctx->hw_params, 3u);
+  ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0xc8u),
+            (uint32_t)((pv + OOPS_GL_VS_P3_OFFSET) >> 8));
+  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b1u), 4u);
+  ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x193u), 2u);
   ASSERT_EQ(ps_tex[GL_PS_SUM_SLOT_TEX], 0xc8300800u);
+  /* And the zero really is in the vertex, so what the shader adds is nothing rather than
+   * whatever the last draw left in attr2. */
+  for (int k = 0; k < 3; k++) {
+    float p2[4];
+    memcpy(p2, vbo + 144 + 192 + 64 * k + 48, sizeof(p2));
+    ASSERT_TRUE(p2[0] == 0.0f && p2[1] == 0.0f && p2[2] == 0.0f);
+  }
+  /* **The slot is still emptied when the sum is switched off**, which is the case it exists to
+   * get right: a slot left holding the sum would add whatever attr2 reads on a draw that
+   * exports two parameters. That is a `glDisable`, not a black vertex. */
   glDisable(GL_COLOR_SUM);
   TRI();
   ASSERT_EQ(ctx->hw_params, 2u);
@@ -5443,6 +5648,7 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_gl_depth_range_reaches_the_viewport);
   RUN_TEST(test_pm4_gl_smooth_polygon_carries_three_edge_distances);
   RUN_TEST(test_pm4_gl_descriptor_ring_wraps_into_a_submission);
+  RUN_TEST(test_pm4_gl_second_unit_moves_the_descriptor_slot);
   RUN_TEST(test_pm4_gl_depth_range_changes_within_a_frame);
   RUN_TEST(test_pm4_gl_logic_op_and_blend_constant_reach_their_registers);
   RUN_TEST(test_pm4_gl_vertex_ring_submits_before_it_wraps);
@@ -5464,5 +5670,6 @@ void run_unit_tests_pm4(void) {
   RUN_TEST(test_pm4_detects_depth_invariants);
   RUN_TEST(test_pm4_detects_zero_vertex_draw);
   RUN_TEST(test_pm4_detects_unaligned_release_mem);
+  RUN_TEST(test_pm4_vendor_measured_packet_headers);
 }
 

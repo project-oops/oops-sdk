@@ -756,6 +756,78 @@ void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
  * Capture: the public half
  */
 
+/*
+ * **Every live texture, written into the stream before the frame is.**
+ *
+ * A capture records the calls a frame makes, and a frame in the middle of a game makes no
+ * `glTexImage2D`: a port uploads its textures when a level loads, hundreds of frames earlier.
+ * Replayed on its own, such a capture binds names that were never given an image and samples
+ * GL's default white - so the replay of Neverball's floor came back white while the console drew
+ * it black, and neither told anybody anything about the console.
+ *
+ * That is the difference between an oracle that can answer a geometry question and one that can
+ * answer a texturing question. The blend fault was cornered with this tool because it was a
+ * question about state; "which texture did this draw sample" is the commoner question and was
+ * exactly the one it could not be asked.
+ *
+ * So the capture opens with the texture state as it stands: a bind, the base image, and the
+ * sampler parameters that decide what a sample of it looks like. The texels are the SDK's own
+ * host copy, which is RGBA8 and tightly packed whatever the program uploaded - so the image goes
+ * back in as `GL_RGBA`/`GL_UNSIGNED_BYTE` under the internal format the program asked for, and
+ * the replay's own unpack state is already neutral for a recorded image.
+ *
+ * Appended rather than called: `gl_capture_append` writes the command without executing it, so
+ * arming a capture costs no re-upload and cannot perturb the frame it is about to record.
+ *
+ * **Mip levels above the base are not emitted yet.** They change how a minified sample *looks*,
+ * never which texture it came from, and every fault this exists to answer is the second kind. A
+ * blurred replay of the right texture is a legible answer; a white one is not.
+ */
+static void gl_capture_emit_texture_state(gl_context_t *ctx) {
+    if (!ctx) return;
+    GLuint restore = 0u;
+    for (GLuint i = 0u; i < (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
+        const gl_texture_object_t *t = &ctx->textures[i];
+        if (!t->used || !t->pixels) continue;
+        if (t->width <= 0 || t->height <= 0) continue;
+        /* 2D only: a cube map's faces and a volume's slices each want their own target and their
+           own emission, and no port here has rendered a surface from one. */
+        if (t->target != GL_TEXTURE_2D) continue;
+
+        gl_list_arg_t bind[2] = {gl_la_e(GL_TEXTURE_2D), gl_la_u(t->id)};
+        gl_capture_append(GL_LIST_OP_BIND_TEXTURE, bind, 2, (const void *)0, 0u);
+        restore = t->id;
+
+        gl_list_arg_t img[8] = {
+            gl_la_e(GL_TEXTURE_2D),      gl_la_i(0),
+            gl_la_i(t->internal_format), gl_la_i((GLint)t->width),
+            gl_la_i((GLint)t->height),   gl_la_i(0),
+            gl_la_e(GL_RGBA),            gl_la_e(GL_UNSIGNED_BYTE),
+        };
+        gl_capture_append(GL_LIST_OP_TEX_IMAGE_2D, img, 8, t->pixels,
+                          (size_t)t->width * (size_t)t->height * 4u);
+
+        /* The sampler state, because a texture replayed with the default filter and wrap is a
+           different image at every fragment that is not exactly on a texel centre. */
+        static const GLenum pnames[4] = {GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER,
+                                         GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T};
+        const GLenum pvals[4] = {t->min_filter, t->mag_filter, t->wrap_s, t->wrap_t};
+        for (int p = 0; p < 4; p++) {
+            if (pvals[p] == 0u) continue;
+            gl_list_arg_t pa[3] = {gl_la_e(GL_TEXTURE_2D), gl_la_e(pnames[p]),
+                                   gl_la_i((GLint)pvals[p])};
+            gl_capture_append(GL_LIST_OP_TEX_PARAMETER_I, pa, 3, (const void *)0, 0u);
+        }
+    }
+    /* Leave the binding where the frame expects to find it rather than on whichever texture
+       happened to be last in the table. */
+    if (restore != 0u) {
+        gl_list_arg_t bind[2] = {gl_la_e(GL_TEXTURE_2D),
+                                 gl_la_u(ctx->tex_unit[0].bound_texture_2d)};
+        gl_capture_append(GL_LIST_OP_BIND_TEXTURE, bind, 2, (const void *)0, 0u);
+    }
+}
+
 void oops_gl_capture_begin(void) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
@@ -769,6 +841,9 @@ void oops_gl_capture_begin(void) {
     g_capture_overflow = GL_FALSE;
     /* Room for the header, filled in by `oops_gl_capture_end` once the count is known. */
     gl_capture_put((const void *)0, GL_CAPTURE_HEADER_BYTES);
+    /* Before `capture_active`, so these are the stream's first commands and nothing the frame
+       does can land in front of them. */
+    gl_capture_emit_texture_state(ctx);
     ctx->capture_active = GL_TRUE;
 }
 

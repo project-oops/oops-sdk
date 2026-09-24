@@ -34,6 +34,30 @@
 /* The texture units. GL 1.3 requires at least two - "must be at least two" (OpenGL 1.3, section
  * 2.6; table 6.29's minimum for MAX_TEXTURE_UNITS) - and oops-gl had one until 2026-09-19. */
 #define OOPS_GL_MAX_TEXTURE_UNITS 2
+
+/* Distinct textures a frame's draw census holds before it starts counting overflow - see
+ * `hw_tex_census`. Neverball's busiest frame uses about a dozen. */
+#define OOPS_GL_TEX_CENSUS 24u
+
+/* The patchable slots in the two master pixel shaders, as an index into `hw_patch_writes` - a
+ * count per slot of how many times a frame it actually changed. Here for the same reason the
+ * descriptor ring's size is: `gl_context_t` sizes an array by it. */
+enum {
+    GL_PATCH_SLOT_ENV,      /* the texture environment's combine */
+    GL_PATCH_SLOT_ENV1,     /* and the second unit's */
+    GL_PATCH_SLOT_SUM,      /* the secondary colour added after texturing */
+    GL_PATCH_SLOT_SAMPLE,   /* 2D, cube, volume, depth or shadow */
+    GL_PATCH_SLOT_UNIT1,    /* the second unit's sample */
+    GL_PATCH_SLOT_COVERAGE, /* antialiasing */
+    GL_PATCH_SLOT_EXPORT,   /* one colour target or two */
+    GL_PATCH_SLOT_FOG,
+    GL_PATCH_SLOT_STIPPLE,
+    GL_PATCH_SLOT_COUNT
+};
+
+/* Slots in the texture descriptor ring. Here rather than with the rest of the descriptor map
+ * further down, because `gl_context_t` sizes an array by it; what it means is documented there. */
+#define OOPS_GL_DESC_RING_SLOTS   63u
 #define OOPS_GL_MAX_IMMEDIATE_VERTS 2048
 /* How many list names exist. A list's *contents* are not fixed: they grow from the SDK heap as
  * they are recorded, like a texture's image or a buffer object's store. They used to be a fixed
@@ -1340,6 +1364,109 @@ typedef struct gl_context {
      * gate as the submit's other values, so a run costs a line a second, not a line a draw. */
     uint32_t hw_draws_textured;
     uint32_t hw_draws_untextured;
+    /*
+     * **Which textures a frame actually drew with, and how many draws each got.**
+     *
+     * The pair above says how much of a frame was textured; this says *what with*. That is the
+     * question a port asks the moment a surface comes out wrong: not what a texture contains -
+     * the dumps already answer that - but which one a given draw reached for.
+     *
+     * There was a per-draw trace for it and it could not be used. Two kernel-log lines a draw,
+     * against the ~9,800 draws a Neverball frame makes, is twenty thousand syscalls a frame: the
+     * game advanced a fifth of a second while seconds of wall clock went by, which from the sofa
+     * is a frozen game and was reported as one. An instrument that changes the thing it measures
+     * that much is not an instrument.
+     *
+     * So it is counted here and printed once a flip, beside the frame's other numbers. A draw
+     * costs a scan of at most `OOPS_GL_TEX_CENSUS` entries and an increment; a frame costs one
+     * line per distinct texture. `id` 0 is the untextured draws, and `over` counts draws whose
+     * texture found no free entry, so a frame using more than the table holds says so rather
+     * than quietly reporting a prefix.
+     */
+    struct {
+        uint32_t id;     /* the texture name, 0 for an untextured draw */
+        /* **The second unit's texture, and the reason a row is keyed on the pair.**
+         *
+         * This table keyed on `id` alone until 2026-09-24, and `id` is the *base* unit's - the
+         * first unit with something bound. Neverball's shadow arrangement puts one unchanging
+         * shadow texture on unit 0 and the per-surface material on unit 1, so every draw of the
+         * level collapsed into a single row reading `id 3, draws 10046` and the census reported
+         * one texture for a frame that sampled thirty. The material - the thing actually going
+         * wrong on screen - was the one number the instrument could not print. */
+        uint32_t id1;
+        uint32_t draws;  /* how many draws sampled it this frame */
+        uint16_t w, h;   /* its dimensions, so a mosaic of two sizes is visible at a glance */
+        uint8_t slot;    /* the descriptor slot it last went into */
+        uint8_t unit;    /* the unit that sampled it - often 1, not 0 */
+        uint8_t env;     /* GL_REPLACE/MODULATE/COMBINE, low byte of the enum */
+        uint8_t blend;   /* whether the draw blended */
+        /* **The base format, because the environment's answer depends on it.** A combine reading
+         * `GL_ONE_MINUS_SRC_ALPHA` from a texture with no alpha channel gets 1, and
+         * `previous x (1 - 1)` is black - so a surface that should be shaded comes out unlit and
+         * nothing about the combine itself is wrong. Which channels a texture actually has is
+         * therefore part of reading this table, not a separate question. */
+        GLenum base;
+        /* **The descriptor the sampler was actually handed.** Everything above says what the
+         * library meant; these eight words are what the hardware was told, and the two have never
+         * been compared on a real port's textures. Width and height are split across words 1 and
+         * 2, and word 4 carries the row pitch - which is read only when the pitch exceeds the
+         * width, so it stays zero for every width that is a multiple of 64 pixels and is the one
+         * field a suite of 1x1 and 2x2 textures can never have exercised. */
+        uint32_t desc[8];
+        uint32_t samp[4];  /* the sampler half: wrap, filter, LOD clamps */
+        uint32_t pitch;  /* what the library believes the row pitch is, in pixels */
+        uint32_t garlic; /* the base level storage >> 8; differs from desc[0] when the
+                          * descriptor points at the mip chain instead */
+    } hw_tex_census[OOPS_GL_TEX_CENSUS];
+    uint32_t hw_tex_census_n;    /* entries used */
+    uint32_t hw_tex_census_over; /* draws that found no entry */
+    /*
+     * **Whether one descriptor slot served two textures inside one submit.**
+     *
+     * Every textured draw hands the shader `payload_va + slot_offset(hw_desc_slot)` and the GPU
+     * reads that slot when it *executes* the draw - long after the CPU moved on. So a slot may
+     * hold one texture's descriptor for the whole of a submit and no more: if a second texture is
+     * written into it before the frame runs, every draw in that submit pointing there samples
+     * whichever was written last. One surface would then wear another's texture, and so would
+     * everything else that shared the slot.
+     *
+     * The ring is built not to do this - a draw takes the next slot whenever the descriptor it
+     * needs differs from the one in the current slot, and the frame is submitted when the ring is
+     * full. This says whether it holds, which is a different question from whether it should.
+     *
+     * `slot_tex[s]` is the texture the slot was given since the last flush, 0 for untouched.
+     * A collision records the slot and both textures, because "slot 7 held 0xb and then 0x2" is
+     * the whole of the diagnosis and a count alone is not.
+     *
+     * **A slot holds two descriptors, so this has to watch two.** `slot_tex1[s]` is the second
+     * unit's half. Watching only the first was an arm that could not fail on the port it was
+     * written for: Neverball's shadowed pass leaves unit 0 on one shadow texture for the whole
+     * frame, so `slot_tex[s]` never changed and the detector reported zero collisions through
+     * thousands of draws that were, in fact, all sharing one unit-1 descriptor. See
+     * [[an-arm-that-cannot-fail]] - a survey is an arm, and this one surveyed the half that was
+     * already correct.
+     */
+    uint32_t hw_slot_tex[OOPS_GL_DESC_RING_SLOTS + 1u];
+    uint32_t hw_slot_tex1[OOPS_GL_DESC_RING_SLOTS + 1u];
+    uint32_t hw_slot_collisions;  /* how many times a slot was re-pointed within one submit */
+    /* **Draws that ran the last shader slot's variant instead of their own.** The pixel shader
+     * ring has six slots; a draw that finds none free reuses the sixth rather than overwrite a
+     * slot a queued draw is reading. `gl_ps_ring_offset` calls that "wrong in one draw", which is
+     * true of one draw and not of a frame where it fires thousands of times - and nothing has
+     * ever counted it. Per flip, cleared with the rest. */
+    uint32_t hw_ps_ring_stale;
+    /* **How far the descriptor slot index actually travels in a submit, and how often the ring
+     * filled.** The ring has `OOPS_GL_DESC_RING_SLOTS` slots and flushes when a draw needs a new
+     * one and none is free. That is the design; this is the measurement, and the two have never
+     * been compared. A high-water mark at or past the last slot says the ring is running at its
+     * limit, and a `ring-full` count says how many times a frame it had to submit to get room -
+     * which is the number that changes when the vertex ring bound changes, and the render with
+     * it. Per flip, cleared with the rest. */
+    uint32_t hw_desc_slot_high;
+    uint32_t hw_desc_ring_full;
+    uint32_t hw_slot_first_slot;  /* and the first one, with the two textures that shared it */
+    uint32_t hw_slot_first_had;
+    uint32_t hw_slot_first_got;
     /* **Texture names handed out, names refused, and errors raised - cumulative, not per submit.**
      * These answer the question a port asks before the draw census is worth reading: did the
      * textures exist at all? `glGenTextures` has a fixed pool here
@@ -1408,6 +1535,81 @@ typedef struct gl_context {
     /* And the command words themselves, so the rest of a draw can be attributed to the texture
      * and descriptor preparation that sits between the two. */
     uint64_t hw_dcb_ns;
+    /*
+     * **The two phases that had no timer, which is where a frame's time turned out to be.**
+     *
+     * `hw_draw_ns` minus `hw_patch_ns` minus `hw_dcb_ns` left 13ms of an 18ms frame unattributed
+     * on 2026-09-24, and the plan being drawn up at that moment was to batch the draw packets -
+     * which are `hw_dcb_ns`, half a millisecond of the eighteen. Splitting a measured total by
+     * assumption is the same mistake as reading the descriptor half that was already correct.
+     *
+     * `hw_tnl_ns` is the software transform and lighting: every vertex through the modelview and
+     * projection, the lights, texture generation, the divide, the viewport and the cull. It runs
+     * per *triangle*, so a vertex shared by six of them is transformed six times.
+     *
+     * `hw_vbo_ns` is the descriptor slot decision and writing the three vertices into the ring.
+     *
+     * What neither covers, between the hardware branch and the patch block, is the state
+     * evaluation: blend, depth, cull and target masks recomputed and compared per draw.
+     */
+    uint64_t hw_tnl_ns;
+    uint64_t hw_vbo_ns;
+    /*
+     * **What the current descriptor slot holds, in cached memory.**
+     *
+     * The slot decision - "does this draw's descriptor differ from the one already in the slot?"
+     * - used to answer itself by reading the slot back out of `gpu_payload`. That is ONION, and
+     * every write to a slot is followed by a `clflush`, so the read on the next triangle is a
+     * guaranteed miss to the slowest bus on the part. Measured at 10.5ms of a 22.3ms frame
+     * across 10,070 triangles - the largest single phase in the draw path, and four times the
+     * cost of every command packet the frame emits.
+     *
+     * The CPU already knows what it wrote. This is that, kept beside the cache rather than
+     * fetched back through it. `valid` says which halves of the shadow describe the slot: bit 0
+     * for unit 0's descriptor and sampler, bit 1 for unit 1's. A slot change clears both,
+     * because the new slot's contents were written by some earlier frame and are not this
+     * shadow's; each half is set again when it is written.
+     *
+     * Laid out as the slot is - unit 0's image at word 0, its sampler at word 8, unit 1's at
+     * word 16 and 24 - so a comparison is against the same 48 bytes the copy writes, in the same
+     * order, and the two cannot drift into describing different things.
+     */
+    uint32_t hw_desc_shadow[32];
+    uint32_t hw_desc_shadow_valid;
+    /*
+     * **And the same for the two pixel shaders, for the same reason.**
+     *
+     * Nine slots in the two master shaders are patched per draw - the fog, the colour sum, the
+     * sample kind, the combine, the coverage, the second unit and its environment, the export,
+     * the stipple table - and each one decides whether it has anything to do by reading the
+     * words already in the payload. `gl_ps_flush_shaders` then `clflush`es whatever it wrote,
+     * so those reads miss to ONION every time as well: `hw_patch_ns` was 5.6ms of a 22.3ms
+     * frame, and almost all of it was the comparisons rather than the copies, because the words
+     * are usually already right and the copy rarely happens.
+     *
+     * Mirrors of the two regions exactly, seeded from the payload once the masters are built -
+     * so the first comparison of a slot is against what is really there rather than against
+     * zeroes, which would answer "same" for any slot whose words are zero.
+     */
+    uint32_t hw_ps_untex_shadow[128]; /* OOPS_GL_PS_UNTEX_WORDS */
+    uint32_t hw_ps_tex_shadow[320];   /* OOPS_GL_PS_TEX_WORDS */
+    /*
+     * **How often each patch slot actually changes, and how much cache eviction that costs.**
+     *
+     * Mirroring the comparisons took `patch-us` from 5.6ms to 5.4ms, which says the comparisons
+     * were never the cost - the *writes* are. A write calls `gl_ps_flush_shaders`, and that
+     * evicts all three shader ranges: sixty cache lines, every time, whichever slot moved by
+     * however many words.
+     *
+     * A count per slot says which one is moving. A slot that changes thirty times a frame is a
+     * material switch and costs nothing; one that changes ten thousand times is a slot being
+     * asked a question whose answer alternates per draw, and the fix is to stop asking rather
+     * than to make the answer cheaper. Timing each call instead would have added fourteen clock
+     * reads per draw to measure five microseconds a thousand - an instrument bigger than the
+     * thing it measures.
+     */
+    uint32_t hw_patch_writes[GL_PATCH_SLOT_COUNT];
+    uint32_t hw_ps_flush_calls;
     const char *hw_flush_site[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_site_n[OOPS_GL_FLUSH_SITES];
     uint32_t hw_flush_unnamed;
@@ -2099,7 +2301,13 @@ static inline uint32_t gl_f32_bits(float f) {
 /* The texture descriptor table, whose address goes in the pixel shader's first user SGPR pair.
  * **Two pairs**: unit 0's image at +0x00 and sampler at +0x20, unit 1's at +0x40 and +0x60 - the
  * layout obSCEne's `-8b1c` was asked about and `-9a41` re-asks, and the one tex-prolog2.s loads
- * from. Only the first pair is filled today. */
+ * from. Both pairs are filled when a draw uses two units.
+ *
+ * **Both pairs belong to the slot, so both decide when the slot advances.** This said "only the
+ * first pair is filled today" until 2026-09-24, and the ring's change detection had been written
+ * to match: it compared unit 0's descriptor against the slot and nothing else. A pass that holds
+ * unit 0 steady and varies unit 1 therefore never advanced, and every draw in the submit read
+ * whichever unit-1 descriptor was written last. See the comparison in `gl_draw.c`. */
 #define OOPS_GL_DESC_TABLE_OFFSET 0x900u
 #define OOPS_GL_DESC_UNIT_STRIDE  0x40u
 
@@ -2215,7 +2423,10 @@ static inline uint32_t gl_hw_gl2_slot_offset(uint32_t slot) {
 
 #define OOPS_GL_DESC_RING_OFFSET  0x1800u
 #define OOPS_GL_DESC_SLOT_STRIDE  0x80u /* two units, 0x40 each */
-#define OOPS_GL_DESC_RING_SLOTS   63u   /* plus slot 0 at the table above: 64 textures a frame */
+/* `OOPS_GL_DESC_RING_SLOTS` is defined near the top of this file, beside the other capacities,
+ * because `gl_context_t` sizes an array by it - see `hw_slot_tex`. Its meaning belongs here with
+ * the rest of the descriptor map: 63 slots, plus slot 0 at the table above, so 64 textures a
+ * frame before the ring is full and the frame is submitted. */
 
 /* Where slot `n` of the ring begins, as a byte offset into the GPU payload. Slot 0 is the
  * original table, so that a frame with one texture is byte for byte the frame it was. */
@@ -2231,6 +2442,12 @@ static inline uint32_t gl_hw_desc_slot_offset(uint32_t slot) {
 typedef char oops_gl_payload_map_closes[
     (OOPS_GL_DESC_RING_OFFSET + OOPS_GL_DESC_RING_SLOTS * OOPS_GL_DESC_SLOT_STRIDE <=
              OOPS_GL_PS_GL2_OFFSET &&
+     /* `hw_desc_shadow` mirrors a whole slot and is sized by a literal, because the struct is
+      * declared above these constants. The two have to stay the same size or the shadow
+      * describes less of the slot than the copy writes. */
+     OOPS_GL_DESC_SLOT_STRIDE == 32u * 4u &&
+     /* And the two shader mirrors, sized by literals for the same reason. */
+     OOPS_GL_PS_UNTEX_WORDS == 128u && OOPS_GL_PS_TEX_WORDS == 320u &&
      OOPS_GL_PS_GL2_OFFSET + OOPS_GL_PS_GL2_WORDS * 4u <= OOPS_GL_GL2_SLOT_OFFSET &&
      OOPS_GL_GL2_SLOT_OFFSET + OOPS_GL_GL2_SLOTS * OOPS_GL_GL2_SLOT_STRIDE <=
              OOPS_GL_PAYLOAD_BYTES &&
@@ -3682,6 +3899,12 @@ static inline uint32_t gl_blend_comb(GLenum equation) {
 /* Set by `oops_gl_set_log_level`; see GL/gl.h for what each level covers. */
 extern int gl_log_level;
 
+/* **Whether a texture's descriptor may point at its mip chain**, from `/app0/oops-gl`'s
+ * `mipchain` key at context creation. Default 1. See the note where it is read: with it off, the
+ * descriptor names the base level's own storage, which is what a frame capture carries and what
+ * a replay on the software rasteriser draws - so the two become comparable. */
+extern int gl_mipchain_enabled;
+
 static inline uint32_t gl_compute_cb_blend_control(const gl_context_t *ctx) {
     if (!ctx || !ctx->cap_blend) return 0u;
     /* A logic op replaces blending, so the blender is left off and CB_COLOR_CONTROL's ROP3
@@ -3814,9 +4037,45 @@ uint64_t gl_hw_query_end(gl_context_t *ctx, GLboolean *counted);
  * gl_draw.c, and anything added per draw has to be added to it. */
 #define OOPS_GL_DCB_DRAW_MAX_DW 232u /* 176 until the stencil registers: bind 15, per draw 5; 200 until the vertex stage's switch to three parameters, 21; 224 until an occlusion query's arming, 7 */
 
-/* Vertex slots in the per-frame ring: 3 vertices of 48 bytes, in the 64 KiB vertex buffer
- * glContextCreate allocates. */
-#define OOPS_GL_VBO_RING_TRIANGLES 450u
+/*
+ * **The vertex ring, and the command stream, sized so a frame fits in one submit.**
+ *
+ * `gl_draw_triangle_pv_body` flushes when either would overflow - and a flush is not a cheap
+ * bookkeeping step, it submits the stream and *waits for the GPU to finish it*. At 450 triangles
+ * the ring was smaller than a frame by a factor of twenty: Neverball draws 9,776 triangles a
+ * frame and its per-flip accounting reported **twenty flushes from inside the draw path**, the
+ * one from `glSwapBuffers` beside them, and six to fifteen milliseconds waiting on them.
+ *
+ * That was the frame, and it was not what it looked like. The draw path's own note guessed
+ * batching draws - 43 dwords per triangle, eighteen thousand single-triangle packets - and the
+ * timer beside it said `dcb-us` was 0.6ms of a 29ms frame, 2.5%. The cost was never the writing.
+ * It was stopping twenty times to wait.
+ *
+ * **One number, in bytes, used by both the allocation and the bound.** They were two - 450 here
+ * and `oops_mem_alloc(65536, ...)` in `glContextCreate` - agreeing only because 450 x 144 is
+ * 64,800 and happens to be under 65,536. A ring raised without the allocation would have written
+ * vertices past the end of it.
+ */
+#define OOPS_GL_VBO_RING_BYTES 0x400000u /* 4 MiB: 29,127 triangles at the 144-byte worst case */
+#define OOPS_GL_VBO_RING_TRIANGLES (OOPS_GL_VBO_RING_BYTES / 144u)
+
+/*
+ * **How much of that ring a frame may use before it submits**, from `/app0/oops-gl`'s `vbobytes`
+ * key. The allocation stays `OOPS_GL_VBO_RING_BYTES`; this only moves the bound that triggers a
+ * flush, so a smaller value is always safe and only means flushing more often.
+ *
+ * It exists because raising the ring from 64 KiB to 4 MiB took Neverball from twenty flushes a
+ * frame to one - and a flush is not only a submit, it is where the descriptor ring, the shader
+ * variant ring and the vertex cursor all start again. Twenty resets a frame hid whatever does not
+ * survive a whole frame; one reset stopped hiding it, and the picture changed on the same day.
+ * This is the knob that tells the two apart without a rebuild.
+ */
+extern uint32_t gl_vbo_ring_bytes;
+
+/* The command stream, in dwords. A triangle writes about 43 of them, so this holds roughly
+ * twelve thousand - past a frame, which is the point. `OOPS_GL_DCB_DRAW_MAX_DW` above is what
+ * each check reserves, and it is the worst case rather than the typical one. */
+#define OOPS_GL_DCB_CAPACITY_DW 0x80000u /* 512 Ki dwords, 2 MiB */
 void gl_hw_fail(gl_context_t *ctx, const char *reason);
 /* One line in the kernel log ("[OOPS-GL] ..."); nothing on a host build. */
 void gl_log_line(const char *msg);
@@ -3878,6 +4137,12 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
  * hardware while passing on the host. Only when the words actually change. */
 void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst, const uint32_t *words,
                              size_t n);
+/* A pixel-shader slot compared and recorded through the cached mirror rather than read back out
+   of ONION - see `hw_ps_untex_shadow`. `gl_ps_shadow_seed` fills the mirror from the masters once
+   they are built, so the first comparison is against what is really in the payload. */
+GLboolean gl_ps_slot_same(gl_context_t *ctx, const uint32_t *dst, const uint32_t *words, size_t n);
+void gl_ps_slot_wrote(gl_context_t *ctx, const uint32_t *dst, const uint32_t *words, size_t n);
+void gl_ps_shadow_seed(gl_context_t *ctx);
 /* Which copy of the textured shader a draw should bind, as a payload offset, and whether
    binding it would first need the frame submitted to free a slot. */
 uint32_t gl_ps_ring_offset(gl_context_t *ctx);

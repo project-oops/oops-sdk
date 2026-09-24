@@ -3272,7 +3272,13 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     /* The mip chain when there is one to describe (gl_tex_hw_prepare decides), the base level's
      * own storage otherwise - which is every texture that does not read mipmaps, and so gets
      * exactly the descriptors it always had. */
-    const GLboolean chain = (GLboolean)(tex->desc_chain && tex->chain_data);
+    /* **`mipchain=off` in `/app0/oops-gl` takes the chain out of the descriptor**, leaving the
+     * base level's own storage - which is the allocation `tex->pixels` names and the one a frame
+     * capture carries, so it is the configuration a replay on the software rasteriser reproduces
+     * exactly. Any difference between the console and that replay is then a difference about the
+     * chain and nothing else. Default on; this is a question, not a setting. */
+    const GLboolean chain =
+        (GLboolean)(tex->desc_chain && tex->chain_data && gl_mipchain_enabled);
     uint64_t va = chain ? tex->chain_va : tex->garlic_va;
     uint32_t w = tex->width ? (uint32_t)tex->width : 1u;
     uint32_t h = tex->height ? (uint32_t)tex->height : 1u;

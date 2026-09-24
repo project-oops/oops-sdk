@@ -17,12 +17,22 @@ static gl_context_t s_host_ctx;
 static float s_host_depth[1920 * 1080];
 static uint8_t s_host_stencil[1920 * 1080];
 static uint32_t s_host_front[1920 * 1080];
-static inline __attribute__((unused)) void gl_klog_line(const char *msg) { (void)msg; }
-static inline __attribute__((unused)) void gl_klog_val(const char *tag, uint64_t val) { (void)tag; (void)val; }
-int gl_log_level = (int)OOPS_LOG_INFO; /* host build keeps the setter honest, and logs nothing */
+static inline void gl_klog_line(const char *msg) { if (msg) oops_log_info("GL", "%s", msg); }
+static inline void gl_klog_val(const char *tag, uint64_t val) { oops_log_debug("GL", "%s: 0x%llx", tag, (unsigned long long)val); }
+int gl_log_level = (int)OOPS_LOG_INFO; /* host build keeps the setter honest */
 #else
 #include "oops/syscall.h"
 #include "oops/time.h" /* the submit is timed - see hw_flush_ns */
+
+int gl_log_level = (int)OOPS_LOG_INFO;
+
+static void gl_klog_line(const char *msg) {
+    if (msg) oops_log_info("GL", "%s", msg);
+}
+
+static void gl_klog_val(const char *tag, uint64_t val) {
+    oops_log_debug("GL", "%s: 0x%llx", tag, (unsigned long long)val);
+}
 #endif
 
 __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
@@ -30,54 +40,8 @@ __attribute__((weak)) int sceAgcDriverSubmitCommandBuffer(void *queue, const voi
 __attribute__((weak)) int sceAgcDriverSubmitDcb(const oops_agc_dcb_desc *desc);
 __attribute__((weak)) int sceAgcDriverCreateQueue(uint32_t type, void *queue_out, uint32_t flags);
 
-#ifndef OOPS_HOST_BUILD
-
-/* **How much of itself this library writes to the kernel log**, set by
- * `oops_gl_set_log_level` and documented there. The per-frame counters were unconditional and a
- * title submitting thirty times a frame buried everything else it and the SDK had to say - which
- * is the opposite of what a log is for. `gl_klog_line` and `gl_klog_val` stay unguarded, because
- * the things that call them at `OOPS_LOG_INFO` are the things worth reading; it is the per-frame
- * and per-submit blocks that ask before they speak. */
-int gl_log_level = (int)OOPS_LOG_INFO;
-
-static void gl_klog_line(const char *msg) {
-    char buf[160];
-    const char *prefix = "[OOPS-GL] ";
-    int n = 0;
-    while (prefix[n] && n < 16) { buf[n] = prefix[n]; n++; }
-    int m = 0;
-    while (msg[m] && n < (int)sizeof(buf) - 2) { buf[n++] = msg[m++]; }
-    buf[n++] = '\n';
-    buf[n] = '\0';
-    (void)sys_call(SYS_klog, 7, (long)buf, 0, 0, 0, 0);
-}
-
-static void gl_klog_val(const char *tag, uint64_t val) {
-    char buf[160];
-    char hex[17];
-    uint64_t v = val;
-    for (int i = 15; i >= 0; i--) {
-        uint8_t d = (uint8_t)(v & 0xf);
-        hex[i] = (char)(d < 10 ? ('0' + d) : ('a' + d - 10));
-        v >>= 4;
-    }
-    hex[16] = '\0';
-    int hstart = 0;
-    while (hstart < 15 && hex[hstart] == '0') hstart++;
-
-    int n = 0;
-    const char *pfx = "[OOPS-GL] ";
-    while (pfx[n] && n < 16) { buf[n] = pfx[n]; n++; }
-    int m = 0;
-    while (tag && tag[m] && n < 48) { buf[n++] = tag[m++]; }
-    if (n < 52) { buf[n++] = ':'; buf[n++] = ' '; buf[n++] = '0'; buf[n++] = 'x'; }
-    m = hstart;
-    while (hex[m] && n < (int)sizeof(buf) - 3) { buf[n++] = hex[m++]; }
-    buf[n++] = '\n';
-    buf[n] = '\0';
-    (void)sys_call(SYS_klog, 7, (long)buf, 0, 0, 0, 0);
-}
-#endif
+int gl_mipchain_enabled = 1;
+uint32_t gl_vbo_ring_bytes = 65536u;
 
 /* One line in the kernel log, for the rest of the library. */
 void oops_gl_set_log_level(int level) {
@@ -124,8 +88,8 @@ void gl_hw_fail(gl_context_t *ctx, const char *reason) {
     if (!ctx || ctx->hw_failed) return;
     ctx->hw_failed = GL_TRUE;
     ctx->hw_failure = reason;
-    gl_klog_line("HARDWARE FAILURE: drawing has stopped; nothing falls back to the CPU");
-    gl_klog_line(reason);
+    oops_log_error("GL", "HARDWARE FAILURE: drawing has stopped; nothing falls back to the CPU");
+    if (reason) oops_log_error("GL", "%s", reason);
 }
 
 #ifndef OOPS_HOST_BUILD
@@ -143,9 +107,8 @@ static void gl_klog_words(const char *tag, const uint32_t *w, uint32_t n) {
             buf[p++] = ' ';
             for (int s = 28; s >= 0; s -= 4) buf[p++] = hexd[(w[k] >> s) & 0xfu];
         }
-        buf[p++] = '\n';
         buf[p] = '\0';
-        (void)sys_call(SYS_klog, 7, (long)buf, 0, 0, 0, 0);
+        oops_log_debug("GL", "%s", buf);
     }
 }
 
@@ -398,6 +361,24 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
     for (size_t p = 0; p < (size_t)total_words * sizeof(uint32_t); p += 64) {
         __builtin_ia32_clflush((const void *)((const char *)ctx->dcb_mem + p));
     }
+    /*
+     * **The drain, once, for everything this frame wrote - not just the command buffer.**
+     *
+     * `gl_color_cpu_drain` says it above and says it correctly: "`sfence` is the one that matters
+     * and `clflush` is the one that is usually a no-op". `clflush` starts a writeback; it does not
+     * wait for it and it is not ordered against what follows. Every other write a frame makes -
+     * the texture descriptors, the vertices, the patched shader words - is flushed the same way at
+     * twenty-four other sites and, until now, was never fenced at all. The submit below is the
+     * moment the GPU begins reading all of it, so this is the one place the ordering has to hold.
+     *
+     * **Measured, not reasoned.** Neverball renders correctly when a frame is split into forty-six
+     * submits and wrongly when it is one, with the per-frame counters *byte for byte identical* -
+     * 10,046 draws, the same descriptor slots, the same rings, nothing at a limit. Identical CPU
+     * work and a different picture is a race, and more submits meant more fence waits, each of
+     * which incidentally gave the outstanding writes time to land. That is the shape of a missing
+     * barrier rather than a missing flush, and this is where it was missing.
+     */
+    __builtin_ia32_sfence();
 #endif
 
     if (ctx->hw_dump_pending) {
@@ -923,12 +904,67 @@ void *glContextCreate(struct oops_display *disp) {
      * nothing. A title calling `oops_gl_set_log_level` afterwards still wins. */
     gl_log_level = (int)oops_log_channel_level("gl", (oops_log_level_t)gl_log_level);
 
+    /* `/app0/oops-gl`: knobs a run can turn without a rebuild, the same shape as the log levels
+     * above. `mipchain=off` makes a texture's descriptor name its base level rather than its mip
+     * chain - see the note in gl_state.c. */
+    {
+        char v[16];
+        if (oops_config_value("/app0/oops-gl", "mipchain", v, sizeof(v)) == 0) {
+            gl_mipchain_enabled = !(v[0] == 'o' && v[1] == 'f') && v[0] != '0';
+            gl_klog_val("mipchain-enabled", (uint64_t)(uint32_t)gl_mipchain_enabled);
+        }
+        /* `vbobytes=<decimal>` - how much of the vertex ring a frame may fill before it submits.
+         * 65536 is what it was before 2026-09-24, when a frame flushed about twenty times; the
+         * whole ring is one flush. Clamped to the allocation, so a typo cannot write past it. */
+        char vb[16];
+        if (oops_config_value("/app0/oops-gl", "vbobytes", vb, sizeof(vb)) == 0) {
+            uint32_t n = 0u;
+            for (size_t i = 0; vb[i] >= '0' && vb[i] <= '9'; i++) n = n * 10u + (uint32_t)(vb[i] - '0');
+            if (n >= 4096u && n <= OOPS_GL_VBO_RING_BYTES) gl_vbo_ring_bytes = n;
+            gl_klog_val("vbo-ring-bytes", (uint64_t)gl_vbo_ring_bytes);
+        }
+    }
+
+    /* **`/app0/oops-capture` arms a frame capture, so a title needs no code to be captured.**
+     *
+     * `oops_gl_capture_frame` already avoids patching a program's main loop - the swap does the
+     * arming and the writing - but somebody still had to call it with a frame number, which meant
+     * a line in each title's entry point and a rebuild to change the number. Neverball carried
+     * exactly that, pinned to frame 3, which is the title screen: the one frame nobody needs.
+     *
+     *     frame=240                  # captured after this many swaps
+     *     path=/app0/frame.oglcap    # optional; this is the default
+     *
+     * `/app0` is writable - the package mount - which the shim that used to search five candidate
+     * directories for somewhere to write established the hard way. Replay the file on a build
+     * machine with `oops-gl/gl-replay`, where the software rasteriser is the reference: the
+     * difference between that image and a screenshot of the same frame is the bug. */
+    {
+        char v[24];
+        if (oops_config_value("/app0/oops-capture", "frame", v, sizeof(v)) == 0) {
+            unsigned f = 0u;
+            for (size_t i = 0; v[i] >= '0' && v[i] <= '9'; i++) f = f * 10u + (unsigned)(v[i] - '0');
+            /* The path outlives this scope because `oops_gl_capture_frame` keeps the pointer. */
+            static char cap_path[96];
+            if (oops_config_value("/app0/oops-capture", "path", cap_path, sizeof(cap_path)) != 0 ||
+                cap_path[0] == '\0') {
+                const char *dflt = "/app0/frame.oglcap";
+                size_t i = 0;
+                while (dflt[i] && i < sizeof(cap_path) - 1u) { cap_path[i] = dflt[i]; i++; }
+                cap_path[i] = '\0';
+            }
+            oops_gl_capture_frame(f, cap_path);
+            gl_klog_val("capture-armed-at-frame", (uint64_t)f);
+        }
+    }
+
     unsigned int w = oops_display_get_width(disp);
     unsigned int h = oops_display_get_height(disp);
     if (!w || !h) {
         w = 1920;
         h = 1080;
     }
+    oops_log_info("GL", "glContextCreate: %ux%u", w, h);
 
     gl_context_t *ctx = NULL;
     float *depth = NULL;
@@ -1309,7 +1345,8 @@ void *glContextCreate(struct oops_display *disp) {
         /* 0x8000 since 2026-09-21, when the GL 2.0 uniform ring went in at 0x4000 - which is
          * where the payload used to end. gl_internal.h holds the map. */
         ctx->gpu_payload = oops_mem_alloc(OOPS_GL_PAYLOAD_BYTES, 256, OOPS_MEM_WB_ONION);
-        ctx->vbo_mem = oops_mem_alloc(65536, 256, OOPS_MEM_WB_ONION);
+        /* One constant with the bound that guards it - see OOPS_GL_VBO_RING_BYTES. */
+        ctx->vbo_mem = oops_mem_alloc(OOPS_GL_VBO_RING_BYTES, 256, OOPS_MEM_WB_ONION);
         ctx->fence = oops_mem_alloc(0x1000, 0x1000, OOPS_MEM_WB_ONION);
         ctx->canary = oops_mem_alloc(0x1000, 0x1000, OOPS_MEM_WB_ONION);
         /* Big enough for a tiled copy too: the scanout path's buffers are padded to whole
@@ -1317,7 +1354,7 @@ void *glContextCreate(struct oops_display *disp) {
         ctx->readback = (uint32_t *)oops_mem_alloc((size_t)((w + 127u) & ~127u) *
                                                        (size_t)((h + 127u) & ~127u) * 4u,
                                                    0x1000, OOPS_MEM_WB_ONION);
-        ctx->dcb_capacity_dw = 65536;
+        ctx->dcb_capacity_dw = OOPS_GL_DCB_CAPACITY_DW;
         ctx->dcb_words = 0;
         ctx->hw_frame_active = GL_FALSE;
         ctx->dcb_mem = (uint32_t *)oops_mem_alloc(ctx->dcb_capacity_dw * sizeof(uint32_t),
@@ -1512,6 +1549,10 @@ void *glContextCreate(struct oops_display *disp) {
             }
 #endif
             ctx->use_hardware = GL_TRUE;
+            /* The mirrors take their first copy of the two masters here, after every word of
+             * them is written and before any draw patches one. The single payload read this
+             * whole mechanism exists to stop doing ten thousand times a frame. */
+            gl_ps_shadow_seed(ctx);
             ctx->zs_tiled = GL_TRUE; /* the DB draws depth and stencil 64KB_Z_X from here on */
             /* The scanout path, once REQ-20260919T1927Z-7e21 has measured it (gl_rx.h) - before
              * the self-test, so that the test clears the buffer frames will be drawn into. */
@@ -1542,6 +1583,7 @@ void *glContextCreate(struct oops_display *disp) {
 #endif
 
     g_gl_ctx = ctx;
+    oops_log_info("GL", "glContextCreate completed, ctx=%p (hw=%d)", ctx, (int)ctx->use_hardware);
     /* Offer the suspend path a way to quiesce this context - see gl_suspend_drain. Registered
        here rather than asked for by a title, so every renderer that makes a context is
        suspendable without knowing the sequence exists. */
@@ -1552,6 +1594,7 @@ void *glContextCreate(struct oops_display *disp) {
 void glContextDestroy(void *ctx_handle) {
     gl_context_t *ctx = (gl_context_t *)ctx_handle;
     if (!ctx) return;
+    oops_log_info("GL", "glContextDestroy ctx=%p", ctx_handle);
 
     /* Before the branch below, because the target arm frees `ctx` itself at the end of it and
      * the buffer storage has to go first. The display lists' storage is heap memory now too. */
@@ -1648,12 +1691,148 @@ void glSwapBuffers(void) {
                usually already right. */
             gl_klog_val("patch-us-this-frame", ctx->hw_patch_ns / 1000u);
             gl_klog_val("dcb-us-this-frame", ctx->hw_dcb_ns / 1000u);
+            /* And the two phases that had no timer until the frame budget stopped adding up -
+             * see `hw_tnl_ns`. `draw-us` minus these four is the state evaluation between
+             * them. */
+            gl_klog_val("tnl-us-this-frame", ctx->hw_tnl_ns / 1000u);
+            gl_klog_val("vbo-us-this-frame", ctx->hw_vbo_ns / 1000u);
+            /* **Which shader slot is actually moving, and what the moves cost in evictions.**
+             * A slot that changes per draw is the patch cost; one that changes per material is
+             * not. See `hw_patch_writes`. Only the slots that moved are printed, so a quiet
+             * frame costs one line. */
+            {
+                static const char *const patch_names[GL_PATCH_SLOT_COUNT] = {
+                    "env", "env1", "sum", "sample", "unit1", "coverage", "export", "fog",
+                    "stipple"};
+                for (int s = 0; s < GL_PATCH_SLOT_COUNT; s++) {
+                    if (ctx->hw_patch_writes[s] == 0u) continue;
+                    char m[96];
+                    size_t n = 0;
+                    const char *lead = "  patch-writes ";
+                    while (lead[n] && n < 16u) { m[n] = lead[n]; n++; }
+                    for (const char *q = patch_names[s]; *q && n < 40u; q++) m[n++] = *q;
+                    n = gl_msg_hex(m, sizeof(m), n, ctx->hw_patch_writes[s]);
+                    m[n] = 0;
+                    gl_log_line(m);
+                }
+            }
+            gl_klog_val("ps-flush-calls", (uint64_t)ctx->hw_ps_flush_calls);
+            /* **Which textures this frame drew with, one line each.** The question a port asks
+             * when a surface comes out wrong is not what a texture holds but which one a draw
+             * reached for, and this is the only place that says so at a cost a frame can carry -
+             * see `hw_tex_census`. `id 0` is the untextured draws. */
+            for (uint32_t ci = 0; ci < ctx->hw_tex_census_n; ci++) {
+                char m[192];
+                size_t n = 0;
+                const char *lead = "  tex id/id1/draws/w/h/slot/unit/env/blend/base";
+                while (lead[n] && n < 48u) { m[n] = lead[n]; n++; }
+                n = gl_msg_hex(m, sizeof(m), n, ctx->hw_tex_census[ci].id);
+                /* The second unit's texture, which on a shadowed pass is the material and
+                 * therefore the one a wrong surface is asking about - see `hw_tex_census[].id1`.
+                 * 0 when the draw used one unit. */
+                n = gl_msg_hex(m, sizeof(m), n, ctx->hw_tex_census[ci].id1);
+                n = gl_msg_hex(m, sizeof(m), n, ctx->hw_tex_census[ci].draws);
+                n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->hw_tex_census[ci].w);
+                n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->hw_tex_census[ci].h);
+                n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->hw_tex_census[ci].slot);
+                n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->hw_tex_census[ci].unit);
+                n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->hw_tex_census[ci].env);
+                n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->hw_tex_census[ci].blend);
+                n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->hw_tex_census[ci].base);
+                m[n] = 0;
+                gl_log_line(m);
+
+                /* **And what the sampler was handed for it**, beside what the library believes -
+                 * see `hw_tex_census[].desc`. The width and height are decoded out of words 1
+                 * and 2 so a mismatch against the `w/h` above is readable without a calculator;
+                 * `pitch-desc` is word 4's encoded row pitch, which the hardware reads only when
+                 * it exceeds the width, and `pitch-lib` is what the allocator laid the rows out
+                 * at. Those two disagreeing is a sampler walking off the end of one texture and
+                 * into whatever the allocator put next to it. */
+                {
+                    const uint32_t d1 = ctx->hw_tex_census[ci].desc[1];
+                    const uint32_t d2 = ctx->hw_tex_census[ci].desc[2];
+                    const uint32_t d4 = ctx->hw_tex_census[ci].desc[4];
+                    const uint32_t dec_w = ((((d2 & 0x3fffu) << 2) | (d1 >> 30)) & 0xffffu) + 1u;
+                    const uint32_t dec_h = (((d2 >> 14) & 0x3fffu)) + 1u;
+                    /* WORD4: DEPTH holds the low 13 bits of pitch-1, bit 13 the top one. */
+                    const uint32_t dec_p = (d4 & 0x1fffu) | (((d4 >> 13) & 1u) << 13);
+                    char q[160];
+                    size_t k = 0;
+                    const char *l2 = "    desc w/h/pitch-desc/pitch-lib/base/w1/w2/w4/gar";
+                    while (l2[k] && k < 56u) { q[k] = l2[k]; k++; }
+                    k = gl_msg_hex(q, sizeof(q), k, dec_w);
+                    k = gl_msg_hex(q, sizeof(q), k, dec_h);
+                    k = gl_msg_hex(q, sizeof(q), k, dec_p ? dec_p + 1u : 0u);
+                    k = gl_msg_hex(q, sizeof(q), k, ctx->hw_tex_census[ci].pitch);
+                    k = gl_msg_hex(q, sizeof(q), k, ctx->hw_tex_census[ci].desc[0]);
+                    k = gl_msg_hex(q, sizeof(q), k, d1);
+                    k = gl_msg_hex(q, sizeof(q), k, d2);
+                    k = gl_msg_hex(q, sizeof(q), k, d4);
+                    /* The base level's storage. Equal to `base` means the sampler reads the
+                     * texels a capture carries; different means it reads the mip chain. */
+                    k = gl_msg_hex(q, sizeof(q), k, ctx->hw_tex_census[ci].garlic);
+                    q[k] = 0;
+                    gl_log_line(q);
+
+                    /* The sampler half - `s[12:15]` beside the image half's `s[4:11]`. */
+                    {
+                        char t[128];
+                        size_t j = 0;
+                        const char *l3 = "    samp s12/s13/s14/s15";
+                        while (l3[j] && j < 32u) { t[j] = l3[j]; j++; }
+                        for (int sw = 0; sw < 4; sw++) {
+                            j = gl_msg_hex(t, sizeof(t), j, ctx->hw_tex_census[ci].samp[sw]);
+                        }
+                        t[j] = 0;
+                        gl_log_line(t);
+                    }
+                }
+            }
+            if (ctx->hw_tex_census_over != 0u) {
+                gl_klog_val("tex-census-overflowed-draws", (uint64_t)ctx->hw_tex_census_over);
+            }
+            /* **A descriptor slot that served two textures inside one submit**, which is the one
+             * way a draw can sample a texture that is not the one it bound - see `hw_slot_tex`.
+             * Printed only when it happens, with the slot and both textures, because a count on
+             * its own says a thing went wrong and not what. Silence here is the ring holding. */
+            /* Draws that ran another draw's pixel shader because the six-slot variant ring was
+             * full - see `hw_ps_ring_stale`. Printed only when it happens. */
+            if (ctx->hw_ps_ring_stale != 0u) {
+                gl_klog_val("ps-ring-stale-draws", (uint64_t)ctx->hw_ps_ring_stale);
+            }
+            /* How hard the descriptor ring was driven - see `hw_desc_slot_high`. */
+            gl_klog_val("desc-slot-high", (uint64_t)ctx->hw_desc_slot_high);
+            gl_klog_val("desc-ring-full", (uint64_t)ctx->hw_desc_ring_full);
+            if (ctx->hw_slot_collisions != 0u) {
+                gl_klog_val("desc-slot-collisions", (uint64_t)ctx->hw_slot_collisions);
+                char m[128];
+                size_t n = 0;
+                const char *lead = "  desc-slot-collision slot/had/got";
+                while (lead[n] && n < 40u) { m[n] = lead[n]; n++; }
+                n = gl_msg_hex(m, sizeof(m), n, ctx->hw_slot_first_slot);
+                n = gl_msg_hex(m, sizeof(m), n, ctx->hw_slot_first_had);
+                n = gl_msg_hex(m, sizeof(m), n, ctx->hw_slot_first_got);
+                m[n] = 0;
+                gl_log_line(m);
+            }
         }
+        ctx->hw_slot_collisions = 0u;
+        ctx->hw_ps_ring_stale = 0u;
+        ctx->hw_desc_slot_high = 0u;
+        ctx->hw_desc_ring_full = 0u;
+        /* Cleared whether or not it was printed, like the counters above it. */
+        ctx->hw_tex_census_n = 0u;
+        ctx->hw_tex_census_over = 0u;
         ctx->hw_dcb_ns = 0u;
         ctx->hw_flush_ns = 0u;
         ctx->hw_draw_ns = 0u;
         ctx->hw_draw_calls = 0u;
         ctx->hw_patch_ns = 0u;
+        ctx->hw_tnl_ns = 0u;
+        ctx->hw_vbo_ns = 0u;
+        for (int s = 0; s < GL_PATCH_SLOT_COUNT; s++) ctx->hw_patch_writes[s] = 0u;
+        ctx->hw_ps_flush_calls = 0u;
         /* **Every site with a count, not the largest one.** A single winner would answer "what
            to fix first" and leave "is that all of it" open; the full breakdown sums to the
            total above, so a reader can see at a glance whether one site is the frame or merely
@@ -1919,15 +2098,57 @@ void glGetCanaryEx(GLuint *vs_canary, GLuint *ps_canary, GLuint *vs_s0, GLuint *
  * actually change - an unconditional flush would split a frame on every glPopAttrib, and on the
  * glDisable that follows a test which was never enabled.
  */
+/*
+ * **Where a pixel-shader slot's words are mirrored, so a patch does not read them back.**
+ *
+ * `ctx->gpu_payload` is ONION and `gl_ps_flush_shaders` evicts every line it writes, so a
+ * `memcmp` against a slot is a cold miss across the slow bus - nine of them per draw, which is
+ * what `patch-us` was measuring. See `hw_ps_untex_shadow`. Returns the mirror of `dst`, or NULL
+ * for a pointer outside the two shader regions, which is not something a patch site passes.
+ */
+static uint32_t *gl_ps_shadow_of(gl_context_t *ctx, const uint32_t *dst) {
+    const size_t off = (size_t)((const char *)dst - (const char *)ctx->gpu_payload);
+    if (off >= OOPS_GL_PS_UNTEX_OFFSET &&
+        off < OOPS_GL_PS_UNTEX_OFFSET + OOPS_GL_PS_UNTEX_WORDS * 4u) {
+        return ctx->hw_ps_untex_shadow + (off - OOPS_GL_PS_UNTEX_OFFSET) / 4u;
+    }
+    if (off >= OOPS_GL_PS_TEX_OFFSET && off < OOPS_GL_PS_TEX_OFFSET + OOPS_GL_PS_TEX_WORDS * 4u) {
+        return ctx->hw_ps_tex_shadow + (off - OOPS_GL_PS_TEX_OFFSET) / 4u;
+    }
+    return (uint32_t *)0;
+}
+
+/* Whether the payload already holds these words, answered from the mirror. A pointer the mirror
+ * does not cover falls back to reading the payload, which is correct and merely slow. */
+GLboolean gl_ps_slot_same(gl_context_t *ctx, const uint32_t *dst, const uint32_t *words,
+                          size_t n) {
+    const uint32_t *const sh = gl_ps_shadow_of(ctx, dst);
+    return (GLboolean)(memcmp(sh ? sh : dst, words, n * sizeof(uint32_t)) == 0);
+}
+
+/* Called with every write to a slot, so the mirror and the payload say the same thing. */
+void gl_ps_slot_wrote(gl_context_t *ctx, const uint32_t *dst, const uint32_t *words, size_t n) {
+    uint32_t *const sh = gl_ps_shadow_of(ctx, dst);
+    if (sh) memcpy(sh, words, n * sizeof(uint32_t));
+}
+
+/* The mirrors seeded from the masters, once, after they are built. The one read of the payload
+ * that this whole mechanism exists to avoid doing per draw. */
+void gl_ps_shadow_seed(gl_context_t *ctx) {
+    if (!ctx || !ctx->gpu_payload) return;
+    memcpy(ctx->hw_ps_untex_shadow, (const char *)ctx->gpu_payload + OOPS_GL_PS_UNTEX_OFFSET,
+           sizeof(ctx->hw_ps_untex_shadow));
+    memcpy(ctx->hw_ps_tex_shadow, (const char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET,
+           sizeof(ctx->hw_ps_tex_shadow));
+}
+
 void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst,
                              const uint32_t *words, size_t n) {
 #ifndef OOPS_HOST_BUILD
     if (!ctx->use_hardware || !ctx->hw_frame_active) return;
-    GLboolean changed = GL_FALSE;
-    for (size_t i = 0; i < n && !changed; i++) {
-        if (dst[i] != words[i]) changed = GL_TRUE;
-    }
-    if (!changed) return;
+    /* Through the mirror, not through `dst`: this ran a word-by-word read of GPU memory on every
+     * patch that reached it, which is the cost `gl_ps_slot_same` exists to remove. */
+    if (gl_ps_slot_same(ctx, dst, words, n)) return;
 
     /* **The textured shader is no longer edited where the GPU reads it.** Its copy at
      * OOPS_GL_PS_TEX_OFFSET is a master that no draw points at; draws bind a variant in the
@@ -1954,6 +2175,9 @@ void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst,
  * the command processor reads what has left the core. The untextured shader sits just below the
  * textured one, so one range covers both. */
 void gl_ps_flush_shaders(gl_context_t *ctx) {
+    /* Counted whether or not the flush compiles, so a host reading of the frame's patch
+     * behaviour matches the console's. Sixty cache lines a call - see `hw_patch_writes`. */
+    if (ctx) ctx->hw_ps_flush_calls++;
 #if !defined(OOPS_HOST_BUILD) && defined(__x86_64__)
     /* Two ranges since 2026-09-20: the textured shader moved to 0x1000 to have room to grow, so
      * one range over both would flush a kilobyte of payload that neither occupies. **Three since
@@ -2222,9 +2446,12 @@ static void gl_tex_env_as_combine(GLenum mode, GLenum base, gl_combine_t *cb) {
  * words first (gl_ps_sync_payload_edit). */
 static void gl_ps_env_write(gl_context_t *ctx, size_t slot, const uint32_t *words) {
     uint32_t *const ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
-    if (memcmp(ps_tex + slot, words, GL_PS_COMBINE_WORDS * sizeof(uint32_t)) == 0) return;
+    if (gl_ps_slot_same(ctx, ps_tex + slot, words, GL_PS_COMBINE_WORDS)) return;
+    ctx->hw_patch_writes[slot == GL_PS_COMBINE_SLOT_TEX ? GL_PATCH_SLOT_ENV
+                                                        : GL_PATCH_SLOT_ENV1]++;
     gl_ps_sync_payload_edit(ctx, ps_tex + slot, words, GL_PS_COMBINE_WORDS);
     for (size_t i = 0; i < GL_PS_COMBINE_WORDS; i++) ps_tex[slot + i] = words[i];
+    gl_ps_slot_wrote(ctx, ps_tex + slot, words, GL_PS_COMBINE_WORDS);
     gl_ps_flush_shaders(ctx);
 }
 
@@ -2397,10 +2624,11 @@ void gl_ps_patch_fog(gl_context_t *ctx) {
 
     uint32_t *ps_untex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_UNTEX_OFFSET);
     uint32_t *ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
-    if (memcmp(ps_untex + GL_PS_FOG_SLOT_UNTEX, words, sizeof(words)) == 0 &&
-        memcmp(ps_tex + GL_PS_FOG_SLOT_TEX, words, sizeof(words)) == 0) {
+    if (gl_ps_slot_same(ctx, ps_untex + GL_PS_FOG_SLOT_UNTEX, words, GL_PS_FOG_WORDS) &&
+        gl_ps_slot_same(ctx, ps_tex + GL_PS_FOG_SLOT_TEX, words, GL_PS_FOG_WORDS)) {
         return;
     }
+    ctx->hw_patch_writes[GL_PATCH_SLOT_FOG]++;
     /* A built frame still points at these words - see gl_ps_sync_payload_edit. */
     gl_ps_sync_payload_edit(ctx, ps_untex + GL_PS_FOG_SLOT_UNTEX, words, GL_PS_FOG_WORDS);
     gl_ps_sync_payload_edit(ctx, ps_tex + GL_PS_FOG_SLOT_TEX, words, GL_PS_FOG_WORDS);
@@ -2408,6 +2636,8 @@ void gl_ps_patch_fog(gl_context_t *ctx) {
         ps_untex[GL_PS_FOG_SLOT_UNTEX + i] = words[i];
         ps_tex[GL_PS_FOG_SLOT_TEX + i] = words[i];
     }
+    gl_ps_slot_wrote(ctx, ps_untex + GL_PS_FOG_SLOT_UNTEX, words, GL_PS_FOG_WORDS);
+    gl_ps_slot_wrote(ctx, ps_tex + GL_PS_FOG_SLOT_TEX, words, GL_PS_FOG_WORDS);
     gl_ps_flush_shaders(ctx);
 }
 
@@ -2431,10 +2661,12 @@ void gl_ps_patch_sum(gl_context_t *ctx, GLboolean on) {
         memcpy(words, sum, sizeof(words));
     }
     uint32_t *ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
-    if (memcmp(ps_tex + GL_PS_SUM_SLOT_TEX, words, sizeof(words)) == 0) return;
+    if (gl_ps_slot_same(ctx, ps_tex + GL_PS_SUM_SLOT_TEX, words, GL_PS_SUM_WORDS)) return;
+    ctx->hw_patch_writes[GL_PATCH_SLOT_SUM]++;
     /* A built frame still points at these words - see gl_ps_sync_payload_edit. */
     gl_ps_sync_payload_edit(ctx, ps_tex + GL_PS_SUM_SLOT_TEX, words, GL_PS_SUM_WORDS);
     memcpy(ps_tex + GL_PS_SUM_SLOT_TEX, words, sizeof(words));
+    gl_ps_slot_wrote(ctx, ps_tex + GL_PS_SUM_SLOT_TEX, words, GL_PS_SUM_WORDS);
     gl_ps_flush_shaders(ctx);
 }
 
@@ -2576,16 +2808,19 @@ void gl_ps_patch_coverage_where(gl_context_t *ctx, gl_coverage_kind_t kind) {
     uint32_t *const ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
     uint32_t *const slot_u = ps_untex + GL_PS_COVERAGE_SLOT_UNTEX;
     uint32_t *const slot_t = ps_tex + GL_PS_COVERAGE_SLOT_TEX;
-    const GLboolean u_same = (GLboolean)(memcmp(slot_u, untex_words, sizeof(untex_words)) == 0);
-    const GLboolean t_same = (GLboolean)(memcmp(slot_t, tex_words, sizeof(tex_words)) == 0);
+    const GLboolean u_same = gl_ps_slot_same(ctx, slot_u, untex_words, GL_PS_COVERAGE_WORDS);
+    const GLboolean t_same = gl_ps_slot_same(ctx, slot_t, tex_words, GL_PS_COVERAGE_WORDS);
     if (u_same && t_same) return;
+    ctx->hw_patch_writes[GL_PATCH_SLOT_COVERAGE]++;
     if (!u_same) {
         gl_ps_sync_payload_edit(ctx, slot_u, untex_words, GL_PS_COVERAGE_WORDS);
         memcpy(slot_u, untex_words, sizeof(untex_words));
+        gl_ps_slot_wrote(ctx, slot_u, untex_words, GL_PS_COVERAGE_WORDS);
     }
     if (!t_same) {
         gl_ps_sync_payload_edit(ctx, slot_t, tex_words, GL_PS_COVERAGE_WORDS);
         memcpy(slot_t, tex_words, sizeof(tex_words));
+        gl_ps_slot_wrote(ctx, slot_t, tex_words, GL_PS_COVERAGE_WORDS);
     }
     gl_ps_flush_shaders(ctx);
 }
@@ -2679,10 +2914,12 @@ void gl_ps_patch_sample(gl_context_t *ctx, gl_ps_sample_kind_t kind, GLenum dept
     }
     uint32_t *const ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
     uint32_t *const slot = ps_tex + GL_PS_SAMPLE_SLOT_TEX;
-    if (memcmp(slot, words, sizeof(words)) == 0) return;
+    if (gl_ps_slot_same(ctx, slot, words, GL_PS_SAMPLE_WORDS)) return;
+    ctx->hw_patch_writes[GL_PATCH_SLOT_SAMPLE]++;
     /* A built frame still points at these words - see gl_ps_sync_payload_edit. */
     gl_ps_sync_payload_edit(ctx, slot, words, GL_PS_SAMPLE_WORDS);
     memcpy(slot, words, sizeof(words));
+    gl_ps_slot_wrote(ctx, slot, words, GL_PS_SAMPLE_WORDS);
     gl_ps_flush_shaders(ctx);
 }
 
@@ -2742,10 +2979,12 @@ void gl_ps_patch_unit1(gl_context_t *ctx, GLboolean on) {
     }
     uint32_t *const ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
     uint32_t *const slot = ps_tex + GL_PS_UNIT1_SLOT_TEX;
-    if (memcmp(slot, words, sizeof(words)) == 0) return;
+    if (gl_ps_slot_same(ctx, slot, words, GL_PS_UNIT1_WORDS)) return;
+    ctx->hw_patch_writes[GL_PATCH_SLOT_UNIT1]++;
     /* A built frame still points at these words - see gl_ps_sync_payload_edit. */
     gl_ps_sync_payload_edit(ctx, slot, words, GL_PS_UNIT1_WORDS);
     memcpy(slot, words, sizeof(words));
+    gl_ps_slot_wrote(ctx, slot, words, GL_PS_UNIT1_WORDS);
     gl_ps_flush_shaders(ctx);
 }
 
@@ -2825,10 +3064,12 @@ void gl_ps_patch_stipple(gl_context_t *ctx, GLboolean on) {
     uint32_t *const slots[2] = {ps_tex + GL_PS_STIPPLE_SLOT, ps_untex + GL_PS_STIPPLE_SLOT};
     GLboolean wrote = GL_FALSE;
     for (int s = 0; s < 2; s++) {
-        if (memcmp(slots[s], words, sizeof(words)) == 0) continue;
+        if (gl_ps_slot_same(ctx, slots[s], words, GL_PS_STIPPLE_WORDS)) continue;
+        ctx->hw_patch_writes[GL_PATCH_SLOT_STIPPLE]++;
         /* A built frame still points at these words - see gl_ps_sync_payload_edit. */
         gl_ps_sync_payload_edit(ctx, slots[s], words, GL_PS_STIPPLE_WORDS);
         memcpy(slots[s], words, sizeof(words));
+        gl_ps_slot_wrote(ctx, slots[s], words, GL_PS_STIPPLE_WORDS);
         wrote = GL_TRUE;
     }
     if (wrote) gl_ps_flush_shaders(ctx);
@@ -2909,10 +3150,12 @@ void gl_ps_patch_export(gl_context_t *ctx, GLboolean both) {
     uint32_t *const slots[2] = {ps_tex + GL_PS_EXPORT_TEX, ps_untex + GL_PS_EXPORT_UNTEX};
     GLboolean wrote = GL_FALSE;
     for (int s = 0; s < 2; s++) {
-        if (memcmp(slots[s], words, GL_PS_EXPORT_WORDS * sizeof(uint32_t)) == 0) continue;
+        if (gl_ps_slot_same(ctx, slots[s], words, GL_PS_EXPORT_WORDS)) continue;
+        ctx->hw_patch_writes[GL_PATCH_SLOT_EXPORT]++;
         /* A built frame still points at these words - see gl_ps_sync_payload_edit. */
         gl_ps_sync_payload_edit(ctx, slots[s], words, GL_PS_EXPORT_WORDS);
         memcpy(slots[s], words, GL_PS_EXPORT_WORDS * sizeof(uint32_t));
+        gl_ps_slot_wrote(ctx, slots[s], words, GL_PS_EXPORT_WORDS);
         wrote = GL_TRUE;
     }
     if (wrote) gl_ps_flush_shaders(ctx);
