@@ -526,36 +526,75 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
      * - and mesa-demos' `CH11-toyball.frag` and `convolution.frag`, at 48 and 64, were refused
      * for wanting more of a 64-float block than 32 scalar registers could hold at once.
      *
-     * So the window slides. Each pass loads 32 floats of the block, waits, moves every uniform
-     * that fits entirely inside it, and the next pass reloads the same registers from further
-     * along. The cost is one extra `s_waitcnt` per pass; what it buys is that the scalar file
-     * stops bounding the pool at all. **A uniform is never split across passes**: the pass starts
-     * at the uniform's own offset rounded down to 16, and no uniform is wider than 16 floats, so
-     * `(offset - base) + floats <= 15 + 16 < 32` always. That is why the bases are 16-aligned
-     * and the window is 32 rather than both being 16.
+     * So the window slides. Each pass loads 32 floats of the block, waits, and moves the floats
+     * of that range into the registers already reserved for them; the next pass reloads the same
+     * scalar registers from further along. The cost is one extra `s_waitcnt` per pass; what it
+     * buys is that the scalar file stops bounding the pool at all.
+     *
+     * **Which is why the two halves below are separate loops.** Every uniform is given its
+     * registers first, and only then is the block walked and copied a float at a time. Placing
+     * whole uniforms inside a pass instead would cap one at the window's width, and `vec4
+     * KernelValue[9]` is 36 floats - it does not fit a 32-float window and does not need to,
+     * because nothing about a copy requires the whole of a uniform to arrive at once.
      *
      * What bounds a shader now is VGPRs - one per uniform float, against the 136 the stage table
      * reserves - which is the honest limit and the one the allocator already reports.
      */
-    while (ok) {
-        /* The lowest 16-aligned chunk holding a uniform nothing has emitted yet. A uniform is
-         * "emitted" when the generator knows its name, which is exactly what declaring it did -
-         * so there is no second bookkeeping array to fall out of step with the first. */
-        int base = -1;
-        for (int i = 0; i < p->uniform_count; i++) {
-            const gl_uniform_t *u = &p->uniforms[i];
-            const size_t ulen = lit_len(u->name);
-            glsl_value_t seen;
-            if (!unit_declares_uniform(fs, u->name, ulen)) continue;
-            if (gl_type_is_sampler(u->type)) continue;
-            if (glsl_gen_lookup(gen, u->name, ulen, &seen)) continue;
-            if (base < 0 || (u->offset & ~15) < base) base = u->offset & ~15;
-        }
-        if (base < 0) break; /* every named uniform has its register */
+    struct { int at; int floats; uint32_t home; } resident[OOPS_GL_MAX_PROGRAM_UNIFORMS];
+    int resident_count = 0;
+    int pool_lo = OOPS_GL_GL2_UNIFORM_FLOATS, pool_hi = 0;
 
+    for (int i = 0; ok && i < p->uniform_count; i++) {
+        const gl_uniform_t *u = &p->uniforms[i];
+        const size_t ulen = lit_len(u->name);
+        if (!unit_declares_uniform(fs, u->name, ulen)) continue;
+        if (gl_type_is_sampler(u->type)) continue; /* its descriptors are in the scalar file */
+        const glsl_type_t t = type_from_gl(u->type);
+        if (t == GLSL_TYPE_ERROR) {
+            /* A type `type_from_gl` does not carry. Named rather than silently skipped, because
+             * a skipped uniform reads as zero and draws. */
+            oops_snprintf(log, log_size,
+                          "uniform '%s' is not a float, a float vector or a matrix, and the "
+                          "compiled path carries nothing else yet", u->name);
+            ok = GL_FALSE;
+            break;
+        }
+        const int size = (u->size > 0) ? u->size : 1;
+        /* **An array of uniforms is a run of registers, which is what `gl_TexCoord[]` already
+         * is.** The elements lie end to end and `gen_index_of` slices the run by a constant
+         * index - so a `uniform vec2 Offset[9]` read inside an unrolled loop resolves element by
+         * element, which is exactly how mesa-demos' `convolution.frag` writes it. An index that
+         * is *not* constant is still refused, there and here alike: there is no addressable
+         * memory behind a run of VGPRs. */
+        const glsl_value_t home =
+            (size > 1) ? glsl_gen_declare_input_array(gen, u->name, ulen, t, size)
+                       : glsl_gen_declare_input(gen, u->name, ulen, t);
+        if (home.count == 0) {
+            log_say(log, log_size, gen->error ? gen->error : "a uniform has no register", 0, 0);
+            ok = GL_FALSE;
+            break;
+        }
+        if (resident_count >= OOPS_GL_MAX_PROGRAM_UNIFORMS) {
+            log_say(log, log_size, "too many uniforms in one shader", 0, 0);
+            ok = GL_FALSE;
+            break;
+        }
+        resident[resident_count].at = u->offset;
+        /* The array form hands back the whole run, the scalar form one element - and `floats`
+         * is per element either way, so this is the one place the two are reconciled. */
+        resident[resident_count].floats = u->floats * size;
+        resident[resident_count].home = home.base;
+        resident_count++;
+        if (u->offset < pool_lo) pool_lo = u->offset;
+        if (u->offset + u->floats * size > pool_hi) pool_hi = u->offset + u->floats * size;
+    }
+
+    /* The block, a window at a time. Aligned down to sixteen because that is the load's own
+     * granularity and the destination has to stay four-aligned. */
+    for (int base = pool_lo & ~15; ok && base < pool_hi; base += GL_PS_UNIFORM_WINDOW_FLOATS) {
         for (int off = 0; off < GL_PS_UNIFORM_WINDOW_FLOATS; off += 16) {
-            /* Only the chunks that are inside the block. A uniform never reaches past its end,
-             * so a chunk left out is one no move below reads. */
+            /* Only the chunks that are inside the block. No uniform reaches past its end, so a
+             * chunk left out is one no move below reads. */
             if (base + off >= OOPS_GL_GL2_UNIFORM_FLOATS) break;
             glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX16,
                              GL_PS_UNIFORM_SGPR_BASE + (uint32_t)off, 0u,
@@ -563,58 +602,16 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         }
         glsl_emit_s_waitcnt_lgkm(&code);
 
-        /* **A pass that places nothing would spin**, because the same uniform would choose the
-         * same base next time round. It cannot happen - the base is the uniform's own offset
-         * rounded down to sixteen and nothing is wider than sixteen floats, so the first one is
-         * always inside the window - but "cannot happen" and "loops forever in the compiler"
-         * are a bad pair to leave together, and the negative control for the sliding window
-         * (pinning the base to 0) hangs rather than failing without this. */
-        int placed = 0;
-        for (int i = 0; ok && i < p->uniform_count; i++) {
-            const gl_uniform_t *u = &p->uniforms[i];
-            const size_t ulen = lit_len(u->name);
-            glsl_value_t seen;
-            if (!unit_declares_uniform(fs, u->name, ulen)) continue;
-            if (gl_type_is_sampler(u->type)) continue; /* descriptors are in the scalar file */
-            if (glsl_gen_lookup(gen, u->name, ulen, &seen)) continue;
-            const glsl_type_t t = type_from_gl(u->type);
-            if (t == GLSL_TYPE_ERROR || u->size != 1) {
-                /* An array, which would need an index this back end cannot generate, or a type
-                 * `type_from_gl` does not carry. Named rather than silently skipped, because a
-                 * skipped uniform reads as zero and draws. */
-                oops_snprintf(log, log_size,
-                              "uniform '%s' is not a float, a float vector or a matrix, and the "
-                              "compiled "
-                              "path carries nothing else yet", u->name);
-                ok = GL_FALSE;
-                break;
+        /* **Relative to this pass's base**, because `s72` holds float `base` of the block and
+         * not float 0. Reading the pool's absolute offset here is what would make a windowed
+         * load return a different uniform's value rather than an error. */
+        for (int r = 0; r < resident_count; r++) {
+            for (int c = 0; c < resident[r].floats; c++) {
+                const int at = resident[r].at + c;
+                if (at < base || at >= base + GL_PS_UNIFORM_WINDOW_FLOATS) continue;
+                glsl_emit_vop1(&code, GLSL_VOP1_MOV_B32, resident[r].home + (uint32_t)c,
+                               glsl_sgpr(GL_PS_UNIFORM_SGPR_BASE + (uint32_t)(at - base)));
             }
-            const int n = u->floats * ((u->size > 0) ? u->size : 1);
-            if (u->offset < base || u->offset + n > base + GL_PS_UNIFORM_WINDOW_FLOATS) {
-                continue; /* a later pass holds it */
-            }
-            const glsl_value_t home = glsl_gen_declare_input(gen, u->name, ulen, t);
-            if (home.count == 0) {
-                log_say(log, log_size, gen->error ? gen->error : "a uniform has no register", 0,
-                        0);
-                ok = GL_FALSE;
-                break;
-            }
-            /* **Relative to this pass's base**, because `s72` holds float `base` of the block
-             * and not float 0. Reading the pool's absolute offset here is what would make a
-             * windowed load return a different uniform's value rather than an error. */
-            for (int c = 0; c < home.count; c++) {
-                glsl_emit_vop1(&code, GLSL_VOP1_MOV_B32, home.base + (uint32_t)c,
-                               glsl_sgpr(GL_PS_UNIFORM_SGPR_BASE +
-                                         (uint32_t)(u->offset + c - base)));
-            }
-            placed++;
-        }
-        if (ok && placed == 0) {
-            oops_snprintf(log, log_size,
-                          "a uniform at float %d of the pool does not fit a %d-float window",
-                          base, GL_PS_UNIFORM_WINDOW_FLOATS);
-            ok = GL_FALSE;
         }
     }
 

@@ -958,7 +958,7 @@ where the GL one was expected, so every `texture2D` returned opaque black.
 | The object model, uniforms, generic attributes | **done** - `gl2-probe`'s first ten checks |
 | Reference execution | **done** - the interpreter. Every check in `gl2-probe` that ends in a pixel measures it |
 | Instruction encoding | **done for what the fragment stage needs** - `src/gl/glsl_emit.c`. VOP1/VOP2/VOPC, the interpolators, the export, the lane kill, and the five scalar-load widths with their wait; every field verified against clang, table in `tools/shader/gl2-fragment.s` |
-| Instruction selection from the AST | **started** - `src/gl/glsl_gen.c`. Arithmetic including `/`, swizzle reads and writes, plain and compound assignment, `++` and `--` both ways round, constructors, declarations, blocks, `if`, every loop shape, user-defined functions, `struct` in every position a value takes, `gl_TexCoord[]`, and the built-in library - the common, exponential and geometric functions of GLSL section 8. Everything else sets `error` and emits nothing, because an instruction whose encoding has not been read out of an assembler is not guessed |
+| Instruction selection from the AST | **started** - `src/gl/glsl_gen.c`. Arithmetic including `/`, swizzle reads and writes, plain and compound assignment, `++` and `--` both ways round, constructors, declarations, blocks, `if`, every loop shape, user-defined functions, `struct` in every position a value takes, `gl_TexCoord[]`, **uniform arrays** and the built-in library - the common, exponential and geometric functions of GLSL section 8. A counted `for` unrolls whether or not it declares its own counter, and a `const int` reads as the constant it is, so `const int N = 9; int i; for (i = 0; i < N; ++i) a[i]` folds to nine indices - the three together are what `convolution.frag` needed. A counter declared outside the loop is given its final value afterwards, because unlike the loop's own it is still readable there. Everything else sets `error` and emits nothing, because an instruction whose encoding has not been read out of an assembler is not guessed |
 | A whole compiled pixel shader | **done** - `src/gl/glsl_ps.c`: the uniform block loaded into the scalar file, the varyings interpolated into registers of their own, the body, the colour moved into v4..v7 and exported. Compiled at link, copied into the payload at `OOPS_GL_PS_GL2_OFFSET` when a draw needs it, and refused if it would need more than the 136 VGPRs the stage table reserves |
 | **Does a generated pixel shader run?** | **yes, measured** - `REQ-20260921T1615Z-4e77`, run 23. `166-agc/compiled-ps` bound shaders this compiler generated, with no hand-written preamble and no `m0` setup; all three arms retired, the constant one exported the colour asked for and the interpolated one returned `0x40 0x80 0xbf`. Arm 3, which read parameter 3, returned a pixel the resolution does not account for - `REQ-20260921T1810Z-3d92` |
 | The parameter interface | a varying is a parameter export; `REQ-...-7c40` measured a third retiring and drawing, `REQ-...-9c3e` its values arriving byte for byte, and four are in daily use. A program whose varyings need more than sixteen floats is refused at compile with that number, rather than reading a parameter the vertex stage never exported (`REQ-20260921T1210Z-4f16` is the fifth) |
@@ -987,7 +987,7 @@ compile and still not become gfx1030 instructions, and for these ports that was 
 | craft | 8/8 | 4/4 |
 | SuperTux | 2/4 | 1/1 |
 | SuperTuxKart | 10/100 | 4/4 |
-| mesa-demos | 48/51 | 21/23 |
+| mesa-demos | 48/51 | 22/23 |
 | armagetron-advanced, extreme-tux-racer, neverball, neverputt, sm64, spaghetti-kart | - | - |
 
 **Six of the eleven ports ship no GLSL at all**, which is the first thing the wider survey says:
@@ -996,21 +996,28 @@ for. Their gates are GL 1.x, and the table above this one is where their answers
 
 SuperTux's two refused are `#version 330`, which it ships beside its ES pair and which is refused
 by number; SuperTuxKart is a GL 3.3 engine and ninety of its hundred are 3.30 or later, for the
-same reason. The two mesa-demos shaders that do not generate are a loop whose known trip count
-would be truncated rather than bounded, and a `uniform vec2 Offset[9]` - **a uniform that is an
-array**, which needs an indexed read of the block that this back end does not generate. Both were
-three until 2026-09-25, when the scalar window started sliding and `CH11-toyball.frag`'s 48
-floats of uniforms stopped being too many.
+same reason. **The one mesa-demos shader that does not generate is `infinite-loop.glsl`**, whose
+known trip count would be truncated rather than bounded - which is a deliberate refusal and the
+file is named for it. It was three that morning: `CH11-toyball.frag` wanted 48 floats of uniforms
+against a 32-float scalar window, and `convolution.frag` wanted a uniform array indexed by a
+counter declared above its loop, bounded by a `const int`.
 
-**So every fragment shader this front end compiles, in every port corpus, now generates for the
-console** - and the three that do not are a resource ceiling and a deliberate refusal, not a
-missing feature. Everything in this section's table that says "done" was put there because a
-shader asked for it: `#version 100` and the precision qualifiers because SuperTux's shaders are
-ES, constant-expression array lengths and function overloading because mesa-demos' are, four
-sampler sets and matrix uniforms because SuperTux's fragment shader wanted three textures and a
-`mat3`, and the integer and boolean *vector* uniforms because SuperTuxKart's `coloredquad.frag`
-is one `uniform ivec4` and a divide - the last shader in any corpus that compiled and then would
-not generate.
+**So the only shader in any port corpus that this front end compiles and the generator will not
+turn into gfx1030 instructions is one that asks for an infinite loop.**
+
+Everything in this section's table that says "done" was put there because a shader asked for it:
+`#version 100` and the precision qualifiers because SuperTux's shaders are ES, constant-expression
+array lengths and function overloading because mesa-demos' are, four sampler sets and matrix
+uniforms because SuperTux's fragment shader wanted three textures and a `mat3`, the integer and
+boolean *vector* uniforms because SuperTuxKart's `coloredquad.frag` is one `uniform ivec4` and a
+divide, and the sliding scalar window, uniform arrays, `for (i = 0; ...)` over a counter declared
+above the loop, and a `const int` the generator reads as a constant because mesa-demos'
+`convolution.frag` is all four at once.
+
+**Each of those refusals named the next one.** `convolution.frag` was refused for a uniform it
+could not carry; once it could, for a loop it could not unroll; once it could, for a bound it
+could not read. That is what a survey is for, and it is a better order to work in than a list
+written from the specification - every step of it was the thing actually standing in the way.
 
 The survey has been wrong three times, each time about the corpus rather than the compiler -
 reading a shader's stage off its file extension, pairing every fragment shader with one fixed

@@ -6448,6 +6448,145 @@ static void test_gl2_uniforms_wider_than_the_scalar_window(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * **mesa-demos' `convolution.frag`, which is three gaps in one shader.**
+ *
+ * It was the last fragment shader in any port corpus that this front end compiled and the
+ * generator refused, and each time one piece went in the refusal moved rather than went away -
+ * which is the useful kind of failure, because it names the next piece.
+ *
+ *   `uniform vec4 KernelValue[9]`  - a uniform that is an array. It is a run of registers, the
+ *                                    same shape `gl_TexCoord[]` already had.
+ *   `int i; for (i = 0; ...)`      - a counted `for` whose counter is declared on the line above.
+ *                                    Only a loop that declared its own counter was unrolled, so
+ *                                    this one branched and `i` became a runtime value.
+ *   `const int KernelSize = 9`     - a `const` the generator could not read as a constant, so
+ *                                    the loop's bound was opaque even once the shape was.
+ *
+ * With any one of them missing, `KernelValue[i]` is an index that is not known at compile time
+ * and a run of registers cannot be indexed by one. So the three are tested together here in the
+ * shape that needed them, and separately below where the shape allows it.
+ */
+static void test_gl2_uniform_arrays_indexed_by_an_unrolled_counter(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    const GLuint prog = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "const int N = 4;\n"
+        "uniform vec4 K[N];\n"
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  int i;\n"
+        "  vec4 sum = vec4(0.0);\n"
+        "  for (i = 0; i < N; ++i) { sum += K[i]; }\n"
+        "  gl_FragColor = sum;\n"
+        "}\n");
+    ASSERT_TRUE(prog != 0);
+    glUseProgram(prog);
+
+    /* **Each channel comes from exactly one element**, so an index off by one does not shade the
+     * answer - it moves a channel to zero and another to double. */
+    const GLfloat k[16] = {0.5f,  0.0f,  0.0f,   0.0f,
+                           0.0f,  0.25f, 0.0f,   0.0f,
+                           0.0f,  0.0f,  0.125f, 0.0f,
+                           0.0f,  0.0f,  0.0f,   1.0f};
+    glUniform4fv(glGetUniformLocation(prog, "K"), 4, k);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    compile_and_run_prog(ctx, prog, attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.25f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.125f, 1e-3f);
+    ASSERT_NEAR(o[3], 1.0f, 1e-3f);
+
+    /* **A counter declared outside the loop is still there afterwards, holding where it
+     * stopped.** The unrolled copies never wrote it - they wrote a shadow that went out of
+     * scope - so this reads the store the unroller leaves behind, and `float(i)` reads the
+     * register rather than the folded constant. Three trips, so `i` is 3 and the channel is
+     * 0.3; without the store it is whatever an uninitialised register held. */
+    const GLuint prog2 = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  int i;\n"
+        "  float t = 0.0;\n"
+        "  for (i = 0; i < 3; ++i) { t += 0.25; }\n"
+        "  gl_FragColor = vec4(t, float(i) * 0.1, 0.0, 1.0);\n"
+        "}\n");
+    ASSERT_TRUE(prog2 != 0);
+    glUseProgram(prog2);
+    compile_and_run_prog(ctx, prog2, attr, o);
+    ASSERT_NEAR(o[0], 0.75f, 1e-3f); /* three trips ran */
+    ASSERT_NEAR(o[1], 0.3f, 1e-3f);  /* and `i` says so afterwards */
+
+    /* **A `const int` as a local array's length and as a loop's bound**, which is the third
+     * piece on its own: the generator reads the name as a constant now, so `float a[W]` has a
+     * length and `i < W` has a count. */
+    const GLuint prog3 = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "const int W = 3;\n"
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  float a[W];\n"
+        "  int i;\n"
+        "  for (i = 0; i < W; ++i) { a[i] = float(i) * 0.25; }\n"
+        "  gl_FragColor = vec4(a[2], a[1], a[0], 1.0);\n"
+        "}\n");
+    ASSERT_TRUE(prog3 != 0);
+    glUseProgram(prog3);
+    compile_and_run_prog(ctx, prog3, attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.25f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.0f, 1e-3f);
+
+    glUseProgram(0);
+    glContextDestroy(ctx);
+}
+
+/* The same three through the software reference, which runs the loop rather than unrolling it
+ * and so reaches none of the machinery above - see the note on the two harnesses. What it shares
+ * with the compiled path is the *answer*, and that is what this measures. */
+static void test_gl2_uniform_arrays_run(void) {
+    gl2_target_t t = gl2_target();
+    static const char *const VS =
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n";
+
+    const GLuint prog = linked_program(
+        VS,
+        "const int N = 4;\n"
+        "uniform vec4 K[N];\n"
+        "void main() {\n"
+        "  int i;\n"
+        "  vec4 sum = vec4(0.0);\n"
+        "  for (i = 0; i < N; ++i) { sum += K[i]; }\n"
+        "  gl_FragColor = vec4(sum.rgb, 1.0);\n"
+        "}\n");
+    glUseProgram(prog);
+    const GLfloat k[16] = {0.25f, 0.0f, 0.0f, 0.0f,
+                           0.0f,  0.5f, 0.0f, 0.0f,
+                           0.0f,  0.0f, 0.75f, 0.0f,
+                           0.0f,  0.0f, 0.0f,  0.0f};
+    glUniform4fv(glGetUniformLocation(prog, "K"), 4, k);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+    const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+    ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);    /* 0.25 */
+    ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);  /* 0.50 */
+    ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);  /* 0.75 */
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 static void test_gl2_compiled_integer_vector_uniform(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -7576,6 +7715,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_non_square_matrix_uniform);
     RUN_TEST(test_gl2_uniforms_wider_than_the_scalar_window);
+    RUN_TEST(test_gl2_uniform_arrays_indexed_by_an_unrolled_counter);
+    RUN_TEST(test_gl2_uniform_arrays_run);
     RUN_TEST(test_gl2_compiled_integer_vector_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);

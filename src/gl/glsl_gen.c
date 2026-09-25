@@ -3495,22 +3495,64 @@ static GLboolean gen_for_generic(glsl_gen_t *g, int32_t node) {
 }
 
 /*
- * A counted `for`, recognised so it can be unrolled: the initialiser declares the counter from a
- * constant, the condition compares it with one, and the step moves it by one. Anything else goes
- * to `gen_for_generic`, which is the same loop without the compile-time count.
+ * A counted `for`, recognised so it can be unrolled: the initialiser sets the counter to a
+ * constant, the condition compares it with one, and the step moves it by a constant. Anything
+ * else goes to `gen_for_generic`, which is the same loop without the compile-time count.
+ *
+ * **The counter need not be declared by the loop.** `for (int i = 0; ...)` and `for (i = 0; ...)`
+ * over a variable declared above are the same loop, and only the first was read here - so the
+ * second took the branched path, its counter became a runtime value, and every `a[i]` inside it
+ * was refused for an index that is not known at compile time. That is what stopped mesa-demos'
+ * `convolution.frag`, whose `int i;` sits on the line before the loop for no reason but style.
+ *
+ * The two shapes differ in one thing that matters, and it is after the loop rather than inside
+ * it: a counter the loop declared goes out of scope with it, and a counter declared outside is
+ * still there and still readable. So the outer one is given its final value when the copies are
+ * done - `start + trips * step`, which is what running the loop would have left in it.
  */
 static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
     const glsl_node_t *n = &g->ast->nodes[node];
 
-    /* The initialiser has to declare the induction variable with a constant. `for (i = 0; ...)`
-     * over a variable declared outside is a different shape and is not read here. */
-    if (n->a == GLSL_NO_NODE || g->ast->nodes[n->a].kind != GLSL_NODE_DECL) {
+    /* The initialiser sets the induction variable to a constant, either declaring it or not.
+     *
+     * The init clause is parsed as a *statement*, because that is what lets it be a declaration -
+     * so `for (i = 0; ...)` arrives as an expression statement wrapping the assignment, and the
+     * assignment is one node further down than it looks. */
+    if (n->a == GLSL_NO_NODE) return gen_for_generic(g, node);
+    const glsl_node_t *init = &g->ast->nodes[n->a];
+    if (init->kind == GLSL_NODE_EXPR_STMT) {
+        if (init->a == GLSL_NO_NODE) return gen_for_generic(g, node);
+        init = &g->ast->nodes[init->a];
+    }
+    const glsl_node_t *decl = (const glsl_node_t *)0; /* null when the counter is not ours */
+    const char *ind_name;
+    size_t ind_len;
+    glsl_type_t ind_t;
+    double start = 0.0;
+    if (init->kind == GLSL_NODE_DECL) {
+        decl = init;
+        ind_name = decl->text;
+        ind_len = decl->length;
+        ind_t = glsl_type_from_token(decl->type_tok);
+        if (!const_of(g, decl->a, &start)) return gen_for_generic(g, node);
+    } else if (init->kind == GLSL_NODE_ASSIGN && init->op == GLSL_TOK_ASSIGN &&
+               init->a != GLSL_NO_NODE &&
+               g->ast->nodes[init->a].kind == GLSL_NODE_IDENTIFIER) {
+        const glsl_node_t *lhs = &g->ast->nodes[init->a];
+        ind_name = lhs->text;
+        ind_len = lhs->length;
+        ind_t = glsl_type_of(g->sema, init->a);
+        if (ind_t != GLSL_TYPE_INT && ind_t != GLSL_TYPE_FLOAT) {
+            return gen_for_generic(g, node);
+        }
+        if (!const_of(g, init->b, &start)) return gen_for_generic(g, node);
+        /* The counter has to be one this stage already has a register for. It always is when it
+         * was declared above; a name the generator does not know would fail on the store at the
+         * end, after the copies had been emitted, which is the one order to avoid. */
+        if (!gen_find(g, ind_name, ind_len)) return gen_for_generic(g, node);
+    } else {
         return gen_for_generic(g, node);
     }
-    const glsl_node_t *decl = &g->ast->nodes[n->a];
-    const glsl_type_t ind_t = glsl_type_from_token(decl->type_tok);
-    double start = 0.0;
-    if (!const_of(g, decl->a, &start)) return gen_for_generic(g, node);
 
     /* The condition: the counter against a constant. */
     if (n->b == GLSL_NO_NODE || g->ast->nodes[n->b].kind != GLSL_NODE_BINARY) {
@@ -3518,7 +3560,7 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
     }
     const glsl_node_t *cond = &g->ast->nodes[n->b];
     double limit = 0.0;
-    if (!is_name(g, cond->a, decl->text, decl->length) || !const_of(g, cond->b, &limit)) {
+    if (!is_name(g, cond->a, ind_name, ind_len) || !const_of(g, cond->b, &limit)) {
         return gen_for_generic(g, node);
     }
 
@@ -3528,10 +3570,9 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
     {
         const glsl_node_t *inc = &g->ast->nodes[n->c];
         if ((inc->kind == GLSL_NODE_POSTFIX || inc->kind == GLSL_NODE_UNARY) &&
-            is_name(g, inc->a, decl->text, decl->length)) {
+            is_name(g, inc->a, ind_name, ind_len)) {
             step = (inc->op == GLSL_TOK_INC) ? 1.0 : (inc->op == GLSL_TOK_DEC ? -1.0 : 0.0);
-        } else if (inc->kind == GLSL_NODE_ASSIGN &&
-                   is_name(g, inc->a, decl->text, decl->length)) {
+        } else if (inc->kind == GLSL_NODE_ASSIGN && is_name(g, inc->a, ind_name, ind_len)) {
             double k = 0.0;
             if (const_of(g, inc->b, &k)) {
                 if (inc->op == GLSL_TOK_ADD_ASSIGN) step = k;
@@ -3578,22 +3619,30 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
     /* **A body that moves the counter makes the count above a lie**, and both counted paths below
      * rest on it - so that shape goes to the generic loop, which re-evaluates the condition every
      * trip and needs no count. Checked before anything is emitted. */
-    if (assigns_name(g, n->d, decl->text, decl->length)) return gen_for_generic(g, node);
+    if (assigns_name(g, n->d, ind_name, ind_len)) return gen_for_generic(g, node);
 
     /* **Which of the two shapes this loop takes.** Unrolling is the better one where it fits -
      * the counter stays a compile-time constant, so indexing and arithmetic on it fold away,
      * and nothing branches. It stops fitting in two ways: too many trips to copy out, or a
      * `break`/`continue` that needs a mask carried across the rest of the loop. Either sends it
-     * to the branched path, which costs three scalar registers and a trip guard. */
+     * to the branched path, which costs three scalar registers and a trip guard.
+     *
+     * The branched path declares the counter itself, so it takes the loop's own declaration and
+     * a loop that did not bring one goes to the generic form instead. That is the same loop by
+     * another route - it runs the initialiser and the step as written, so the outer counter ends
+     * up correct without anything here arranging it. */
     if (trips > GLSL_GEN_MAX_UNROLL || has_loop_flow(g, n->d)) {
+        if (!decl) return gen_for_generic(g, node);
         return gen_for_branched(g, node, decl, ind_t, start, limit, step, (int)cond->op, trips);
     }
 
     /* Out it goes, one copy per trip, with the counter a fresh constant each time. The scope is
-     * the loop's - `for (int i = ...)` ends with it - and each body gets its own on top. */
+     * the loop's - `for (int i = ...)` ends with it - and each body gets its own on top. A
+     * counter declared outside is shadowed by the same mechanism, so the copies read a constant
+     * either way and the outer register is not touched until the store below. */
     const int vars_before = g->var_count;
     glsl_scope_push(g->sema);
-    if (!glsl_declare(g->sema, decl->text, decl->length, ind_t, GL_FALSE)) {
+    if (!glsl_declare(g->sema, ind_name, ind_len, ind_t, GL_FALSE)) {
         g->sema->error = (const char *)0;
     }
     double v = start;
@@ -3603,7 +3652,7 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
         if (is_bad(iv)) break;
         glsl_emit_mov_imm(g->code, iv.base, float_bits((float)v));
         const int vars_here = g->var_count;
-        glsl_gen_var_t *ivar = gen_declare(g, decl->text, decl->length, ind_t, iv, node);
+        glsl_gen_var_t *ivar = gen_declare(g, ind_name, ind_len, ind_t, iv, node);
         if (!ivar) break;
         /* **This copy's value, so `w[i]` is an index and not a refusal.** Safe for exactly this
          * variable: the body was checked for assignments to it before any of this was emitted,
@@ -3616,6 +3665,22 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
     }
     glsl_scope_pop(g->sema);
     g->var_count = vars_before;
+
+    /* **A counter declared outside the loop is still readable after it**, and the copies above
+     * never wrote it - they wrote a shadow that has just gone out of scope. So it gets the value
+     * the loop would have left: the condition failed on `v`, which is where the counter stops.
+     *
+     * A loop the unroller declared does not reach here, because that name no longer exists. */
+    if (!decl && !g->error) {
+        glsl_gen_var_t *outer = gen_find(g, ind_name, ind_len);
+        if (outer && outer->value.count == 1) {
+            glsl_emit_mov_imm(g->code, outer->value.base, float_bits((float)v));
+            /* Whatever it was, it is a known constant from here - which is what makes a second
+             * loop over the same counter, or an `a[i]` after this one, fold as well. */
+            outer->is_const = GL_TRUE;
+            outer->const_val = v;
+        }
+    }
     return (GLboolean)(g->error == (const char *)0);
 }
 
@@ -3704,6 +3769,24 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
                 }
                 return GL_TRUE;
             }
+            /* **A `const` initialised from a constant is a constant here too**, read before the
+             * initialiser is generated because `const_of` looks the name up and this name is not
+             * declared yet - which is also what stops `const int a = a;` seeing itself.
+             *
+             * It is still given a register and still moved into, because the rest of the
+             * generator reads a variable and not a number. What the flag adds is that `const_of`
+             * can answer for it, which is what an array length, a loop bound and an index need:
+             * `const int N = 9; ... for (i = 0; i < N; ++i) a[i]` is one shader, and without
+             * this the bound is opaque, the loop branches, and every `a[i]` in it is refused for
+             * an index that is not known at compile time. mesa-demos' `convolution.frag` is
+             * exactly that shader.
+             *
+             * It cannot go stale: the language forbids assigning to a `const` (1.10, 4.3.1) and
+             * the semantic stage refuses it, so nothing can write this register afterwards. */
+            double const_val = 0.0;
+            const GLboolean is_const_decl =
+                (GLboolean)(n->qualifier == GLSL_TOK_KW_CONST && t == GLSL_TYPE_INT &&
+                            n->array_size == GLSL_NO_NODE && const_of(g, n->a, &const_val));
             if (n->a != GLSL_NO_NODE) {
                 const uint32_t mark = gen_mark(g);
                 glsl_value_t init = gen_expr(g, n->a);
@@ -3716,7 +3799,12 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
                 gen_move(g, home, init);
                 gen_release(g, mark);
             }
-            if (!gen_declare(g, n->text, n->length, t, home, node)) return GL_FALSE;
+            glsl_gen_var_t *dv = gen_declare(g, n->text, n->length, t, home, node);
+            if (!dv) return GL_FALSE;
+            if (is_const_decl) {
+                dv->is_const = GL_TRUE;
+                dv->const_val = const_val;
+            }
             /* And into the semantic stage, which is what answers `glsl_type_of` for every later
              * mention of this name. Declared *after* the initialiser is generated, so
              * `float a = a;` cannot see itself. */
