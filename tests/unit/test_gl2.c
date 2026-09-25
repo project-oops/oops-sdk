@@ -1403,6 +1403,65 @@ static void test_gl2_framebuffer_objects(void) {
 }
 
 /*
+ * **An array's length is an integral constant expression, not a literal.**
+ *
+ * `const int N = 8; uniform vec2 offs[N];` is what shaders write - mesa-demos' `vpglsl` uses it
+ * throughout - and requiring a literal refused the idiom rather than an edge case.
+ *
+ * The arm that matters is the last one: a length that cannot be folded is still refused. A
+ * constant folder that quietly answered 1 for what it could not work out would turn an array
+ * into a scalar and index it out of bounds at run time, which is not a thing to discover on
+ * hardware. Each accepted case is read back through a value that depends on the length, so a
+ * length folded to the wrong number fails rather than merely compiling.
+ */
+static void test_gl2_array_length_constant_expressions(void) {
+    gl2_target_t t = gl2_target();
+
+    /* A `const int`, and arithmetic over one. `v[3]` is the last element of a 4-long array and
+     * out of bounds for a 3-long one, so the length has to be exactly right. */
+    const GLuint prog = linked_program(
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+        "const int N = 2;\n"
+        "const int WIDE = N * 2;\n"
+        "uniform float vals[WIDE];\n"
+        "void main() {\n"
+        "  float a[N + 1];\n"
+        "  a[0] = 0.25; a[1] = 0.5; a[2] = 0.75;\n"
+        "  gl_FragColor = vec4(a[0], a[1], a[2] * vals[3], 1.0);\n"
+        "}\n");
+    ASSERT_TRUE(prog != 0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(prog);
+    glUniform1f(glGetUniformLocation(prog, "vals[3]"), 1.0f);
+    draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+    const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+    /* The uniform's element resolves by name, which only happens if the linker saw a length. */
+    ASSERT_TRUE(glGetUniformLocation(prog, "vals[3]") >= 0);
+    ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);
+    ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);
+    ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);
+
+    /* **What must still be refused.** A non-constant length, and a length that folds to zero. */
+    const char *const bad[] = {
+        "uniform int n;\nvoid main() { float a[n]; a[0] = 1.0; gl_FragColor = vec4(a[0]); }\n",
+        "const int Z = 2 - 2;\nfloat a[Z];\nvoid main() { gl_FragColor = vec4(a[0]); }\n",
+    };
+    for (int i = 0; i < 2; i++) {
+        const GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(sh, 1, &bad[i], (const GLint *)0);
+        glCompileShader(sh);
+        GLint status = 1;
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &status);
+        ASSERT_TRUE(status == 0);
+        glDeleteShader(sh);
+    }
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
+/*
  * **OpenGL ES 1.00 - `#version 100` and the precision qualifiers.**
  *
  * ES 1.00 is derived from GLSL 1.10 and shares everything this compiler cares about; what it
@@ -6197,6 +6256,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_limits_and_version_are_answered);
     RUN_TEST(test_gl2_a_program_draws);
     RUN_TEST(test_gl2_structs_run);
+    RUN_TEST(test_gl2_array_length_constant_expressions);
     RUN_TEST(test_gl2_es_100_shaders);
     RUN_TEST(test_gl2_framebuffer_objects);
     RUN_TEST(test_gl2_draw_into_a_framebuffer_object);

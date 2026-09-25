@@ -424,6 +424,13 @@ typedef struct {
      * the whole of what the language can say. Indexing is the only thing that may be done to
      * one, and it is the only place this is read. */
     int array_size;
+    /* **A `const int`'s value, for the one place the language needs it: an array's length.**
+     * GLSL 4.1.9 calls that an integral constant expression, and the idiom every shader writes
+     * is `const int N = 8; uniform vec2 offs[N];` - so the value has to survive from the
+     * declaration to the use. Only `const`-qualified integer scalars with a foldable initialiser
+     * set it, which is exactly the set the specification allows to appear there. */
+    GLboolean has_const_int;
+    int const_int;
     glsl_type_t params[GLSL_MAX_PARAMS];
     int param_count;
 } glsl_symbol_t;

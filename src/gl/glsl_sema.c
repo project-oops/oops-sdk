@@ -256,6 +256,59 @@ static const glsl_symbol_t *lookup(const glsl_sema_t *s, const char *name, size_
     return (const glsl_symbol_t *)0;
 }
 
+/*
+ * **An integral constant expression** - GLSL 4.1.9, and the only place the language needs one is
+ * an array's length.
+ *
+ * Folded here rather than demanded as a literal, because `const int N = 8;` followed by
+ * `uniform vec2 offs[N];` is what shaders actually write - it is the shape mesa-demos' `vpglsl`
+ * uses throughout, and refusing it was refusing the idiom rather than an edge case.
+ *
+ * What folds: an integer literal, a `const` integer scalar whose own initialiser folded, and the
+ * arithmetic the specification allows over those. Anything else returns false and the caller
+ * refuses the declaration by name - **nothing here guesses a length**, because a wrong one turns
+ * `vec4 v[n]` into something indexed out of bounds at run time rather than into a diagnostic.
+ *
+ * Division by zero folds to false for the same reason: a constant expression the shader wrote
+ * that has no value is a shader to refuse, not one to give an arbitrary length to.
+ */
+static GLboolean const_int_eval(const glsl_sema_t *s, int32_t node, int *out) {
+    if (node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &s->ast->nodes[node];
+    switch (n->kind) {
+        case GLSL_NODE_INTCONST:
+            *out = (int)n->value;
+            return GL_TRUE;
+        case GLSL_NODE_IDENTIFIER: {
+            const glsl_symbol_t *sym = lookup(s, n->text, n->length);
+            if (!sym || !sym->has_const_int) return GL_FALSE;
+            *out = sym->const_int;
+            return GL_TRUE;
+        }
+        case GLSL_NODE_UNARY: {
+            int v = 0;
+            if (!const_int_eval(s, n->a, &v)) return GL_FALSE;
+            if (n->op == GLSL_TOK_MINUS) { *out = -v; return GL_TRUE; }
+            if (n->op == GLSL_TOK_PLUS) { *out = v; return GL_TRUE; }
+            return GL_FALSE;
+        }
+        case GLSL_NODE_BINARY: {
+            int l = 0, r = 0;
+            if (!const_int_eval(s, n->a, &l) || !const_int_eval(s, n->b, &r)) return GL_FALSE;
+            switch (n->op) {
+                case GLSL_TOK_PLUS:    *out = l + r; return GL_TRUE;
+                case GLSL_TOK_MINUS:   *out = l - r; return GL_TRUE;
+                case GLSL_TOK_STAR:    *out = l * r; return GL_TRUE;
+                case GLSL_TOK_SLASH:   if (r == 0) return GL_FALSE; *out = l / r; return GL_TRUE;
+                case GLSL_TOK_PERCENT: if (r == 0) return GL_FALSE; *out = l % r; return GL_TRUE;
+                default: return GL_FALSE;
+            }
+        }
+        default:
+            return GL_FALSE;
+    }
+}
+
 GLboolean glsl_declare(glsl_sema_t *s, const char *name, size_t len, glsl_type_t type,
                        GLboolean is_function) {
     if (!s) return GL_FALSE;
@@ -279,6 +332,11 @@ GLboolean glsl_declare(glsl_sema_t *s, const char *name, size_t len, glsl_type_t
     s->symbols[s->count].is_function = is_function;
     s->symbols[s->count].qualifier = GLSL_TOK_EOF;
     s->symbols[s->count].array_size = 0;
+    /* **Cleared, because this table is reused and not zeroed.** A slot that held a `const int`
+     * earlier would otherwise hand its value to whatever is declared here next, and the symptom
+     * would be an array silently taking some previous constant's length. */
+    s->symbols[s->count].has_const_int = GL_FALSE;
+    s->symbols[s->count].const_int = 0;
     s->symbols[s->count].param_count = 0;
     s->count++;
     return GL_TRUE;
@@ -1040,23 +1098,54 @@ static GLboolean check_declarator(glsl_sema_t *s, int32_t d) {
             return GL_FALSE;
         }
     }
-    /* **An array's length has to be a constant**, and in GLSL 1.10 that means a literal or a
-     * `const` initialised from one (4.1.9). A literal is what shaders write and is all that is
-     * accepted here: anything else is refused by name rather than assumed to be 1, which would
+    /* **An array's length has to be an integral constant expression** - GLSL 4.1.9 - which is a
+     * literal, a `const` integer, or arithmetic over those. `const_int_eval` is the whole of
+     * that rule; what it cannot fold is refused by name rather than assumed to be 1, which would
      * turn `vec4 v[n]` into a scalar and index it out of bounds at run time. An unsized
      * declaration - `varying vec4 v[];` - is refused for the same reason. */
     int elements = 0;
     if (n->array_size != GLSL_NO_NODE) {
-        const glsl_node_t *sz = &s->ast->nodes[n->array_size];
-        if (sz->kind != GLSL_NODE_INTCONST || (int)sz->value <= 0) {
-            sema_fail(s, "an array length must be a positive integer literal", d);
+        int len = 0;
+        if (!const_int_eval(s, n->array_size, &len)) {
+            sema_fail(s, "an array length must be a constant expression", d);
             return GL_FALSE;
         }
-        elements = (int)sz->value;
+        if (len <= 0) {
+            sema_fail(s, "an array length must be greater than zero", d);
+            return GL_FALSE;
+        }
+        elements = len;
+        /*
+         * **The fold is written back into the tree, so it happens once.**
+         *
+         * The interpreter, the generator and the linker all read an array's length straight off
+         * this node and all three accepted only `GLSL_NODE_INTCONST` - which is right, because a
+         * length is a number by the time anything downstream wants it. Folding here and leaving
+         * `const int N = 2; float a[N];` as an identifier in the tree made the semantic pass
+         * agree the length was 3 while every consumer read 0: the shader compiled, linked, and
+         * drew black, and `glGetUniformLocation` could not find `vals[3]` because the linker had
+         * enumerated no elements.
+         *
+         * Replacing the expression with its value is the same discipline the struct layout
+         * follows - decided once, in this pass, and read by everyone after it - and it means no
+         * back end needs a constant folder of its own to stay in agreement with this one.
+         */
+        s->ast->nodes[n->array_size].kind = GLSL_NODE_INTCONST;
+        s->ast->nodes[n->array_size].value = (int32_t)len;
     }
     if (!glsl_declare(s, n->text, n->length, t, GL_FALSE)) return GL_FALSE;
     s->symbols[s->count - 1].qualifier = n->qualifier;
     s->symbols[s->count - 1].array_size = elements;
+    /* **A `const int` carries its value forward**, so a later array length can name it. Only an
+     * unqualified-length integer scalar with a foldable initialiser qualifies, which is the set
+     * 4.1.9 allows to appear in one. */
+    if (n->qualifier == GLSL_TOK_KW_CONST && t == GLSL_TYPE_INT && elements == 0) {
+        int v = 0;
+        if (n->a != GLSL_NO_NODE && const_int_eval(s, n->a, &v)) {
+            s->symbols[s->count - 1].has_const_int = GL_TRUE;
+            s->symbols[s->count - 1].const_int = v;
+        }
+    }
     return GL_TRUE;
 }
 
