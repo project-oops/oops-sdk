@@ -45,7 +45,7 @@ ${CC:-clang} -target x86_64-unknown-freebsd -ffreestanding -nostdlib -fPIC \
 # Anything undefined that is not a platform import is a name a port would not find.
 undefined_names() {
     nm -u "$1" | sed 's/^[[:space:]]*//;s/^w //;s/^U //' \
-        | grep -vE '^sce[A-Z]|^sysctlbyname$|^$' || true
+        | grep -vE '^sce[A-Z]|^sysctlbyname$|^__error$|^_sigaction$|^$' || true
 }
 
 # **Does this tool notice?** A checker that cannot fail says nothing when it passes, and this one

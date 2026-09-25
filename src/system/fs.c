@@ -10,6 +10,7 @@
 #include "oops/system.h"
 
 #ifdef OOPS_HOST_BUILD
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -17,11 +18,34 @@
 #include <stdio.h>
 #endif
 
+/*
+ * **The `fs` channel of `/app0/oops-log`** - see `oops_log_channel_level` in `oops/system.h`.
+ *
+ * File access is gated through the unified logging system:
+ * `fs=debug` prints the opens that fail, `fs=trace` prints all operations.
+ */
+static int fs_open_raw(const char *path, int flags, int mode);
+
 int oops_fs_open(const char *path, int flags, int mode) {
   if (path == NULL) {
     return -1;
   }
 
+  const int fd = fs_open_raw(path, flags, mode);
+
+  if (fd < 0) {
+#ifndef OOPS_HOST_BUILD
+    oops_log_debug("FS", "open failed errno=%d flags=0x%x %s", sys_get_errno(), flags, path);
+#else
+    oops_log_debug("FS", "open failed errno=%d flags=0x%x %s", errno, flags, path);
+#endif
+  } else {
+    oops_log_trace("FS", "open fd=%d flags=0x%x %s", fd, flags, path);
+  }
+  return fd;
+}
+
+static int fs_open_raw(const char *path, int flags, int mode) {
 #ifndef OOPS_HOST_BUILD
   int target_flags = 0;
   if ((flags & 3) == OOPS_O_RDONLY) target_flags |= 0;
@@ -53,6 +77,7 @@ int oops_fs_close(int fd) {
   if (fd < 0) {
     return -1;
   }
+  oops_log_trace("FS", "close fd=%d", fd);
 #ifndef OOPS_HOST_BUILD
   return (int)sys_call(SYS_close, fd, 0, 0, 0, 0, 0);
 #else
@@ -65,10 +90,12 @@ int64_t oops_fs_read(int fd, void *buf, size_t count) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
-  return (int64_t)sys_call(SYS_read, fd, (long)buf, (long)count, 0, 0, 0);
+  int64_t rc = (int64_t)sys_call(SYS_read, fd, (long)buf, (long)count, 0, 0, 0);
 #else
-  return (int64_t)read(fd, buf, count);
+  int64_t rc = (int64_t)read(fd, buf, count);
 #endif
+  oops_log_trace("FS", "read fd=%d count=%zu rc=%ld", fd, count, (long)rc);
+  return rc;
 }
 
 int64_t oops_fs_write(int fd, const void *buf, size_t count) {
@@ -76,10 +103,12 @@ int64_t oops_fs_write(int fd, const void *buf, size_t count) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
-  return (int64_t)sys_call(SYS_write, fd, (long)buf, (long)count, 0, 0, 0);
+  int64_t rc = (int64_t)sys_call(SYS_write, fd, (long)buf, (long)count, 0, 0, 0);
 #else
-  return (int64_t)write(fd, buf, count);
+  int64_t rc = (int64_t)write(fd, buf, count);
 #endif
+  oops_log_trace("FS", "write fd=%d count=%zu rc=%ld", fd, count, (long)rc);
+  return rc;
 }
 
 int64_t oops_fs_seek(int fd, int64_t offset, int whence) {
@@ -87,13 +116,15 @@ int64_t oops_fs_seek(int fd, int64_t offset, int whence) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
-  return (int64_t)sys_call(SYS_lseek, fd, offset, whence, 0, 0, 0);
+  int64_t rc = (int64_t)sys_call(SYS_lseek, fd, offset, whence, 0, 0, 0);
 #else
   int host_whence = SEEK_SET;
   if (whence == OOPS_SEEK_CUR) host_whence = SEEK_CUR;
   else if (whence == OOPS_SEEK_END) host_whence = SEEK_END;
-  return (int64_t)lseek(fd, (off_t)offset, host_whence);
+  int64_t rc = (int64_t)lseek(fd, (off_t)offset, host_whence);
 #endif
+  oops_log_trace("FS", "seek fd=%d offset=%ld whence=%d rc=%ld", fd, (long)offset, whence, (long)rc);
+  return rc;
 }
 
 int64_t oops_fs_tell(int fd) {
@@ -210,11 +241,13 @@ int oops_fs_mkdir(const char *path, int mode) {
   }
 #ifndef OOPS_HOST_BUILD
   int target_mode = mode ? mode : 0755;
-  return (int)sys_call(SYS_mkdir, (long)path, target_mode, 0, 0, 0, 0);
+  int rc = (int)sys_call(SYS_mkdir, (long)path, target_mode, 0, 0, 0, 0);
 #else
   mode_t host_mode = mode ? (mode_t)mode : 0755;
-  return mkdir(path, host_mode);
+  int rc = mkdir(path, host_mode);
 #endif
+  oops_log_debug("FS", "mkdir path=%s rc=%d", path, rc);
+  return rc;
 }
 
 int oops_fs_rename(const char *from, const char *to) {
@@ -222,10 +255,12 @@ int oops_fs_rename(const char *from, const char *to) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
-  return (int)sys_call(SYS_rename, (long)from, (long)to, 0, 0, 0, 0);
+  int rc = (int)sys_call(SYS_rename, (long)from, (long)to, 0, 0, 0, 0);
 #else
-  return rename(from, to);
+  int rc = rename(from, to);
 #endif
+  oops_log_debug("FS", "rename %s -> %s rc=%d", from, to, rc);
+  return rc;
 }
 
 /* ---------------------------------------------------------------------------
@@ -276,11 +311,13 @@ oops_dir_t *oops_fs_opendir(const char *path) {
 
   oops_dir_t *dir = (oops_dir_t *)oops_malloc(sizeof(*dir));
   if (dir == NULL) {
+    oops_log_warn("FS", "opendir: out of memory allocating dir context for %s", path);
     return NULL;
   }
 
   dir->fd = oops_fs_open(path, OOPS_O_RDONLY, 0);
   if (dir->fd < 0) {
+    oops_log_debug("FS", "opendir failed to open %s", path);
     oops_free(dir);
     return NULL;
   }
@@ -288,6 +325,7 @@ oops_dir_t *oops_fs_opendir(const char *path) {
   dir->used = 0;
   dir->offset = 0;
 #endif
+  oops_log_debug("FS", "opendir opened %s (fd=%d)", path, dir->fd);
   return dir;
 }
 
@@ -335,6 +373,7 @@ int oops_fs_readdir(oops_dir_t *dir, oops_dirent_t *out) {
     }
     out->name[len] = '\0';
     out->is_directory = (ent->d_type == OOPS_DT_DIR) ? 1 : 0;
+    oops_log_trace("FS", "readdir entry: %s (is_dir=%d)", out->name, out->is_directory);
     return 1;
   }
 #else
@@ -350,6 +389,7 @@ int oops_fs_closedir(oops_dir_t *dir) {
   }
   int rc = oops_fs_close(dir->fd);
   oops_free(dir);
+  oops_log_debug("FS", "closedir rc=%d", rc);
   return rc;
 }
 
@@ -358,10 +398,12 @@ int oops_fs_unlink(const char *path) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
-  return (int)sys_call(SYS_unlink, (long)path, 0, 0, 0, 0, 0);
+  int rc = (int)sys_call(SYS_unlink, (long)path, 0, 0, 0, 0, 0);
 #else
-  return unlink(path);
+  int rc = unlink(path);
 #endif
+  oops_log_debug("FS", "unlink %s rc=%d", path, rc);
+  return rc;
 }
 
 static int oops_fs_mkdir_p(const char *path) {
@@ -450,6 +492,7 @@ int oops_fs_get_storage_dir(oops_storage_location_t loc, char *out_path, size_t 
   for (size_t i = 0; i <= rlen; i++) {
     out_path[i] = resolved[i];
   }
+  oops_log_info("FS", "storage dir resolved to %s", out_path);
   return 0;
 }
 

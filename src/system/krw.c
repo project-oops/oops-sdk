@@ -8,23 +8,19 @@
 #include "oops/krw.h"
 #include "oops/freestd.h"
 #include "oops/syscall.h"
+#include "oops/system.h"
 
 __attribute__((weak)) void klog_write(const char *msg) {
   if (msg == NULL) {
     return;
   }
-  char buf[256];
-  const char *prefix = "[INJECTOR] ";
-  size_t plen = obs_strlen(prefix);
-  size_t mlen = obs_strlen(msg);
-  if (plen + mlen + 2 > sizeof(buf)) {
-    mlen = sizeof(buf) - plen - 2;
+  if (obs_strncmp(msg, "ERROR:", 6) == 0) {
+    oops_log_error("INJECT", "%s", msg + 6);
+  } else if (obs_strncmp(msg, "WARNING:", 8) == 0) {
+    oops_log_warn("INJECT", "%s", msg + 8);
+  } else {
+    oops_log_debug("INJECT", "%s", msg);
   }
-  memcpy(buf, prefix, plen);
-  memcpy(buf + plen, msg, mlen);
-  buf[plen + mlen] = '\n';
-  buf[plen + mlen + 1] = '\0';
-  sys_call(SYS_klog, 7, (long)buf, 0, 0, 0, 0);
 }
 
 __attribute__((weak)) void klog_write_hex(const char *prefix, uint64_t hex) {

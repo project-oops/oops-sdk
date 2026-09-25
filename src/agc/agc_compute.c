@@ -1,6 +1,7 @@
 #include "oops/agc.h"
 #include "oops/gpu.h"
 #include "oops/memory.h"
+#include "oops/system.h"
 #include "oops/target.h"
 #include "agc_internal.h"
 
@@ -28,6 +29,7 @@ static int init_agc_subsystem(void) {
     s_agc_state[i] = 0;
   }
   int rc = sceAgcInit(s_agc_state, 0xd);
+  oops_log_debug("AGC", "sceAgcInit rc=%d", rc);
   if (rc == 0) {
     s_agc_inited = 1;
     return 0;
@@ -55,6 +57,7 @@ static oops_gpu_queue_t *create_queue_type(uint32_t type) {
   void *queue_handle = (void *)0;
   int qrc = sceAgcDriverCreateQueue(type, &queue_handle, 0);
   if (qrc != 0 || !queue_handle) {
+    oops_log_warn("AGC", "sceAgcDriverCreateQueue(%u) failed: %d", type, qrc);
     oops_mem_free(q);
     return (oops_gpu_queue_t *)0;
   }
@@ -70,6 +73,7 @@ static oops_gpu_queue_t *create_queue_type(uint32_t type) {
       (volatile uint32_t *)oops_mem_alloc(0x1000, 0x1000, OOPS_MEM_WB_ONION);
 
   if (!q->dcb_mem || !q->fence) {
+    oops_log_warn("AGC", "failed to allocate coherent memory for queue");
     if (q->dcb_mem)
       oops_mem_free(q->dcb_mem);
     if (q->fence)
@@ -82,6 +86,7 @@ static oops_gpu_queue_t *create_queue_type(uint32_t type) {
 
   *q->fence = 0;
   q->last_fence = 0;
+  oops_log_debug("AGC", "create_queue_type(%u) succeeded: handle=%p", type, queue_handle);
   return q;
 }
 
@@ -148,17 +153,21 @@ oops_gpu_shader_t *oops_gpu_create_shader(const void *container_hdr,
   void *obj_out = (void *)0;
   int src_rc = sceAgcCreateShader(&obj_out, sh->hdr, sh->payload_mem, 0);
   if (src_rc != 0 || !obj_out) {
+    oops_log_warn("AGC", "sceAgcCreateShader failed: %d", src_rc);
     oops_mem_free(sh->payload_mem);
     oops_mem_free(sh);
     return (oops_gpu_shader_t *)0;
   }
   sh->shader_obj = obj_out;
+  oops_log_debug("AGC", "create_shader ok: hdr_size=%zu payload_size=%zu obj=%p",
+                 hdr_size, payload_size, obj_out);
   return sh;
 }
 
 void oops_gpu_destroy_shader(oops_gpu_shader_t *shader) {
   if (!shader)
     return;
+  oops_log_debug("AGC", "destroy_shader: obj=%p", shader->shader_obj);
   if (shader->payload_mem) {
     oops_mem_free(shader->payload_mem);
     shader->payload_mem = (void *)0;
@@ -238,6 +247,9 @@ int oops_gpu_dispatch(oops_gpu_queue_t *queue,
   dw += 16;
 
   uint32_t dcb_dwords = (uint32_t)(dw - (uint32_t *)queue->dcb_mem);
+  oops_log_trace("AGC", "dispatch grid=(%u,%u,%u) dwords=%u fence=%u",
+                 gx, gy, gz, dcb_dwords, next_fence);
+
   oops_agc_dcb_desc desc;
   desc.gpu_addr = (uint64_t)(uintptr_t)queue->dcb_mem;
   desc.size = dcb_dwords; /* STRICTLY in DWORDs */
@@ -246,6 +258,7 @@ int oops_gpu_dispatch(oops_gpu_queue_t *queue,
 
   int submit_rc = sceAgcDriverSubmitDcb(&desc);
   if (submit_rc != 0) {
+    oops_log_warn("AGC", "sceAgcDriverSubmitDcb failed: %d", submit_rc);
     return submit_rc;
   }
 
@@ -265,6 +278,8 @@ int oops_gpu_dispatch(oops_gpu_queue_t *queue,
     queue->last_fence = next_fence;
     return 0;
   }
+  oops_log_warn("AGC", "gpu dispatch fence timeout waiting for %u (fence=0x%x)",
+                next_fence, *queue->fence);
   return -2; /* fence timeout */
 }
 

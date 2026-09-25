@@ -33,6 +33,12 @@ This document provides a comprehensive technical API reference for all subsystem
 23. [Freestanding Userland Heap Allocator (`<oops/heap.h>`)](#23-freestanding-userland-heap-allocator-oopsheaph)
 24. [Freestanding Math & 3D Linear Algebra (`<oops/math.h>`)](#24-freestanding-math--3d-linear-algebra-oopsmathh)
 25. [Target Platform Identification (`<oops/target.h>`)](#25-target-platform-identification-oopstargeth)
+26. [On-Device ZIP Extractor (`<oops/zip.h>`)](#26-on-device-zip-extractor-oopsziph)
+27. [HTTP Client & URL Parsing (`<oops/http.h>`)](#27-http-client--url-parsing-oopshttph)
+28. [Standalone JavaScript Engine (`<oops/js.h>`)](#28-standalone-javascript-engine-oopsjsh)
+29. [Standalone HTML5/CSS Layout & Rendering (`<oops/html.h>`)](#29-standalone-html5css-layout--rendering-oopshtmlh)
+30. [Assembled Webview Browser (`<oops/webview.h>`)](#30-assembled-webview-browser-oopswebviewh)
+31. [Performance Telemetry & Diagnostic Overlay (`<oops/perf.h>`)](#31-performance-telemetry--diagnostic-overlay-oopsperfh)
 
 ---
 
@@ -283,7 +289,9 @@ Prospero divides memory between CPU-cached coherent system RAM and GPU write-com
 
 ### Low-Level Primitives
 * `int oops_mem_alloc_direct(size_t size, size_t alignment, oops_mem_type_t type, int64_t *out_phys)`
-* `int oops_mem_map_direct(void **out_vaddr, size_t size, int prot, int flags, int64_t phys, size_t alignment)`
+* `int oops_mem_map_direct(void **vaddr_inout, size_t size, int prot, int flags, int64_t phys, size_t alignment)`: Maps direct memory to virtual address space. If `*vaddr_inout` is non-NULL (e.g., from `oops_mem_reserve_va`), the kernel attempts to map to that reserved virtual address; if NULL, the kernel chooses an address and returns it in `*vaddr_inout`.
+* `int oops_mem_reserve_va(void **addr_inout, size_t len, int flags, size_t alignment)`: Reserves a virtual address range without backing physical memory, confirmed on hardware via `sceKernelReserveVirtualRange`. If `*addr_inout` is NULL, the kernel selects a base address and writes it back; `alignment` must be page-aligned (e.g. 0x4000 or 0x40000).
+* `int oops_mem_release_va(void *vaddr, size_t len)`: Releases a previously reserved virtual address range without physical backing via `sceKernelMunmap`.
 * `int oops_mem_batch_map(void *vaddr_base, int64_t phys_base, size_t total_size, size_t page_size, uint8_t prot)`: Map a run of same-sized pages in one call, for a caller that already knows its page size instead of mapping one region at a time.
 * `int oops_mem_unmap(void *vaddr, size_t size)`
 * `int oops_mem_free_direct(int64_t phys, size_t size)`
@@ -618,6 +626,9 @@ Dynamically load internal PRX modules at runtime using `libSceSysmodule`.
 `oops_sysmodule_load`/`unload`/`is_loaded` take a plain `uint16_t` — there is no
 `oops_sysmodule_id_t` enum type. `include/oops/sysmodule.h` `#define`s the full set (`OOPS_SYSMODULE_PERF`
 through `OOPS_SYSMODULE_SHARE`); the ones this SDK's own subsystems load are:
+* `OOPS_SYSMODULE_NET` (`0x0001`) — `libSceNet`
+* `OOPS_SYSMODULE_HTTP` (`0x0002`) — `libSceHttp`
+* `OOPS_SYSMODULE_SSL` (`0x0003`) — `libSceSsl`
 * `OOPS_SYSMODULE_NET_CTL` (`0x0011`)
 * `OOPS_SYSMODULE_AUDIO_DEC` (`0x0088`)
 * `OOPS_SYSMODULE_IME_DIALOG` (`0x0096`) — loaded by `<oops/dialog.h>`'s IME open.
@@ -933,4 +944,166 @@ Compile-time platform selection. Pulled into every other header through the unif
 * `OOPS_TARGET_IS_ORBIS`, `OOPS_TARGET_IS_PROSPERO`: Generation-classification macros (`orbis`/`neo` vs. `prospero`/`trinity`).
 * `static inline oops_target_t oops_get_target(void)`: Returns the target the current binary was compiled for.
 * `static inline const char *oops_target_name(oops_target_t target)`: Human-readable target name (`"orbis"`, `"neo"`, `"prospero"`, `"trinity"`).
+
+---
+
+## 26. On-Device ZIP Extractor (`<oops/zip.h>`)
+
+Freestanding ZIP archive extractor supporting uncompressed (`STORED`, method 0) and Deflate-compressed (`DEFLATED`, method 8) entries. Implements RFC 1951 Deflate decompression with zero libc dependency. Files and directories are created using `<oops/fs.h>`.
+
+### Error Codes
+* `OOPS_ZIP_OK` (`0`): Success.
+* `OOPS_ZIP_ERR_PARAM` (`-1`): Invalid parameter or illegal path traversal attempt (`..` or root prefix).
+* `OOPS_ZIP_ERR_NOT_FOUND` (`-2`): Archive file could not be found or opened.
+* `OOPS_ZIP_ERR_READ` (`-3`): File read error.
+* `OOPS_ZIP_ERR_BAD_HEADER` (`-4`): Malformed ZIP headers or corrupted EOCD/Central Directory.
+* `OOPS_ZIP_ERR_UNSUPPORTED` (`-5`): Unsupported compression method (only method 0 and 8 are supported).
+* `OOPS_ZIP_ERR_DECOMPRESS` (`-6`): Decompression error during Deflate inflation.
+* `OOPS_ZIP_ERR_WRITE` (`-7`): Target filesystem write error.
+* `OOPS_ZIP_ERR_NOMEM` (`-8`): Memory allocation failure.
+
+### Functions
+* `int oops_zip_extract(const char *zip_path, const char *dest_dir)`: Reads an archive from disk at `zip_path` and unpacks all entries recursively into `dest_dir`.
+* `int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest_dir)`: Unpacks an archive loaded in memory into `dest_dir`.
+
+---
+
+## 27. HTTP/HTTPS Client & URL Parsing (`<oops/http.h>`)
+
+Lightweight HTTP and HTTPS client engine for fetching remote payloads, REST API responses, and streaming package archives directly to storage. Supports plain HTTP/1.1 over BSD sockets and native HTTPS (TLS 1.2/1.3) via platform system modules (`libSceHttp`, `libSceSsl`, `libSceNet`) with automatic redirect following.
+
+### Error Codes
+* `OOPS_HTTP_OK` (`0`): Success.
+* `OOPS_HTTP_ERR_PARAM` (`-1`): Invalid argument or malformed URL.
+* `OOPS_HTTP_ERR_RESOLVE` (`-2`): DNS hostname resolution failed.
+* `OOPS_HTTP_ERR_CONNECT` (`-3`): Socket or TLS connection failed.
+* `OOPS_HTTP_ERR_SEND` (`-4`): Failed to send HTTP/HTTPS request.
+* `OOPS_HTTP_ERR_RECV` (`-5`): Socket receive error or remote disconnect.
+* `OOPS_HTTP_ERR_PARSE` (`-6`): Malformed HTTP response headers or invalid chunked encoding.
+* `OOPS_HTTP_ERR_NOMEM` (`-7`): Out of memory.
+* `OOPS_HTTP_ERR_WRITE` (`-8`): Target file write error.
+* `OOPS_HTTP_ERR_UNSUPPORTED` (`-9`): Unsupported protocol or feature.
+* `OOPS_HTTP_ERR_TLS_UNAVAIL` (`-10`): HTTPS requested but TLS system modules (`libSceHttp`, `libSceSsl`, `libSceNet`) are unavailable (e.g. host build mock).
+
+### Data Structures
+* `oops_http_response_t`:
+  * `int status_code`: HTTP status code (e.g. 200, 301, 302, 404).
+  * `size_t content_length`: Content-Length header or body payload length.
+  * `char *body`: Null-terminated response payload allocated on heap (caller frees via `oops_http_response_free`).
+  * `size_t body_size`: Byte length of response body.
+  * `char content_type[64]`: Content-Type header string.
+  * `char location[256]`: Location redirect header URL.
+
+### Functions
+* `int oops_http_get(const char *url, oops_http_response_t *out_resp)`: Performs an HTTP or HTTPS GET request, buffering the entire response body into heap memory. Supports native HTTPS with automatic redirect handling over TLS.
+* `int oops_http_get_to_file(const char *url, const char *dest_path)`: Streams an HTTP or HTTPS GET response body directly into a destination file using `<oops/fs.h>`.
+* `void oops_http_response_free(oops_http_response_t *resp)`: Frees internal heap allocations within a response structure.
+* `int oops_http_url_parse(const char *url, char *scheme, size_t scheme_sz, char *host, size_t host_sz, uint16_t *port, char *path, size_t path_sz)`: Parses an HTTP or HTTPS URL into scheme, host, port, and path.
+* `int oops_http_build_request(const char *host, const char *path, char *buf, size_t buf_sz)`: Formats a standard HTTP/1.1 GET request.
+* `int oops_http_parse_headers(...)`: Parses response status line, Content-Length, chunked encoding flag, and headers.
+* `int oops_http_decode_chunked(...)`: Decodes RFC 7230 chunked transfer-encoded stream data.
+
+---
+
+## 28. Standalone JavaScript Engine (`<oops/js.h>`)
+
+Standalone, high-performance JavaScript engine based on QuickJS (ES2020 specification). Completely decoupled from rendering, layout, or DOM dependencies; suitable for game logic, dynamic configuration, scripting, and live-data handling.
+
+### Types and Data Structures
+* `oops_js_t`: Opaque JavaScript execution context.
+* `oops_js_type_t`: Value type enumeration (`UNDEFINED`, `NULL`, `BOOL`, `INT`, `FLOAT`, `STRING`, `OBJECT`, `ARRAY`, `FUNCTION`, `EXCEPTION`).
+* `oops_js_value_t`: Tagged value representation for interop between C and JS runtimes.
+* `oops_js_native_fn`: Function pointer signature for registering native C callbacks:
+  `oops_js_value_t (*)(oops_js_t *js, int argc, oops_js_value_t *argv, void *userdata)`.
+
+### Functions
+* `oops_js_t *oops_js_create(void)`: Creates an isolated JavaScript runtime and execution context.
+* `void oops_js_destroy(oops_js_t *js)`: Destroys a context, freeing all garbage-collected objects and memory.
+* `int oops_js_eval(oops_js_t *js, const char *src, const char *name, oops_js_value_t *out)`: Evaluates a JS script string. Returns `0` on success, or `-1` if an unhandled exception was thrown.
+* `int oops_js_register_fn(oops_js_t *js, const char *name, oops_js_native_fn fn, void *userdata)`: Binds a native C function into the global scope.
+* `int oops_js_set_global(oops_js_t *js, const char *name, oops_js_value_t val)`: Sets a global variable.
+* `oops_js_value_t oops_js_get_global(oops_js_t *js, const char *name)`: Retrieves a global variable.
+* `int oops_js_execute_pending_jobs(oops_js_t *js)`: Runs pending Promise reaction microtasks. Returns the number of executed jobs.
+* `oops_js_value_t oops_js_make_undefined(void)`, `oops_js_make_null(void)`, `oops_js_make_bool(int val)`, `oops_js_make_int(int val)`, `oops_js_make_number(double val)`, `oops_js_make_string(oops_js_t *js, const char *str)`: Value constructors.
+* `void oops_js_free_value(oops_js_t *js, oops_js_value_t *val)`: Releases memory associated with an `oops_js_value_t`.
+* `void *oops_js_get_context(oops_js_t *js)`, `void *oops_js_get_runtime(oops_js_t *js)`: Returns underlying `JSContext*` and `JSRuntime*`.
+
+---
+
+## 29. Standalone HTML5/CSS Layout & Rendering (`<oops/html.h>`)
+
+Standalone HTML5 and CSS layout engine based on litehtml with Gumbo parser. Parses document structures, cascades CSS stylesheets, computes box layouts, and paints directly to an `oops_surface_t` (linear CPU buffer or GL texture) with zero JavaScript dependencies.
+
+### Types and Data Structures
+* `oops_html_t`: Opaque HTML document layout and rendering viewport.
+
+### Functions
+* `oops_html_t *oops_html_create(int width, int height)`: Creates an HTML renderer viewport of the specified dimensions.
+* `void oops_html_destroy(oops_html_t *html)`: Destroys the renderer and frees document/CSS trees.
+* `void oops_html_set_size(oops_html_t *html, int width, int height)`: Resizes viewport and reflows layout.
+* `int oops_html_load(oops_html_t *html, const char *html_source, const char *base_url)`: Parses HTML and CSS, resolves styles, and calculates layout boxes.
+* `void oops_html_render(oops_html_t *html, oops_surface_t *surf)`: Rasterizes the laid out document to target surface.
+* `void oops_html_scroll(oops_html_t *html, int dx, int dy)`: Adjusts scroll offsets.
+* `int oops_html_get_scroll_y(const oops_html_t *html)`: Returns current vertical scroll position.
+* `int oops_html_get_content_height(const oops_html_t *html)`: Returns total computed document height in pixels.
+* `int oops_html_hit_test(oops_html_t *html, int x, int y, char *href_out, size_t href_len)`: Tests whether a coordinate hits an anchor hyperlink; returns `1` and copies URL if hit.
+* `void *oops_html_get_document(oops_html_t *html)`, `void *oops_html_get_container(oops_html_t *html)`: Retrieves underlying `litehtml::document*` and container pointers.
+
+---
+
+## 30. Assembled Webview Browser (`<oops/webview.h>`)
+
+Full-fledged webview component binding `oops/js.h` and `oops/html.h` together. Provides a live DOM bridge, host runtime environment (`fetch()`, `console.log`, `setTimeout`/`setInterval`), input event dispatch, and automatic layout reflow on DOM/style mutations.
+
+### Types and Data Structures
+* `oops_webview_t`: Opaque webview instance.
+* `oops_webview_event_t`: Input event payload covering gamepads, keyboards, and mice.
+* `oops_webview_event_type_t`: Input event types (`PAD`, `KEY_DOWN`, `KEY_UP`, `MOUSE_MOVE`, `MOUSE_BUTTON_DOWN`, `MOUSE_BUTTON_UP`, `MOUSE_WHEEL`).
+
+### Functions
+* `oops_webview_t *oops_webview_create(int width, int height)`: Allocates and initializes an assembled webview instance with DOM prototypes and host environment.
+* `void oops_webview_destroy(oops_webview_t *wv)`: Destroys webview, canceling active network fetches, timers, and DOM nodes.
+* `int oops_webview_load_url(oops_webview_t *wv, const char *url)`: Fetches an HTML document over HTTP/HTTPS, evaluates `<script>` tags, and triggers `DOMContentLoaded` / `load` lifecycle events.
+* `int oops_webview_load_html(oops_webview_t *wv, const char *html, const char *base_url)`: Loads an HTML string directly, resolves relative URLs against `base_url`, and runs embedded scripts.
+* `void oops_webview_pump(oops_webview_t *wv)`: Pumps active timers, advances asynchronous `fetch()` requests, drains Promise microtasks, and re-renders layout if marked dirty.
+* `void oops_webview_render(oops_webview_t *wv, oops_surface_t *surf)`: Renders current webview state into target surface.
+* `void oops_webview_send_input(oops_webview_t *wv, const oops_webview_event_t *ev)`: Injects hardware or OS input events into the DOM.
+* `oops_js_t *oops_webview_get_js(oops_webview_t *wv)`: Returns underlying `oops_js_t *`.
+* `oops_html_t *oops_webview_get_html(oops_webview_t *wv)`: Returns underlying `oops_html_t *`.
+
+---
+
+## 31. Performance Telemetry & Diagnostic Overlay (`<oops/perf.h>`)
+
+On-device performance monitoring and composable diagnostic overlay subsystem. Collects real-time frame pacing, min/max/average frame times, instantaneous/smoothed FPS, 60-sample frametime history sparkline, and userland heap allocation telemetry. Provides zero-code activation (`OOPS_PERF=1`), hardware gamepad chord toggle (`L3 + R3`), and composable rendering delegates for both 3D scenes (`<oops/hud.h>`) and 2D software surfaces (`<oops/draw.h>`).
+
+### Types and Data Structures
+* `oops_perf_t`: Opaque performance monitor instance.
+* `oops_perf_flags_t`: Display configuration flags:
+  * `OOPS_PERF_SHOW_FPS`: Instantaneous and rolling average FPS.
+  * `OOPS_PERF_SHOW_FRAMETIME`: Min, average, and maximum frame times over rolling window.
+  * `OOPS_PERF_SHOW_MEMORY`: Current and peak userland virtual memory allocations (`<oops/heap.h>`).
+  * `OOPS_PERF_SHOW_SPARKLINE`: 60-frame pacing sparkline histogram with 16.7ms and 33.3ms reference target guides.
+  * `OOPS_PERF_SHOW_ALL`: Enables all metrics and visualizations.
+* `oops_perf_stats_t`: Queryable telemetry snapshot:
+  * `fps`, `avg_fps`: Frame rates.
+  * `frame_time_ms`, `avg_frame_time_ms`, `min_frame_time_ms`, `max_frame_time_ms`: Millisecond durations.
+  * `heap_used_bytes`, `heap_peak_bytes`: Memory utilization in bytes.
+  * `total_frames`: Total frame count.
+
+### Functions
+* `oops_perf_t *oops_perf_create(void)`: Allocates and initializes monitor. Parses `OOPS_PERF` environment variable.
+* `void oops_perf_destroy(oops_perf_t *perf)`: Destroys monitor and frees sample history.
+* `void oops_perf_frame_step(oops_perf_t *perf)`: Marks frame boundary, updates delta times and ring buffer, and samples heap.
+* `void oops_perf_update_input(oops_perf_t *perf, const oops_pad_state_t *pad)`: Polls gamepad buttons for `L3 + R3` toggle chord with 300ms debouncing.
+* `void oops_perf_set_visible(oops_perf_t *perf, bool visible)`: Explicitly sets overlay visibility.
+* `bool oops_perf_is_visible(const oops_perf_t *perf)`: Returns whether overlay is currently visible.
+* `void oops_perf_toggle_visible(oops_perf_t *perf)`: Toggles overlay visibility state.
+* `void oops_perf_set_flags(oops_perf_t *perf, uint32_t flags)`: Sets displayed telemetry metric flags.
+* `uint32_t oops_perf_get_flags(const oops_perf_t *perf)`: Returns active telemetry metric flags.
+* `void oops_perf_set_position(oops_perf_t *perf, int x, int y)`: Configures screen coordinate placement of overlay panel.
+* `void oops_perf_get_stats(const oops_perf_t *perf, oops_perf_stats_t *out_stats)`: Queries current computed performance statistics.
+* `void oops_perf_render_hud(oops_perf_t *perf, oops_hud_t *hud)`: Renders overlay onto GPU 3D scene using `<oops/hud.h>`.
+* `void oops_perf_render_surface(oops_perf_t *perf, oops_surface_t *surf)`: Renders overlay onto 2D linear surface using `<oops/draw.h>`.
+
 

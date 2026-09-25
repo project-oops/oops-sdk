@@ -23,6 +23,9 @@ int oops_kernel_pipe_init(int rwpipe[2], int rwpair[2], uint64_t kpipe_addr,
                           uint64_t kdata_base) {
   if (!rwpipe || !rwpair || kpipe_addr == 0)
     return -1;
+  oops_log_info("ESCALATE", "pipe_init rwpipe=[%d,%d] rwpair=[%d,%d] kpipe=0x%llx kdata=0x%llx",
+                rwpipe[0], rwpipe[1], rwpair[0], rwpair[1],
+                (unsigned long long)kpipe_addr, (unsigned long long)kdata_base);
   s_rwpipe[0] = rwpipe[0];
   s_rwpipe[1] = rwpipe[1];
   s_rwpair[0] = rwpair[0];
@@ -193,17 +196,24 @@ int oops_jailbreak_process(int pid) {
   }
 
   uint64_t proc = oops_kernel_find_proc_by_pid(pid);
-  if (!proc)
+  if (!proc) {
+    oops_log_warn("ESCALATE", "jailbreak: process pid=%d not found", pid);
     return -1;
+  }
 
   const oops_common_offsets_t *common = oops_offsets_get_common();
-  if (!common)
+  if (!common) {
+    oops_log_warn("ESCALATE", "jailbreak: common offsets not found");
     return -1;
+  }
 
   uint64_t ucred = read_k_u64(proc + common->p_ucred);
   uint64_t fd = read_k_u64(proc + common->p_fd);
-  if (!ucred || !fd)
+  if (!ucred || !fd) {
+    oops_log_warn("ESCALATE", "jailbreak: ucred/fd null (ucred=0x%llx, fd=0x%llx)",
+                  (unsigned long long)ucred, (unsigned long long)fd);
     return -1;
+  }
 
   /* 1. Clear uid, ruid, svuid, ngroups, rgid */
   uint32_t zero = 0;
@@ -254,31 +264,48 @@ int oops_jailbreak_process(int pid) {
     }
   }
 
+  oops_log_info("ESCALATE", "jailbreak process pid=%d success (proc=0x%llx)",
+                pid, (unsigned long long)proc);
   return 0;
 }
 
 int oops_escape_jail(void) {
-  if (!sceKernelGetProcessId)
+  if (!sceKernelGetProcessId) {
+    oops_log_warn("ESCALATE", "escape_jail: sceKernelGetProcessId unavailable");
     return -1;
+  }
+  oops_log_info("ESCALATE", "escape_jail called");
   return oops_jailbreak_process(sceKernelGetProcessId());
 }
 
 int oops_escalate_to_system_authid(void) {
   uint64_t proc = oops_kernel_get_current_proc();
-  if (!proc)
+  if (!proc) {
+    oops_log_warn("ESCALATE", "escalate_to_system_authid: current proc not found");
     return -1;
+  }
 
   const oops_common_offsets_t *common = oops_offsets_get_common();
-  if (!common)
+  if (!common) {
+    oops_log_warn("ESCALATE", "escalate_to_system_authid: common offsets not found");
     return -1;
+  }
 
   uint64_t ucred = read_k_u64(proc + common->p_ucred);
-  if (!ucred)
+  if (!ucred) {
+    oops_log_warn("ESCALATE", "escalate_to_system_authid: ucred null");
     return -1;
+  }
 
   uint64_t system_authid = OOPS_SYSTEM_AUTHID;
-  return oops_kernel_copyin(&system_authid, ucred + common->cr_sceauthid,
-                            sizeof(system_authid));
+  int rc = oops_kernel_copyin(&system_authid, ucred + common->cr_sceauthid,
+                              sizeof(system_authid));
+  if (rc == 0) {
+    oops_log_info("ESCALATE", "escalated to system authid 0x%llx", (unsigned long long)system_authid);
+  } else {
+    oops_log_warn("ESCALATE", "failed to write system authid rc=%d", rc);
+  }
+  return rc;
 }
 
 int oops_has_system_authid(void) {

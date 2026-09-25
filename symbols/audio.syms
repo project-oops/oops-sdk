@@ -1,0 +1,6 @@
+libSceAudioOut sceAudioOutInit
+libSceAudioOut sceAudioOutOpen
+libSceAudioOut sceAudioOutClose
+libSceAudioOut sceAudioOutOutput
+libSceAudioOut sceAudioOutSetVolume
+libSceAudioOut sceAudioOutGetPortState

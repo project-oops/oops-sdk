@@ -61,3 +61,12 @@ heuristic offsets for reliable process resolution.
   layout offsets for `struct proc` (`p_fd`, `p_ucred`, `p_pid`), `struct filedesc`
   (`fd_rdir`, `fd_jdir`), and `struct ucred` (`cr_prison`, `cr_uid`, `cr_sceauthid`,
   `cr_scecaps`) used in the credential elevation and vnode redirection.
+
+## Web Stack Components
+
+- **QuickJS** (Fabrice Bellard and Charlie Gordon) — MIT License. Vendored in `src/js/quickjs`
+  for `oops/js.h` and `oops/webview.h`. Provides the standalone, embeddable ECMAScript 2020 engine.
+- **litehtml** (Boris Rasin and contributors) — 3-Clause BSD License. Vendored in `src/html/litehtml`
+  for `oops/html.h` and `oops/webview.h`. Provides the standalone HTML5 layout and CSS formatting engine.
+- **Gumbo Parser** (Google Inc.) — Apache License 2.0. Vendored in `src/html/litehtml/src/gumbo`
+  as the compliant HTML5 tokenizer and tree builder for litehtml.

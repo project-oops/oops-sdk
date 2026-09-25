@@ -201,6 +201,8 @@ void run_unit_tests_fs(void);
 void run_unit_tests_heap(void);
 void run_unit_tests_math(void);
 void run_unit_tests_dns(void);
+void run_unit_tests_zip(void);
+void run_unit_tests_http(void);
 
 /* Declarations of integration test suites */
 void run_integration_tests_pipeline(void);
@@ -256,6 +258,8 @@ int main(int argc, char **argv) {
     run_unit_tests_heap();
     run_unit_tests_math();
     run_unit_tests_dns();
+    run_unit_tests_zip();
+    run_unit_tests_http();
   }
 
   if (run_int) {

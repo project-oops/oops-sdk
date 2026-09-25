@@ -41,8 +41,8 @@ When building or porting an application, choosing the correct graphics stack and
 | Technology | API & Standard | Environment | Memory Footprint | Primary Use Cases |
 | :--- | :--- | :--- | :--- | :--- |
 | **`oops-gl` (`gl1`)** | OpenGL 1.1–1.5 Fixed Function | Pure Freestanding (`-ffreestanding`) | ~100–300 KB | Retro 3D games (Quake, DOOM, Neverball), GLUT demos, lightweight tools, pure freestanding binaries. |
-| **`oops-gl` (`gl2`)** | OpenGL 2.0, GLSL 1.10 / 1.20 | Pure Freestanding (`-ffreestanding`) | ~300–600 KB | Custom vertex/fragment shaders, procedural materials, programmable lighting, retro-indie games. |
-| **`oops-mesa` (`mesa`)** | OpenGL 3.3 Core, GLES 2/3, EGL | Hosted (`USE_MESA = 1`, FreeBSD libc sysroot) | ~15–30 MB | Modern desktop games, complex game engines, GLSL 330+, geometry/compute shaders, framebuffers (FBOs). |
+| **`oops-gl` (`gl2`)** | OpenGL 2.0, GLSL 1.10 / 1.20 / ES 1.00 | Pure Freestanding (`-ffreestanding`) | ~300–600 KB | Custom vertex/fragment shaders, render-to-texture, procedural materials, programmable lighting, retro-indie games. |
+| **`oops-mesa` (`mesa`)** | OpenGL 3.3 Core, GLES 2/3, EGL | Hosted (`USE_MESA = 1`, FreeBSD libc sysroot) | ~15–30 MB | Modern desktop games, complex game engines, GLSL 330+, geometry/compute shaders, multisampled or depth-attached FBOs. |
 | **`oops-draw` (2D Canvas)** | 2D CPU Rasterizer (`<oops/draw.h>`) | Pure Freestanding | Zero extra | Console shells (SeaShell), HUDs, text overlays, simple 2D menus, diagnostics. Zero GPU overhead. |
 | **`oops-sdl` (SDL2)** | SDL 2.0.22 Windowing, Events, Audio | Either (Freestanding or Hosted) | ~500 KB | Cross-platform games, emulators, and engines already written against SDL2. Works with `oops-gl` and `oops-mesa`. |
 
@@ -61,10 +61,29 @@ Are you porting an existing codebase?
   │     └─► USE: oops-gl (OOPS_RENDERER = gl1 or gl2)
   │           (Freestanding, instant startup, compiles fragment shaders directly to gfx1030)
   │
-  └─► Does it require modern OpenGL 3.x/4.x, GLSL 330+, FBOs, or EGL?
+  └─► Does it require modern OpenGL 3.x/4.x, GLSL 330+, or EGL?
         └─► USE: oops-mesa (OOPS_RENDERER = mesa)
               (Hosted Mesa Gallium/Radv stack with FreeBSD C library sysroot)
 ```
+
+### Render-to-texture under `gl2`
+
+`oops-gl` draws into a framebuffer object on the console: `glFramebufferRenderbuffer` with a
+colour renderbuffer, or `glFramebufferTexture2D` with a texture's base level. Both are measured -
+`gl2-probe`'s `fbo/renderbuffer` and `fbo/texture`.
+
+**Ask `glCheckFramebufferStatus` and act on the answer**, which is what a port should do anyway.
+Three combinations answer `GL_FRAMEBUFFER_UNSUPPORTED` here rather than drawing something wrong:
+
+- a **depth or stencil attachment**, because the console's depth surface is tiled where an
+  attachment is linear. The whole framebuffer is refused rather than the depth attachment being
+  quietly ignored, so a port that needs a depth buffer in its off-screen pass wants `oops-mesa`.
+- a **texture level above 0**. Only the base level is GPU memory; the mip levels above it are
+  built on the heap.
+- **multisampling**, which `gl2` does not have.
+
+A pass that renders colour into a texture and samples it afterwards - the common shape for
+post-processing and for a mirror or a minimap - needs none of those.
 
 ---
 
@@ -268,9 +287,10 @@ pros.exe logs
    TITLE_NAME := "My SDL2 Port"
 
    OOPS_RENDERER := gl1  # or gl2, or mesa
+   OOPS_FEATURES := audio input keyboard
    ENTRY_POINT   := myapp_start
 
-   # Application Sources
+   # Application Sources (your code only - do not hand-list SDK sources)
    PAYLOAD_SRCS  := src/entry.c src/game.c src/render.c
 
    # Include SDL2 backend and POSIX shims
@@ -377,7 +397,16 @@ A loop whose condition never terminates does not just draw a wrong frame—it ha
 
 ## 9. Build System, Packaging & Deployment
 
-### 1. Standard Targets
+### 1. Declarative Subsystem Capabilities (`OOPS_FEATURES`)
+Applications declare **capabilities**, not SDK implementation sources. In your Makefile:
+```makefile
+OOPS_FEATURES += keyboard net http audio savedata
+```
+The SDK (`oops-sdk.mk`) maps capabilities to the required implementation sources and `libSce*` import claims, while `app.mk` injects them automatically. The base runtime (`system.c`, `freestd.c`, `heap.c`, `fs.c`, `libc.c`, `math.c`, etc.) is always linked implicitly.
+
+See the complete capability matrix and reference in [**`docs/FEATURES.md`**](FEATURES.md).
+
+### 2. Standard Targets
 Every application Makefile using `common/app.mk` provides four primary targets:
 - `make check`: Compiles host-side models and runs unit tests.
 - `make elf`: Compiles the freestanding target ELF payload.

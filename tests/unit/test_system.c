@@ -138,11 +138,36 @@ static void test_system_klog(void) {
   ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001:INP] ERROR: fatal fault 42\n");
 #endif
 
-  /* Debug level enables debug messages */
+  /* Warn message must pass at WARN level */
+  oops_log_set_level(OOPS_LOG_WARN);
+  oops_log_warn("INP", "warning message");
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001:INP] WARN: warning message\n");
+#endif
+
+  /* Info message must pass at INFO level */
+  oops_log_set_level(OOPS_LOG_INFO);
+  oops_log_info("INP", "info message");
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001:INP] info message\n");
+#endif
+
+  /* Debug level enables debug messages, filters trace */
   oops_log_set_level(OOPS_LOG_DEBUG);
   oops_log_debug("INP", "visible debug message");
 #ifdef OOPS_HOST_BUILD
   ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001:INP] DEBUG: visible debug message\n");
+#endif
+  oops_log_trace("INP", "filtered trace message");
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001:INP] DEBUG: visible debug message\n");
+#endif
+
+  /* Trace level enables trace messages */
+  oops_log_set_level(OOPS_LOG_TRACE);
+  oops_log_trace("INP", "visible trace message %d", 99);
+#ifdef OOPS_HOST_BUILD
+  ASSERT_STR_EQ(oops_test_get_last_klog(), "[SCSH00001:INP] TRACE: visible trace message 99\n");
 #endif
 
   /* Restore default INFO level */

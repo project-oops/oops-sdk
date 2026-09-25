@@ -1,0 +1,11 @@
+libSceAudiodec sceAudiodecInitLibrary
+libSceAudiodec sceAudiodecTermLibrary
+libSceAudiodec sceAudiodecCreateDecoder
+libSceAudiodec sceAudiodecDeleteDecoder
+libSceAudiodec sceAudiodecDecode
+libSceAudiodec sceAudiodecDecode2
+libSceAudiodec sceAudiodecDecodeWithPriority
+libSceAudiodec sceAudiodecDecode2WithPriority
+libSceAudiodec sceAudiodecClearContext
+libSceAjm sceAjmInitialize
+libSceAjm sceAjmInstanceCreate

@@ -88,11 +88,15 @@ int oops_system_pump_events(void) {
     }
     taken++;
   }
+  if (taken > 0) {
+    oops_log_trace("SYS", "pump_events: drained %d event(s)", taken);
+  }
   return taken;
 #endif
 }
 
 void oops_system_prepare_for_suspend(void) {
+  oops_log_info("SYS", "prepare_for_suspend: pumping events and draining renderer");
   /* The queue first: an event still owed to the process is the process still being asked
      something. */
   (void)oops_system_pump_events();

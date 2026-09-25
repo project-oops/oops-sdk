@@ -35,6 +35,30 @@ int oops_user_get_logged_in_users(int32_t *out_user_ids, size_t max_users,
 int oops_system_get_info(oops_system_info_t *out_info);
 int oops_system_notify(const char *text);
 
+/*
+ * **Run the payload's static constructors. A freestanding title must call this itself, first.**
+ *
+ * A hosted program's crt walks `.preinit_array` and `.init_array` before `main`. A payload has no
+ * crt: the loader calls the entry point named in its metadata and nothing else, so every
+ * `__attribute__((constructor))` function and every C++ global with a constructor is simply never
+ * run. The link script (`selfish/link/native_eboot.ld`) does emit the arrays and the bracketing
+ * symbols; nothing was calling them.
+ *
+ * **What that looks like when it bites, because it does not look like this.** Most constructors
+ * only zero their members, and the payload's `.bss` is already zero - so a title missing every
+ * constructor behaves correctly until one of them stores a value that is *not* zero. Extreme Tux
+ * Racer spent 2026-09-24 on this: `CCourse`'s constructor sets `curr_course = -1`, it stayed 0,
+ * so `LoadCourse(0)` took its "this course is already loaded" early return, left the course
+ * dimensions at zero, and the first division by the course width produced a NaN that walked
+ * through two range clamps - which compare with `<` and `>`, and NaN fails both - into
+ * `(int)NaN = 0x80000000` and a page fault at `0xfffffffc00000000`. Four layers between the cause
+ * and the symptom, and nothing in between logged a thing.
+ *
+ * Idempotent, so an entry point that calls it and a runtime that also does are not a problem.
+ * `oops_mesa_run_init_array` is the same walk for the hosted Mesa stack and predates this.
+ */
+void oops_run_init_array(void);
+
 /* Log Levels */
 typedef enum oops_log_level {
   OOPS_LOG_NONE = 0,

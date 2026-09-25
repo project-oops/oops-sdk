@@ -158,20 +158,6 @@ static uintptr_t find_allproc_kaddr(pid_t mypid) {
   return krw_allproc_addr();
 }
 
-static const char *obs_strstr(const char *haystack, const char *needle) {
-  if (!haystack || !needle)
-    return NULL;
-  size_t nlen = obs_strlen(needle);
-  if (nlen == 0)
-    return haystack;
-  for (; *haystack != '\0'; haystack++) {
-    if (*haystack == *needle && obs_strncmp(haystack, needle, nlen) == 0) {
-      return haystack;
-    }
-  }
-  return NULL;
-}
-
 static int is_system_daemon(const char *comm) {
   if (comm == NULL || comm[0] == '\0') {
     return 1; /* Skip unknown/empty names; retail games always have comm

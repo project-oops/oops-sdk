@@ -28,11 +28,24 @@ typedef enum oops_mem_type {
 int oops_mem_alloc_direct(size_t size, size_t alignment, oops_mem_type_t type,
                           int64_t *out_phys);
 int oops_mem_free_direct(int64_t phys, size_t size);
-int oops_mem_map_direct(void **out_vaddr, size_t size, int prot, int flags,
+/* Maps direct memory. If *vaddr_inout is non-NULL (e.g. from oops_mem_reserve_va),
+ * the kernel attempts to map to that virtual address; if NULL, the kernel chooses.
+ * The mapped virtual address is written back to *vaddr_inout. */
+int oops_mem_map_direct(void **vaddr_inout, size_t size, int prot, int flags,
                         int64_t phys, size_t alignment);
 int oops_mem_batch_map(void *vaddr_base, int64_t phys_base, size_t total_size,
                        size_t page_size, uint8_t prot);
 int oops_mem_unmap(void *vaddr, size_t size);
+
+/* Virtual address range reservation without physical backing.
+ * Reserves a virtual address range suitable for later mapping (e.g. via
+ * oops_mem_batch_map or oops_mem_map_direct).
+ * Confirmed on hardware (sweep 20260909-204626, check 020-memory/reserve-virtual-range).
+ * If *addr_inout is NULL, kernel selects base address and writes it back.
+ * Alignment must be page-aligned (e.g. 0x4000 or 0x40000). */
+int oops_mem_reserve_va(void **addr_inout, size_t len, int flags,
+                        size_t alignment);
+int oops_mem_release_va(void *vaddr, size_t len);
 
 /* High-level managed GPU/CPU allocations: direct memory, mapped CPU+GPU
  * read-write, tracked so that free and the physical lookup need only the

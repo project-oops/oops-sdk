@@ -173,6 +173,7 @@ int oops_input_init(void) {
    * because a flag was set on the way out. */
   s_initialized = 1;
   s_init_rc = (s_pad_handles[0] >= 0) ? 0 : -1;
+  oops_log_info("INPUT", "oops_input_init result: rc=%d (pad0_handle=%d)", s_init_rc, s_pad_handles[0]);
   return s_init_rc;
 }
 
@@ -368,6 +369,7 @@ int oops_input_set_rumble(unsigned int port, uint8_t small_motor,
   if (port >= OOPS_MAX_PADS || s_pad_handles[port] < 0 || !scePadSetVibration) {
     return -1;
   }
+  oops_log_debug("INPUT", "set rumble port %u: small=%u large=%u", port, small_motor, large_motor);
   struct {
     uint8_t largeMotor;
     uint8_t smallMotor;
@@ -381,6 +383,7 @@ int oops_input_set_lightbar(unsigned int port, uint8_t r, uint8_t g,
   if (port >= OOPS_MAX_PADS || s_pad_handles[port] < 0 || !scePadSetLightBar) {
     return -1;
   }
+  oops_log_debug("INPUT", "set lightbar port %u: rgb=(%u,%u,%u)", port, r, g, b);
   struct {
     uint8_t r, g, b, a;
   } col = {r, g, b, 255};
@@ -392,6 +395,7 @@ int oops_input_reset_orientation(unsigned int port) {
       !scePadResetOrientation) {
     return -1;
   }
+  oops_log_debug("INPUT", "reset orientation port %u", port);
   return scePadResetOrientation(s_pad_handles[port]);
 }
 
@@ -431,6 +435,7 @@ int oops_input_set_trigger_effect(unsigned int port, unsigned int triggers,
 }
 
 void oops_input_close(void) {
+  oops_log_debug("INPUT", "oops_input_close: closing pads");
   for (unsigned int i = 0; i < OOPS_MAX_PADS; i++) {
     if (s_pad_handles[i] >= 0 && scePadClose) {
       scePadClose(s_pad_handles[i]);

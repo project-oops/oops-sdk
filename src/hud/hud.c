@@ -46,7 +46,7 @@ struct oops_hud {
 
 static void hud_log(const char *msg)
 {
-    oops_klog("OOPS-HUD", msg);
+    oops_log_warn("HUD", "%s", msg);
 }
 
 /*
@@ -74,6 +74,7 @@ static void bake_glyph(uint8_t *px, int cell_col, int cell_row, const uint8_t *g
 
 oops_hud_t *oops_hud_create(int fb_width, int fb_height)
 {
+    oops_log_debug("HUD", "create %dx%d", fb_width, fb_height);
     oops_hud_t *hud = (oops_hud_t *)oops_calloc(1, sizeof(*hud));
     if (hud == NULL) {
         return NULL;
@@ -132,6 +133,7 @@ void oops_hud_destroy(oops_hud_t *hud)
     if (hud == NULL) {
         return;
     }
+    oops_log_debug("HUD", "destroy hud=%p", (void *)hud);
     if (hud->tex != 0) {
         glDeleteTextures(1, &hud->tex);
     }

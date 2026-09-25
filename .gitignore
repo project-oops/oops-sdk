@@ -35,3 +35,10 @@ desktop.ini
 *.swp
 *.swo
 *~
+
+# **Probe and title output, which the SDK writes and nothing reads back.** `data/default/` is
+# where a payload's own logging lands when it runs on the console, and a day of hardware runs
+# leaves hundreds of files there. They are output, not work: committing them was nearly done
+# once, and the reason to name them here rather than remember not to is that `git add -A` does
+# not remember.
+data/default/

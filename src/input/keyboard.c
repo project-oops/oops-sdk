@@ -187,26 +187,26 @@ int oops_keyboard_init(void) {
     }
     if (sceKeyboardInit && oops_symbol_is_resolved((const void *)sceKeyboardInit)) {
       int irc = sceKeyboardInit();
-      oops_kprintf("KBD", "sceKeyboardInit returned %d\n", irc);
+      oops_log_debug("KBD", "sceKeyboardInit returned %d", irc);
     }
     if (sceUserServiceInitialize && oops_symbol_is_resolved((const void *)sceUserServiceInitialize)) {
       sceUserServiceInitialize(NULL);
     }
     if (sceKeyboardSetProcessPrivilege && oops_symbol_is_resolved((const void *)sceKeyboardSetProcessPrivilege)) {
       int prc = sceKeyboardSetProcessPrivilege(1);
-      oops_kprintf("KBD", "sceKeyboardSetProcessPrivilege(1) returned %d\n", prc);
+      oops_log_debug("KBD", "sceKeyboardSetProcessPrivilege(1) returned %d", prc);
     }
     if (sceKeyboardSetProcessFocus && oops_symbol_is_resolved((const void *)sceKeyboardSetProcessFocus)) {
       int frc = sceKeyboardSetProcessFocus(1);
-      oops_kprintf("KBD", "sceKeyboardSetProcessFocus(1) returned %d\n", frc);
+      oops_log_debug("KBD", "sceKeyboardSetProcessFocus(1) returned %d", frc);
     }
     s_keyboard_module_loaded = 1;
   }
 
   if (!oops_keyboard_available()) {
-    oops_kprintf("KBD", "keyboard entry points unavailable (open=%p read=%p readState=%p)\n",
-                 (const void *)sceKeyboardOpen, (const void *)sceKeyboardRead,
-                 (const void *)sceKeyboardReadState);
+    oops_log_warn("KBD", "keyboard entry points unavailable (open=%p read=%p readState=%p)",
+                  (const void *)sceKeyboardOpen, (const void *)sceKeyboardRead,
+                  (const void *)sceKeyboardReadState);
     s_kbd_init_rc = OOPS_KEYBOARD_EUNAVAIL;
     return s_kbd_init_rc;
   }
@@ -275,8 +275,8 @@ int oops_keyboard_init(void) {
           s_kbd_previous_keys[idx][k] = 0;
         }
         opened++;
-        oops_kprintf("KBD", "sceKeyboardOpen(uid=0x%x, idx=%d) -> handle %d\n",
-                     (unsigned int)uid, idx, rc);
+        oops_log_info("KBD", "sceKeyboardOpen(uid=0x%x, idx=%d) -> handle %d",
+                      (unsigned int)uid, idx, rc);
         break;
       }
     }
@@ -500,12 +500,10 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
      default: a held key is quiet but a typed sentence is two lines a character, and the reason
      this exists is that a duplicated press is invisible from above the SDK and
      indistinguishable, in a log, from someone pressing twice. */
-  if (s_input_log_level >= (int)OOPS_LOG_DEBUG) {
-    for (unsigned int e = 0u; e < n; e++) {
-      oops_kprintf("KBD", "event usage=0x%x %s mods=0x%x\n", (unsigned int)out_events[e].usage,
+  for (unsigned int e = 0u; e < n; e++) {
+    oops_log_debug("KBD", "event usage=0x%x %s mods=0x%x", (unsigned int)out_events[e].usage,
                    out_events[e].transition == (uint8_t)OOPS_KEY_DOWN ? "down" : "up",
                    (unsigned int)out_events[e].modifiers);
-    }
   }
 
   for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
@@ -523,8 +521,8 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
   static int s_said_first;
   if (n > 0u && !s_said_first) {
     s_said_first = 1;
-    oops_kprintf("KBD", "first key delivered: usage 0x%02x - the read path works\n",
-                 (unsigned int)out_events[0].usage);
+    oops_log_info("KBD", "first key delivered: usage 0x%02x - the read path works",
+                  (unsigned int)out_events[0].usage);
   }
 
   return (int)n;
@@ -610,6 +608,7 @@ uint32_t oops_keyboard_poll_buttons(void) {
 }
 
 void oops_keyboard_close(void) {
+  oops_log_debug("KBD", "oops_keyboard_close: closing keyboard handles");
   for (int i = 0; i < OOPS_KEYBOARD_MAX_HANDLES; i++) {
     if (s_kbd_handles[i] >= 0 && sceKeyboardClose &&
         oops_symbol_is_resolved((const void *)sceKeyboardClose)) {

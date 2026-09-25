@@ -1,4 +1,5 @@
 #include "oops/net.h"
+#include "oops/system.h"
 
 /*
  * Two worlds, one interface.
@@ -348,28 +349,31 @@ int oops_net_init(void) {
   /* POSIX sockets need no library bring-up; the marker keeps the interface
    * honest. */
   s_net_initialized = socket_reachable() ? 1 : 0;
+  oops_log_info("NET", "network subsystem init: reachable=%d", s_net_initialized);
   return s_net_initialized ? 0 : -1;
 }
 
-void oops_net_term(void) { s_net_initialized = 0; }
+void oops_net_term(void) {
+  oops_log_info("NET", "network subsystem terminated");
+  s_net_initialized = 0;
+}
 
 int oops_socket(int domain, int type, int protocol) {
   int proto = protocol;
   if (proto == 0) {
     proto = (type == OOPS_SOCK_STREAM) ? OOPS_IPPROTO_TCP : OOPS_IPPROTO_UDP;
   }
+  int fd = -1;
   if (__sys_socketex) {
-    int fd = __sys_socketex("oops_sock", domain, type, proto);
-    if (fd >= 0)
-      return fd;
+    fd = __sys_socketex("oops_sock", domain, type, proto);
+  } else if (sys_call) {
+    long r = sys_call(OOPS_SYS_SOCKET, (long)domain, (long)type, (long)proto,
+                      0, 0, 0);
+    if (r >= 0)
+      fd = (int)r;
   }
-  if (sys_call) {
-    long fd = sys_call(OOPS_SYS_SOCKET, (long)domain, (long)type, (long)proto,
-                       0, 0, 0);
-    if (fd >= 0)
-      return (int)fd;
-  }
-  return -1;
+  oops_log_debug("NET", "socket(domain=%d, type=%d, proto=%d) -> fd=%d", domain, type, proto, fd);
+  return fd;
 }
 
 static void fill_addr(struct fbsd_sockaddr_in *a, uint32_t ip_net,
@@ -392,13 +396,17 @@ int oops_bind(int sock, const char *ip, uint16_t port) {
   }
   struct fbsd_sockaddr_in addr;
   fill_addr(&addr, ip_net, port);
-  return p_bind(sock, &addr, (socklen_t_)sizeof(addr));
+  int rc = p_bind(sock, &addr, (socklen_t_)sizeof(addr));
+  oops_log_debug("NET", "bind(sock=%d, ip=%s, port=%u) -> rc=%d", sock, ip ? ip : "0.0.0.0", port, rc);
+  return rc;
 }
 
 int oops_listen(int sock, int backlog) {
   if (sock < 0)
     return -1;
-  return p_listen(sock, (backlog <= 0) ? 5 : backlog);
+  int rc = p_listen(sock, (backlog <= 0) ? 5 : backlog);
+  oops_log_debug("NET", "listen(sock=%d, backlog=%d) -> rc=%d", sock, backlog, rc);
+  return rc;
 }
 
 int oops_accept(int sock, char *client_ip, size_t ip_len,
@@ -419,6 +427,8 @@ int oops_accept(int sock, char *client_ip, size_t ip_len,
       oops_net_inet_ntop(addr.sin_addr, client_ip, ip_len);
     if (client_port)
       *client_port = oops_ntohs(addr.sin_port);
+    oops_log_info("NET", "accept(sock=%d) -> client_sock=%d from %s:%u",
+                  sock, client_sock, client_ip ? client_ip : "?", client_port ? *client_port : 0);
   }
   return client_sock;
 }
@@ -429,27 +439,35 @@ int oops_connect(int sock, const char *server_ip, uint16_t port) {
   uint32_t ip_net = 0;
   if (oops_net_inet_pton(server_ip, &ip_net) != 0) {
     char resolved[32];
-    if (oops_net_resolve(server_ip, resolved, sizeof(resolved)) != 0)
+    if (oops_net_resolve(server_ip, resolved, sizeof(resolved)) != 0) {
+      oops_log_warn("NET", "connect: failed to resolve host '%s'", server_ip);
       return -1;
+    }
     if (oops_net_inet_pton(resolved, &ip_net) != 0)
       return -1;
   }
   struct fbsd_sockaddr_in addr;
   fill_addr(&addr, ip_net, port);
-  return p_connect(sock, &addr, (socklen_t_)sizeof(addr));
+  int rc = p_connect(sock, &addr, (socklen_t_)sizeof(addr));
+  oops_log_info("NET", "connect(sock=%d, server=%s, port=%u) -> rc=%d", sock, server_ip, port, rc);
+  return rc;
 }
 
 long oops_send(int sock, const void *buf, size_t len, int flags) {
   if (sock < 0 || !buf)
     return -1;
   /* No exported `send`; it is `_sendto` with a null destination. */
-  return (long)p_sendto(sock, buf, len, flags, (const void *)0, 0);
+  long rc = (long)p_sendto(sock, buf, len, flags, (const void *)0, 0);
+  oops_log_trace("NET", "send(sock=%d, len=%zu) -> sent=%ld", sock, len, rc);
+  return rc;
 }
 
 long oops_recv(int sock, void *buf, size_t len, int flags) {
   if (sock < 0 || !buf)
     return -1;
-  return (long)p_recv(sock, buf, len, flags);
+  long rc = (long)p_recv(sock, buf, len, flags);
+  oops_log_trace("NET", "recv(sock=%d, max_len=%zu) -> recvd=%ld", sock, len, rc);
+  return rc;
 }
 
 long oops_sendto(int sock, const void *buf, size_t len, int flags,
@@ -502,8 +520,10 @@ int oops_set_nonblocking(int sock, int nonblocking) {
 }
 
 void oops_close(int sock) {
-  if (sock >= 0)
+  if (sock >= 0) {
+    oops_log_debug("NET", "close(sock=%d)", sock);
     p_close(sock);
+  }
 }
 
 int oops_net_would_block(long rc) {

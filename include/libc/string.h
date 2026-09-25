@@ -69,6 +69,10 @@ char *strpbrk(const char *s, const char *accept);
 /* There is no errno here, so every code reads as one string: "unknown error". It exists because
  * a program that prints it needs it to link, not because it says anything. */
 char *strerror(int errnum);
+/* The reentrant one, in its XSI form - returns 0, or ERANGE when `buf` cannot hold the message.
+   libc++'s `system_error.cpp` calls it unconditionally off Windows, so a target without it does
+   not fail to link, it fails to *compile* the C++ standard library. */
+int strerror_r(int errnum, char *buf, size_t buflen);
 
 #ifdef __cplusplus
 }

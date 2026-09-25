@@ -1,6 +1,7 @@
 #include "oops/agc.h"
 #include "oops/gpu.h"
 #include "oops/memory.h"
+#include "oops/system.h"
 #include "oops/target.h"
 #include "agc_internal.h"
 
@@ -30,6 +31,10 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
   uint64_t ps_va = desc->ps_shader_va;
   uint32_t prim_type = desc->primitive_type ? desc->primitive_type : OOPS_AGC_PRIM_TRILIST;
   uint32_t vcount = desc->vertex_count ? desc->vertex_count : 3;
+
+  oops_log_trace("AGC", "draw primitive: prim=%u verts=%u size=%ux%u ngg_va=0x%llx ps_va=0x%llx",
+                 prim_type, vcount, desc->width, desc->height,
+                 (unsigned long long)ngg_va, (unsigned long long)ps_va);
 
   /* Reset fence */
   *queue->fence = 0x11111111u;
@@ -316,6 +321,7 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
   }
 
   if (submit_rc != 0) {
+    oops_log_warn("AGC", "draw primitive submit failed: %d", submit_rc);
     return -1;
   }
 
@@ -333,6 +339,7 @@ int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t 
     }
   }
 
+  oops_log_warn("AGC", "draw primitive fence timeout waiting for 0xbeefcafe (fence=0x%x)", *queue->fence);
   return -2; /* fence timeout */
 }
 

@@ -9,6 +9,7 @@
 #include "oops/heap.h"
 #include "oops/freestd.h"
 #include "oops/syscall.h"
+#include "oops/system.h"
 
 #ifdef OOPS_HOST_BUILD
 #include <sys/mman.h>
@@ -104,10 +105,12 @@ static int replenish_class(int class_idx) {
 
   uint8_t *arena = (uint8_t *)sys_vm_alloc(arena_sz);
   if (arena == NULL) {
+    oops_log_warn("HEAP", "replenish_class %d (%zu bytes) failed: out of memory", class_idx, chunk_payload);
     return -1;
   }
 
   size_t count = arena_sz / chunk_total;
+  oops_log_trace("HEAP", "replenished class %d (%zu bytes): arena=%zu count=%zu", class_idx, chunk_payload, arena_sz, count);
   for (size_t i = 0; i < count; i++) {
     uint8_t *block = arena + (i * chunk_total);
     heap_block_header_t *hdr = (heap_block_header_t *)block;
@@ -164,6 +167,7 @@ void *oops_malloc(size_t size) {
   uint8_t *block = (uint8_t *)sys_vm_alloc(page_aligned);
   if (block == NULL) {
     heap_release();
+    oops_log_warn("HEAP", "large mmap alloc failed for %zu bytes", size);
     return NULL;
   }
 
@@ -181,6 +185,8 @@ void *oops_malloc(size_t size) {
   s_stats.total_alloc_count++;
 
   heap_release();
+  oops_log_trace("HEAP", "large mmap alloc: size=%zu page_aligned=%zu ptr=%p",
+                 size, page_aligned, (void *)(block + sizeof(heap_block_header_t)));
   return (void *)(block + sizeof(heap_block_header_t));
 }
 
@@ -205,6 +211,7 @@ void *oops_aligned_alloc(size_t alignment, size_t size) {
 
   uint8_t *block = (uint8_t *)sys_vm_alloc(page_aligned);
   if (block == NULL) {
+    oops_log_warn("HEAP", "aligned alloc failed: align=%zu size=%zu", alignment, size);
     return NULL;
   }
 
@@ -226,6 +233,8 @@ void *oops_aligned_alloc(size_t alignment, size_t size) {
   s_stats.total_alloc_count++;
   heap_release();
 
+  oops_log_trace("HEAP", "aligned alloc: align=%zu size=%zu addr=%p",
+                 alignment, size, (void *)aligned_addr);
   return (void *)aligned_addr;
 }
 
@@ -237,6 +246,8 @@ void oops_free(void *ptr) {
   heap_block_header_t *hdr = (heap_block_header_t *)((uint8_t *)ptr - sizeof(heap_block_header_t));
   if (hdr->magic != OOPS_HEAP_MAGIC) {
     /* Corrupted or foreign pointer */
+    oops_log_warn("HEAP", "oops_free: block corruption or bad pointer %p (magic=0x%x)",
+                  ptr, hdr->magic);
     return;
   }
 
@@ -292,6 +303,7 @@ void *oops_realloc(void *ptr, size_t new_size) {
 
   heap_block_header_t *hdr = (heap_block_header_t *)((uint8_t *)ptr - sizeof(heap_block_header_t));
   if (hdr->magic != OOPS_HEAP_MAGIC) {
+    oops_log_warn("HEAP", "oops_realloc: block corruption or bad pointer %p", ptr);
     return NULL;
   }
 
@@ -355,5 +367,8 @@ int oops_heap_get_stats(oops_heap_stats_t *out_stats) {
   heap_acquire();
   *out_stats = s_stats;
   heap_release();
+  oops_log_trace("HEAP", "get_stats: allocated=%zu peak=%zu allocs=%zu frees=%zu",
+                 out_stats->current_allocated_bytes, out_stats->peak_allocated_bytes,
+                 out_stats->total_alloc_count, out_stats->total_free_count);
   return 0;
 }

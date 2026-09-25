@@ -131,6 +131,9 @@ int oops_dialog_ime_open(const oops_ime_param_t *param) {
   int rc = sceImeDialogInit(&sce_param, NULL);
   if (rc == 0) {
     s_ime_active = true;
+    oops_log_info("DIALOG", "IME dialog opened successfully (user=%d, max_len=%u)", user_id, param->max_text_len);
+  } else {
+    oops_log_warn("DIALOG", "sceImeDialogInit failed rc=0x%x", rc);
   }
   return rc;
 }
@@ -282,6 +285,9 @@ int oops_dialog_message_show(const char *message,
   int rc = sceMsgDialogOpen(&s_msg_dialog_param);
   if (rc == 0) {
     s_msg_active = true;
+    oops_log_info("DIALOG", "message dialog opened: '%s'", message ? message : "");
+  } else {
+    oops_log_warn("DIALOG", "sceMsgDialogOpen failed rc=0x%x", rc);
   }
   return rc;
 }
@@ -312,6 +318,7 @@ int oops_dialog_message_poll(oops_msg_dialog_result_t *out_result) {
           else
             *out_result = OOPS_MSG_DIALOG_RES_INVALID;
         }
+        oops_log_debug("DIALOG", "message dialog finished (buttonId=%d)", res.buttonId);
         return 1; /* Completed */
       }
     }
@@ -320,6 +327,9 @@ int oops_dialog_message_poll(oops_msg_dialog_result_t *out_result) {
 }
 
 void oops_dialog_message_close(void) {
+  if (s_msg_active) {
+    oops_log_info("DIALOG", "closing message dialog");
+  }
   if (s_msg_active && sceMsgDialogClose) {
     sceMsgDialogClose();
   }

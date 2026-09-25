@@ -1,5 +1,6 @@
 #include "oops/jit.h"
 #include "oops/freestd.h"
+#include "oops/system.h"
 
 #if defined(OOPS_HOST_BUILD) || (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 1)
 #include <sys/mman.h>
@@ -33,11 +34,13 @@ int oops_jit_get_method(void) {
 
 int oops_jit_alloc(size_t size, oops_jit_memory_t *out_mem) {
   if (!out_mem || size == 0) {
+    oops_log_warn("JIT", "alloc invalid arguments");
     return -1;
   }
 
   size_t aligned = align_page(size);
   if (aligned < size) {
+    oops_log_warn("JIT", "alloc size overflow size=%zu", size);
     return -1; /* Overflow */
   }
 
@@ -48,6 +51,7 @@ int oops_jit_alloc(size_t size, oops_jit_memory_t *out_mem) {
     ptr = mmap(NULL, aligned, PROT_READ | PROT_WRITE,
                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (ptr == MAP_FAILED || !ptr) {
+      oops_log_warn("JIT", "alloc mmap failed size=%zu aligned=%zu", size, aligned);
       return -1;
     }
   }
@@ -57,6 +61,7 @@ int oops_jit_alloc(size_t size, oops_jit_memory_t *out_mem) {
   out_mem->size = aligned;
   out_mem->handle = -1;
   out_mem->method = OOPS_JIT_METHOD_HOST;
+  oops_log_debug("JIT", "alloc size=%zu aligned=%zu -> addr=%p (HOST)", size, aligned, ptr);
   return 0;
 }
 
@@ -64,7 +69,7 @@ int oops_jit_free(oops_jit_memory_t *mem) {
   if (!mem || !mem->rx_addr || mem->size == 0) {
     return -1;
   }
-
+  oops_log_debug("JIT", "free rx=%p rw=%p size=%zu (HOST)", mem->rx_addr, mem->rw_addr, mem->size);
   int rc = munmap(mem->rx_addr, mem->size);
   mem->rx_addr = NULL;
   mem->rw_addr = NULL;
@@ -239,12 +244,14 @@ static void probe_jit(void) {
     s_jit_cached_method = OOPS_JIT_METHOD_MPROTECT;
     oops_jit_free(&test_mem);
     s_jit_probed = 1;
+    oops_log_info("JIT", "probe result: supported=%d method=MPROTECT", s_jit_supported);
     return;
   }
 
   s_jit_supported = 0;
   s_jit_cached_method = OOPS_JIT_METHOD_NONE;
   s_jit_probed = 1;
+  oops_log_warn("JIT", "probe result: JIT unavailable");
 }
 
 int oops_jit_is_available(void) {
@@ -259,25 +266,32 @@ int oops_jit_get_method(void) {
 
 int oops_jit_alloc(size_t size, oops_jit_memory_t *out_mem) {
   if (!out_mem || size == 0) {
+    oops_log_warn("JIT", "alloc invalid arguments");
     return -1;
   }
 
   memset(out_mem, 0, sizeof(*out_mem));
   size_t aligned = align_page(size);
   if (aligned < size) {
+    oops_log_warn("JIT", "alloc size overflow size=%zu", size);
     return -1;
   }
 
   /* Attempt Sony shared memory first */
   if (try_alloc_shared_mem(aligned, out_mem) == 0) {
+    oops_log_debug("JIT", "alloc size=%zu -> rx=%p rw=%p handle=%d (SHARED_MEM)",
+                   size, out_mem->rx_addr, out_mem->rw_addr, out_mem->handle);
     return 0;
   }
 
   /* Fall back to direct mprotect (kstuff-lite) */
   if (try_alloc_mprotect(aligned, out_mem) == 0) {
+    oops_log_debug("JIT", "alloc size=%zu -> rx=%p rw=%p (MPROTECT)",
+                   size, out_mem->rx_addr, out_mem->rw_addr);
     return 0;
   }
 
+  oops_log_warn("JIT", "alloc failed for size=%zu aligned=%zu", size, aligned);
   return -1;
 }
 
@@ -286,6 +300,8 @@ int oops_jit_free(oops_jit_memory_t *mem) {
     return -1;
   }
 
+  oops_log_debug("JIT", "free rx=%p rw=%p size=%zu handle=%d method=%d",
+                 mem->rx_addr, mem->rw_addr, mem->size, mem->handle, mem->method);
   int rc = 0;
 
   if (mem->method == OOPS_JIT_METHOD_SHARED_MEM) {

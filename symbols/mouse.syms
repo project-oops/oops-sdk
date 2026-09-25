@@ -1,0 +1,4 @@
+libSceMouse sceMouseInit
+libSceMouse sceMouseOpen
+libSceMouse sceMouseClose
+libSceMouse sceMouseRead

@@ -1,5 +1,6 @@
 #include "oops/draw.h"
 #include "oops/heap.h"
+#include "oops/system.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -266,12 +267,17 @@ static uint8_t paeth(int a, int b, int c) {
 int oops_png_decode(const void *png_data, size_t png_size,
                     uint32_t *out_pixels, uint32_t target_w, uint32_t target_h,
                     uint32_t *out_orig_w, uint32_t *out_orig_h) {
-  if (!png_data || png_size < 33 || !out_pixels) return -1;
+  oops_log_debug("PNG", "decode size=%zu target=%ux%u", png_size, target_w, target_h);
+  if (!png_data || png_size < 33 || !out_pixels) {
+    oops_log_warn("PNG", "decode: invalid arguments");
+    return -1;
+  }
 
   const uint8_t *p = (const uint8_t *)png_data;
   /* Check PNG signature */
   if (p[0] != 0x89 || p[1] != 'P' || p[2] != 'N' || p[3] != 'G' ||
       p[4] != 0x0D || p[5] != 0x0A || p[6] != 0x1A || p[7] != 0x0A) {
+    oops_log_warn("PNG", "decode: invalid PNG header signature");
     return -2;
   }
 
@@ -399,6 +405,7 @@ int oops_png_decode(const void *png_data, size_t png_size,
     }
   }
 
+  oops_log_debug("PNG", "decoded %ux%u -> %ux%u", width, height, tw, th);
   oops_free(raw_buf);
   return 0;
 }

@@ -492,7 +492,9 @@ int oops_system_check_pltauth(void) {
   }
   long ret = sys_call(SYS_ioctl, (long)fd, 0xdeadbeef, 0, 0, 0, 0);
   sys_call(SYS_close, (long)fd, 0, 0, 0, 0, 0);
-  return (ret == 0) ? 1 : 0;
+  int patched = (ret == 0) ? 1 : 0;
+  oops_log_debug("SYS", "pltauth check: %s", patched ? "patched" : "unpatched");
+  return patched;
 #endif
 }
 
@@ -501,6 +503,31 @@ int oops_system_check_pltauth(void) {
 static char s_host_last_klog[512] = {0};
 const char *oops_test_get_last_klog(void) { return s_host_last_klog; }
 #endif
+
+/*
+ * The payload's static constructors - see `oops_run_init_array` in `oops/system.h` for why a
+ * freestanding title has to ask for this and what it costs when nobody does.
+ *
+ * The bracketing symbols come from the link script and are weak here, so a payload linked without
+ * them (or with the arrays empty) walks a zero-length range rather than failing to link.
+ */
+extern void (*__preinit_array_start[])(void) __attribute__((weak));
+extern void (*__preinit_array_end[])(void) __attribute__((weak));
+extern void (*__init_array_start[])(void) __attribute__((weak));
+extern void (*__init_array_end[])(void) __attribute__((weak));
+
+void oops_run_init_array(void) {
+  static int done = 0;
+  if (done) return;
+  done = 1;
+
+  for (void (**fn)(void) = __preinit_array_start; fn != __preinit_array_end; ++fn) {
+    if (*fn) (*fn)();
+  }
+  for (void (**fn)(void) = __init_array_start; fn != __init_array_end; ++fn) {
+    if (*fn) (*fn)();
+  }
+}
 
 static char s_app_id[32] = {0};
 static int s_app_id_resolved = 0;
@@ -646,33 +673,17 @@ int oops_config_value(const char *path, const char *key, char *out, size_t max) 
   return -1;
 }
 
-/* ---------------------------------------------------------------------------
- * `/app0/oops-log`: the verbosity a launch asked for. See `<oops/system.h>`.
- *
- * Held as the file's own bytes rather than parsed into a table, because the table would need a
- * maximum number of channels and a maximum name length, and a linear scan of a file this size is
- * done once per subsystem at startup. The whole point is that adding a channel needs no change
- * here.
- * --------------------------------------------------------------------------- */
+#define OOPS_MAX_CHANNELS 32
 
-static char s_log_cfg[512];
-static int s_log_cfg_read = 0;
+typedef struct oops_channel_entry {
+  char name[24];
+  oops_log_level_t level;
+} oops_channel_entry_t;
 
-static void oops_log_cfg_load(void) {
-  if (s_log_cfg_read) return;
-  s_log_cfg_read = 1;
-  s_log_cfg[0] = '\0';
-#ifndef OOPS_HOST_BUILD
-  int fd = oops_fs_open("/app0/oops-log", OOPS_O_RDONLY, 0);
-  if (fd < 0) return;
-  int64_t n = oops_fs_read(fd, s_log_cfg, sizeof(s_log_cfg) - 1);
-  oops_fs_close(fd);
-  s_log_cfg[(n > 0) ? (size_t)n : 0u] = '\0';
-#endif
-}
+static oops_channel_entry_t s_channels[OOPS_MAX_CHANNELS];
+static size_t s_channel_count = 0;
+static int s_channels_loaded = 0;
 
-/* A level by name or digit, or `fallback` for anything else - a typo must not silence a
- * subsystem, which is the failure that would be hardest to notice from the log it produces. */
 static oops_log_level_t oops_log_level_of(const char *s, size_t len,
                                           oops_log_level_t fallback) {
   static const struct {
@@ -693,15 +704,33 @@ static oops_log_level_t oops_log_level_of(const char *s, size_t len,
   return fallback;
 }
 
-oops_log_level_t oops_log_channel_level(const char *channel, oops_log_level_t fallback) {
-  if (channel == NULL || *channel == '\0') return fallback;
-  oops_log_cfg_load();
-  if (s_log_cfg[0] == '\0') return fallback;
+static void oops_log_load_channels(void) {
+  if (s_channels_loaded) return;
+  s_channels_loaded = 1;
 
-  const size_t want = obs_strlen(channel);
-  const char *p = s_log_cfg;
-  while (*p != '\0') {
-    /* One line, with `#` ending it. Leading blanks are skipped so an indented file reads. */
+  char buf[512];
+  buf[0] = '\0';
+#ifndef OOPS_HOST_BUILD
+  int fd = oops_fs_open("/app0/oops-log", OOPS_O_RDONLY, 0);
+  if (fd >= 0) {
+    int64_t got = oops_fs_read(fd, buf, sizeof(buf) - 1);
+    oops_fs_close(fd);
+    buf[(got > 0) ? (size_t)got : 0u] = '\0';
+  }
+#else
+  int fd = open("oops-log", O_RDONLY);
+  if (fd < 0) fd = open("/app0/oops-log", O_RDONLY);
+  if (fd >= 0) {
+    ssize_t got = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    buf[(got > 0) ? (size_t)got : 0u] = '\0';
+  }
+#endif
+
+  if (buf[0] == '\0') return;
+
+  const char *p = buf;
+  while (*p != '\0' && s_channel_count < OOPS_MAX_CHANNELS) {
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
     const char *line = p;
     while (*p != '\0' && *p != '\n') p++;
@@ -715,26 +744,80 @@ oops_log_level_t oops_log_channel_level(const char *channel, oops_log_level_t fa
       if (*c == '=') { eq = c; break; }
     }
     if (eq != (const char *)0) {
-      /* The name, without the blanks either side of it. */
-      const char *ns = line;
-      const char *ne = eq;
+      const char *ns = line, *ne = eq;
       while (ns < ne && (*ns == ' ' || *ns == '\t')) ns++;
       while (ne > ns && (ne[-1] == ' ' || ne[-1] == '\t')) ne--;
-      if ((size_t)(ne - ns) == want && obs_strncmp(ns, channel, want) == 0) {
-        const char *vs = eq + 1;
-        const char *ve = end;
+      size_t klen = (size_t)(ne - ns);
+      if (klen > 0 && klen < sizeof(s_channels[0].name)) {
+        const char *vs = eq + 1, *ve = end;
         while (vs < ve && (*vs == ' ' || *vs == '\t')) vs++;
         while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t' || ve[-1] == '\r')) ve--;
-        return oops_log_level_of(vs, (size_t)(ve - vs), fallback);
+        size_t vlen = (size_t)(ve - vs);
+        if (vlen > 0) {
+          oops_log_level_t lvl = oops_log_level_of(vs, vlen, OOPS_LOG_INFO);
+          for (size_t i = 0; i < klen; i++) {
+            s_channels[s_channel_count].name[i] = ns[i];
+          }
+          s_channels[s_channel_count].name[klen] = '\0';
+          s_channels[s_channel_count].level = lvl;
+          s_channel_count++;
+        }
       }
     }
     if (*p == '\n') p++;
+  }
+}
+
+static oops_log_level_t oops_log_effective_level(const char *tag) {
+  if (!s_channels_loaded) {
+    oops_log_load_channels();
+  }
+  if (tag != NULL && tag[0] != '\0') {
+    for (size_t i = 0; i < s_channel_count; i++) {
+      size_t j = 0;
+      int match = 1;
+      while (tag[j] != '\0' && s_channels[i].name[j] != '\0') {
+        char c1 = tag[j];
+        char c2 = s_channels[i].name[j];
+        if (c1 >= 'A' && c1 <= 'Z') c1 = (char)(c1 + ('a' - 'A'));
+        if (c2 >= 'A' && c2 <= 'Z') c2 = (char)(c2 + ('a' - 'A'));
+        if (c1 != c2) { match = 0; break; }
+        j++;
+      }
+      if (match && tag[j] == '\0' && s_channels[i].name[j] == '\0') {
+        return s_channels[i].level;
+      }
+    }
+  }
+  return s_log_level;
+}
+
+oops_log_level_t oops_log_channel_level(const char *channel, oops_log_level_t fallback) {
+  if (channel == NULL || *channel == '\0') return fallback;
+  if (!s_channels_loaded) {
+    oops_log_load_channels();
+  }
+  for (size_t i = 0; i < s_channel_count; i++) {
+    size_t j = 0;
+    int match = 1;
+    while (channel[j] != '\0' && s_channels[i].name[j] != '\0') {
+      char c1 = channel[j];
+      char c2 = s_channels[i].name[j];
+      if (c1 >= 'A' && c1 <= 'Z') c1 = (char)(c1 + ('a' - 'A'));
+      if (c2 >= 'A' && c2 <= 'Z') c2 = (char)(c2 + ('a' - 'A'));
+      if (c1 != c2) { match = 0; break; }
+      j++;
+    }
+    if (match && channel[j] == '\0' && s_channels[i].name[j] == '\0') {
+      return s_channels[i].level;
+    }
   }
   return fallback;
 }
 
 void oops_klog_level(oops_log_level_t level, const char *tag, const char *msg) {
-  if (msg == NULL || level == OOPS_LOG_NONE || level > s_log_level) return;
+  oops_log_level_t effective = oops_log_effective_level(tag);
+  if (msg == NULL || level == OOPS_LOG_NONE || level > effective) return;
   char buf[512];
   size_t pos = 0;
 
@@ -817,7 +900,7 @@ void oops_klog_level(oops_log_level_t level, const char *tag, const char *msg) {
 }
 
 void oops_kprintf_level(oops_log_level_t level, const char *tag, const char *fmt, ...) {
-  if (fmt == NULL || level == OOPS_LOG_NONE || level > s_log_level) return;
+  if (fmt == NULL || level == OOPS_LOG_NONE || level > oops_log_effective_level(tag)) return;
   char buf[512];
   va_list args;
   va_start(args, fmt);
@@ -931,6 +1014,7 @@ int oops_log_enable_disk_sink(const char *app_name, int archive_timestamped) {
     }
   }
 
+  oops_log_info("SYS", "disk sink enabled at %s", path);
   return 0;
 }
 
@@ -956,6 +1040,7 @@ void oops_log_close_disk_sink(void) {
     s_disk_sink_ts_fd = -1;
   }
   s_disk_sink_path[0] = '\0';
+  oops_log_debug("SYS", "disk sink closed");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1026,6 +1111,8 @@ int oops_system_escape_sandbox(void) {
         OOPS_SYSMODULE_SAVE_DATA,      OOPS_SYSMODULE_NET_CTL,
         OOPS_SYSMODULE_IME_DIALOG,     OOPS_SYSMODULE_MESSAGE_DIALOG,
         OOPS_SYSMODULE_AUDIO_DEC,      OOPS_SYSMODULE_VIDEODEC,
+        OOPS_SYSMODULE_NET,            OOPS_SYSMODULE_SSL,
+        OOPS_SYSMODULE_HTTP,
     };
     for (unsigned i = 0; i < sizeof(needed) / sizeof(needed[0]); i++) {
       /* Already-resident is success and costs nothing; a refusal is not fatal here - it only
@@ -1062,9 +1149,11 @@ int oops_system_escape_sandbox(void) {
   }
 
   /* Connect with a short timeout (3 seconds) */
+  oops_log_info("SYS", "sandbox escape: pid=%d connecting to daemon 127.0.0.1:9069", (int)my_pid);
   long connect_rc = sys_call(SYS_connect, sock, (long)sockaddr, 16, 0, 0, 0);
   if (connect_rc != 0) {
     sys_call(SYS_close, sock, 0, 0, 0, 0, 0);
+    oops_log_warn("SYS", "sandbox escape: connect failed rc=%ld", connect_rc);
     return -1;
   }
 
@@ -1072,6 +1161,7 @@ int oops_system_escape_sandbox(void) {
   long written = sys_call(SYS_write, sock, (long)&my_pid, 4, 0, 0, 0);
   if (written != 4) {
     sys_call(SYS_close, sock, 0, 0, 0, 0, 0);
+    oops_log_warn("SYS", "sandbox escape: send pid failed written=%ld", written);
     return -1;
   }
 
@@ -1081,9 +1171,11 @@ int oops_system_escape_sandbox(void) {
   sys_call(SYS_close, sock, 0, 0, 0, 0, 0);
 
   if (read_rc != 4 || status != 0) {
+    oops_log_warn("SYS", "sandbox escape: failed status=%d read_rc=%ld", (int)status, read_rc);
     return -1;
   }
 
+  oops_log_info("SYS", "sandbox escape succeeded");
   return 0;
 #else
   /* On the host side there is no sandbox to escape. */

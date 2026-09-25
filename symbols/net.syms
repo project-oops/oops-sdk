@@ -1,0 +1,16 @@
+libSceNet sceNetInit
+libSceNet sceNetTerm
+libSceNet sceNetSocket
+libSceNet sceNetBind
+libSceNet sceNetListen
+libSceNet sceNetAccept
+libSceNet sceNetRecv
+libSceNet sceNetSend
+libSceNet sceNetSocketClose
+libSceNet sceNetSetsockopt
+libSceNet sceNetConnect
+libSceNet sceNetPoolCreate
+libSceNet sceNetPoolDestroy
+libSceNetCtl sceNetCtlInit
+libSceNetCtl sceNetCtlGetInfo
+libSceNetCtl sceNetCtlTerm

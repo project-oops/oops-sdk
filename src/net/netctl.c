@@ -1,5 +1,6 @@
 #include "oops/netctl.h"
 #include "oops/sysmodule.h"
+#include "oops/system.h"
 #include <stdbool.h>
 
 __attribute__((weak)) int sceNetCtlInit(void);
@@ -55,17 +56,23 @@ int oops_net_ctl_init(void) {
     return 0;
   }
 
+  oops_log_debug("NETCTL", "initializing netctl subsystem");
+
   if (oops_sysmodule_load(OOPS_SYSMODULE_NET_CTL) == 0) {
     s_netctl_module_loaded = true;
   }
 
   if (!sceNetCtlInit) {
+    oops_log_warn("NETCTL", "sceNetCtlInit symbol not found");
     return -1;
   }
 
   int rc = sceNetCtlInit();
   if (rc == 0) {
     s_netctl_initialized = true;
+    oops_log_info("NETCTL", "netctl initialized successfully");
+  } else {
+    oops_log_warn("NETCTL", "sceNetCtlInit failed: %d", rc);
   }
   return rc;
 }
@@ -84,8 +91,11 @@ int oops_net_ctl_get_info(oops_net_info_t *out_info) {
   }
 
   if (!sceNetCtlGetInfo) {
+    oops_log_warn("NETCTL", "sceNetCtlGetInfo symbol not found");
     return -1;
   }
+
+  oops_log_trace("NETCTL", "querying netctl info parameters");
 
   uint8_t buffer[NETCTL_QUERY_BYTES];
   int answered =
@@ -146,10 +156,19 @@ int oops_net_ctl_get_info(oops_net_info_t *out_info) {
   }
 
   /* Nothing answered is a failure, not an interface with no address. */
-  return (answered > 0) ? 0 : -1;
+  if (answered == 0) {
+    oops_log_warn("NETCTL", "sceNetCtlGetInfo queries yielded 0 answers");
+    return -1;
+  }
+
+  oops_log_info("NETCTL", "net info: IP=%s netmask=%s gw=%s DNS1=%s link=%d type=%d",
+                out_info->ip_address, out_info->netmask, out_info->default_gateway,
+                out_info->primary_dns, out_info->link_status, out_info->device_type);
+  return 0;
 }
 
 void oops_net_ctl_term(void) {
+  oops_log_debug("NETCTL", "terminating netctl subsystem");
   if (s_netctl_initialized && sceNetCtlTerm) {
     sceNetCtlTerm();
     s_netctl_initialized = false;

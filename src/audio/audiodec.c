@@ -1,5 +1,6 @@
 #include "oops/audiodec.h"
 #include "oops/sysmodule.h"
+#include "oops/system.h"
 #include <stddef.h>
 
 /*
@@ -42,8 +43,12 @@ int oops_audiodec_available(void) {
   /* Real, measured capability: the base decode entry points resolved. */
   if (sceAudiodecCreateDecoder && sceAudiodecDecode &&
       sceAudiodecDeleteDecoder) {
+    oops_log_trace("AUDIODEC", "available: entry points resolved");
     return 1;
   }
+  oops_log_trace("AUDIODEC", "available: missing entry points (create=%p decode=%p del=%p)",
+                 (void *)sceAudiodecCreateDecoder, (void *)sceAudiodecDecode,
+                 (void *)sceAudiodecDeleteDecoder);
   return 0;
 }
 
@@ -51,17 +56,22 @@ int oops_audiodec_offload_available(void) {
   /* The engine beneath the codec. Present separately because a front door
    * without the engine is a distinct finding a caller may want to know. */
   if (sceAjmInitialize && sceAjmInstanceCreate) {
+    oops_log_trace("AUDIODEC", "offload available: AJM entry points resolved");
     return 1;
   }
+  oops_log_trace("AUDIODEC", "offload available: missing AJM entry points");
   return 0;
 }
 
 oops_audiodec_t *oops_audiodec_open(int codec) {
+  oops_log_debug("AUDIODEC", "open codec=%d", codec);
   if (codec != OOPS_AUDIODEC_AAC && codec != OOPS_AUDIODEC_MP3) {
+    oops_log_warn("AUDIODEC", "open: unsupported codec=%d", codec);
     s_last_error = OOPS_AUDIODEC_EPARAM;
     return NULL;
   }
   if (!oops_audiodec_available()) {
+    oops_log_warn("AUDIODEC", "open: libSceAudiodec not available");
     s_last_error = OOPS_AUDIODEC_EUNAVAIL;
     return NULL;
   }
@@ -70,6 +80,7 @@ oops_audiodec_t *oops_audiodec_open(int codec) {
    * not confirmed. A guessed layout corrupts the stack rather than failing, so
    * this refuses loudly. Completing it needs the obSCEne struct-layout probe
    * (see the header). */
+  oops_log_warn("AUDIODEC", "open: struct layout unconfirmed (ELAYOUT)");
   s_last_error = OOPS_AUDIODEC_ELAYOUT;
   return NULL;
 }
@@ -77,9 +88,12 @@ oops_audiodec_t *oops_audiodec_open(int codec) {
 int oops_audiodec_decode(oops_audiodec_t *dec, const void *au, size_t au_size,
                          int16_t *pcm_out, size_t pcm_capacity) {
   if (!dec || !au || au_size == 0 || !pcm_out || pcm_capacity == 0) {
+    oops_log_warn("AUDIODEC", "decode: invalid arguments dec=%p au=%p sz=%zu pcm=%p cap=%zu",
+                  (void *)dec, au, au_size, (void *)pcm_out, pcm_capacity);
     s_last_error = OOPS_AUDIODEC_EPARAM;
     return OOPS_AUDIODEC_EPARAM;
   }
+  oops_log_trace("AUDIODEC", "decode: dec=%p sz=%zu -> ELAYOUT", (void *)dec, au_size);
   s_last_error = OOPS_AUDIODEC_ELAYOUT;
   return OOPS_AUDIODEC_ELAYOUT;
 }
@@ -88,6 +102,7 @@ void oops_audiodec_close(oops_audiodec_t *dec) {
   if (!dec) {
     return;
   }
+  oops_log_debug("AUDIODEC", "close dec=%p handle=%d", (void *)dec, dec->handle);
   if (dec->handle > 0 && sceAudiodecDeleteDecoder) {
     sceAudiodecDeleteDecoder(dec->handle);
     dec->handle = -1;

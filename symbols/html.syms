@@ -1,0 +1,2 @@
+# oops-sdk symbols: html (litehtml HTML5/CSS Renderer)
+# Relies on libc++ runtime and 2D canvas drawing rasterizer.

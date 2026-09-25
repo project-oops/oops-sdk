@@ -95,10 +95,12 @@ OBJS := \
     $(BUILD)/net/net.o \
     $(BUILD)/net/netctl.o \
     $(BUILD)/net/dns.o \
+    $(BUILD)/net/http.o \
     $(BUILD)/draw/draw.o \
     $(BUILD)/draw/png.o \
     $(BUILD)/hud/hud.o \
     $(BUILD)/system/pkg.o \
+    $(BUILD)/system/zip.o \
     $(BUILD)/system/freestd.o \
     $(BUILD)/system/scanf.o \
     $(BUILD)/system/libc.o \
@@ -142,6 +144,8 @@ TEST_SRCS := \
     tests/unit/test_heap.c \
     tests/unit/test_math.c \
     tests/unit/test_dns.c \
+    tests/unit/test_zip.c \
+    tests/unit/test_http.c \
     tests/integration/test_pipeline_draw_tile.c \
     tests/integration/test_memory_surface.c \
     tests/integration/test_thread_worker_pool.c \
@@ -170,6 +174,7 @@ TEST_SRCS := \
     src/system/jit.c \
     src/system/fs.c \
     src/system/pkg.c \
+    src/system/zip.c \
     src/system/freestd.c \
     src/system/scanf.c \
     src/system/syscall.c \
@@ -183,6 +188,7 @@ TEST_SRCS := \
     src/net/net.c \
     src/net/netctl.c \
     src/net/dns.c \
+    src/net/http.c \
     src/gl/gl_context.c \
     src/gl/gfx.c \
     src/gl/gl_state.c \

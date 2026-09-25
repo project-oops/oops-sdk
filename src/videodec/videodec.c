@@ -1,5 +1,6 @@
 #include "oops/videodec.h"
 #include "oops/sysmodule.h"
+#include "oops/system.h"
 #include <stddef.h>
 
 /*
@@ -56,23 +57,31 @@ int oops_videodec_available(void) {
    * works today. */
   if (sceVideodec2CreateDecoder && sceVideodec2Decode &&
       sceVideodec2DeleteDecoder) {
+    oops_log_trace("VIDEODEC", "available: entry points resolved");
     return 1;
   }
+  oops_log_trace("VIDEODEC", "available: missing entry points (create=%p decode=%p del=%p)",
+                 (void *)sceVideodec2CreateDecoder, (void *)sceVideodec2Decode,
+                 (void *)sceVideodec2DeleteDecoder);
   return 0;
 }
 
 oops_videodec_t *oops_videodec_open(int codec, uint32_t width,
                                     uint32_t height) {
+  oops_log_debug("VIDEODEC", "open codec=%d size=%ux%u", codec, width, height);
   if (codec != OOPS_VIDEODEC_H264 && codec != OOPS_VIDEODEC_HEVC &&
       codec != OOPS_VIDEODEC_VP9) {
+    oops_log_warn("VIDEODEC", "open: unsupported codec=%d", codec);
     s_last_error = OOPS_VIDEODEC_EPARAM;
     return NULL;
   }
   if (width == 0 || height == 0) {
+    oops_log_warn("VIDEODEC", "open: invalid dimensions %ux%u", width, height);
     s_last_error = OOPS_VIDEODEC_EPARAM;
     return NULL;
   }
   if (!oops_videodec_available()) {
+    oops_log_warn("VIDEODEC", "open: libSceVideodec2 not available");
     s_last_error = OOPS_VIDEODEC_EUNAVAIL;
     return NULL;
   }
@@ -82,6 +91,7 @@ oops_videodec_t *oops_videodec_open(int codec, uint32_t width,
    * Passing a guessed layout would corrupt the stack rather than fail, so this
    * refuses loudly instead. Completing it needs the obSCEne struct-layout probe
    * (see the header). */
+  oops_log_warn("VIDEODEC", "open: struct layout unconfirmed (ELAYOUT)");
   s_last_error = OOPS_VIDEODEC_ELAYOUT;
   return NULL;
 }
@@ -89,10 +99,13 @@ oops_videodec_t *oops_videodec_open(int codec, uint32_t width,
 int oops_videodec_decode(oops_videodec_t *dec, const void *au, size_t au_size,
                          oops_videodec_frame_t *out_frame) {
   if (!dec || !au || au_size == 0 || !out_frame) {
+    oops_log_warn("VIDEODEC", "decode: invalid arguments dec=%p au=%p sz=%zu frame=%p",
+                  (void *)dec, au, au_size, (void *)out_frame);
     s_last_error = OOPS_VIDEODEC_EPARAM;
     return OOPS_VIDEODEC_EPARAM;
   }
   /* Same boundary as open: the input/output struct layouts are unconfirmed. */
+  oops_log_trace("VIDEODEC", "decode: dec=%p sz=%zu -> ELAYOUT", (void *)dec, au_size);
   s_last_error = OOPS_VIDEODEC_ELAYOUT;
   return OOPS_VIDEODEC_ELAYOUT;
 }
@@ -101,6 +114,8 @@ void oops_videodec_close(oops_videodec_t *dec) {
   if (!dec) {
     return;
   }
+  oops_log_debug("VIDEODEC", "close dec=%p decoder=%p queue=%p",
+                 (void *)dec, dec->decoder, dec->queue);
   if (dec->decoder && sceVideodec2DeleteDecoder) {
     sceVideodec2DeleteDecoder(dec->decoder);
     dec->decoder = NULL;

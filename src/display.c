@@ -1,5 +1,6 @@
 #include "oops/display.h"
 #include "oops/draw.h"
+#include "oops/system.h"
 #include "oops/target.h"
 
 #if OOPS_TARGET_IS_PROSPERO
@@ -35,6 +36,8 @@ oops_display_t *oops_display_open_adopting(oops_display_backend_t backend,
                                            unsigned int height,
                                            void *const *adopt,
                                            int adopt_count) {
+  oops_log_info("DISP", "oops_display_open backend=%d size=%ux%u adopting=%d",
+                (int)backend, width, height, adopt_count);
   struct oops_display *disp = &s_unified_display;
   /* A second open without a close would overwrite the pointer to a live backend
    * and leak it. Closing a backend whose open failed is a no-op, so this is
@@ -320,6 +323,7 @@ oops_surface_t oops_display_get_surface(oops_display_t *disp) {
 void oops_display_close(oops_display_t *disp) {
   if (!disp)
     return;
+  oops_log_info("DISP", "oops_display_close");
 #if OOPS_TARGET_IS_PROSPERO
   agc_display_close(disp->agc);
 #else

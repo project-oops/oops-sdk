@@ -1,4 +1,5 @@
 #include "oops/audio.h"
+#include "oops/system.h"
 #include "audio_port.h"
 #include <stddef.h>
 
@@ -45,19 +46,24 @@ int oops_audio_get_chunk_frames(const oops_audio_port_t *port) {
 
 oops_audio_port_t *oops_audio_open(int sample_rate, int channels,
                                    int buffer_frames) {
+  oops_log_debug("AUDIO", "oops_audio_open rate=%d channels=%d frames=%d",
+                 sample_rate, channels, buffer_frames);
   /* Arguments first, so a host without the platform still reports a bad call as
    * bad. */
   int ch = (channels <= 0) ? OOPS_AUDIO_CHANNELS : channels;
   if (ch != OOPS_AUDIO_CHANNELS) {
+    oops_log_warn("AUDIO", "invalid channel count %d (must be %d)", channels, OOPS_AUDIO_CHANNELS);
     s_last_audio_error = OOPS_AUDIO_EPARAM;
     return NULL;
   }
   if (s_default_audio.handle >= 0) {
+    oops_log_warn("AUDIO", "audio port already open");
     s_last_audio_error = OOPS_AUDIO_EBUSY;
     return NULL;
   }
   /* A port that opens but can never output is not a port. */
   if (!sceAudioOutOpen || !sceAudioOutOutput) {
+    oops_log_warn("AUDIO", "sceAudioOutOpen or sceAudioOutOutput not available");
     s_last_audio_error = OOPS_AUDIO_EUNAVAIL;
     return NULL;
   }
@@ -65,6 +71,7 @@ oops_audio_port_t *oops_audio_open(int sample_rate, int channels,
   if (!s_audio_initialized) {
     if (sceAudioOutInit) {
       int init_rc = sceAudioOutInit();
+      oops_log_debug("AUDIO", "sceAudioOutInit returned %d", init_rc);
       (void)init_rc;
     }
     s_audio_initialized = 1;
@@ -102,6 +109,7 @@ oops_audio_port_t *oops_audio_open(int sample_rate, int channels,
                              (unsigned int)rate, OOPS_AUDIO_FORMAT_PARAM);
   }
   if (handle < 0) {
+    oops_log_warn("AUDIO", "sceAudioOutOpen failed: 0x%x (%d)", handle, handle);
     s_last_audio_error = handle;
     return NULL;
   }
@@ -114,6 +122,8 @@ oops_audio_port_t *oops_audio_open(int sample_rate, int channels,
   s_default_audio.sink = sceAudioOutOutput;
   s_last_audio_error = OOPS_AUDIO_OK;
 
+  oops_log_info("AUDIO", "audio opened: handle=%d rate=%d channels=%d frames=%d",
+                handle, rate, ch, frames);
   return &s_default_audio;
 }
 
@@ -121,6 +131,9 @@ oops_audio_port_t *oops_audio_open(int sample_rate, int channels,
  * else is 0. */
 static int oops_audio_emit(struct oops_audio_port *port, const int16_t *chunk) {
   int rc = port->sink(port->handle, chunk);
+  if (rc < 0) {
+    oops_log_warn("AUDIO", "port->sink returned %d", rc);
+  }
   return (rc < 0) ? rc : 0;
 }
 
@@ -133,6 +146,8 @@ int oops_audio_write(oops_audio_port_t *port, const int16_t *pcm_samples,
   if (port->chunk_frames <= 0 || port->chunk_frames > OOPS_AUDIO_MAX_CHUNK) {
     return -1;
   }
+
+  oops_log_trace("AUDIO", "audio_write: %zu frames, pending=%d", frame_count, port->pending);
 
   const size_t chunk = (size_t)port->chunk_frames;
   const int16_t *src = pcm_samples;
@@ -177,6 +192,8 @@ int oops_audio_flush(oops_audio_port_t *port) {
   if (port->pending == 0)
     return 0;
 
+  oops_log_trace("AUDIO", "audio_flush: pending=%d", port->pending);
+
   size_t chunk_samples = (size_t)port->chunk_frames * OOPS_AUDIO_CHANNELS;
   for (size_t i = (size_t)port->pending * OOPS_AUDIO_CHANNELS;
        i < chunk_samples; i++) {
@@ -200,6 +217,8 @@ int oops_audio_set_volume(oops_audio_port_t *port, float left, float right) {
   if (right > 1.0f)
     right = 1.0f;
 
+  oops_log_debug("AUDIO", "set volume: left=%.2f right=%.2f", (double)left, (double)right);
+
   /* Hardware scale: 0 to 32768 */
   int volumes[2];
   volumes[0] = (int)(left * 32768.0f);
@@ -212,6 +231,7 @@ void oops_audio_close(oops_audio_port_t *port) {
   if (!port)
     return;
   if (port->handle >= 0) {
+    oops_log_info("AUDIO", "audio_close handle=%d", port->handle);
     /* Emit any held partial chunk first, then drain what is queued. The
      * platform refuses sceAudioOutClose with SCE_AUDIO_OUT_ERROR_BUSY
      * (0x80260002) while unplayed chunks remain, and sceAudioOutOutput(handle,

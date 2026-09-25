@@ -1,0 +1,4 @@
+libSceSaveData sceSaveDataInitialize3
+libSceSaveData sceSaveDataTerminate
+libSceSaveData sceSaveDataMount2
+libSceSaveData sceSaveDataUmount

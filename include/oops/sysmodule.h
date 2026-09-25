@@ -13,6 +13,9 @@ extern "C" {
  * Several high-level libraries on Orbis and Prospero are not resident
  * by default and must be loaded by identifier before use.
  */
+#define OOPS_SYSMODULE_NET 0x0001
+#define OOPS_SYSMODULE_HTTP 0x0002
+#define OOPS_SYSMODULE_SSL 0x0003
 #define OOPS_SYSMODULE_PERF 0x0005
 #define OOPS_SYSMODULE_FIBER 0x0006
 #define OOPS_SYSMODULE_ULT 0x0007

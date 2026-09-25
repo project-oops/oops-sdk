@@ -1,0 +1,2 @@
+# oops-sdk symbols: js (QuickJS Standalone Engine)
+# Core JavaScript execution relies on freestanding memory, math, and time primitives.

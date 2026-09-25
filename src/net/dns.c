@@ -7,6 +7,7 @@
 #include "oops/netctl.h"
 #include "oops/freestd.h"
 #include "oops/time.h"
+#include "oops/system.h"
 
 #if defined(OOPS_HOST_BUILD)
 #ifndef _POSIX_C_SOURCE
@@ -170,12 +171,15 @@ int oops_net_resolve(const char *hostname, char *out_ip, size_t out_len) {
     return -1;
   }
 
+  oops_log_debug("DNS", "resolving hostname '%s'", hostname);
+
   /* 1. Direct dotted-quad IPv4 passthrough */
   uint32_t ip_test;
   if (oops_net_inet_pton(hostname, &ip_test) == 0) {
     size_t len = obs_strlen(hostname);
     if (len >= out_len) return -1;
     obs_strncpy(out_ip, hostname, out_len);
+    oops_log_trace("DNS", "'%s' is dotted-quad IPv4 passthrough", hostname);
     return 0;
   }
 
@@ -183,6 +187,7 @@ int oops_net_resolve(const char *hostname, char *out_ip, size_t out_len) {
   if (obs_strcmp(hostname, "localhost") == 0) {
     if (out_len < 10) return -1;
     obs_strncpy(out_ip, "127.0.0.1", out_len);
+    oops_log_trace("DNS", "resolved localhost -> 127.0.0.1");
     return 0;
   }
 
@@ -196,8 +201,12 @@ int oops_net_resolve(const char *hostname, char *out_ip, size_t out_len) {
     struct sockaddr_in *ipv4 = (struct sockaddr_in *)res->ai_addr;
     const char *ptr = inet_ntop(AF_INET, &(ipv4->sin_addr), out_ip, (socklen_t)out_len);
     freeaddrinfo(res);
-    if (ptr) return 0;
+    if (ptr) {
+      oops_log_info("DNS", "resolved '%s' -> %s", hostname, out_ip);
+      return 0;
+    }
   }
+  oops_log_warn("DNS", "failed to resolve host '%s'", hostname);
   return -1;
 #else
   /* Target freestanding RFC 1035 UDP DNS resolution */
@@ -246,9 +255,13 @@ int oops_net_resolve(const char *hostname, char *out_ip, size_t out_len) {
     }
 
     oops_close(sock);
-    if (success) return 0;
+    if (success) {
+      oops_log_info("DNS", "resolved '%s' -> %s (via %s)", hostname, out_ip, servers[s]);
+      return 0;
+    }
   }
 
+  oops_log_warn("DNS", "failed to resolve host '%s' across %d servers", hostname, num_servers);
   return -1;
 #endif
 }

@@ -1,0 +1,10 @@
+libSceKeyboard sceKeyboardInit
+libSceKeyboard sceKeyboardOpen
+libSceKeyboard sceKeyboardClose
+libSceKeyboard sceKeyboardGetHandle
+libSceKeyboard sceKeyboardRead
+libSceKeyboard sceKeyboardReadState
+libSceKeyboard sceKeyboardConnectPort
+libSceKeyboard sceKeyboardGetConnection
+libSceKeyboard sceKeyboardSetProcessFocus
+libSceKeyboard sceKeyboardSetProcessPrivilege

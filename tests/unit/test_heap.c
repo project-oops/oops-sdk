@@ -112,6 +112,17 @@ static void test_heap_aligned_alloc(void) {
   }
 }
 
+static void test_heap_malloc_alignment(void) {
+  /* Verify 16-byte alignment across slab and large mmap allocations (x86-64 max_align_t) */
+  size_t sizes[] = {1, 3, 7, 8, 15, 16, 24, 32, 63, 64, 127, 128, 255, 256, 1000, 2048, 4096, 8192, 16384, 65536};
+  for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+    void *p = oops_malloc(sizes[i]);
+    ASSERT_TRUE(p != NULL);
+    ASSERT_EQ(((uintptr_t)p & 15ULL), 0ULL);
+    oops_free(p);
+  }
+}
+
 void run_unit_tests_heap(void) {
   TEST_SUITE_BEGIN("Freestanding Userland Heap Allocator");
   RUN_TEST(test_heap_null_and_zero);
@@ -119,5 +130,6 @@ void run_unit_tests_heap(void) {
   RUN_TEST(test_heap_calloc_and_realloc);
   RUN_TEST(test_heap_large_mmap);
   RUN_TEST(test_heap_aligned_alloc);
+  RUN_TEST(test_heap_malloc_alignment);
 }
 

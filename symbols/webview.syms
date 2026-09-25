@@ -1,0 +1,2 @@
+# oops-sdk symbols: webview (QuickJS + litehtml Assembled Browser)
+# Binds JavaScript VM, HTML/CSS DOM, and HTTP network fetch capabilities.

@@ -58,6 +58,16 @@ static void test_memory_direct_contract_on_host(void) {
   ASSERT_TRUE(oops_mem_alloc(0x10000, 0x10000, OOPS_MEM_WC_GARLIC) == NULL);
 }
 
+static void test_memory_reserve_va_contract_on_host(void) {
+  void *va = NULL;
+  ASSERT_EQ(oops_mem_reserve_va(NULL, 0x10000, 0, 0x4000), -1);
+  ASSERT_EQ(oops_mem_reserve_va(&va, 0, 0, 0x4000), -1);
+  ASSERT_EQ(oops_mem_reserve_va(&va, 0x10000, 0, 0x4000), -1);
+  ASSERT_EQ(oops_mem_release_va(NULL, 0x10000), -1);
+  ASSERT_EQ(oops_mem_release_va((void *)0x20000000, 0), -1);
+  ASSERT_EQ(oops_mem_release_va((void *)0x20000000, 0x10000), -1);
+}
+
 void run_unit_tests_memory(void) {
   TEST_SUITE_BEGIN("Direct Memory & Coherent Allocator");
   RUN_TEST(test_memory_constants);
@@ -65,4 +75,5 @@ void run_unit_tests_memory(void) {
   RUN_TEST(test_memory_alloc_refuses_wrapping_size);
   RUN_TEST(test_memory_phys_unknown_is_minus_one);
   RUN_TEST(test_memory_direct_contract_on_host);
+  RUN_TEST(test_memory_reserve_va_contract_on_host);
 }

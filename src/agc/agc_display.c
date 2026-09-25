@@ -716,11 +716,11 @@ static int agc_display_flip_from(agc_display_t *disp, const uint32_t *src) {
   uint64_t t_submit_done = oops_time_get_us();
 
   if (disp->flip_count <= 10 || (disp->flip_count % 60) == 0) {
-    oops_kprintf("AGC", "flip %lu: tile=%lu submit=%lu total=%lu\n",
-                 (unsigned long)disp->flip_count,
-                 (unsigned long)(t_tile_done - t_flip_start),
-                 (unsigned long)(t_submit_done - t_tile_done),
-                 (unsigned long)(t_submit_done - t_flip_start));
+    oops_log_debug("AGC", "flip %lu: tile=%lu submit=%lu total=%lu",
+                   (unsigned long)disp->flip_count,
+                   (unsigned long)(t_tile_done - t_flip_start),
+                   (unsigned long)(t_submit_done - t_tile_done),
+                   (unsigned long)(t_submit_done - t_flip_start));
   }
 
   return frc;
@@ -875,6 +875,7 @@ int agc_display_get_video_handle(const agc_display_t *disp) {
 void agc_display_close(agc_display_t *disp) {
   if (!disp)
     return;
+  oops_log_info("AGC", "agc_display_close: handle=%d", disp->handle);
 
   agc_gpu_teardown(disp);
 

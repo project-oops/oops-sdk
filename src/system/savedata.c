@@ -101,6 +101,7 @@ int oops_savedata_mount(const char *dir_name, oops_savedata_mode_t mode,
   if (!dir_name || !out_mount_path || max_path_len == 0)
     return -1;
   out_mount_path[0] = '\0';
+  oops_log_info("SAVEDATA", "mount requested: dir='%s' mode=0x%x", dir_name, (unsigned int)mode);
 
   /* 1. Try vendor libSceSaveData if available */
   if (!s_savedata_initialized) {
@@ -131,8 +132,10 @@ int oops_savedata_mount(const char *dir_name, oops_savedata_mode_t mode,
     int rc = s_pfn_sceSaveDataMount2(mount_param);
     if (rc == 0) {
       safe_strcpy(out_mount_path, mount_point, max_path_len);
+      oops_log_info("SAVEDATA", "mounted vendor container at '%s'", mount_point);
       return 0;
     }
+    oops_log_debug("SAVEDATA", "vendor mount failed rc=0x%x, falling back to title storage", rc);
   }
 
   /* 2. Fallback: transparent title-scoped persistent directory */
@@ -154,27 +157,32 @@ int oops_savedata_mount(const char *dir_name, oops_savedata_mode_t mode,
 #endif
 
   if (obs_strlen(slot_path) >= max_path_len) {
+    oops_log_warn("SAVEDATA", "slot_path '%s' exceeds max_path_len %zu", slot_path, max_path_len);
     return -1;
   }
 
   if (mode & OOPS_SAVEDATA_MODE_CREATE) {
     if (mkdir_p(slot_path) != 0) {
+      oops_log_warn("SAVEDATA", "mkdir_p failed for '%s'", slot_path);
       return -1;
     }
   } else {
     /* If CREATE was not specified, verify that the directory already exists */
     if (!oops_fs_exists(slot_path)) {
+      oops_log_debug("SAVEDATA", "directory '%s' does not exist (CREATE not specified)", slot_path);
       return -1;
     }
   }
 
   safe_strcpy(out_mount_path, slot_path, max_path_len);
+  oops_log_info("SAVEDATA", "mounted title storage at '%s'", slot_path);
   return 0;
 }
 
 int oops_savedata_unmount(const char *mount_path, bool commit) {
   if (!mount_path || mount_path[0] == '\0')
     return -1;
+  oops_log_info("SAVEDATA", "unmount '%s' (commit=%d)", mount_path, commit ? 1 : 0);
 
   /* Check if mounted via vendor SCE container (e.g. /savedata0) */
   if (obs_strncmp(mount_path, "/savedata", 9) == 0 &&
