@@ -51,7 +51,15 @@
  * raising the shader limit, which is what SuperTux needs (three samplers), stops being a change
  * to the fixed-function descriptor ring. See the memory note on the payload map.
  */
-#define OOPS_GL_MAX_TEXTURE_IMAGE_UNITS 2
+#define OOPS_GL_MAX_TEXTURE_IMAGE_UNITS 4
+
+/* **How many sampler descriptor sets a compiled pixel shader carries**, which is one fact in two
+ * layouts: the payload slot holds this many 0x40 descriptor sets before the uniform block, and
+ * the scalar file holds this many at `GLSL_GEN_TEX_SGPR_BASE`. `glsl_internal.h` derives
+ * `GLSL_GEN_MAX_TEX_SETS` from it rather than restating it, because the two drifting apart would
+ * put the shader's descriptors and the draw's at different offsets - which is a wrong texture
+ * rather than a diagnostic. Here because that header includes this one. */
+#define OOPS_GL_GL2_TEX_SETS OOPS_GL_MAX_TEXTURE_IMAGE_UNITS
 
 /* Distinct textures a frame's draw census holds before it starts counting overflow - see
  * `hw_tex_census`. Neverball's busiest frame uses about a dozen. */
@@ -989,7 +997,7 @@ typedef struct {
      * separately by the compiler and the draw path: the shader loads set `n` from a fixed offset
      * in the block and the draw fills that offset, so the two have to mean the same thing by
      * `n`, and the only way to be sure is for there to be one decision. */
-    int hw_tex_uniform[2];
+    int hw_tex_uniform[OOPS_GL_GL2_TEX_SETS];
     int hw_tex_sets;
     float *values;         /* the value pool the uniforms' offsets index */
     int value_floats;
@@ -1208,7 +1216,11 @@ typedef struct gl_context {
 
     /* The texture units (GL 1.3), and which one glActiveTexture selected - an index, 0 for
      * GL_TEXTURE0. State calls act on `tex_unit[active_texture]` (gl_tu); a draw reads each unit. */
-    gl_tex_unit_t tex_unit[OOPS_GL_MAX_TEXTURE_UNITS];
+    /* **Sized by the *image* units**, because a sampler may name any of them and a binding has
+     * to exist there for it to sample. The fixed-function pipeline still combines only the
+     * first `OOPS_GL_MAX_TEXTURE_UNITS` of them - that limit is the descriptor ring's, and the
+     * units past it are binding points a shader reaches rather than stages that combine. */
+    gl_tex_unit_t tex_unit[OOPS_GL_MAX_TEXTURE_IMAGE_UNITS];
     GLuint active_texture;
 
     /* State settings */
@@ -2477,9 +2489,9 @@ static inline uint32_t gl_f32_bits(float f) {
  * scalars or two mat4s. A program past it is refused by the compiler with the number.
  */
 #define OOPS_GL_GL2_SLOT_OFFSET    0x4000u
-#define OOPS_GL_GL2_SLOT_STRIDE    0x100u /* two descriptor sets, then the uniforms */
-#define OOPS_GL_GL2_SLOTS          32u    /* 0x4000 .. 0x6000 */
-#define OOPS_GL_GL2_UNIFORM_AT     0x80u  /* the uniform block's offset within a slot */
+#define OOPS_GL_GL2_SLOT_STRIDE    0x200u /* four descriptor sets, then the uniforms */
+#define OOPS_GL_GL2_SLOTS          32u    /* 0x4000 .. 0x8000, the rest of the payload */
+#define OOPS_GL_GL2_UNIFORM_AT     0x100u /* the uniform block's offset within a slot */
 #define OOPS_GL_GL2_UNIFORM_FLOATS 32
 
 /* **The draw's own constants**, four floats the shader may need that are not the program's
@@ -2492,12 +2504,15 @@ static inline uint32_t gl_f32_bits(float f) {
  * into 96 rows at the bottom of 1080, where `96 - y` is hugely negative for every row it
  * touches, and the whole region came out black with `drawn` reporting all 12288 pixels.
  *
- * It lives in the second descriptor set's tail rather than in a region of its own. A set is
+ * It lives in the *last* descriptor set's tail rather than in a region of its own. A set is
  * `OOPS_GL_DESC_UNIT_STRIDE` = 0x40 and holds a 32-byte image descriptor and a 16-byte sampler,
- * so the last sixteen bytes of each were padding; this is the second set's. Free space the
- * layout already had, on a 4-aligned offset a scalar load of four dwords can name, and the
- * assertion below holds it clear of both descriptors. */
-#define OOPS_GL_GL2_DRAWCONST_AT     0x70u
+ * so the last sixteen bytes of each are padding; this is the last set's. Free space the layout
+ * already had, on a 4-aligned offset a scalar load of four dwords can name, and the assertion
+ * below holds it clear of every descriptor.
+ *
+ * It was the *second* set's tail at 0x70 while there were two sets. Going to four moved it,
+ * because the second set's padding is now the third set's descriptors. */
+#define OOPS_GL_GL2_DRAWCONST_AT     0xF0u
 #define OOPS_GL_GL2_DRAWCONST_FLOATS 4
 /* Which float is which. Room for three more before the set above it. */
 #define OOPS_GL_GL2_DC_TARGET_H      0
@@ -2538,13 +2553,14 @@ typedef char oops_gl_payload_map_closes[
      OOPS_GL_PS_GL2_OFFSET + OOPS_GL_PS_GL2_WORDS * 4u <= OOPS_GL_GL2_SLOT_OFFSET &&
      OOPS_GL_GL2_SLOT_OFFSET + OOPS_GL_GL2_SLOTS * OOPS_GL_GL2_SLOT_STRIDE <=
              OOPS_GL_PAYLOAD_BYTES &&
-     /* The uniform block has to start after both descriptor sets and end inside the slot. */
-     2u * OOPS_GL_DESC_UNIT_STRIDE <= OOPS_GL_GL2_UNIFORM_AT &&
+     /* The uniform block has to start after every descriptor set and end inside the slot. */
+     (uint32_t)OOPS_GL_GL2_TEX_SETS * OOPS_GL_DESC_UNIT_STRIDE <= OOPS_GL_GL2_UNIFORM_AT &&
      OOPS_GL_GL2_UNIFORM_AT + (uint32_t)OOPS_GL_GL2_UNIFORM_FLOATS * 4u <=
              OOPS_GL_GL2_SLOT_STRIDE &&
-     /* The draw constants sit in the second set's padding: after its 48 bytes of descriptors,
+     /* The draw constants sit in the last set's padding: after its 48 bytes of descriptors,
       * before the uniforms, and 4-aligned so a scalar load of four dwords can name them. */
-     OOPS_GL_DESC_UNIT_STRIDE + 48u <= OOPS_GL_GL2_DRAWCONST_AT &&
+     ((uint32_t)OOPS_GL_GL2_TEX_SETS - 1u) * OOPS_GL_DESC_UNIT_STRIDE + 48u <=
+             OOPS_GL_GL2_DRAWCONST_AT &&
      OOPS_GL_GL2_DRAWCONST_AT % 16u == 0u &&
      OOPS_GL_GL2_DRAWCONST_AT + (uint32_t)OOPS_GL_GL2_DRAWCONST_FLOATS * 4u <=
              OOPS_GL_GL2_UNIFORM_AT)

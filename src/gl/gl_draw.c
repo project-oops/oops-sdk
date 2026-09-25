@@ -1061,13 +1061,21 @@ void glTexCoord4sv(const GLshort *v)  { if (v) glTexCoord4s(v[0], v[1], v[2], v[
  * ------------------------------------------------------------------------- */
 
 /* The unit a GL_TEXTUREn names, or -1 - with GL_INVALID_ENUM recorded - for one there is not. */
-static int gl_mt_unit(GLenum target) {
-    if (target >= GL_TEXTURE0 && target < GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS) {
+static int gl_mt_unit_to(GLenum target, unsigned int limit) {
+    if (target >= GL_TEXTURE0 && target < GL_TEXTURE0 + limit) {
         return (int)(target - GL_TEXTURE0);
     }
     gl_context_t *ctx = gl_get_ctx();
     if (ctx) gl_record_error(ctx, GL_INVALID_ENUM);
     return -1;
+}
+
+/* **The fixed-function limit**, which is what a texture *coordinate* is counted against -
+ * `glMultiTexCoord` and `glClientActiveTexture` feed the coordinate arrays, and GL bounds those
+ * by `GL_MAX_TEXTURE_COORDS`. `glActiveTexture` is the one that goes further, because it selects
+ * a binding a sampler may name; it asks `gl_mt_unit_to` with the image limit below. */
+static int gl_mt_unit(GLenum target) {
+    return gl_mt_unit_to(target, OOPS_GL_MAX_TEXTURE_UNITS);
 }
 
 /* The one implementation: compiled into a list as named, and checked when it runs. */
@@ -1089,7 +1097,9 @@ static void gl_mtc(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
 /* Server state, so compiled into a list; glClientActiveTexture below is client state and is not. */
 void glActiveTexture(GLenum texture) {
     if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_ACTIVE_TEXTURE, gl_la_e(texture))) return;
-    const int u = gl_mt_unit(texture);
+    /* Up to the image units: this selects a binding point, and a fragment shader may sample any
+     * of them even though only the first few combine in the fixed-function pipeline. */
+    const int u = gl_mt_unit_to(texture, OOPS_GL_MAX_TEXTURE_IMAGE_UNITS);
     gl_context_t *ctx = gl_get_ctx();
     if (u >= 0 && ctx) ctx->active_texture = (GLuint)u;
 }
@@ -2268,7 +2278,9 @@ static gl_texture_object_t *gl_gl2_sampler_texture(gl_context_t *ctx,
 static void gl_gl2_build_block(gl_context_t *ctx, const gl_program_object_t *prog,
                                uint32_t *block) {
     memset(block, 0, OOPS_GL_GL2_SLOT_STRIDE);
-    for (int s = 0; s < prog->hw_tex_sets && s < (int)OOPS_GL_MAX_TEXTURE_UNITS; s++) {
+    /* The shader's descriptor sets, not the fixed-function stages - the block has
+     * `OOPS_GL_GL2_TEX_SETS` of them and the link assigned that many at most. */
+    for (int s = 0; s < prog->hw_tex_sets && s < (int)OOPS_GL_GL2_TEX_SETS; s++) {
         gl_texture_object_t *obj = gl_gl2_sampler_texture(ctx, prog, s);
         if (!obj) continue;
         uint32_t *set = block + (size_t)s * (OOPS_GL_DESC_UNIT_STRIDE / 4u);

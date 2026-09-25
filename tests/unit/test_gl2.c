@@ -1048,8 +1048,9 @@ static void test_gl2_limits_and_version_are_answered(void) {
     glGetIntegerv(GL_MAX_VARYING_FLOATS, &v);
     ASSERT_EQ(v, OOPS_GL_MAX_VARYING_FLOATS);
     ASSERT_TRUE(v >= 32);
+    /* The samplers a shader may name, which is not the fixed-function stage count. */
     glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &v);
-    ASSERT_EQ(v, OOPS_GL_MAX_TEXTURE_UNITS);
+    ASSERT_EQ(v, OOPS_GL_MAX_TEXTURE_IMAGE_UNITS);
     ASSERT_TRUE(v >= 2);
     glGetIntegerv(GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS, &v);
     /* Zero is legal and is what this is: GL 2.0's minimum, and a vertex shader here has no
@@ -2700,13 +2701,18 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
 
     /* **Then the uniforms**, because they are a memory load and the wait for it wants as much
      * between it and the first read as possible. This program's pool is the vertex shader's
-     * `mat4 mvp` - sixteen floats, one `s_load_dwordx16` into s48..s63 - and the fragment
-     * shader names none of them, so nothing is moved into a VGPR for it. */
-    ASSERT_EQ(words[1], 0xf4100c00u); /* s_load_dwordx16 s[48:63], s[0:1], 0x80 */
-    /* **0x80, not 0.** The block's first two 0x40 are the texture units' descriptors; the
+     * `mat4 mvp` - sixteen floats, one `s_load_dwordx16` into s72..s87 - and the fragment
+     * shader names none of them, so nothing is moved into a VGPR for it.
+     *
+     * **The destination register is in the word**, so this literal moves when the scalar map
+     * does: the SGPR number sits in bits 6 and up, so s48 was 0xc00 and s72 is 0x1200. It went
+     * from s48 to s72 on 2026-09-25, when the sampler sets grew from two to four and pushed
+     * everything above them along. */
+    ASSERT_EQ(words[1], 0xf4101200u); /* s_load_dwordx16 s[72:87], s[0:1], 0x100 */
+    /* **0x100, not 0.** The block's first four 0x40 are the texture units' descriptors; the
      * uniforms start after them, and a shader loading from 0 would compute with an image
      * descriptor read as floats. */
-    ASSERT_EQ(words[2], 0xfa000080u);
+    ASSERT_EQ(words[2], 0xfa000100u);
     ASSERT_EQ(words[3], 0xbf8cc07fu); /* s_waitcnt lgkmcnt(0) */
 
     /* Then three components of one varying, each a `p1`/`p2` pair, into v8, v9, v10 - the first
@@ -2810,23 +2816,37 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
      * proxy. */
     gl_context_t *c = (gl_context_t *)ctx;
 
-    /* **And a third sampler**, which is one more than a draw carries descriptor sets for. The
-     * message names the number rather than saying "too many", because the number is the thing
-     * to check against. */
+    /* **One sampler more than a draw carries descriptor sets for.** The message names the number
+     * rather than saying "too many", because the number is the thing to check against - and the
+     * shader is built from the limit rather than written out, since this asserted three samplers
+     * while there were two sets and three now compile. */
     memset(log, 0, sizeof(log));
-    const GLuint three = linked_program(
+    char too_many_fs[512];
+    int at = 0;
+    for (int s = 0; s <= OOPS_GL_GL2_TEX_SETS; s++) {
+        at += oops_snprintf(too_many_fs + at, sizeof(too_many_fs) - (size_t)at,
+                            "uniform sampler2D s%d;\n", s);
+    }
+    at += oops_snprintf(too_many_fs + at, sizeof(too_many_fs) - (size_t)at,
+                        "varying vec2 uv;\nvoid main() {\n  gl_FragColor = vec4(0.0)");
+    for (int s = 0; s <= OOPS_GL_GL2_TEX_SETS; s++) {
+        at += oops_snprintf(too_many_fs + at, sizeof(too_many_fs) - (size_t)at,
+                            " + texture2D(s%d, uv)", s);
+    }
+    (void)oops_snprintf(too_many_fs + at, sizeof(too_many_fs) - (size_t)at, ";\n}\n");
+
+    const GLuint too_many = linked_program(
         "attribute vec3 pos;\n"
         "varying vec2 uv;\n"
         "void main() { uv = pos.xy; gl_Position = vec4(pos, 1.0); }\n",
-        "uniform sampler2D a;\nuniform sampler2D b;\nuniform sampler2D d;\n"
-        "varying vec2 uv;\n"
-        "void main() {\n"
-        "  gl_FragColor = texture2D(a, uv) + texture2D(b, uv) + texture2D(d, uv);\n"
-        "}\n");
-    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, three), words, 256u, &count,
+        too_many_fs);
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, too_many), words, 256u, &count,
                                           &vgprs, NULL, NULL, log, sizeof(log)),
               GL_FALSE);
-    ASSERT_TRUE(strstr(log, "2") != NULL);
+    /* The set count, as the message spells it. */
+    char want[16];
+    (void)oops_snprintf(want, sizeof(want), "%d", OOPS_GL_GL2_TEX_SETS);
+    ASSERT_TRUE(strstr(log, want) != NULL);
 
     /* **The hardware's own limit**, named with its number: four parameters, sixteen floats.
      * Five has never run on this part, so a program needing a fifth is refused here rather than

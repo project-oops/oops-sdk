@@ -10039,7 +10039,9 @@ static void test_gl_multitexture_state_is_per_unit(void) {
   glMultiTexCoord2f((GLenum)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS), 9.0f, 9.0f);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.5f && ctx->cur_texcoord[1][0] == 1.0f);
-  glActiveTexture((GLenum)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS));
+  /* **glActiveTexture goes as far as the image units**, not the fixed-function stages: it
+   * selects a binding a sampler may name. The coordinate calls above stop at the stage count. */
+  glActiveTexture((GLenum)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_IMAGE_UNITS));
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glGetIntegerv(GL_ACTIVE_TEXTURE, iv);
   ASSERT_EQ(iv[0], (GLint)GL_TEXTURE1);

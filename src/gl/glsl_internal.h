@@ -874,10 +874,39 @@ void glsl_emit_dpp_sub(glsl_code_t *c, uint32_t dst, uint32_t src0, uint32_t vsr
  */
 #define GLSL_GEN_TEX_SGPR_BASE   4u   /* set n: image at +12n, sampler at +12n+8 */
 #define GLSL_GEN_TEX_SGPR_STRIDE 12u
-#define GLSL_GEN_MAX_TEX_SETS    2
-#define GLSL_GEN_LIVE_SGPR       28u
-#define GLSL_GEN_EXEC_SGPR_BASE  29u
+/*
+ * **Four sampler sets, which is what the scalar file has room for and not a round number picked
+ * for tidiness.** Sets take s4..s51, the masks s52..s64, the draw constants s68..s71 and the
+ * uniforms s72..s103 - against a ceiling of s105, from Mesa's `ac_gpu_info.c:260`
+ * (`max_sgpr_alloc = 108`, with VCC at s[106-107]). Two registers spare, and the static
+ * assertion in `gl_internal.h` is what keeps a fifth set from silently running past the end.
+ *
+ * Two was the limit until 2026-09-25, and `tools/shader-survey.sh` is what named the cost:
+ * SuperTux's shader samples three textures and was refused for the console while compiling
+ * perfectly, so the front end said nothing about it.
+ */
+#define GLSL_GEN_MAX_TEX_SETS    OOPS_GL_GL2_TEX_SETS
+#define GLSL_GEN_LIVE_SGPR       52u
+#define GLSL_GEN_EXEC_SGPR_BASE  53u
 #define GLSL_GEN_MAX_EXEC_DEPTH  12
+
+/*
+ * **The scalar file has room for all of it.** Mesa puts this part's general SGPRs at s0..s105 -
+ * `ac_gpu_info.c:260`, `max_sgpr_alloc = 108` with VCC at s[106-107]. A fifth sampler set, a
+ * deeper exec stack or a wider uniform block would run off the end of the register file, which
+ * is not a diagnostic at run time: it is another wave's registers, so a wrong pixel in a draw
+ * that has nothing to do with this one. Caught here instead.
+ *
+ * The uniform bound is the last thing in the map, so checking where it ends checks everything
+ * below it - `glsl_ps.c` holds `GL_PS_UNIFORM_SGPR_BASE` and the assertion there ties the two
+ * files together.
+ */
+typedef char glsl_gen_sgpr_map_fits[
+    (GLSL_GEN_TEX_SGPR_BASE + (unsigned)GLSL_GEN_MAX_TEX_SETS * GLSL_GEN_TEX_SGPR_STRIDE
+             <= GLSL_GEN_LIVE_SGPR &&
+     GLSL_GEN_LIVE_SGPR < GLSL_GEN_EXEC_SGPR_BASE &&
+     GLSL_GEN_EXEC_SGPR_BASE + (unsigned)GLSL_GEN_MAX_EXEC_DEPTH <= 106u)
+        ? 1 : -1];
 /*
  * **A loop that branches needs three masks, where an `if` needs one.**
  *

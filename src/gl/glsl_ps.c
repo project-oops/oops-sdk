@@ -71,16 +71,17 @@
 #define GL_PS_MAX_VGPRS 136u
 
 /* **Where the uniform block lands in the scalar file.** s0 and s1 are the block's own address,
- * the texture descriptors take s4..s27 and the mask registers s28..s40 - `glsl_internal.h` has
- * the map. s48 is the first multiple of four clear of all of it, and a multiple of four is what
- * a scalar load of four dwords or more needs; the loads march on by sixteen from here, so every
- * one of them lands on one too. */
-#define GL_PS_UNIFORM_SGPR_BASE 48u
+ * the texture descriptors take s4..s51 and the mask registers s52..s64 - `glsl_internal.h` has
+ * the map. s72 is the first multiple of four clear of all of it and of the draw constants, and a
+ * multiple of four is what a scalar load of four dwords or more needs; the loads march on by
+ * sixteen from here, so every one of them lands on one too. Thirty-two floats from s72 ends at
+ * s103, two below the s105 this part allows. */
+#define GL_PS_UNIFORM_SGPR_BASE 72u
 
-/* **The draw's own constants**, loaded into s44..s47 - the last 4-aligned group below the
- * uniforms and above the exec masks, which end at s40. Four dwords, so a 4-aligned destination
- * is what the load needs and s44 is one. */
-#define GL_PS_DRAWCONST_SGPR_BASE 44u
+/* **The draw's own constants**, loaded into s68..s71 - the last 4-aligned group below the
+ * uniforms and above the exec masks, which end at s64. Four dwords, so a 4-aligned destination
+ * is what the load needs and s68 is one. */
+#define GL_PS_DRAWCONST_SGPR_BASE 68u
 
 /* **Where the hardware puts the fragment's window position**, when `SPI_PS_INPUT_ENA` asks for
  * it. The VGPRs are packed in the order Mesa enumerates them (`ac_get_fs_input_vgpr_cnt`,

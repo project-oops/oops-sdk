@@ -66,6 +66,11 @@ typedef struct {
     char text[REASON_LEN];
     int count;
     char first_file[256];
+    /* **The first message in this bucket, untruncated.** The key above has the shader's own
+     * identifiers stripped so that one finding is one row, and that also removes the part that
+     * says *which* uniform or name - which is the part you need once the row is the one you are
+     * working on. Both, then. */
+    char first_full[REASON_LEN];
 } reason_t;
 
 static reason_t g_reason[MAX_REASONS];
@@ -112,6 +117,7 @@ static void tally_into(const char *log, const char *file, int which) {
     if (*n >= MAX_REASONS) return;
     snprintf(tab[*n].text, REASON_LEN, "%s", key);
     snprintf(tab[*n].first_file, sizeof(tab[*n].first_file), "%s", file);
+    snprintf(tab[*n].first_full, REASON_LEN, "%s", log);
     tab[*n].count = 1;
     (*n)++;
 }
@@ -312,8 +318,9 @@ int main(int argc, char **argv) {
             if (best < 0 || g_genreason[i].count > g_genreason[best].count) best = i;
         }
         if (best < 0) break;
-        printf("%-6d %s\n           %s\n", g_genreason[best].count, g_genreason[best].text,
-               g_genreason[best].first_file);
+        printf("%-6d %s\n           %s\n           first: %s\n", g_genreason[best].count,
+               g_genreason[best].text, g_genreason[best].first_file,
+               g_genreason[best].first_full);
         g_genreason[best].count = -1;
     }
     glContextDestroy(ctx);
