@@ -34,6 +34,24 @@
 /* The texture units. GL 1.3 requires at least two - "must be at least two" (OpenGL 1.3, section
  * 2.6; table 6.29's minimum for MAX_TEXTURE_UNITS) - and oops-gl had one until 2026-09-19. */
 #define OOPS_GL_MAX_TEXTURE_UNITS 2
+/*
+ * **The units a *shader* may sample, which GL keeps separate from the fixed-function count.**
+ *
+ * `GL_MAX_TEXTURE_UNITS` is the fixed-function pipeline's - how many `glEnable(GL_TEXTURE_2D)`
+ * stages combine - and `GL_MAX_TEXTURE_IMAGE_UNITS` is how many samplers a fragment shader may
+ * name. Real GL lets them differ and this has to, because what limits them here is different:
+ *
+ *   - the fixed-function count is limited by `OOPS_GL_DESC_SLOT_STRIDE`, 0x80 for two units at
+ *     0x40 each, 63 slots from 0x1800. At 0x100 the ring would reach 0x5700 and land on the
+ *     GL 2.0 slot region at 0x4000.
+ *   - the shader count is limited by `GLSL_GEN_MAX_TEX_SETS` and the GL 2.0 payload slot, which
+ *     is a different region with room above it.
+ *
+ * They are equal today, so nothing behaves differently for the separation - what it buys is that
+ * raising the shader limit, which is what SuperTux needs (three samplers), stops being a change
+ * to the fixed-function descriptor ring. See the memory note on the payload map.
+ */
+#define OOPS_GL_MAX_TEXTURE_IMAGE_UNITS 2
 
 /* Distinct textures a frame's draw census holds before it starts counting overflow - see
  * `hw_tex_census`. Neverball's busiest frame uses about a dozen. */

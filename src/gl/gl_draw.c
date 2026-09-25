@@ -2196,8 +2196,10 @@ static gl_texture_object_t *gl_gl2_sampler_texture(gl_context_t *ctx,
     if (s < 0 || s >= prog->hw_tex_sets) return (gl_texture_object_t *)0;
     const int ui = prog->hw_tex_uniform[s];
     if (ui < 0 || ui >= prog->uniform_count || !prog->values) return (gl_texture_object_t *)0;
+    /* **The shader's limit, not the fixed-function one.** A sampler uniform names a texture
+     * image unit, which is what `GL_MAX_TEXTURE_IMAGE_UNITS` reports. */
     const float unit_f = prog->values[prog->uniforms[ui].offset];
-    if (unit_f < 0.0f || unit_f >= (float)OOPS_GL_MAX_TEXTURE_UNITS) {
+    if (unit_f < 0.0f || unit_f >= (float)OOPS_GL_MAX_TEXTURE_IMAGE_UNITS) {
         return (gl_texture_object_t *)0;
     }
     /* **A sampler's type picks the target, and `glEnable` has nothing to do with it.**

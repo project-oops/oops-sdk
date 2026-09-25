@@ -2200,9 +2200,16 @@ void glGetIntegerv(GLenum pname, GLint *params) {
             if (!gl_require_version_enum(ctx, 2u, 0u)) break;
             params[0] = OOPS_GL_MAX_VARYING_FLOATS;   /* 32, the minimum: eight vec4 slots */
             break;
-        /* The samplers a fragment shader may use, which is the texture units that exist. */
+        /* **The samplers a fragment shader may name**, which is not the fixed-function stage
+         * count - see `OOPS_GL_MAX_TEXTURE_IMAGE_UNITS`. Equal today. */
         case GL_MAX_TEXTURE_IMAGE_UNITS:
         case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
+            if (!gl_require_version_enum(ctx, 2u, 0u)) break;
+            params[0] = OOPS_GL_MAX_TEXTURE_IMAGE_UNITS;
+            break;
+        /* **The fixed-function one**, because `gl_TexCoord[]` is a fixed-function array and its
+         * length is the stage count rather than the sampler count. A shader indexing past it is
+         * refused by the built-in's own array bound. */
         case GL_MAX_TEXTURE_COORDS:
             if (!gl_require_version_enum(ctx, 2u, 0u)) break;
             params[0] = OOPS_GL_MAX_TEXTURE_UNITS;
