@@ -1662,6 +1662,102 @@ static void test_gl2_draw_into_a_framebuffer_object(void) {
 }
 
 /*
+ * **`glBlitFramebuffer`, and the read/draw binding split it needed** (2026-09-25).
+ *
+ * Added for Ship of Harkinian: `libultraship` renders the game into a framebuffer object and
+ * blits it out, at `gfx_opengl.cpp:907`, `:977` and `:994`. Every other entry point that port's
+ * renderer calls was already defined here; this one and
+ * `glRenderbufferStorageMultisample` were not.
+ *
+ * **Each arm is built so that the obvious wrong implementation fails it.** Two different colours
+ * in the source, not one, so a blit that copies the right pixel and a blit that copies the first
+ * pixel everywhere give different answers. An inverted destination rectangle, so a flip that is
+ * dropped is visible. And a read binding that is *not* the draw binding, so an implementation
+ * that reads whatever is bound for drawing - which is what this would have done before the split
+ * - copies a surface onto itself and leaves the destination untouched.
+ */
+static void test_gl2_blit_framebuffer_reads_the_read_binding(void) {
+    gl2_target_t t = gl2_target();
+
+    GLuint src_fb = 0, src_rb = 0, dst_fb = 0, dst_rb = 0;
+    glGenFramebuffers(1, &src_fb);
+    glGenRenderbuffers(1, &src_rb);
+    glBindFramebuffer(GL_FRAMEBUFFER, src_fb);
+    glBindRenderbuffer(GL_RENDERBUFFER, src_rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 8, 8);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, src_rb);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), (GLenum)GL_FRAMEBUFFER_COMPLETE);
+
+    /* Bottom half red, top half green - so a flip is detectable and so is a copy that smears one
+     * pixel over everything. `glScissor` rather than two draws, because a clear is the one
+     * operation already proven to reach an attachment. */
+    glViewport(0, 0, 8, 8);
+    glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 4, 8, 4);
+    glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_SCISSOR_TEST);
+
+    glGenFramebuffers(1, &dst_fb);
+    glGenRenderbuffers(1, &dst_rb);
+    glBindFramebuffer(GL_FRAMEBUFFER, dst_fb);
+    glBindRenderbuffer(GL_RENDERBUFFER, dst_rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 8, 8);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, dst_rb);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), (GLenum)GL_FRAMEBUFFER_COMPLETE);
+    glViewport(0, 0, 8, 8);
+    glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    /* The split: read from one, draw to the other. */
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fb);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst_fb);
+    glBlitFramebuffer(0, 0, 8, 8, 0, 0, 8, 8, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    uint8_t lo[4] = {0, 0, 0, 0}, hi[4] = {0, 0, 0, 0};
+    glReadPixels(4, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, lo);
+    glReadPixels(4, 6, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, hi);
+    /* Blue anywhere means the blit did not happen; both the same means it smeared. */
+    ASSERT_TRUE(lo[0] == 255 && lo[1] == 0 && lo[2] == 0);
+    ASSERT_TRUE(hi[0] == 0 && hi[1] == 255 && hi[2] == 0);
+
+    /* **Inverted destination y flips the image.** The same source, upside down. */
+    glBlitFramebuffer(0, 0, 8, 8, 0, 8, 8, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glReadPixels(4, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, lo);
+    glReadPixels(4, 6, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, hi);
+    ASSERT_TRUE(lo[0] == 0 && lo[1] == 255 && lo[2] == 0);
+    ASSERT_TRUE(hi[0] == 255 && hi[1] == 0 && hi[2] == 0);
+
+    /* **`GL_FRAMEBUFFER` still moves both**, which is what keeps every program written before
+     * the split working: after this, a blit reads the destination and writing it changes
+     * nothing, so the picture must survive unchanged. */
+    glBindFramebuffer(GL_FRAMEBUFFER, dst_fb);
+    glBlitFramebuffer(0, 0, 8, 8, 0, 0, 8, 8, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glReadPixels(4, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, lo);
+    ASSERT_TRUE(lo[0] == 0 && lo[1] == 255 && lo[2] == 0);
+
+    /* **Multisampling is refused rather than downgraded.** One sample is all this rasterises, so
+     * a request for four is `GL_INVALID_OPERATION` and the storage is left alone. */
+    while (glGetError() != GL_NO_ERROR) { }
+    glBindRenderbuffer(GL_RENDERBUFFER, dst_rb);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_RGBA8, 8, 8);
+    ASSERT_EQ(glGetError(), (GLenum)GL_INVALID_OPERATION);
+    /* One sample is the same request `glRenderbufferStorage` answers, and is accepted. */
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 1, GL_RGBA8, 8, 8);
+    ASSERT_EQ(glGetError(), (GLenum)GL_NO_ERROR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &src_fb);
+    glDeleteFramebuffers(1, &dst_fb);
+    glDeleteRenderbuffers(1, &src_rb);
+    glDeleteRenderbuffers(1, &dst_rb);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
+/*
  * `glGenerateMipmap`, checked by reading the levels back.
  *
  * The 4x4 image is four uniform 2x2 blocks with a different red in each, so level 1 must be
@@ -6648,6 +6744,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_es_100_shaders);
     RUN_TEST(test_gl2_framebuffer_objects);
     RUN_TEST(test_gl2_draw_into_a_framebuffer_object);
+    RUN_TEST(test_gl2_blit_framebuffer_reads_the_read_binding);
     RUN_TEST(test_gl2_generate_mipmap);
     RUN_TEST(test_gl2_uniforms_and_varyings_reach_the_pixels);
     RUN_TEST(test_gl2_a_matrix_uniform_transforms);

@@ -6942,7 +6942,14 @@ void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers) {
 void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx) return;
-    if (target != GL_FRAMEBUFFER) {
+    /* **Three targets since 2026-09-25**, for `glBlitFramebuffer`. `GL_FRAMEBUFFER` moves both
+     * bindings, which is what it meant when it was the only one - so nothing written against the
+     * single-binding model changes behaviour. See `bound_read_framebuffer`. */
+    const GLboolean set_draw =
+        (GLboolean)(target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER);
+    const GLboolean set_read =
+        (GLboolean)(target == GL_FRAMEBUFFER || target == GL_READ_FRAMEBUFFER);
+    if (!set_draw && !set_read) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
@@ -6953,7 +6960,11 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
+    if (set_read) ctx->bound_read_framebuffer = framebuffer;
+    if (!set_draw) return;
     ctx->bound_framebuffer = framebuffer;
+    /* Only the draw binding changes where pixels land, so only it re-points the targets. A read
+     * binding is consulted by `glBlitFramebuffer` when it runs and at no other time. */
     gl_draw_targets(ctx);
 }
 
@@ -7101,6 +7112,178 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, 
     }
     /* Storage is what made this attachment renderable, or what moved it. */
     gl_draw_targets(ctx);
+}
+
+/*
+ * **Multisampled renderbuffer storage, which refuses more samples than it can give.**
+ *
+ * This GL rasterises one sample per pixel. `GL_MAX_SAMPLES` is therefore 1, and the honest
+ * implementations of this entry point are "accept 0 or 1 and behave as `glRenderbufferStorage`"
+ * and "refuse anything above it" - which is what the specification already says to do
+ * (`GL_INVALID_OPERATION` when `samples` exceeds `GL_MAX_SAMPLES`).
+ *
+ * **The flattering alternative was rejected for the reason `glCheckFramebufferStatus` gives a few
+ * hundred lines down.** Silently downgrading a request for four samples to one produces a
+ * framebuffer that renders, looks very slightly wrong, and reports nothing - and a caller that
+ * asked because it has an aliasing problem is given the aliasing back with a success code.
+ * libultraship asks with a runtime `msaa_level` and is written to cope with a refusal, which is
+ * the common shape: a program that wants multisampling asks and falls back.
+ *
+ * Existing for the sake of the link is itself worth something here. The alternative is an
+ * undefined symbol in a payload, which - as `oops-sdk/AGENTS.md` records - links clean and faults
+ * on the console.
+ */
+void glRenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat,
+                                      GLsizei width, GLsizei height) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (samples < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    if (samples > OOPS_GL_MAX_SAMPLES) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    /* Target, format and size are validated there, once, rather than restated here. */
+    glRenderbufferStorage(target, internalformat, width, height);
+}
+
+/* -------------------------------------------------------------------------
+ * glBlitFramebuffer
+ *
+ * The one operation that reads one framebuffer while writing another, which is why the read and
+ * draw bindings had to be told apart for it - see `bound_read_framebuffer`.
+ *
+ * **Both sides are resolved to plain pixels here rather than through `gl_color_index`.** That
+ * helper addresses *the bound framebuffer* through `ctx->width`/`ctx->height`, and a blit has two
+ * surfaces of possibly different sizes; asking it about the other one would silently address the
+ * wrong memory. The swizzle it applies for a tiled framebuffer 0 is reproduced below, for that
+ * surface only, because an attachment is never tiled.
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+    uint32_t *pixels;
+    GLsizei w, h;
+    size_t pitch;    /* pixels per row; meaningless when `tiled` */
+    GLboolean tiled; /* framebuffer 0 under the scanout swizzle, never an attachment */
+} gl_blit_surface_t;
+
+static GLboolean gl_blit_surface(gl_context_t *ctx, GLuint name, gl_blit_surface_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (name == 0u) {
+        /* The window system's own buffer, at its own size - which is not `ctx->width` when a
+         * framebuffer object is bound, and that is exactly the case a blit is used in. */
+        out->pixels = ctx->back_fb ? ctx->back_fb : ctx->framebuffer;
+        out->w = (GLsizei)ctx->fb0_width;
+        out->h = (GLsizei)ctx->fb0_height;
+        out->pitch = (size_t)ctx->fb0_width;
+        out->tiled = ctx->color_tiled;
+        return (GLboolean)(out->pixels != (uint32_t *)0 && out->w > 0 && out->h > 0);
+    }
+    gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, name);
+    if (!fb) return GL_FALSE;
+    gl_fb_storage_t st;
+    if (!gl_fb_attachment_storage(ctx, &fb->color0, &st)) return GL_FALSE;
+    out->pixels = st.pixels;
+    out->w = st.width;
+    out->h = st.height;
+    out->pitch = st.pitch;
+    out->tiled = GL_FALSE;
+    return GL_TRUE;
+}
+
+/* Bottom-up, as `gl_color_index` is: GL's origin is the lower left and the buffer's first row is
+ * the top one. The tiled branch is `gl_color_index`'s, against this surface's own width. */
+static size_t gl_blit_index(const gl_blit_surface_t *s, GLsizei x, GLsizei y) {
+    const uint32_t row = (uint32_t)(s->h - 1 - y);
+    if (s->tiled) {
+        const size_t block = (size_t)(row >> 7) * (size_t)(((uint32_t)s->w + 127u) >> 7) +
+                             (size_t)((uint32_t)x >> 7);
+        return block * 16384u + agc_tile_pixel((uint32_t)x & 127u, row & 127u);
+    }
+    return (size_t)row * s->pitch + (size_t)x;
+}
+
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                       GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                       GLbitfield mask, GLenum filter) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx) return;
+    if (filter != GL_NEAREST && filter != GL_LINEAR) {
+        gl_record_error(ctx, GL_INVALID_ENUM);
+        return;
+    }
+    if ((mask & ~(GLbitfield)(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                              GL_STENCIL_BUFFER_BIT)) != 0u) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    /* GL 3.0: filtering a depth or stencil blit is not a thing that means anything. */
+    if (filter == GL_LINEAR && (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0u) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
+    /* **The depth and stencil halves are not copied, and this says so once.**
+     *
+     * A depth attachment here is a float buffer the software rasteriser owns, and on the console
+     * the depth surface is 64KB_Z_X tiled and programmed through its own registers - the same
+     * reason `gl_fbo_bound_target` refuses a framebuffer object with a depth attachment on
+     * hardware. Copying colour and quietly not copying depth is the "flattering answer" this file
+     * argues against a few hundred lines down, so it is reported rather than hidden. Every caller
+     * measured so far - libultraship's three call sites at `gfx_opengl.cpp:907,977,994` - asks for
+     * `GL_COLOR_BUFFER_BIT` alone. */
+    if ((mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0u && !ctx->hw_blit_ds_logged) {
+        gl_log_line("glBlitFramebuffer copies colour only: the depth and stencil bits were asked "
+                    "for and are not applied");
+        ctx->hw_blit_ds_logged = GL_TRUE;
+    }
+    if ((mask & GL_COLOR_BUFFER_BIT) == 0u) return;
+
+    gl_blit_surface_t src, dst;
+    if (!gl_blit_surface(ctx, ctx->bound_read_framebuffer, &src) ||
+        !gl_blit_surface(ctx, ctx->bound_framebuffer, &dst)) {
+        /* An incomplete framebuffer on either side. The specification's answer. */
+        gl_record_error(ctx, GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
+
+    /* **Signed spans, because either rectangle may be given inverted and that is how a blit
+     * flips.** The destination is walked in its own direction and the source mapped onto it, so a
+     * reversed pair on one side and not the other mirrors, which is what `gfx_opengl.cpp` relies
+     * on to turn the game's bottom-up target the right way up. */
+    const GLint dw = dstX1 - dstX0, dh = dstY1 - dstY0;
+    const GLint sw = srcX1 - srcX0, sh = srcY1 - srcY0;
+    if (dw == 0 || dh == 0 || sw == 0 || sh == 0) return;
+    const GLint dxs = dw > 0 ? 1 : -1, dys = dh > 0 ? 1 : -1;
+    const GLint dnx = dw > 0 ? dw : -dw, dny = dh > 0 ? dh : -dh;
+
+    /* Same size and no flip is a straight copy, and it is the common case - a full-screen blit
+     * from the game's framebuffer to the display. Taking it separately keeps the general path
+     * from having to be fast as well as correct. */
+    for (GLint j = 0; j < dny; j++) {
+        const GLint dy = dstY0 + j * dys;
+        if (dy < 0 || dy >= dst.h) continue;
+        /* Pixel centres, which is what makes an unscaled blit exact. */
+        const GLint sy = srcY0 + (GLint)(((int64_t)j * sh) / dny);
+        if (sy < 0 || sy >= src.h) continue;
+        for (GLint i = 0; i < dnx; i++) {
+            const GLint dx = dstX0 + i * dxs;
+            if (dx < 0 || dx >= dst.w) continue;
+            const GLint sx = srcX0 + (GLint)(((int64_t)i * sw) / dnx);
+            if (sx < 0 || sx >= src.w) continue;
+            dst.pixels[gl_blit_index(&dst, dx, dy)] = src.pixels[gl_blit_index(&src, sx, sy)];
+        }
+    }
+    /* **`GL_LINEAR` is honoured as nearest only where the two agree**, which is whenever the
+     * rectangles are the same size - sample centres land exactly on source texels and a linear
+     * filter returns that texel. A scaled linear blit is a real difference and this does not do
+     * it yet; said once rather than assumed, for the reason the depth note above gives. */
+    if (filter == GL_LINEAR && (dnx != (sw > 0 ? sw : -sw) || dny != (sh > 0 ? sh : -sh)) &&
+        !ctx->hw_blit_linear_logged) {
+        gl_log_line("glBlitFramebuffer scaled with GL_LINEAR: filtered as GL_NEAREST");
+        ctx->hw_blit_linear_logged = GL_TRUE;
+    }
 }
 
 void glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params) {

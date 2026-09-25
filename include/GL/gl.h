@@ -2386,6 +2386,18 @@ void glTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset
  */
 #define GL_FRAMEBUFFER                          0x8D40
 #define GL_RENDERBUFFER                         0x8D41
+/* **The read/draw split** (GL 3.0, and EXT_framebuffer_blit before it). `GL_FRAMEBUFFER` binds
+ * both, which is why every program written against the older single-binding model keeps working.
+ * They exist here for `glBlitFramebuffer`, which is the only operation that reads one framebuffer
+ * while writing another and so is the only one that needs to tell them apart. */
+#define GL_READ_FRAMEBUFFER                     0x8CA8
+#define GL_DRAW_FRAMEBUFFER                     0x8CA9
+#define GL_READ_FRAMEBUFFER_BINDING             0x8CAA
+#define GL_DRAW_FRAMEBUFFER_BINDING             0x8CA6
+/* How many samples a multisampled renderbuffer may ask for. Answered honestly - see
+ * `glRenderbufferStorageMultisample`, which refuses more rather than quietly giving one. */
+#define GL_MAX_SAMPLES                          0x8D57
+#define GL_RENDERBUFFER_SAMPLES                 0x8CAB
 #define GL_RENDERBUFFER_WIDTH                   0x8D42
 #define GL_RENDERBUFFER_HEIGHT                  0x8D43
 #define GL_RENDERBUFFER_INTERNAL_FORMAT         0x8D44
@@ -2423,6 +2435,15 @@ void glDeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers);
 void glBindRenderbuffer(GLenum target, GLuint renderbuffer);
 GLboolean glIsRenderbuffer(GLuint renderbuffer);
 void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
+/* Refuses `samples` above `GL_MAX_SAMPLES`, which is 1 here, rather than quietly giving one
+ * sample for four. A caller that wants multisampling asks and falls back. */
+void glRenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat,
+                                      GLsizei width, GLsizei height);
+/* Colour only: the depth and stencil bits are accepted and reported, not copied. See the
+ * definition for why that is stated rather than hidden. */
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                       GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                       GLbitfield mask, GLenum filter);
 void glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params);
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
                             GLuint texture, GLint level);

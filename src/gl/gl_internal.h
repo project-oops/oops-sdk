@@ -358,6 +358,11 @@ static inline gl_list_arg_t gl_la_e(GLenum v)  { gl_list_arg_t a; a.e = v; retur
  * steps, levels 0..11. */
 #define OOPS_GL_MAX_TEXTURE_SIZE 2048
 #define OOPS_GL_MAX_TEXTURE_LEVELS 12
+/* **Samples per pixel, which is one.** This rasterises one sample and the hardware path's colour
+ * target is single-sampled, so `GL_MAX_SAMPLES` is 1 and
+ * `glRenderbufferStorageMultisample` refuses more rather than quietly giving one - see it for why
+ * the flattering answer is the wrong one. */
+#define OOPS_GL_MAX_SAMPLES 1
 
 /* One mip level above the base: RGBA8 rows packed tight, in process memory. The base level is
  * the texture object's own fields, because that is the image the hardware samples - see
@@ -1751,7 +1756,25 @@ typedef struct gl_context {
     gl_framebuffer_object_t framebuffers[OOPS_GL_MAX_FRAMEBUFFER_OBJECTS];
     gl_renderbuffer_object_t renderbuffers[OOPS_GL_MAX_RENDERBUFFER_OBJECTS];
     GLuint bound_framebuffer;
+    /*
+     * **The read binding, which `bound_framebuffer` is not.**
+     *
+     * GL 3.0 split one binding into two: draws go to `GL_DRAW_FRAMEBUFFER` and reads come from
+     * `GL_READ_FRAMEBUFFER`, and `GL_FRAMEBUFFER` sets both. `bound_framebuffer` stays the *draw*
+     * binding, because that is what all twelve of its readers already mean and renaming it would
+     * be a change to every one of them for no gain.
+     *
+     * It exists for `glBlitFramebuffer`, the only entry point that reads one framebuffer while
+     * writing another. A program that never mentions the split - which is every program here
+     * before Ship of Harkinian - binds `GL_FRAMEBUFFER`, both move together, and nothing changes.
+     */
+    GLuint bound_read_framebuffer;
     GLuint bound_renderbuffer;
+    /* Said-once flags for the two halves of `glBlitFramebuffer` that are not applied - the
+     * depth/stencil bits and a scaled `GL_LINEAR`. Reported rather than silently skipped, and
+     * reported once rather than per blit, because a blit is a per-frame call. */
+    GLboolean hw_blit_ds_logged;
+    GLboolean hw_blit_linear_logged;
     /* **The window-system framebuffer's size, kept because `width` and `height` stop being it.**
      * Everything addresses the colour buffer through `gl_color_index`, which reads those two, so
      * binding a framebuffer object of a different size means changing them - and changing them
