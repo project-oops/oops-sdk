@@ -953,7 +953,8 @@ where the GL one was expected, so every `texture2D` returned opaque black.
 |---|---|
 | Lexer, parser, preprocessor, semantic stage | **done** for GLSL 1.10 **and 1.20**, including arrays and the built-in library. 1.20 is implicit int-to-float conversion, `invariant` and `centroid`, `transpose`/`outerProduct`, and the non-square matrices; 1.30 and later are refused by number. The preprocessor is complete for the dialect: `#if`/`#elif` with the full constant-expression grammar, function-like macros, `#extension`, `#pragma` and `#line` |
 | `struct`, and the type-name ambiguity | **done**, in all four stages - parser, semantic pass, interpreter and generator - and measured on the console (`gl2-probe`'s `structs`, seven arms). The type-name ambiguity is resolved the way C resolves it: the parser keeps the struct names it has seen and `starts_declaration` asks. The layout is decided once in the semantic pass and every later stage reads it, rather than each deriving its own |
-| GLSL 1.20's arrays | **not implemented, and named as such.** 1.20 added array constructors (`float[2](0.25, 0.5)`), array initialisers, and whole-array assignment and comparison. This front end parses none of them and refuses each with a message that says it is 1.20's and not implemented - rather than the 1.10 rule that a whole array is not an l-value (5.8), which is true of 1.10 and would send a 1.20 shader's author to a specification that agrees with them. `tools/shader-conformance/refused-compile-array-ctor-120.frag` and its sibling hold the line so the day it is implemented, the gate says so |
+| GLSL 1.20's array constructors | **done** since 2026-09-25. `float[2](a, b)`, in both back ends. The parser already produced the right shape without anyone noticing - `float` is a type name in primary position, `[2]` the postfix index, `(...)` the postfix call, so it arrives as `CALL(INDEX(IDENTIFIER, 2), args)` and nothing was added to the grammar. **Legal in exactly one place, and not by convenience**: an array constructor's value is an array, and here an expression carries a type while only a symbol carries a length, so a declaration's initialiser is the one context that supplies one. 1.20 also allows one as an argument and a return value; those would need an array type in the type system and are refused by name rather than typed as their element and left to mismatch downstream. The length folds into the tree the way a declarator's does, so both back ends read a number |
+| GLSL 1.20's whole-array assignment and comparison | **not implemented, and named as such.** `v = w` and `v == w` on arrays are 1.20's, and the refusal says "1.20's and not implemented" for a 1.20 shader while keeping 1.10's own rule - that a whole array is not an l-value (5.8) - for a 1.10 one. Claiming the language forbids it would send a 1.20 shader's author to a specification that agrees with them. `tools/shader-conformance/refused-compile-whole-array-assign-120.frag` holds the line, so the day it goes in the gate says so |
 | Non-square matrices (`mat2x3` and the rest) | **done** since 2026-09-25, in all four stages and in the GL API beside them. The type name is 1.20's and a 1.10 shader is told so, by name, from both the declaration and the constructor. `matNxN` is a spelling of `matN` rather than a tenth type |
 | Point sprites, and `gl_PointCoord` | **done** since 2026-09-23. `gl_PointCoord` is texture coordinate generation over the sprite, which is what `GL_COORD_REPLACE` does for the fixed-function path - a program reading it asks for the same thing without an enum to ask with. `gl2-probe`'s `point-coord` measures it |
 | The object model, uniforms, generic attributes | **done** - `gl2-probe`'s first ten checks |
@@ -985,7 +986,7 @@ compile and still not become gfx1030 instructions, and for these ports that was 
 
 | | compile | generate |
 |---|---|---|
-| craft | 8/8 | 4/4 |
+| craft | 16/16 | 8/8 |
 | SuperTux | 2/4 | 1/1 |
 | SuperTuxKart | 10/100 | 4/4 |
 | mesa-demos | 48/51 | 22/23 |
@@ -1046,7 +1047,9 @@ the function exists, and `gl_NormalMatrix` is the modelview's upper 3x3 **invers
 the one built-in matrix that is derived rather than copied. Under the test's (2, 1, 1) scale the
 two readings differ by a factor of four.
 
-It found nine real gaps in its first four runs, none reachable from any port's shaders:
+It found nine real gaps in its first four runs, none reachable from any port's shaders, and a
+tenth batch found none at all - which is what saturation looks like and is why the fifth tick went
+on measuring the vertex stage instead of widening the corpus further:
 
 - **an array as a struct member** (`struct S { float w[3]; }`), which GLSL 1.10 4.1.9 allows and
   the semantic stage refused for indexing something that is neither a vector nor a matrix. The

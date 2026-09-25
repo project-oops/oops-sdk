@@ -215,6 +215,15 @@ static int32_t parse_postfix(glsl_parser_t *p) {
             bump(p);
             int32_t at = node_new(p, GLSL_NODE_INDEX);
             if (at == GLSL_NO_NODE) return at;
+            /* **`x[]` is never an expression**, so the one thing it can be is the unsized array
+             * constructor `float[](a, b)` - GLSL 1.30's form, which this does not implement.
+             * Saying so beats "expected an expression", which reads as a missing index and sends
+             * its author to look between the brackets. */
+            if (check(p, GLSL_TOK_RBRACKET)) {
+                fail(p, "an array constructor needs a constant length here: `float[2](a, b)`; "
+                        "the unsized `float[](a, b)` is a later version's");
+                return GLSL_NO_NODE;
+            }
             int32_t idx = glsl_parse_expression(p);
             if (!accept(p, GLSL_TOK_RBRACKET)) {
                 fail(p, "expected ']'");

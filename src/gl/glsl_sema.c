@@ -477,6 +477,137 @@ static glsl_type_t swizzle_type(glsl_sema_t *s, glsl_type_t operand, const char 
  * Expressions
  * ------------------------------------------------------------------------- */
 
+/* The type a name in call position constructs, or ERROR if it names no type. `matNxN` is the
+ * long spelling of `matN` and denotes the same type - the language gives both names. */
+glsl_type_t glsl_type_by_ctor_name(const char *name, size_t len);
+static glsl_type_t type_by_ctor_name(const char *name, size_t len) {
+    static const struct { const char *name; glsl_type_t type; } ctors[] = {
+        {"float", GLSL_TYPE_FLOAT}, {"int", GLSL_TYPE_INT}, {"bool", GLSL_TYPE_BOOL},
+        {"vec2", GLSL_TYPE_VEC2}, {"vec3", GLSL_TYPE_VEC3}, {"vec4", GLSL_TYPE_VEC4},
+        {"ivec2", GLSL_TYPE_IVEC2}, {"ivec3", GLSL_TYPE_IVEC3}, {"ivec4", GLSL_TYPE_IVEC4},
+        {"bvec2", GLSL_TYPE_BVEC2}, {"bvec3", GLSL_TYPE_BVEC3}, {"bvec4", GLSL_TYPE_BVEC4},
+        {"mat2", GLSL_TYPE_MAT2}, {"mat3", GLSL_TYPE_MAT3}, {"mat4", GLSL_TYPE_MAT4},
+        {"mat2x2", GLSL_TYPE_MAT2}, {"mat3x3", GLSL_TYPE_MAT3}, {"mat4x4", GLSL_TYPE_MAT4},
+        {"mat2x3", GLSL_TYPE_MAT2X3}, {"mat2x4", GLSL_TYPE_MAT2X4},
+        {"mat3x2", GLSL_TYPE_MAT3X2}, {"mat3x4", GLSL_TYPE_MAT3X4},
+        {"mat4x2", GLSL_TYPE_MAT4X2}, {"mat4x3", GLSL_TYPE_MAT4X3},
+    };
+    for (size_t i = 0; i < sizeof(ctors) / sizeof(ctors[0]); i++) {
+        size_t k = 0;
+        while (ctors[i].name[k] != '\0') k++;
+        if (k != len) continue;
+        GLboolean match = GL_TRUE;
+        for (size_t c = 0; c < len; c++) {
+            if (name[c] != ctors[i].name[c]) { match = GL_FALSE; break; }
+        }
+        if (match) return ctors[i].type;
+    }
+    return GLSL_TYPE_ERROR;
+}
+
+/*
+ * **A GLSL 1.20 array constructor, `T[N](a, b, ...)`**, which the parser already produces the
+ * right shape for without knowing it: `float[2](x, y)` is a call whose *callee* is an index -
+ * `CALL(INDEX(IDENTIFIER "float", 2), args)` - because `float` is a type name in primary
+ * position, `[2]` is the postfix index, and `(...)` is the postfix call. Nothing had to be added
+ * to the grammar; what was missing was anyone recognising the shape.
+ *
+ * Answers the element type and the length. It does **not** answer an array type, because this
+ * type system has none: a symbol carries `(type, array_size)` and an expression carries a type
+ * alone. That is why the length comes back through a pointer and why an array constructor is
+ * only usable where something is waiting to receive a length - a declaration's initialiser. GLSL
+ * 1.20 also allows one as an argument and a return value; those stay refused, and the refusal
+ * says which, rather than pretending the type system can hold an array-valued expression.
+ */
+GLboolean glsl_array_ctor_of(glsl_sema_t *s, int32_t node, glsl_type_t *elem, int *count) {
+    if (!s || node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &s->ast->nodes[node];
+    if (n->kind != GLSL_NODE_CALL || n->a == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *idx = &s->ast->nodes[n->a];
+    if (idx->kind != GLSL_NODE_INDEX || idx->a == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *name = &s->ast->nodes[idx->a];
+    if (name->kind != GLSL_NODE_IDENTIFIER) return GL_FALSE;
+    const glsl_type_t t = type_by_ctor_name(name->text, name->length);
+    if (t == GLSL_TYPE_ERROR) return GL_FALSE;
+    int len = 0;
+    if (idx->b == GLSL_NO_NODE || !const_int_eval(s, idx->b, &len) || len < 1) {
+        /* `float[](a, b)` - the unsized form - and `float[n]` with a length nothing can fold.
+         * Both parse as far as here and neither is something to guess a length for. */
+        sema_fail(s, "an array constructor needs a constant length: `float[2](a, b)`, not an "
+                     "empty or computed one", node);
+        return GL_FALSE;
+    }
+    /* **Folded back into the tree**, exactly as a declarator's length is and for the same
+     * reason: both back ends read this node and neither has a semantic pass to ask. It is what
+     * lets `glsl_array_ctor_shape` be an AST-only question. */
+    s->ast->nodes[idx->b].kind = GLSL_NODE_INTCONST;
+    s->ast->nodes[idx->b].value = (double)len;
+    *elem = t;
+    *count = len;
+    return GL_TRUE;
+}
+
+/* The same shape, asked of the tree alone - which is what both back ends have. Sema folded the
+ * length to an `INTCONST` when it typed the call, so there is nothing left to evaluate. */
+GLboolean glsl_array_ctor_shape(const glsl_ast_t *ast, int32_t node, glsl_type_t *elem,
+                                int *count) {
+    if (!ast || node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &ast->nodes[node];
+    if (n->kind != GLSL_NODE_CALL || n->a == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *idx = &ast->nodes[n->a];
+    if (idx->kind != GLSL_NODE_INDEX || idx->a == GLSL_NO_NODE || idx->b == GLSL_NO_NODE) {
+        return GL_FALSE;
+    }
+    const glsl_node_t *name = &ast->nodes[idx->a];
+    const glsl_node_t *len = &ast->nodes[idx->b];
+    if (name->kind != GLSL_NODE_IDENTIFIER || len->kind != GLSL_NODE_INTCONST) return GL_FALSE;
+    const glsl_type_t t = type_by_ctor_name(name->text, name->length);
+    if (t == GLSL_TYPE_ERROR || (int)len->value < 1) return GL_FALSE;
+    *elem = t;
+    *count = (int)len->value;
+    return GL_TRUE;
+}
+
+/* Whether this looks like an array constructor whatever its length folds to - a call on an index
+ * into a type name. Used only to pick the diagnostic: the unfoldable and unsized forms have to
+ * be told they are array constructors in the wrong place rather than "calling something that is
+ * not a name", which reads as a typo. */
+static GLboolean is_array_ctor_syntax(const glsl_sema_t *s, int32_t node) {
+    const glsl_node_t *n = &s->ast->nodes[node];
+    if (n->kind != GLSL_NODE_CALL || n->a == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *idx = &s->ast->nodes[n->a];
+    if (idx->kind != GLSL_NODE_INDEX || idx->a == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *name = &s->ast->nodes[idx->a];
+    return (GLboolean)(name->kind == GLSL_NODE_IDENTIFIER &&
+                       type_by_ctor_name(name->text, name->length) != GLSL_TYPE_ERROR);
+}
+
+/* The arity and element types of an array constructor, once its shape is known. 1.20 gives no
+ * filling rule for one - unlike `vec4(1.0)`, an array constructor takes exactly one argument per
+ * element (1.20, 5.4.4). */
+static GLboolean check_array_ctor(glsl_sema_t *s, int32_t node, glsl_type_t elem, int count) {
+    const glsl_node_t *n = &s->ast->nodes[node];
+    if (s->version < 120) {
+        sema_fail(s, "an array constructor is GLSL 1.20; this shader is 1.10", node);
+        return GL_FALSE;
+    }
+    int given = 0;
+    for (int32_t a = n->b; a != GLSL_NO_NODE; a = s->ast->nodes[a].sibling) {
+        const glsl_type_t at = glsl_type_of(s, a);
+        if (at == GLSL_TYPE_ERROR) return GL_FALSE;
+        if (!glsl_type_accepts(s, elem, at)) {
+            sema_fail(s, "an array constructor's argument does not match its element type", a);
+            return GL_FALSE;
+        }
+        given++;
+    }
+    if (given != count) {
+        sema_fail(s, "an array constructor takes exactly one argument per element", node);
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
 /* A constructor: `vec3(1.0)`, `vec4(v, 1.0)`, `mat4(1.0)`.
  *
  * GLSL's rule is by **component count, not argument count**: `vec4(v3, 1.0)` is four components
@@ -763,37 +894,31 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
         case GLSL_NODE_CALL: {
             const glsl_node_t *callee = &s->ast->nodes[n->a];
             if (callee->kind != GLSL_NODE_IDENTIFIER) {
+                /* **`float[2](a, b)` is a call whose callee is an index**, and reaching *here*
+                 * means it is being used as a general expression - which it cannot be. An array
+                 * constructor's value is an array, and an expression in this type system carries
+                 * a type while only a symbol carries a length. So it is legal in exactly one
+                 * place, a declaration's initialiser, where the declaration supplies the length;
+                 * `check_declarator` handles it there and never asks this function.
+                 *
+                 * GLSL 1.20 also allows one as an argument and as a return value. Those would
+                 * need an array type, and the refusal says so rather than typing the constructor
+                 * as its element and letting the width mismatch surface somewhere else. */
+                glsl_type_t ael = GLSL_TYPE_ERROR;
+                int acount = 0;
+                if (glsl_array_ctor_shape(s->ast, node, &ael, &acount) ||
+                    is_array_ctor_syntax(s, node)) {
+                    sema_fail(s, "an array constructor is a declaration's initialiser here - "
+                                 "1.20 also allows one as an argument and a return value, and "
+                                 "those are not implemented", node);
+                    return GLSL_TYPE_ERROR;
+                }
                 sema_fail(s, "calling something that is not a name", node);
                 return GLSL_TYPE_ERROR;
             }
             /* A constructor is a type name in call position. Checked before the symbol table,
              * because `vec4` is never declared as a function. */
-            glsl_type_t ctor = GLSL_TYPE_ERROR;
-            static const struct { const char *name; glsl_type_t type; } ctors[] = {
-                {"float", GLSL_TYPE_FLOAT}, {"int", GLSL_TYPE_INT}, {"bool", GLSL_TYPE_BOOL},
-                {"vec2", GLSL_TYPE_VEC2}, {"vec3", GLSL_TYPE_VEC3}, {"vec4", GLSL_TYPE_VEC4},
-                {"ivec2", GLSL_TYPE_IVEC2}, {"ivec3", GLSL_TYPE_IVEC3}, {"ivec4", GLSL_TYPE_IVEC4},
-                {"bvec2", GLSL_TYPE_BVEC2}, {"bvec3", GLSL_TYPE_BVEC3}, {"bvec4", GLSL_TYPE_BVEC4},
-                {"mat2", GLSL_TYPE_MAT2}, {"mat3", GLSL_TYPE_MAT3}, {"mat4", GLSL_TYPE_MAT4},
-                /* 1.20's non-square matrices, and the long spellings of the square ones - the
-                 * language gives `mat3` and `mat3x3` both, and they are one type. */
-                {"mat2x2", GLSL_TYPE_MAT2}, {"mat3x3", GLSL_TYPE_MAT3},
-                {"mat4x4", GLSL_TYPE_MAT4},
-                {"mat2x3", GLSL_TYPE_MAT2X3}, {"mat2x4", GLSL_TYPE_MAT2X4},
-                {"mat3x2", GLSL_TYPE_MAT3X2}, {"mat3x4", GLSL_TYPE_MAT3X4},
-                {"mat4x2", GLSL_TYPE_MAT4X2}, {"mat4x3", GLSL_TYPE_MAT4X3},
-            };
-            for (size_t i = 0; i < sizeof(ctors) / sizeof(ctors[0]); i++) {
-                size_t len = 0;
-                while (ctors[i].name[len] != '\0') len++;
-                if (len == callee->length) {
-                    GLboolean match = GL_TRUE;
-                    for (size_t k = 0; k < len; k++) {
-                        if (callee->text[k] != ctors[i].name[k]) { match = GL_FALSE; break; }
-                    }
-                    if (match) { ctor = ctors[i].type; break; }
-                }
-            }
+            const glsl_type_t ctor = type_by_ctor_name(callee->text, callee->length);
             /* A non-square matrix constructor is 1.20's, the same as the type name is. The
              * parser refuses the declaration; this refuses `mat2x3(1.0)[0]` in an expression,
              * which never passes through a declaration and would otherwise be the one way into
@@ -1310,11 +1435,39 @@ static GLboolean check_declarator(glsl_sema_t *s, int32_t d) {
     /* **The initialiser is typed before the name is declared**, so `float x = x;` is an error
      * rather than a variable initialised from itself. */
     if (n->a != GLSL_NO_NODE) {
-        glsl_type_t init = glsl_type_of(s, n->a);
-        if (init == GLSL_TYPE_ERROR) return GL_FALSE;
-        if (!glsl_type_accepts(s, t, init)) {
-            sema_fail(s, "initialiser of a different type from the variable", d);
-            return GL_FALSE;
+        /* **An array constructor is handled here and nowhere else** - this is the one context
+         * that supplies the length its value needs, so `glsl_type_of` refuses it everywhere and
+         * the declarator asks about it directly. The length is checked against the declared one
+         * below, once that has been folded. */
+        glsl_type_t ael = GLSL_TYPE_ERROR;
+        int acount = 0;
+        if (is_array_ctor_syntax(s, n->a)) {
+            if (n->array_size == GLSL_NO_NODE) {
+                sema_fail(s, "an array constructor initialises an array, and this is not one", d);
+                return GL_FALSE;
+            }
+            if (!glsl_array_ctor_of(s, n->a, &ael, &acount)) return GL_FALSE;
+            if (!check_array_ctor(s, n->a, ael, acount)) return GL_FALSE;
+            if (!glsl_type_accepts(s, t, ael)) {
+                sema_fail(s, "the array constructor's element type is not the array's", d);
+                return GL_FALSE;
+            }
+            int want = 0;
+            if (!const_int_eval(s, n->array_size, &want) || want != acount) {
+                sema_fail(s, "the array constructor's length is not the array's", d);
+                return GL_FALSE;
+            }
+        } else {
+            glsl_type_t init = glsl_type_of(s, n->a);
+            if (init == GLSL_TYPE_ERROR) return GL_FALSE;
+            if (!glsl_type_accepts(s, t, init)) {
+                sema_fail(s, "initialiser of a different type from the variable", d);
+                return GL_FALSE;
+            }
+            if (n->array_size != GLSL_NO_NODE) {
+                sema_fail(s, "an array takes an array constructor here, or no initialiser", d);
+                return GL_FALSE;
+            }
         }
     }
     /* **An array's length has to be an integral constant expression** - GLSL 4.1.9 - which is a

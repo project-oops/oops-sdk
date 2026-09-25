@@ -1583,6 +1583,36 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
                 const glsl_node_t *sz = &ast->nodes[n->array_size];
                 elements = (sz->kind == GLSL_NODE_INTCONST) ? (int)sz->value : 0;
             }
+            /* **An array with an initialiser is GLSL 1.20's array constructor**, and its
+             * arguments fill the run one element each. Taken before the scalar path below, whose
+             * `init` holds one value's worth of floats and could not carry an array however long
+             * - the same reason the compiled path copies argument by argument rather than
+             * through a value. */
+            if (elements > 0 && n->a != GLSL_NO_NODE) {
+                glsl_type_t ael = GLSL_TYPE_ERROR;
+                int acount = 0;
+                if (!glsl_array_ctor_shape(ast, n->a, &ael, &acount) || acount != elements) {
+                    fail(e, "an array takes an array constructor of its own length here");
+                    return GL_FALSE;
+                }
+                const int w = exec_comps(e, t);
+                exec_val_t args[GLSL_MAX_ARRAY_CTOR_ARGS];
+                int given = 0;
+                for (int32_t a = ast->nodes[n->a].b;
+                     a != GLSL_NO_NODE && given < GLSL_MAX_ARRAY_CTOR_ARGS;
+                     a = ast->nodes[a].sibling) {
+                    args[given++] = eval(e, a);
+                }
+                float *arr = declare(e, n->text, n->length, t, elements);
+                if (arr) {
+                    for (int i = 0; i < given && i < elements; i++) {
+                        for (int c = 0; c < w && c < EXEC_MAX_VAL_FLOATS; c++) {
+                            arr[i * w + c] = args[i].v[c];
+                        }
+                    }
+                }
+                return (GLboolean)(e->error == (const char *)0);
+            }
             /* **The initialiser is evaluated before the name exists**, so `float x = x;` reads
              * an outer `x` or fails, rather than reading itself. */
             exec_val_t init = val_zero(t);

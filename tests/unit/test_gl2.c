@@ -6993,6 +6993,160 @@ static void test_gl2_builtin_constants(void) {
 }
 
 /*
+ * **GLSL 1.20's array constructors**, which were the last named unimplemented language feature.
+ *
+ * `float[2](a, b)`. The parser already produced the right shape without anyone noticing: `float`
+ * is a type name in primary position, `[2]` is the postfix index and `(...)` the postfix call, so
+ * it arrives as `CALL(INDEX(IDENTIFIER "float", 2), args)`. Nothing was added to the grammar.
+ *
+ * **It is legal in exactly one place**, and that is not a restriction of convenience: an array
+ * constructor's value is an array, and in this type system an expression carries a type while
+ * only a symbol carries a length. A declaration's initialiser is the one context that supplies
+ * the length, so that is where it works. 1.20 also allows one as an argument and a return value;
+ * those need an array type and are refused by name.
+ */
+static void test_gl2_array_constructors(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* Read back out of order, so a fill that ran the wrong way is a rotation and not a near
+     * miss. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  float w[3] = float[3](0.25, 0.5, 0.75);\n"
+                    "  gl_FragColor = vec4(w[2], w[0], w[1], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, 2e-3f);
+    ASSERT_NEAR(o[1], 0.25f, 2e-3f);
+    ASSERT_NEAR(o[2], 0.5f, 2e-3f);
+
+    /* An element wider than one register, so the stride is what an index multiplies by. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  vec2 p[3] = vec2[3](vec2(0.1, 0.2), vec2(0.3, 0.4), vec2(0.5, 0.6));\n"
+                    "  gl_FragColor = vec4(p[2].y, p[1].x, p[0].y, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.6f, 2e-3f);
+    ASSERT_NEAR(o[1], 0.3f, 2e-3f);
+    ASSERT_NEAR(o[2], 0.2f, 2e-3f);
+
+    /* **The arguments are expressions, not literals**, which is what says they are generated
+     * rather than folded out of the source. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  float a = 0.5;\n"
+                    "  float w[2] = float[2](a * 0.5, a + 0.25);\n"
+                    "  gl_FragColor = vec4(w[0], w[1], 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 2e-3f);
+    ASSERT_NEAR(o[1], 0.75f, 2e-3f);
+
+    /* A `const int` length on both sides, which is 4.1.9's integral constant expression and the
+     * idiom a shader actually writes. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "const int N = 3;\n"
+                    "void main() {\n"
+                    "  float w[N] = float[N](0.125, 0.25, 0.5);\n"
+                    "  float t = 0.0;\n"
+                    "  int i;\n"
+                    "  for (i = 0; i < N; i++) { t += w[i]; }\n"
+                    "  gl_FragColor = vec4(t, w[0], w[2], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.875f, 2e-3f);
+    ASSERT_NEAR(o[1], 0.125f, 2e-3f);
+    ASSERT_NEAR(o[2], 0.5f, 2e-3f);
+
+    /* **The refusals, each for its own reason and each saying which.** */
+    struct { const char *src; const char *wants; } bad[] = {
+        /* 1.10 does not have them at all. */
+        {"void main() {\n"
+         "  float w[2] = float[2](0.25, 0.5);\n"
+         "  gl_FragColor = vec4(w[0], w[1], 0.0, 1.0);\n"
+         "}\n",
+         "GLSL 1.20"},
+        /* One argument per element, with no filling rule - unlike `vec4(1.0)`. */
+        {"#version 120\n"
+         "void main() {\n"
+         "  float w[3] = float[3](0.25, 0.5);\n"
+         "  gl_FragColor = vec4(w[0], w[1], w[2], 1.0);\n"
+         "}\n",
+         "one argument per element"},
+        /* The unsized form, which is a later version's and has no length to take. */
+        {"#version 120\n"
+         "void main() {\n"
+         "  float w[2] = float[](0.25, 0.5);\n"
+         "  gl_FragColor = vec4(w[0], w[1], 0.0, 1.0);\n"
+         "}\n",
+         "constant length"},
+        /* **As an argument**, which 1.20 allows and this does not - and the message says that
+         * rather than reporting a width mismatch somewhere downstream. */
+        {"#version 120\n"
+         "float total(float w[2]) { return w[0] + w[1]; }\n"
+         "void main() { gl_FragColor = vec4(total(float[2](0.25, 0.5)), 0.0, 0.0, 1.0); }\n",
+         "not implemented"},
+        /* A length that disagrees with the array's. */
+        {"#version 120\n"
+         "void main() {\n"
+         "  float w[2] = float[3](0.25, 0.5, 0.75);\n"
+         "  gl_FragColor = vec4(w[0], w[1], 0.0, 1.0);\n"
+         "}\n",
+         "length is not the array's"},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        const GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+        source_of(sh, bad[i].src);
+        glCompileShader(sh);
+        GLint ok = 0;
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        char log[256] = {0};
+        glGetShaderInfoLog(sh, (GLsizei)sizeof(log), NULL, log);
+        if (ok != GL_FALSE || strstr(log, bad[i].wants) == NULL) {
+            printf("\n    case %d: wanted a refusal mentioning '%s', got ok=%d log='%s'\n",
+                   (int)i, bad[i].wants, (int)ok, log);
+        }
+        ASSERT_EQ(ok, GL_FALSE);
+        ASSERT_TRUE(strstr(log, bad[i].wants) != NULL);
+    }
+
+    glContextDestroy(ctx);
+}
+
+/* And through the software reference, which fills the run from its own evaluation of each
+ * argument - an `exec_val_t` holds one value's worth of floats, so an array could never have
+ * come through the scalar initialiser path however short it was. */
+static void test_gl2_array_constructors_run(void) {
+    gl2_target_t t = gl2_target();
+    const GLuint prog = linked_program(
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+        "#version 120\n"
+        "const int N = 3;\n"
+        "void main() {\n"
+        "  vec2 p[N] = vec2[N](vec2(0.25, 0.1), vec2(0.5, 0.2), vec2(0.75, 0.3));\n"
+        "  gl_FragColor = vec4(p[0].x, p[1].x, p[2].x, 1.0);\n"
+        "}\n");
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(prog);
+    draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+    const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+    ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);    /* 0.25 */
+    ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);  /* 0.50 */
+    ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);  /* 0.75 */
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
+/*
  * **The vertex stage, which every test above reaches through and none measures.**
  *
  * A fragment shader's answer is a pixel and a wrong one is visible. A vertex shader's answer is a
@@ -8336,6 +8490,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_spec_corners_run);
     RUN_TEST(test_gl2_builtin_constants);
     RUN_TEST(test_gl2_builtin_constants_run);
+    RUN_TEST(test_gl2_array_constructors);
+    RUN_TEST(test_gl2_array_constructors_run);
     RUN_TEST(test_gl2_vertex_stage_computes);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);

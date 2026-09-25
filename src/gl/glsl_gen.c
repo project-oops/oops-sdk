@@ -3837,13 +3837,24 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
                                    node);
                     return GL_FALSE;
                 }
-                /* **No initialiser.** An array is initialised by a constructor - `float[4](…)` -
-                 * which is GLSL 1.20 syntax this front end does not parse, so anything here is
-                 * a width mismatch waiting to be reported as something else. */
+                /* **An initialiser, if it is an array constructor of the right length.** That is
+                 * GLSL 1.20's `float[4](a, b, c, d)`, and it is the one place an array-valued
+                 * expression is usable here: the declaration supplies the length that the type
+                 * system cannot carry. Anything else is refused, because a scalar initialiser on
+                 * an array is a width mismatch waiting to be reported as something else. */
                 if (n->a != GLSL_NO_NODE) {
-                    (void)gen_fail(g, "an array is not initialised where it is declared here; "
-                                      "assign its elements", node);
-                    return GL_FALSE;
+                    glsl_type_t ael = GLSL_TYPE_ERROR;
+                    int acount = 0;
+                    if (!glsl_array_ctor_shape(g->ast, n->a, &ael, &acount)) {
+                        (void)gen_fail(g, "an array takes an array constructor here, or none; "
+                                          "`float[2](a, b)` is 1.20's form", node);
+                        return GL_FALSE;
+                    }
+                    if (acount != elems) {
+                        (void)gen_fail(g, "the array constructor's length is not the array's",
+                                       node);
+                        return GL_FALSE;
+                    }
                 }
             }
             glsl_value_t home =
@@ -3852,6 +3863,35 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
             if (elems > 0) {
                 /* The run is the array; `value.count` stays the *element* width so every other
                  * reader - a move, a place, a width check - sees one element. */
+                /* **The constructor's arguments fill the run, one element each**, generated
+                 * before the name is declared so `float a[2] = float[2](a[0], 1.0);` cannot see
+                 * itself - the same rule the scalar case below follows for the same reason. */
+                if (n->a != GLSL_NO_NODE) {
+                    const int w = gen_comps(g, t);
+                    int filled = 0;
+                    for (int32_t arg = g->ast->nodes[n->a].b;
+                         arg != GLSL_NO_NODE && filled < elems;
+                         arg = g->ast->nodes[arg].sibling, filled++) {
+                        const uint32_t mark = gen_mark(g);
+                        glsl_value_t v = gen_expr(g, arg);
+                        if (is_bad(v)) return GL_FALSE;
+                        if (v.count != w) {
+                            (void)gen_fail(g, "an array constructor's argument is a different "
+                                              "width from the element", node);
+                            return GL_FALSE;
+                        }
+                        for (int c = 0; c < w; c++) {
+                            glsl_emit_mov(g->code, home.base + (uint32_t)(filled * w + c),
+                                          v.base + (uint32_t)c);
+                        }
+                        gen_release(g, mark);
+                    }
+                    if (filled != elems) {
+                        (void)gen_fail(g, "the array constructor's length is not the array's",
+                                       node);
+                        return GL_FALSE;
+                    }
+                }
                 home.count = gen_comps(g, t);
                 glsl_gen_var_t *av = gen_declare(g, n->text, n->length, t, home, node);
                 if (!av) return GL_FALSE;

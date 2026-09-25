@@ -125,6 +125,11 @@ typedef struct {
  * see `struct_name` on `glsl_parser_t`. */
 #define GLSL_MAX_STRUCTS 16
 #define GLSL_MAX_STRUCT_MEMBERS 16
+
+/* How many arguments an array constructor may have, which is how long an array it can build.
+ * The interpreter holds them all before it declares the array, because the declaration is what
+ * the name starts existing at - so this bounds a stack array there. */
+#define GLSL_MAX_ARRAY_CTOR_ARGS 32
 /* **How large a struct may be, in components.** A struct is a value - constructed, assigned,
  * passed and returned whole - and the interpreter carries a value in a fixed array on the stack
  * that every expression it evaluates pays for. This is that array's width, enforced here at
@@ -556,6 +561,16 @@ GLboolean glsl_declare_array(glsl_sema_t *s, const char *name, size_t len, glsl_
 /* The same, for a `const int` whose value is known - which an array's length and a loop's bound
  * may both be. GLSL 7.4's built-in constants come in this way. */
 GLboolean glsl_declare_const_int(glsl_sema_t *s, const char *name, size_t len, int value);
+/* **Whether this CALL node is a GLSL 1.20 array constructor** `T[N](a, b, ...)`, and if so its
+ * element type and length. The parser already produces the shape - a call whose callee is an
+ * index into a type name - so both back ends ask this rather than matching the tree themselves.
+ * An array constructor has no *type* here, because an expression carries a type and a symbol
+ * carries the length, which is why it is only usable as a declaration's initialiser. */
+GLboolean glsl_array_ctor_of(glsl_sema_t *s, int32_t node, glsl_type_t *elem, int *count);
+/* The same shape asked of the tree alone, which is what both back ends have - sema folded the
+ * length to an `INTCONST` when it typed the call, so there is nothing left to evaluate. */
+GLboolean glsl_array_ctor_shape(const glsl_ast_t *ast, int32_t node, glsl_type_t *elem,
+                                int *count);
 
 /* -------------------------------------------------------------------------
  * The built-in library
