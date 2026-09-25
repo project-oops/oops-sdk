@@ -1127,8 +1127,17 @@ static GLboolean check_assign_targets(glsl_sema_t *s, int32_t node) {
          * array and would happily have copied something, never being asked. A language error
          * belongs to the front end so that both paths refuse it for the same reason. */
         if (names_whole_array(s, n->a)) {
-            sema_fail(s, "an array is assigned an element at a time; GLSL 1.10 does not make a "
-                         "whole array an l-value (5.8)", node);
+            /* **The reason differs by version and the message says which.** GLSL 1.10 5.8 lists
+             * what an l-value is and an array is not among them, so there it is ill-formed.
+             * GLSL 1.20 relaxed that along with adding array constructors, so there it is legal
+             * and simply not implemented - and claiming the language forbids it would be a
+             * diagnostic that sends its author to read a spec that agrees with them. */
+            sema_fail(s, (s->version >= 120)
+                             ? "assigning a whole array is GLSL 1.20's and is not implemented "
+                               "here; assign its elements"
+                             : "an array is assigned an element at a time; GLSL 1.10 does not "
+                               "make a whole array an l-value (5.8)",
+                      node);
             return GL_FALSE;
         }
     }
