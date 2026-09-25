@@ -53,6 +53,7 @@ size_t obs_strlen(const char *s);
 int obs_strcmp(const char *s1, const char *s2);
 int obs_strncmp(const char *s1, const char *s2, size_t n);
 char *obs_strncpy(char *dest, const char *src, size_t n);
+char *obs_strstr(const char *haystack, const char *needle);
 
 size_t obs_format_u64(char *dest, uint64_t value);
 size_t obs_format_i64(char *dest, int64_t value);

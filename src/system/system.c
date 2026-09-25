@@ -586,6 +586,67 @@ oops_log_level_t oops_log_get_level(void) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Small `key=value` files a launch can carry, read by whoever cares. See `<oops/system.h>`.
+ *
+ * Parsed on each call rather than held in a table: a table needs a maximum key count and a
+ * maximum key length, and every one of these is read a handful of times while a title starts.
+ * The whole point is that adding a key needs no change here.
+ * --------------------------------------------------------------------------- */
+
+int oops_config_value(const char *path, const char *key, char *out, size_t max) {
+  if (!path || !key || !*key || !out || max == 0u) return -1;
+  out[0] = '\0';
+
+  char buf[512];
+  buf[0] = '\0';
+#ifndef OOPS_HOST_BUILD
+  int fd = oops_fs_open(path, OOPS_O_RDONLY, 0);
+  if (fd < 0) return -1;
+  int64_t got = oops_fs_read(fd, buf, sizeof(buf) - 1);
+  oops_fs_close(fd);
+  buf[(got > 0) ? (size_t)got : 0u] = '\0';
+#else
+  (void)path;
+#endif
+  if (buf[0] == '\0') return -1;
+
+  const size_t want = obs_strlen(key);
+  const char *p = buf;
+  while (*p != '\0') {
+    /* One line, with `#` ending it. Leading blanks are skipped so an indented file reads. */
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    const char *line = p;
+    while (*p != '\0' && *p != '\n') p++;
+    const char *end = p;
+    for (const char *h = line; h < end; h++) {
+      if (*h == '#') { end = h; break; }
+    }
+
+    const char *eq = (const char *)0;
+    for (const char *c = line; c < end; c++) {
+      if (*c == '=') { eq = c; break; }
+    }
+    if (eq != (const char *)0) {
+      const char *ns = line, *ne = eq;
+      while (ns < ne && (*ns == ' ' || *ns == '\t')) ns++;
+      while (ne > ns && (ne[-1] == ' ' || ne[-1] == '\t')) ne--;
+      if ((size_t)(ne - ns) == want && obs_strncmp(ns, key, want) == 0) {
+        const char *vs = eq + 1, *ve = end;
+        while (vs < ve && (*vs == ' ' || *vs == '\t')) vs++;
+        while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t' || ve[-1] == '\r')) ve--;
+        size_t n = (size_t)(ve - vs);
+        if (n > max - 1u) n = max - 1u;
+        for (size_t i = 0; i < n; i++) out[i] = vs[i];
+        out[n] = '\0';
+        return 0;
+      }
+    }
+    if (*p == '\n') p++;
+  }
+  return -1;
+}
+
+/* ---------------------------------------------------------------------------
  * `/app0/oops-log`: the verbosity a launch asked for. See `<oops/system.h>`.
  *
  * Held as the file's own bytes rather than parsed into a table, because the table would need a

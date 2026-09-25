@@ -78,6 +78,21 @@ oops_log_level_t oops_log_get_level(void);
  */
 oops_log_level_t oops_log_channel_level(const char *channel, oops_log_level_t fallback);
 
+/*
+ * One value out of a small `key=value` file the launch carries - the mechanism behind the log
+ * levels above, and available to anything else that wants to be told something without a rebuild.
+ *
+ * Lines are `key=value`, `#` runs to the end of a line, and blanks around either side are
+ * ignored. Returns 0 and fills `out` when the key is present, non-zero otherwise, leaving `out`
+ * empty - so a caller's default is simply what it already had.
+ *
+ * **A rebuild is the expensive part of a port, not the run.** Compiling, packaging and restoring
+ * to reach a number the program already knows is minutes per question; a file the console already
+ * has is seconds. That is the whole reason these exist, and why the SDK reads them rather than
+ * each title growing its own marker.
+ */
+int oops_config_value(const char *path, const char *key, char *out, size_t max);
+
 void oops_log(const char *fmt, ...)
     __attribute__((format(printf, 1, 2)));
 void oops_klog(const char *tag, const char *msg);
