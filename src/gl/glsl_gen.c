@@ -3949,3 +3949,38 @@ glsl_value_t glsl_gen_declare_input(glsl_gen_t *g, const char *name, size_t len,
     }
     return home;
 }
+
+/*
+ * **An input that is an array**, which `gl_TexCoord[]` is and nothing else here is.
+ *
+ * The elements are one run of registers end to end, `count` of them each `components(type)`
+ * wide - exactly the layout `gen_index_of` already reads for a declared array, so a constant
+ * index into this slices it with no new machinery. `array_size` is what tells the identifier
+ * path to refuse reading the whole array as a value, which is right: a `vec4[2]` is not a value
+ * this back end has.
+ */
+glsl_value_t glsl_gen_declare_input_array(glsl_gen_t *g, const char *name, size_t len,
+                                          glsl_type_t type, int count) {
+    glsl_value_t none; none.base = 0u; none.count = 0;
+    if (!g || g->error || count <= 0) return none;
+    if (!is_generated(type)) {
+        return gen_fail(g, "only float, vec and mat array inputs are generated", GLSL_NO_NODE);
+    }
+    const int width = glsl_type_components(type);
+    glsl_value_t run = gen_alloc(g, width * count, GLSL_NO_NODE);
+    if (is_bad(run)) return run;
+
+    /* The variable's `value` is one *element*, and `gen_index_of` multiplies by the index - so
+     * the count here is the element's width and the base is the run's. */
+    glsl_value_t elem;
+    elem.base = run.base;
+    elem.count = width;
+    glsl_gen_var_t *v = gen_declare(g, name, len, type, elem, GLSL_NO_NODE);
+    if (!v) return none;
+    v->array_size = count;
+
+    if (!glsl_declare_array(g->sema, name, len, type, count, GLSL_TOK_KW_VARYING)) {
+        g->sema->error = (const char *)0; /* already declared by the caller */
+    }
+    return run;
+}

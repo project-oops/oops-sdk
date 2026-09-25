@@ -999,6 +999,12 @@ typedef struct {
      * `n`, and the only way to be sure is for there to be one decision. */
     int hw_tex_uniform[OOPS_GL_GL2_TEX_SETS];
     int hw_tex_sets;
+    /* **The first parameter `gl_TexCoord[]` occupies**, or -1 when the fragment shader never
+     * names it. One parameter an element, `OOPS_GL_MAX_TEXTURE_UNITS` of them, laid out
+     * consecutively from here - decided at link time for the same reason `hw_color_param` is,
+     * since the compiler reads it to emit the interpolation and the draw reads it to fill the
+     * slot, and the two must not each work it out. */
+    int hw_texcoord_param;
     float *values;         /* the value pool the uniforms' offsets index */
     int value_floats;
 

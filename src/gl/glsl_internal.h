@@ -1055,6 +1055,11 @@ glsl_value_t glsl_gen_expression(glsl_gen_t *g, int32_t node);
  * a varying arrives once the shader interface is settled. */
 glsl_value_t glsl_gen_declare_input(glsl_gen_t *g, const char *name, size_t len,
                                     glsl_type_t type);
+/* The same, for an input that is an array of `count` of `type` - `gl_TexCoord[]` is the one the
+ * language has. The registers are the elements end to end, which is the layout `[]` already
+ * indexes, so nothing else has to know it is an array. Returns the whole run. */
+glsl_value_t glsl_gen_declare_input_array(glsl_gen_t *g, const char *name, size_t len,
+                                          glsl_type_t type, int count);
 /* Puts the allocator's cursor at `first`, so the registers below it are the caller's. A pixel
  * shader's v0 and v1 are the barycentrics the hardware wrote and v4..v7 are what it exports
  * from, and an allocator that handed one of those out would have the shader compute over the

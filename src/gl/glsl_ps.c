@@ -612,6 +612,27 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         }
     }
 
+    /* **`gl_TexCoord[]`, the same way and one parameter an element.** It is an array, so the run
+     * of registers is `OOPS_GL_MAX_TEXTURE_UNITS` vec4s end to end and a constant index into it
+     * is a slice - which is what a fragment shader writes, `gl_TexCoord[0].st` and no other
+     * shape. The parameter each element sits in comes from the link for the reason `gl_Color`'s
+     * does: the draw fills that slot and this reads it, and the two cannot each decide. */
+    if (ok && p->hw_texcoord_param >= 0) {
+        const glsl_value_t home = glsl_gen_declare_input_array(
+            gen, "gl_TexCoord", 11u, GLSL_TYPE_VEC4, OOPS_GL_MAX_TEXTURE_UNITS);
+        if (home.count != 4 * OOPS_GL_MAX_TEXTURE_UNITS) {
+            log_say(log, log_size, gen->error ? gen->error : "gl_TexCoord has no registers", 0, 0);
+            ok = GL_FALSE;
+        } else {
+            for (int u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+                for (int c = 0; c < 4; c++) {
+                    glsl_emit_interp_pair(&code, home.base + (uint32_t)(u * 4 + c),
+                                          (uint32_t)(p->hw_texcoord_param + u), (uint32_t)c);
+                }
+            }
+        }
+    }
+
     /*
      * **`gl_PointCoord`, interpolated from the texture parameter** (since 2026-09-23).
      *

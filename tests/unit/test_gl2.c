@@ -5375,6 +5375,55 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
  * here has to distinguish: both leave the variable the same. So each arm reads the *expression's*
  * value and the variable separately, and the two differ by one.
  */
+/*
+ * **`gl_TexCoord[]` reaching a compiled fragment shader.**
+ *
+ * The fixed-function vertex stage has always written the texture coordinates into the vertex's
+ * own block; what was missing was carrying them across the parameter interface to a *compiled*
+ * shader, so a shader reading `gl_TexCoord[0]` was refused with "this name has no register".
+ * Four of mesa-demos' fragment shaders are that shape.
+ *
+ * **The two elements carry different values on purpose.** They are one run of registers and a
+ * constant index slices it, so an off-by-one or an aliasing of the two would hand back the wrong
+ * element - and if both held the same thing, neither mistake would show. The vertex shader here
+ * declares no varyings, which puts `gl_TexCoord[0]` in parameter 0 and `[1]` in parameter 1.
+ */
+static void test_gl2_compiled_texcoord_builtin(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float tol = 2e-3f;
+    const float attr[4][4] = {
+        {0.25f, 0.5f, 0.0f, 1.0f},   /* gl_TexCoord[0] */
+        {0.75f, 0.125f, 0.0f, 1.0f}, /* gl_TexCoord[1] */
+        {0, 0, 0, 0}, {0, 0, 0, 0},
+    };
+
+    compile_and_run(ctx,
+                    "attribute vec4 pos;\nvoid main() { gl_Position = pos; }\n",
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(gl_TexCoord[0].x, gl_TexCoord[0].y,\n"
+                    "                      gl_TexCoord[1].x, gl_TexCoord[1].y);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.75f, tol);   /* the *other* element, not the first again */
+    ASSERT_NEAR(o[3], 0.125f, tol);
+
+    /* `.st` is the same swizzle by its texture-coordinate name, which is how shaders write it. */
+    compile_and_run(ctx,
+                    "attribute vec4 pos;\nvoid main() { gl_Position = pos; }\n",
+                    "void main() {\n"
+                    "  vec2 c = gl_TexCoord[0].st;\n"
+                    "  gl_FragColor = vec4(c.s, c.t, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_increment(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -6637,6 +6686,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_while_loops);
     RUN_TEST(test_gl2_compiled_unbounded_for_loops);
     RUN_TEST(test_gl2_compiled_increment);
+    RUN_TEST(test_gl2_compiled_texcoord_builtin);
     RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);

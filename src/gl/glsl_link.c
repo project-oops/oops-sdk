@@ -546,6 +546,7 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     p->hw_ps_serial = 0u;
     p->hw_params = 0u;
     p->hw_color_param = -1;
+    p->hw_texcoord_param = -1;
     p->hw_ps_exports_depth = GL_FALSE;
     p->hw_ps_kills = GL_FALSE;
     p->hw_ps_log[0] = '\0';
@@ -745,6 +746,22 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
         } else {
             p->hw_color_param = 0;
         }
+    }
+
+    /* **`gl_TexCoord[]`, one parameter an element.** The fixed-function vertex stage has always
+     * written the texture coordinates into the vertex's own block (`GL_SHADER_VARY_TEXCOORD`),
+     * so what is added here is carrying them across the parameter interface to a *compiled*
+     * fragment shader - which is where they were not reaching.
+     *
+     * Every element is reserved rather than only the ones indexed, because which indices a
+     * shader uses is a question about its tree and this is a question about the interface. The
+     * cost is bounded by `OOPS_GL_MAX_TEXTURE_UNITS` and paid only by a shader that names the
+     * array at all; a program whose varyings then exceed what the stage exports is refused with
+     * that number, as it was before. */
+    p->hw_texcoord_param = -1;
+    if (fs && glsl_unit_mentions(fs, "gl_TexCoord", 11u)) {
+        p->hw_texcoord_param = (int)p->hw_params;
+        p->hw_params += (uint32_t)OOPS_GL_MAX_TEXTURE_UNITS;
     }
 
     if (p->hw_params < 2u) p->hw_params = 2u;   /* the pipeline's smallest configuration */

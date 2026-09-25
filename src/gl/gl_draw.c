@@ -4722,6 +4722,19 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                             for (int c = 0; c < 4; c++) {
                                 slot[c] = vso[k].vary[GL_SHADER_VARY_COLOR + c];
                             }
+                        } else if (prog->hw_texcoord_param >= 0 &&
+                                   pi >= (uint32_t)prog->hw_texcoord_param &&
+                                   pi < (uint32_t)prog->hw_texcoord_param +
+                                            (uint32_t)OOPS_GL_MAX_TEXTURE_UNITS) {
+                            /* **`gl_TexCoord[u]`, from the slot the vertex stage left it in.**
+                             * Not a user varying and so not in the flat block below - the
+                             * fixed-function outputs have named places in the vertex's own
+                             * output and this is one of them. */
+                            const uint32_t u = pi - (uint32_t)prog->hw_texcoord_param;
+                            for (int c = 0; c < 4; c++) {
+                                slot[c] = vso[k].vary[GL_SHADER_VARY_TEXCOORD +
+                                                      (int)(u * 4u) + c];
+                            }
                         } else {
                             for (int c = 0; c < 4; c++) {
                                 const int at = (int)(pi * 4u) + c;
