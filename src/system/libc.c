@@ -922,6 +922,15 @@ void rewind(FILE *f) { (void)fseek(f, 0L, SEEK_SET); }
 int feof(FILE *f) { return f ? f->eof : 1; }
 int ferror(FILE *f) { return f ? f->err : 1; }
 
+/* Both flags, as C says - not one. A caller clearing an error and then finding `feof` still set
+ * would loop forever on a stream it believes it has recovered. */
+void clearerr(FILE *f) {
+    if (f) {
+        f->eof = 0;
+        f->err = 0;
+    }
+}
+
 int fflush(FILE *f) {
     if (f && f->is_log) libc_log_flush(f->is_log);
     else if (!f) { libc_log_flush(1); libc_log_flush(2); } /* fflush(NULL): all of them */

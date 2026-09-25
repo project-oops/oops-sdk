@@ -87,6 +87,10 @@ long ftell(FILE *f);
 void rewind(FILE *f);
 int feof(FILE *f);
 int ferror(FILE *f);
+/* Clears both of the above. C's way of saying "I have handled that error, carry on with this
+ * stream" - without it a caller that recovers from a short read has no way to stop `ferror`
+ * answering yes forever. */
+void clearerr(FILE *f);
 int fflush(FILE *f);
 int fgetc(FILE *f);
 int getc(FILE *f);
