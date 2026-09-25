@@ -13441,6 +13441,18 @@ static void test_glsl_emit_matches_the_assembler(void) {
   ASSERT_EQ(words[0], 0xf0a00108u);
   ASSERT_EQ(words[1], 0x00610410u);
 
+  /* **The biased sample**, which differs from the plain one in its opcode alone - the address
+   * run is one register longer but `vaddr` names only its first. clang 21 for gfx1030 assembles
+   * `image_sample_b v[4:7], v[16:18], s[8:15], s[16:19] dmask:0xf dim:SQ_RSRC_IMG_2D` to
+   * 0xf0940f08 0x00820410, against the plain sample's 0xf0800f08 with the same operands.
+   *
+   * Pinned here because an opcode is the one field where being wrong is silent: the instruction
+   * still assembles, still samples, and returns a texel from a level nobody asked for. */
+  glsl_code_init(&c, words, 64);
+  glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE_B, GLSL_IMG_DIM_2D, 4u, 16u, 8u, 16u);
+  ASSERT_EQ(words[0], 0xf0940f08u);
+  ASSERT_EQ(words[1], 0x00820410u);
+
   /* **The cube face selection**, which is the only VOP3 this back end emits. Words from
    * `tools/shader/tex-cube.s`, whose four instructions all take the same three sources - so the
    * second dword is identical across them and the opcode is the whole difference, which is

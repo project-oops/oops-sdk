@@ -1352,8 +1352,24 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
          * for a shadow the reference along with them. */
         const GLboolean projective = (GLboolean)(tex_proj || tex_3dproj || tex_shadowproj ||
                                                  tex_1dproj || tex_1dshadowproj);
-        if (argc_of(g, first_arg) != 2) {
-            return gen_fail(g, "a texture lookup takes a sampler and a coordinate", node);
+        /*
+         * **The third argument is a level-of-detail bias**, which GLSL 1.10 gives every
+         * fragment-stage lookup - `texture2D(s, c, bias)`. It is added to the level the
+         * derivatives worked out, so it is not a different lookup, just a different opcode with
+         * one more address register.
+         *
+         * Not offered for the shadow forms: those go through `image_sample_c`, whose biased
+         * spelling is a third opcode this has not read out of an assembler.
+         */
+        const int tex_argc = argc_of(g, first_arg);
+        const GLboolean biased = (GLboolean)(tex_argc == 3 && !want_shadow);
+        if (tex_argc != 2 && !biased) {
+            return gen_fail(g, want_shadow
+                                   ? "a shadow lookup takes a sampler and a coordinate; the "
+                                     "biased form goes through a different instruction and is "
+                                     "not generated"
+                                   : "a texture lookup takes a sampler and a coordinate, and "
+                                     "may take a level-of-detail bias after them", node);
         }
         const glsl_node_t *sn = &g->ast->nodes[first_arg];
         if (sn->kind != GLSL_NODE_IDENTIFIER) {
@@ -1544,8 +1560,27 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
             glsl_emit_mov_imm(g->code, out.base + 3u, float_bits(1.0f));
             return out;
         }
-        glsl_emit_image_sample(g->code, GLSL_MIMG_SAMPLE, want_dim, out.base, uv.base, srsrc,
-                               srsrc + 8u);
+        /* **The bias goes first in the address run**, which means a fresh run: the coordinate is
+         * already in consecutive registers and there is no room in front of it. The move is the
+         * cost of the biased form, and only a biased lookup pays it. */
+        uint32_t addr_base = uv.base;
+        if (biased) {
+            const int32_t bias_node = g->ast->nodes[coord_node].sibling;
+            glsl_value_t b = gen_expr(g, bias_node);
+            if (is_bad(b)) return b;
+            if (b.count != 1) {
+                return gen_fail(g, "a texture lookup's bias is a single number", node);
+            }
+            glsl_value_t run = gen_alloc(g, uv.count + 1, node);
+            if (is_bad(run)) return run;
+            glsl_emit_mov(g->code, run.base, b.base);
+            for (int i = 0; i < uv.count; i++) {
+                glsl_emit_mov(g->code, run.base + 1u + (uint32_t)i, uv.base + (uint32_t)i);
+            }
+            addr_base = run.base;
+        }
+        glsl_emit_image_sample(g->code, biased ? GLSL_MIMG_SAMPLE_B : GLSL_MIMG_SAMPLE, want_dim,
+                               out.base, addr_base, srsrc, srsrc + 8u);
         /* **A sample is not in order with what follows it.** Without this the next instruction
          * reads the destination before the texture unit has written it, which is the same
          * hazard `s_waitcnt lgkmcnt(0)` covers for the uniform block - and obSCEne measured

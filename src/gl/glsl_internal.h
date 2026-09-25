@@ -706,6 +706,13 @@ void glsl_emit_s_cmp_ge_u32_imm(glsl_code_t *c, uint32_t sreg, uint32_t imm);
  * derivatives and no whole-quad mode - and leaves the mip chain, the minification filter and
  * GL 1.4's LOD bias unused. The textured fixed-function shader found that on 2026-09-19. */
 #define GLSL_MIMG_SAMPLE    32u
+/* **`image_sample_b`, read out of the assembler and not guessed**: clang 21 for gfx1030
+ * assembles `image_sample_b v[4:7], v[16:18], s[8:15], s[16:19] dmask:0xf dim:SQ_RSRC_IMG_2D`
+ * to `0xF0940F08`, against the plain sample's `0xF0800F08` - the opcode field, bits 24:18,
+ * being the whole difference. The same line at `SQ_RSRC_IMG_CUBE` takes `v[16:19]`, one register
+ * more than the cube's three coordinates, which is where the bias goes: **first in the address
+ * run**, ahead of the coordinate. */
+#define GLSL_MIMG_SAMPLE_B  37u
 #define GLSL_MIMG_SAMPLE_LZ 39u
 /* **The comparing form**, which returns one value rather than a texel: the sampler's own
  * `DEPTH_COMPARE_FUNC` is applied per texel against a reference the shader hands over as the
