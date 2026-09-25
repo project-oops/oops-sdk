@@ -5358,6 +5358,89 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
  * column-major against row-major is exactly the mistake available here. The expected values are
  * worked out for column-major, which is what `glUniformMatrix3fv` writes without `transpose`.
  */
+/*
+ * **`while` and `do`-`while` generated for the console.**
+ *
+ * They were refused with advice to rewrite them as a bounded `for` with a `break`. The masks a
+ * branched loop needs were already there for that `for`; what was missing was a trip guard for a
+ * loop with no static count, and `GLSL_GEN_MAX_TRIPS` is the ceiling the design already names for
+ * exactly that case.
+ *
+ * **Each result depends on how many times the loop ran**, so a body executed once, or one trip too
+ * many, gives a different number rather than the same one. A loop whose result did not count its
+ * trips would pass without the loop working at all - which is the shape of test this file has been
+ * bitten by before.
+ */
+static void test_gl2_compiled_while_loops(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float tol = 2e-3f;
+
+    /* A pre-tested loop: five trips, each adding a tenth. Six or four would both be visible. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float acc = 0.0;\n"
+                    "  float i = 0.0;\n"
+                    "  while (i < 5.0) { acc += 0.1; i += 1.0; }\n"
+                    "  gl_FragColor = vec4(acc, i, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, tol);
+    ASSERT_NEAR(o[1], 5.0f, tol);
+
+    /* **A `do`-`while` whose condition is false at the top still runs once**, which is the whole
+     * difference between the two and the thing a post-test has to get right. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float acc = 0.0;\n"
+                    "  do { acc += 0.25; } while (acc < 0.0);\n"
+                    "  gl_FragColor = vec4(acc, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+
+    /* A `do`-`while` that does loop, so the post-test is not passing merely by running once. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float acc = 0.0;\n"
+                    "  do { acc += 0.25; } while (acc < 0.7);\n"
+                    "  gl_FragColor = vec4(acc, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, tol);
+
+    /* **A `while` whose condition is false on entry runs not at all**, which is the other half of
+     * the pre-test and the case the branch around an empty body exists for. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float acc = 0.5;\n"
+                    "  while (acc > 1.0) { acc += 1.0; }\n"
+                    "  gl_FragColor = vec4(acc, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, tol);
+
+    /* `break` and `continue` reach a `while` the same way they reach a `for`: the accumulator
+     * counts three of the five trips, so a `continue` that failed to skip gives 0.5. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float acc = 0.0;\n"
+                    "  float i = 0.0;\n"
+                    "  while (i < 10.0) {\n"
+                    "    i += 1.0;\n"
+                    "    if (i > 3.0) { break; }\n"
+                    "    acc += 0.1;\n"
+                    "  }\n"
+                    "  gl_FragColor = vec4(acc, i, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.3f, tol);
+    ASSERT_NEAR(o[1], 4.0f, tol);
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_matrix_uniform(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -6445,6 +6528,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);
+    RUN_TEST(test_gl2_compiled_while_loops);
     RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);

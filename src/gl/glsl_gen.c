@@ -3053,6 +3053,164 @@ static uint32_t loop_trip_sgpr(int d)  { return loop_active_sgpr(d) + 2u; }
  * says never reaches it. It is not a safety margin over that number - it is that number, and a
  * loop that wanted more has already been refused by the caller.
  */
+/*
+ * **The two ends of a branched loop, shared by every kind of one.**
+ *
+ * What differs between a `for` and a `while` is the condition and the step; the mask protocol is
+ * the same and it is the subtle part - `active` narrowed each trip and reloaded into `exec` at the
+ * top so that `continue` undoes itself, `entry` kept because a lane that broke out still runs the
+ * statements after the loop, and the trip guard so a condition that never goes false is a
+ * diagnostic rather than a hung part. Writing that twice would be two answers to one question,
+ * and the answer is not obvious enough to have two.
+ */
+/* **A condition into VCC, lane by lane**, the same way `if` does it: compare the value against a
+ * materialised zero, because a GLSL bool is a float here and "true" is "not zero". Shared so that
+ * a loop's condition and an `if`'s cannot come to mean different things. */
+static GLboolean gen_cond_into_vcc(glsl_gen_t *g, int32_t cond_node) {
+    glsl_value_t c = gen_expr(g, cond_node);
+    if (is_bad(c)) return GL_FALSE;
+    if (c.count != 1) {
+        (void)gen_fail(g, "a loop condition takes a single bool", cond_node);
+        return GL_FALSE;
+    }
+    glsl_value_t zero = gen_const(g, 0.0, cond_node);
+    if (is_bad(zero)) return GL_FALSE;
+    glsl_emit_cmp(g->code, GLSL_VOPC_NEQ_F32, c.base, zero.base);
+    return GL_TRUE;
+}
+
+static void gen_loop_open(glsl_gen_t *g, uint32_t s_active, uint32_t s_entry, uint32_t s_trip) {
+    glsl_emit_exec_save(g->code, s_entry);
+    glsl_emit_exec_save(g->code, s_active);
+    glsl_emit_sop1(g->code, GLSL_SOP1_MOV_B32, s_trip, 128u); /* 128: scalar inline zero */
+}
+
+/* The tail: the trip guard, the branch back to `top`, and both exits patched to land after it.
+ * `fix_empty` is the forward branch taken when no lane entered the body, or 0 for a loop shape
+ * that has none - a `do`-`while`, whose body always runs once. */
+static GLboolean gen_loop_close(glsl_gen_t *g, int32_t node, uint32_t s_entry, uint32_t s_trip,
+                                int trips, uint32_t top, uint32_t fix_empty,
+                                GLboolean have_empty) {
+    glsl_emit_s_inc_u32(g->code, s_trip);
+    glsl_emit_s_cmp_ge_u32_imm(g->code, s_trip, (uint32_t)trips);
+    const uint32_t fix_guard = glsl_emit_branch_fwd(g->code, GLSL_SOPP_CBRANCH_SCC1);
+    glsl_emit_branch_back(g->code, GLSL_SOPP_BRANCH, top);
+    /* **Both exits land here, and an unpatched one would be a jump to nowhere.** A false from
+     * either means the buffer overflowed while the body was generated, which is already a failed
+     * compile - this is what stops it also being a plausible branch. */
+    if (!glsl_patch_branch_here(g->code, fix_guard) ||
+        (have_empty && !glsl_patch_branch_here(g->code, fix_empty))) {
+        (void)gen_fail(g, "this loop's body is longer than the shader buffer, so the branches "
+                          "around it could not be resolved", node);
+        return GL_FALSE;
+    }
+    glsl_emit_exec_restore(g->code, s_entry);
+    return GL_TRUE;
+}
+
+/*
+ * **`while` and `do`-`while`, on the same masks a branched `for` uses.**
+ *
+ * They were refused with advice to rewrite them as a bounded `for` with a `break`, and the reason
+ * given was the trip guard - "the trip count comes from a `for`'s initialiser, bound and step".
+ * That was true of where the *number* comes from and not of whether a guard can exist:
+ * `GLSL_GEN_MAX_TRIPS` is the ceiling the design already names for "a loop that does not do what
+ * it says", and a loop with no static count is exactly that case. So the guard is the same
+ * mechanism with the ceiling in place of a counted bound.
+ *
+ * The condition is generated rather than pattern-matched, which is the other difference from the
+ * `for` path: there is no counter to compare against a constant, so it costs whatever the
+ * expression costs, every trip.
+ *
+ * `do`-`while` tests at the bottom, so its body runs once whatever the condition says - which is
+ * why it needs no branch around an empty first trip and why the condition is emitted after the
+ * body rather than before it.
+ */
+static GLboolean gen_while_branched(glsl_gen_t *g, int32_t node, GLboolean post_test) {
+    const glsl_node_t *n = &g->ast->nodes[node];
+    if (g->loop_depth >= GLSL_GEN_MAX_LOOP_DEPTH) {
+        (void)gen_fail(g, "the branched loops in this shader nest deeper than the scalar "
+                          "registers set aside for them", node);
+        return GL_FALSE;
+    }
+    /* **The two kinds hold their children the other way round**, which is worth reading off the
+     * parser rather than assuming: `while (c) s;` is the condition in `a` and the body in `b`,
+     * and `do s; while (c);` is the body in `a` and the condition in `b` - each in source order.
+     * Assuming they agreed fed the condition to the statement generator, which refused it as a
+     * statement with no instruction selection and named a column inside the condition. */
+    const int32_t cond_node = post_test ? n->b : n->a;
+    const int32_t body_node = post_test ? n->a : n->b;
+    if (cond_node == GLSL_NO_NODE) {
+        (void)gen_fail(g, "a loop with no condition has no trip count and no exit", node);
+        return GL_FALSE;
+    }
+
+    const int d = g->loop_depth;
+    const uint32_t s_active = loop_active_sgpr(d);
+    const uint32_t s_entry  = loop_entry_sgpr(d);
+    const uint32_t s_trip   = loop_trip_sgpr(d);
+
+    const int vars_before = g->var_count;
+    const uint32_t loop_mark = gen_mark(g);
+    gen_loop_open(g, s_active, s_entry, s_trip);
+
+    const uint32_t top = glsl_code_here(g->code);
+    GLboolean ok = GL_TRUE;
+    uint32_t fix_empty = 0u;
+    GLboolean have_empty = GL_FALSE;
+
+    /* **A pre-tested loop narrows before the body; a post-tested one after it.** Everything else
+     * below is the same, which is why this is one function and a flag rather than two. */
+    if (!post_test) {
+        const uint32_t mark = gen_mark(g);
+        ok = gen_cond_into_vcc(g, cond_node);
+        gen_release(g, mark);
+        if (ok) {
+            glsl_emit_sop2(g->code, GLSL_SOP2_AND_B32, s_active, s_active, GLSL_SREG_VCC_LO);
+            glsl_emit_exec_restore(g->code, s_active);
+            fix_empty = glsl_emit_branch_fwd(g->code, GLSL_SOPP_CBRANCH_EXECZ);
+            have_empty = GL_TRUE;
+        }
+    }
+
+    if (ok) {
+        g->loop_exec_depth[d] = g->exec_depth;
+        g->loop_depth++;
+        const int vars_here = g->var_count;
+        const uint32_t mark = gen_mark(g);
+        ok = glsl_gen_stmt(g, body_node);
+        g->var_count = vars_here;
+        gen_release(g, mark);
+        g->loop_depth--;
+    }
+
+    if (ok) {
+        /* Back to the full loop mask before the condition: see `gen_loop_open` on `continue`. */
+        glsl_emit_exec_restore(g->code, s_active);
+        if (post_test) {
+            const uint32_t mark = gen_mark(g);
+            ok = gen_cond_into_vcc(g, cond_node);
+            gen_release(g, mark);
+            if (ok) {
+                glsl_emit_sop2(g->code, GLSL_SOP2_AND_B32, s_active, s_active, GLSL_SREG_VCC_LO);
+                glsl_emit_exec_restore(g->code, s_active);
+                /* No lane still going round: fall out rather than branch back. */
+                fix_empty = glsl_emit_branch_fwd(g->code, GLSL_SOPP_CBRANCH_EXECZ);
+                have_empty = GL_TRUE;
+            }
+        }
+    }
+
+    if (ok) {
+        ok = gen_loop_close(g, node, s_entry, s_trip, GLSL_GEN_MAX_TRIPS, top, fix_empty,
+                            have_empty);
+    }
+
+    gen_release(g, loop_mark);
+    g->var_count = vars_before;
+    return (GLboolean)(ok && g->error == (const char *)0);
+}
+
 static GLboolean gen_for_branched(glsl_gen_t *g, int32_t node, const glsl_node_t *decl,
                                   glsl_type_t ind_t, double start, double limit, double step,
                                   int cond_op, int trips) {
@@ -3082,9 +3240,7 @@ static GLboolean gen_for_branched(glsl_gen_t *g, int32_t node, const glsl_node_t
         glsl_scope_pop(g->sema); g->var_count = vars_before; return GL_FALSE;
     }
 
-    glsl_emit_exec_save(g->code, s_entry);
-    glsl_emit_exec_save(g->code, s_active);
-    glsl_emit_sop1(g->code, GLSL_SOP1_MOV_B32, s_trip, 128u); /* 128: scalar inline zero */
+    gen_loop_open(g, s_active, s_entry, s_trip);
 
     const uint32_t top = glsl_code_here(g->code);
 
@@ -3141,21 +3297,7 @@ static GLboolean gen_for_branched(glsl_gen_t *g, int32_t node, const glsl_node_t
     }
 
     if (ok) {
-        glsl_emit_s_inc_u32(g->code, s_trip);
-        glsl_emit_s_cmp_ge_u32_imm(g->code, s_trip, (uint32_t)trips);
-        const uint32_t fix_guard = glsl_emit_branch_fwd(g->code, GLSL_SOPP_CBRANCH_SCC1);
-        glsl_emit_branch_back(g->code, GLSL_SOPP_BRANCH, top);
-        /* **Both exits land here, and an unpatched one would be a jump to nowhere.** A false
-         * from either means the buffer overflowed while the body was generated, which is
-         * already a failed compile - this is what stops it also being a plausible branch. */
-        if (!glsl_patch_branch_here(g->code, fix_guard) ||
-            !glsl_patch_branch_here(g->code, fix_empty)) {
-            (void)gen_fail(g, "this loop's body is longer than the shader buffer, so the "
-                              "branches around it could not be resolved", node);
-            ok = GL_FALSE;
-        } else {
-            glsl_emit_exec_restore(g->code, s_entry);
-        }
+        ok = gen_loop_close(g, node, s_entry, s_trip, trips, top, fix_empty, GL_TRUE);
     }
 
     gen_release(g, loop_mark);
@@ -3619,14 +3761,9 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
          * loop and is bounded, so the rewrite is small and it is named here.
          */
         case GLSL_NODE_WHILE:
+            return gen_while_branched(g, node, GL_FALSE);
         case GLSL_NODE_DO_WHILE:
-            (void)gen_fail(g, "a `while` loop is not generated: a loop that branches carries a "
-                              "trip guard so that a condition which never goes false cannot "
-                              "hang the part, and the trip count comes from a `for`'s "
-                              "initialiser, bound and step. Write it as "
-                              "`for (int i = 0; i < <a bound>; i++)` with a `break` for the "
-                              "real condition - both are generated", node);
-            return GL_FALSE;
+            return gen_while_branched(g, node, GL_TRUE);
         default:
             (void)gen_fail(g, "this statement has no instruction selection yet: declarations, "
                               "expressions, blocks, `if`, `for`, `break`, `continue`, `return` "
