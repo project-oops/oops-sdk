@@ -888,25 +888,11 @@ void glsl_emit_dpp_sub(glsl_code_t *c, uint32_t dst, uint32_t src0, uint32_t vsr
 #define GLSL_GEN_MAX_TEX_SETS    OOPS_GL_GL2_TEX_SETS
 #define GLSL_GEN_LIVE_SGPR       52u
 #define GLSL_GEN_EXEC_SGPR_BASE  53u
-#define GLSL_GEN_MAX_EXEC_DEPTH  12
+/* **Eight, down from twelve on 2026-09-25**, to make room below the 106-register ceiling for four
+ * sampler sets. Eight levels of nested `if` in a fragment shader is past anything written by
+ * hand, and a ninth is a diagnostic rather than a corrupted register. */
+#define GLSL_GEN_MAX_EXEC_DEPTH  8
 
-/*
- * **The scalar file has room for all of it.** Mesa puts this part's general SGPRs at s0..s105 -
- * `ac_gpu_info.c:260`, `max_sgpr_alloc = 108` with VCC at s[106-107]. A fifth sampler set, a
- * deeper exec stack or a wider uniform block would run off the end of the register file, which
- * is not a diagnostic at run time: it is another wave's registers, so a wrong pixel in a draw
- * that has nothing to do with this one. Caught here instead.
- *
- * The uniform bound is the last thing in the map, so checking where it ends checks everything
- * below it - `glsl_ps.c` holds `GL_PS_UNIFORM_SGPR_BASE` and the assertion there ties the two
- * files together.
- */
-typedef char glsl_gen_sgpr_map_fits[
-    (GLSL_GEN_TEX_SGPR_BASE + (unsigned)GLSL_GEN_MAX_TEX_SETS * GLSL_GEN_TEX_SGPR_STRIDE
-             <= GLSL_GEN_LIVE_SGPR &&
-     GLSL_GEN_LIVE_SGPR < GLSL_GEN_EXEC_SGPR_BASE &&
-     GLSL_GEN_EXEC_SGPR_BASE + (unsigned)GLSL_GEN_MAX_EXEC_DEPTH <= 106u)
-        ? 1 : -1];
 /*
  * **A loop that branches needs three masks, where an `if` needs one.**
  *
@@ -921,7 +907,13 @@ typedef char glsl_gen_sgpr_map_fits[
  * Two levels, because these are levels of *branched* loop: one the unroller could not finish.
  * An unrolled loop nested inside one costs nothing here, so two is deeper than it reads.
  */
-#define GLSL_GEN_LOOP_SGPR_BASE  41u
+/* **After the exec stack, which is after the sampler sets.** These were s41..s46 while the sets
+ * ended at s27; going to four sets on 2026-09-25 moved the sets' end to s51 and left these
+ * inside it, so a shader with four samplers and a branched loop would have written its loop
+ * masks over its own image descriptors. Nothing caught it: the assertion at the end of this
+ * block checked the exec stack and the sets and not this range, which is why it now walks the
+ * whole map in order rather than checking the pieces it happened to name. */
+#define GLSL_GEN_LOOP_SGPR_BASE  61u
 #define GLSL_GEN_LOOP_SGPR_COUNT  3u
 #define GLSL_GEN_MAX_LOOP_DEPTH   2
 /* A branched loop always ends. The ceiling is the trip count this generator counted statically,
@@ -933,6 +925,27 @@ typedef char glsl_gen_sgpr_map_fits[
  * fragment shader written by hand does, and short enough that a shader calling itself is a
  * message rather than a hang. */
 #define GLSL_GEN_MAX_INLINE_DEPTH 8
+
+/*
+ * **The scalar map, asserted as the sequence it is.** Mesa puts this part's general SGPRs at
+ * s0..s105 - `ac_gpu_info.c:260`, `max_sgpr_alloc = 108` with VCC at s[106-107]. Running off the
+ * end, or one range starting inside another, is not a diagnostic at run time: it is another
+ * wave's registers or this shader's own descriptors, so a wrong pixel somewhere with no error.
+ *
+ * **Every range in order, each starting after the last ends.** The first version of this checked
+ * the two ranges it happened to name, and that let the loop masks sit inside the sampler
+ * descriptors for a commit when the sets grew from two to four. A map is a sequence, so the
+ * assertion has to be one. `glsl_ps.c` continues it upward with the draw constants and the
+ * uniforms, which are the last things in the file.
+ */
+typedef char glsl_gen_sgpr_map_fits[
+    (GLSL_GEN_TEX_SGPR_BASE + (unsigned)GLSL_GEN_MAX_TEX_SETS * GLSL_GEN_TEX_SGPR_STRIDE
+             <= GLSL_GEN_LIVE_SGPR &&
+     GLSL_GEN_LIVE_SGPR + 1u <= GLSL_GEN_EXEC_SGPR_BASE &&
+     GLSL_GEN_EXEC_SGPR_BASE + (unsigned)GLSL_GEN_MAX_EXEC_DEPTH <= GLSL_GEN_LOOP_SGPR_BASE &&
+     GLSL_GEN_LOOP_SGPR_BASE +
+             (unsigned)GLSL_GEN_MAX_LOOP_DEPTH * GLSL_GEN_LOOP_SGPR_COUNT <= 106u)
+        ? 1 : -1];
 
 typedef struct {
     uint32_t base;  /* the first VGPR of the run */

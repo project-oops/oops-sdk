@@ -83,6 +83,25 @@
  * is what the load needs and s68 is one. */
 #define GL_PS_DRAWCONST_SGPR_BASE 68u
 
+/*
+ * **The top of the scalar map, continued from `glsl_internal.h`.** That file asserts the ranges
+ * it owns end below `GLSL_GEN_LOOP_SGPR_BASE`; these two are above them and are the last things
+ * in the file, so this is where the map meets the 106-register ceiling.
+ *
+ * It is a separate assertion only because the two halves are declared in different files. It is
+ * one map, and the reason both halves exist is that checking part of it let the loop masks sit
+ * inside the sampler descriptors for a commit.
+ */
+typedef char gl_ps_sgpr_map_fits[
+    (GLSL_GEN_LOOP_SGPR_BASE + (unsigned)GLSL_GEN_MAX_LOOP_DEPTH * GLSL_GEN_LOOP_SGPR_COUNT
+             <= GL_PS_DRAWCONST_SGPR_BASE &&
+     GL_PS_DRAWCONST_SGPR_BASE % 4u == 0u &&
+     GL_PS_DRAWCONST_SGPR_BASE + (unsigned)OOPS_GL_GL2_DRAWCONST_FLOATS
+             <= GL_PS_UNIFORM_SGPR_BASE &&
+     GL_PS_UNIFORM_SGPR_BASE % 4u == 0u &&
+     GL_PS_UNIFORM_SGPR_BASE + (unsigned)OOPS_GL_GL2_UNIFORM_FLOATS <= 106u)
+        ? 1 : -1];
+
 /* **Where the hardware puts the fragment's window position**, when `SPI_PS_INPUT_ENA` asks for
  * it. The VGPRs are packed in the order Mesa enumerates them (`ac_get_fs_input_vgpr_cnt`,
  * `ac_shader_util.c`): the perspective-centre barycentrics take v0 and v1, and x, y, z and w
