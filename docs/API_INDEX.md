@@ -31,6 +31,7 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 - `glBlendEquationSeparate`
 - `glBlendFunc`
 - `glBlendFuncSeparate`
+- `glBlitFramebuffer`
 - `glBufferData`
 - `glBufferDataARB`
 - `glBufferSubData`
@@ -466,6 +467,7 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 - `glReleaseShaderCompiler`
 - `glRenderMode`
 - `glRenderbufferStorage`
+- `glRenderbufferStorageMultisample`
 - `glRequestHardwareDump`
 - `glRotated`
 - `glRotatef`
@@ -971,8 +973,6 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 - `oops_mem_free_direct`
 - `oops_mem_get_phys`
 - `oops_mem_map_direct`
-- `oops_mem_release_va`
-- `oops_mem_reserve_va`
 - `oops_mem_unmap`
 
 ## oops/mouse.h
@@ -1054,7 +1054,6 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 
 ## oops/system.h
 
-- `oops_config_value`
 - `oops_klog`
 - `oops_klog_level`
 - `oops_kprintf`
@@ -1069,7 +1068,6 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 - `oops_log_init`
 - `oops_log_level_t`
 - `oops_log_set_level`
-- `oops_run_init_array`
 - `oops_symbol_is_resolved`
 - `oops_system_check_pltauth`
 - `oops_system_close_requested`

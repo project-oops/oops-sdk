@@ -21,14 +21,18 @@ OUT="$SDK/docs/API_INDEX.md"
   echo
   echo "For declarative subsystem capabilities used in application Makefiles, see [**docs/FEATURES.md**](FEATURES.md)."
   echo
-  # **Tracked headers only.** The index is committed, so generating it from whatever is on disk
-  # publishes any header another session has in flight and has not committed - their API surface
-  # appears in this repository's documentation before they have decided it is the API. Asking git
-  # rather than the filesystem also makes the output the same for everyone: two people with
-  # different uncommitted work regenerate the same file rather than reverting each other.
+  # **Committed headers, and their committed contents.** The index is itself committed, so
+  # generating it from what is on disk publishes whatever another session has in flight - their
+  # API surface appearing in this repository's documentation before they have decided it is the
+  # API. Listing tracked files is not enough on its own: a *tracked* header with uncommitted
+  # additions leaks the same way, which is how `oops/math.h`'s in-flight names nearly landed here
+  # on 2026-09-25. So the content comes from `git show HEAD:` too.
+  #
+  # It also makes the output the same for everyone: two people with different uncommitted work
+  # regenerate the same file rather than reverting each other.
   for h in $(cd "$SDK/include" && git ls-files '*.h' | sort); do
-    decls=$(grep -hoE '^[a-zA-Z_][a-zA-Z0-9_ *]*\b(oops_[a-z0-9_]+|gl[A-Z][A-Za-z0-9]*)\s*\(' \
-              "$SDK/include/$h" 2>/dev/null \
+    decls=$(git -C "$SDK" show "HEAD:include/$h" 2>/dev/null \
+            | grep -hoE '^[a-zA-Z_][a-zA-Z0-9_ *]*\b(oops_[a-z0-9_]+|gl[A-Z][A-Za-z0-9]*)\s*\(' \
             | grep -oE '(oops_[a-z0-9_]+|gl[A-Z][A-Za-z0-9]*)' | sort -u || true)
     [ -z "$decls" ] && continue
     echo "## $h"
