@@ -507,9 +507,25 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                glsl_unit_mentions(fs, "fwidth", 6u))) {
         gen->wqm = GL_TRUE;
     }
-    if (ok && gen->wqm) {
+    /*
+     * **The live mask is kept for every shader, not only one that samples.**
+     *
+     * It used to be whole-quad mode's alone: save `exec`, widen to the quad, restore before the
+     * export so helper lanes do not reach it. That is still what it does there, but the mask it
+     * holds is more general than that - **the lanes that should reach the export** - and two
+     * other things need exactly that.
+     *
+     * `discard` takes a lane out of it, so a discarded lane cannot be handed back by the restore.
+     * And a `return` in `main` does *not*, which is what makes an early return work: the lane
+     * stops executing the body and still exports whatever `gl_FragColor` held when it left.
+     *
+     * The cost is one scalar move at each end of every shader. Making it conditional is what
+     * made a `return` in `main` impossible to generate, because the mask it needed was only
+     * there for shaders that happened to sample.
+     */
+    if (ok) {
         glsl_emit_exec_save(&code, GLSL_GEN_LIVE_SGPR);
-        glsl_emit_wqm(&code);
+        if (gen->wqm) glsl_emit_wqm(&code);
     }
 
     /* Each uniform this shader actually names is moved into a VGPR of its own and declared like
@@ -823,10 +839,12 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             log_say(log, log_size, "gl_FragColor did not survive to the export", 0, 0);
             ok = GL_FALSE;
         } else {
-            /* **Out of whole-quad mode before anything is written.** The helper lanes were on
-             * so the sample's derivatives would exist; letting them reach the export would put
-             * fragments on screen that the primitive does not cover. */
-            if (gen->wqm) glsl_emit_exec_restore(&code, GLSL_GEN_LIVE_SGPR);
+            /* **Back to the lanes that should export**, which does three things at once: it
+             * leaves whole-quad mode, so helper lanes on for a sample's derivatives do not put
+             * fragments on screen the primitive does not cover; it keeps a discarded lane out,
+             * because `discard` took it out of this mask; and it brings back a lane that
+             * returned early from `main`, which is still supposed to export what it had. */
+            glsl_emit_exec_restore(&code, GLSL_GEN_LIVE_SGPR);
             for (uint32_t i = 0; i < 4u; i++) {
                 /* A move onto itself would be a wasted instruction rather than a wrong one, and
                  * the export registers are below everything the allocator hands out - so this

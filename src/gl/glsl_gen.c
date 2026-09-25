@@ -3768,11 +3768,12 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
             for (int d = 0; d < g->exec_depth; d++) {
                 glsl_emit_exec_drop_live(g->code, GLSL_GEN_EXEC_SGPR_BASE + (uint32_t)d);
             }
-            /* **And the live mask, when the shader samples.** In whole-quad mode the export is
-             * restored from that mask rather than from `exec`, so a discard that did not reach
-             * it would be undone at the end of the shader instead of at the end of the `if` -
-             * the same bug one step further out. Taking helper lanes out of it along the way is
-             * harmless: they were never in it.
+            /* **And the live mask, always.** The export is restored from that mask rather than
+             * from `exec`, so a discard that did not reach it would be undone at the end of the
+             * shader instead of at the end of the `if` - the same bug one step further out.
+             * Taking helper lanes out of it along the way is harmless: they were never in it.
+             * This was conditional on whole-quad mode while the mask was, and both became
+             * unconditional so that a `return` in `main` could have a mask to come back through.
              *
              * **The known limit is a sample that comes *after* a discard.** A discarded lane is
              * off from here on, so it no longer contributes to a neighbour's derivative, and a
@@ -3783,7 +3784,7 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
              * samples after discarding will differ from a desktop driver in the last mip level
              * it picks. Sampling and then discarding - which is what craft's block shader does,
              * and the common shape - is unaffected. */
-            if (g->wqm) glsl_emit_exec_drop_live(g->code, GLSL_GEN_LIVE_SGPR);
+            glsl_emit_exec_drop_live(g->code, GLSL_GEN_LIVE_SGPR);
             /* **And every enclosing branched loop's two masks.** A loop reloads `exec` from its
              * active mask at the top of each trip, so a discarded lane that stayed in that mask
              * would be handed straight back on the next trip and reach the export alive - the
@@ -3853,15 +3854,38 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
          * the call rather than counted from zero.
          */
         case GLSL_NODE_RETURN: {
+            /*
+             * **A `return` in `main` is a discard that still exports.**
+             *
+             * It was refused because "the lanes that took it would have to be held off until the
+             * colour is exported, which happens after the body" - which is true, and is what the
+             * live mask does. The lane comes out of every enclosing `if` and loop so the rest of
+             * the body writes nothing for it, `exec` is cleared, and the epilogue restores from
+             * `GLSL_GEN_LIVE_SGPR` - which this deliberately does *not* touch. So the lane
+             * exports whatever `gl_FragColor` held when it returned, which is what GLSL says
+             * happens: returning ends `main`, it does not throw the fragment away.
+             *
+             * That is the whole difference from `discard`, which drops the lane from the live
+             * mask as well and therefore exports nothing.
+             *
+             * `main` returns void, so there is no value to write - a `return <expr>` there is
+             * already refused by the semantic stage against `main`'s return type.
+             */
             if (g->inline_depth <= 0) {
-                /* `main` has no caller to hand the lanes back to, and its epilogue - the export
-                 * that retires the wave - runs after the body rather than inside it. */
-                (void)gen_fail(g, "a return in `main` is not generated: the lanes that took it "
-                                  "would have to be held off until the colour is exported, "
-                                  "which happens after the body. Put the rest of `main` in the "
-                                  "`else`, or use `discard` if the fragment should be thrown "
-                                  "away", node);
-                return GL_FALSE;
+                if (n->a != GLSL_NO_NODE) {
+                    (void)gen_fail(g, "`main` returns void, so `return` there takes no value",
+                                   node);
+                    return GL_FALSE;
+                }
+                for (int e = 0; e < g->exec_depth; e++) {
+                    glsl_emit_exec_drop_live(g->code, GLSL_GEN_EXEC_SGPR_BASE + (uint32_t)e);
+                }
+                for (int l = 0; l < g->loop_depth; l++) {
+                    glsl_emit_exec_drop_live(g->code, loop_active_sgpr(l));
+                    glsl_emit_exec_drop_live(g->code, loop_entry_sgpr(l));
+                }
+                glsl_emit_exec_clear(g->code);
+                return GL_TRUE;
             }
             const int d = g->inline_depth - 1;
             if (n->a != GLSL_NO_NODE) {

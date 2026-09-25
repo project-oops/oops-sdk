@@ -2807,14 +2807,20 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
      * names something. */
     ASSERT_EQ(words[1], 0xbf8cc07fu); /* s_waitcnt lgkmcnt(0) */
 
+    /* **Then the live mask is taken**, for every shader rather than only one that samples: it
+     * holds the lanes that should reach the export, which is what lets `discard` keep a lane out
+     * and a `return` in `main` bring one back. See `glsl_ps.c`. */
+    /* Verified against clang 21 for gfx1030: `s_mov_b32 s52, exec_lo` assembles to 0xbeb4037e. */
+    ASSERT_EQ(words[2], 0xbeb4037eu);
+
     /* Then three components of one varying, each a `p1`/`p2` pair, into v8, v9, v10 - the first
      * registers above the ones the hardware owns. */
-    ASSERT_EQ(words[2], 0xc8200000u); /* v_interp_p1_f32 v8, v0, attr0.x */
-    ASSERT_EQ(words[3], 0xc8210001u); /* v_interp_p2_f32 v8, v1, attr0.x */
-    ASSERT_EQ(words[4], 0xc8240100u); /* v9, attr0.y */
-    ASSERT_EQ(words[5], 0xc8250101u);
-    ASSERT_EQ(words[6], 0xc8280200u); /* v10, attr0.z */
-    ASSERT_EQ(words[7], 0xc8290201u);
+    ASSERT_EQ(words[3], 0xc8200000u); /* v_interp_p1_f32 v8, v0, attr0.x */
+    ASSERT_EQ(words[4], 0xc8210001u); /* v_interp_p2_f32 v8, v1, attr0.x */
+    ASSERT_EQ(words[5], 0xc8240100u); /* v9, attr0.y */
+    ASSERT_EQ(words[6], 0xc8250101u);
+    ASSERT_EQ(words[7], 0xc8280200u); /* v10, attr0.z */
+    ASSERT_EQ(words[8], 0xc8290201u);
 
     /* **The block's address and the mask register are one decision.** Two user SGPRs is what
      * the draw configures into `SPI_SHADER_PGM_RSRC2_PS`, and it is also what puts the mask in
@@ -5362,19 +5368,11 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
     char log[256] = {0};
 
     static const struct { const char *fs; const char *wants; } cases[] = {
-        /* **A return in `main`, which is the one that is still refused.** An early return
-         * inside a function hands its lanes back at the call; `main` has no call to hand them
-         * back at, and the export that retires the wave runs after the body rather than inside
-         * it - so the lanes would have to be held off across a boundary this generator does not
-         * reach. */
-        {"varying vec4 vin;\n"
-         "void main() {\n"
-         "  gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);\n"
-         "  if (vin.x > 0.0) { return; }\n"
-         "  gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
-         "}\n",
-         "`main`"},
-        /* A value-returning function still has to end in a return: GLSL requires every path to
+        /* A `return` in `main` used to be here. It is generated now - the live mask holds the
+         * lanes that should export, a return leaves it alone, and the epilogue restores from it,
+         * so a returned lane exports what it had. `test_gl2_compiled_early_return` measures it.
+         *
+         * A value-returning function still has to end in a return: GLSL requires every path to
          * return, and the trailing one is what catches the lanes no earlier return took. */
         {"varying vec4 vin;\n"
          "float f(float a) { if (a > 0.0) { return 1.0; } }\n"
@@ -5503,6 +5501,71 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
  * a matrix `==` was refused as "a reduction, not a comparison" when the reduction was already
  * written for vectors.
  */
+/*
+ * **An early `return` in `main`.**
+ *
+ * It was refused because "the lanes that took it would have to be held off until the colour is
+ * exported, which happens after the body" - true, and it is what the live mask does. A returning
+ * lane comes out of every enclosing `if` and loop so the rest of the body writes nothing for it,
+ * and the epilogue restores `exec` from a mask the return deliberately leaves alone. So it
+ * exports whatever `gl_FragColor` held when it left, which is what GLSL says: returning ends
+ * `main`, it does not throw the fragment away.
+ *
+ * **The value is what distinguishes this from a `discard`**, which would export nothing, and
+ * from an unimplemented return, which would fall through and export the *later* value. Three
+ * different outcomes, so the test has to read the colour rather than check it compiled.
+ */
+static void test_gl2_compiled_early_return(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    /* The varying is 1.0 at this fragment, so the condition below is taken. */
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float tol = 2e-3f;
+
+    /* Returns before the second write: the exported colour is the first one. Falling through
+     * would give 0.75 and a discard would give nothing at all. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(0.25, 0.5, 0.0, 1.0);\n"
+                    "  if (vin.x > 0.5) { return; }\n"
+                    "  gl_FragColor = vec4(0.75, 0.75, 0.75, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+
+    /* **And the condition not taken still runs on**, so the return is a branch and not a stop. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(0.25, 0.5, 0.0, 1.0);\n"
+                    "  if (vin.x > 2.0) { return; }\n"
+                    "  gl_FragColor = vec4(0.75, 0.75, 0.75, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, tol);
+
+    /* A `return` out of a loop leaves the loop as well as the body - otherwise the loop's top
+     * reloads `exec` from a mask the lane is still in and starts it round again. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "varying vec4 vin;\n"
+                    "void main() {\n"
+                    "  float t = 0.0;\n"
+                    "  for (int i = 0; i < 8; i++) {\n"
+                    "    t += 0.125;\n"
+                    "    gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+                    "    if (t > 0.3) { return; }\n"
+                    "  }\n"
+                    "  gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.375f, tol);  /* the third trip, and no further */
+    ASSERT_NEAR(o[1], 0.0f, tol);    /* and not the line after the loop */
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_glsl110_corners(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -6903,6 +6966,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_texcoord_builtin);
     RUN_TEST(test_gl2_compiled_uniform_window);
     RUN_TEST(test_gl2_compiled_glsl110_corners);
+    RUN_TEST(test_gl2_compiled_early_return);
     RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
