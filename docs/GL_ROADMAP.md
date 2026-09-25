@@ -971,7 +971,7 @@ where the GL one was expected, so every `texture2D` returned opaque black.
 | Non-square matrices (`mat2x3` and the rest) | **done** - the last part of GLSL 1.20, closed 2026-09-25. No shader in any port corpus uses one, so this was completeness rather than a blocked port, and the survey's numbers over craft, SuperTux and mesa-demos are unchanged by it. **A matrix has two sizes and one number was being asked for**: every site read the matrix's dimension and used it as both the stride between columns and the number of columns, which is right for a square matrix and for nothing else. Thirteen of those, across the semantic stage, the interpreter, the generator, the emitter and the linker; `glsl_type_matrix_dim` is gone rather than deprecated, so the compiler names anything still reaching for it. The GL side is GL 2.1's: six `GL_FLOAT_MAT*x*` enums and the six `glUniformMatrix{2x3,3x2,2x4,4x2,3x4,4x3}fv` commands, **checked against the declared type rather than the float count** - `mat2x3` and `mat3x2` are both six floats, so a count check would let either command set either uniform and silently transpose one of them |
 | Framebuffer objects | **done, and measured on the console** - `gl2-probe`'s `fbo/renderbuffer` and `fbo/texture`, 2026-09-25: the command processor draws into a renderbuffer in Garlic and into a texture's base level, and the display region is untouched by either. Names, storage, attachments, the completeness rules and `glGenerateMipmap` are in, and a draw into a bound framebuffer object lands in its attachment - the colour target, the depth buffer and the addressing width all follow it, which is what lets an attachment be a different size from the display. The console takes a renderbuffer or a texture's base level because `gl_hw_begin_frame` already reads `CB_COLOR0_BASE` from `ctx->framebuffer` and `CB_COLOR0_INFO` already describes a LINEAR_GENERAL surface; what had to change was allocating a renderbuffer from the GPU allocator rather than the heap. Still refused: a texture level above 0, which is heap memory; any depth attachment on the console, because the depth surface is 64KB_Z_X tiled and the whole framebuffer is refused rather than the depth attachment quietly ignored; and the scanout path. `gl2-probe`'s `framebuffer-objects` has a renderbuffer arm and a texture arm kept separate so one console run says which the command processor accepts |
 | Sampler descriptor sets | **four**, which is what the scalar file holds: sets at s4..s51, masks to s64, draw constants s68..s71 and uniforms s72..s103 against a ceiling of s105 (Mesa `ac_gpu_info.c:260`). Two was the limit until 2026-09-25 and it is what stopped SuperTux generating - found by `tools/shader-survey.sh`, since the front end compiled that shader perfectly. `GL_MAX_TEXTURE_UNITS` and `GL_MAX_TEXTURE_IMAGE_UNITS` are separate numbers now, because the first is bounded by the fixed-function descriptor ring and the second by this |
-| Uniforms a compiled shader can reach | the block carries 64 floats and a shader holds a **window** of 32 - the span between the first and last uniform it names. The pool is both stages' uniforms together, so before this a vertex shader's `mat4` cost the fragment shader sixteen scalar registers it could not read, and a pool past 32 floats was refused however few the fragment stage named. A matrix uniform is carried since 2026-09-25 as well: the generator already stored a matrix column-major and multiplied one by a vector at any shape, so the gap was cases in `type_from_gl` - three for the square types, and six more for the non-square ones when those arrived the same day |
+| Uniforms a compiled shader can reach | the block carries 64 floats and a shader holds a **window** of 32 - the span between the first and last uniform it names. The pool is both stages' uniforms together, so before this a vertex shader's `mat4` cost the fragment shader sixteen scalar registers it could not read, and a pool past 32 floats was refused however few the fragment stage named. A matrix uniform is carried since 2026-09-25 as well: the generator already stored a matrix column-major and multiplied one by a vector at any shape, so the gap was cases in `type_from_gl` - three for the square types, six more for the non-square ones, and six for the integer and boolean *vectors*, which are a `vecN` in the pool and a `vecN` in the registers and were left out when their scalars went in |
 
 ### What the ports' own shaders ask for
 
@@ -986,18 +986,29 @@ compile and still not become gfx1030 instructions, and for these ports that was 
 |---|---|---|
 | craft | 8/8 | 4/4 |
 | SuperTux | 2/4 | 1/1 |
+| SuperTuxKart | 10/100 | 4/4 |
 | mesa-demos | 48/51 | 20/23 |
+| armagetron-advanced, extreme-tux-racer, neverball, neverputt, sm64, spaghetti-kart | - | - |
 
-SuperTux's two are `#version 330`, which it ships beside its ES pair and which is refused by
-number. Of the three mesa-demos shaders that do not generate, two name 48 and 64 floats of
+**Six of the eleven ports ship no GLSL at all**, which is the first thing the wider survey says:
+they are fixed-function titles, and the GL 2.0 shader path is not what any of them is waiting
+for. Their gates are GL 1.x, and the table above this one is where their answers live.
+
+SuperTux's two refused are `#version 330`, which it ships beside its ES pair and which is refused
+by number; SuperTuxKart is a GL 3.3 engine and ninety of its hundred are 3.30 or later, for the
+same reason. Of the three mesa-demos shaders that do not generate, two name 48 and 64 floats of
 uniforms - genuinely past what a shader holds - and one is a loop whose known trip count would be
 truncated rather than bounded.
 
-**So there is no unimplemented feature left in what those directories contain.** Everything in
-this section's table that says "done" was put there because a shader asked for it: `#version 100`
-and the precision qualifiers because SuperTux's shaders are ES, constant-expression array lengths
-and function overloading because mesa-demos' are, four sampler sets and matrix uniforms because
-SuperTux's fragment shader wanted three textures and a `mat3`.
+**So every fragment shader this front end compiles, in every port corpus, now generates for the
+console** - and the three that do not are a resource ceiling and a deliberate refusal, not a
+missing feature. Everything in this section's table that says "done" was put there because a
+shader asked for it: `#version 100` and the precision qualifiers because SuperTux's shaders are
+ES, constant-expression array lengths and function overloading because mesa-demos' are, four
+sampler sets and matrix uniforms because SuperTux's fragment shader wanted three textures and a
+`mat3`, and the integer and boolean *vector* uniforms because SuperTuxKart's `coloredquad.frag`
+is one `uniform ivec4` and a divide - the last shader in any corpus that compiled and then would
+not generate.
 
 The survey has been wrong three times, each time about the corpus rather than the compiler -
 reading a shader's stage off its file extension, pairing every fragment shader with one fixed

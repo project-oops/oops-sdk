@@ -161,6 +161,17 @@ static glsl_type_t type_from_gl(GLenum t) {
          * stays `int` here, and the generator has no verified instruction for it. */
         case GL_INT: return GLSL_TYPE_INT;
         case GL_BOOL: return GLSL_TYPE_BOOL;
+        /* And their vectors, which are the same argument N times over: an `ivec4` is four floats
+         * in the pool and four registers here, exactly as a `vec4` is, and `vec4(color)` is the
+         * conversion the constructor already does componentwise. Left out while the scalars were
+         * added, which is why SuperTuxKart's `coloredquad.frag` - one `uniform ivec4` and one
+         * divide - was the shader that did not generate. */
+        case GL_INT_VEC2: return GLSL_TYPE_IVEC2;
+        case GL_INT_VEC3: return GLSL_TYPE_IVEC3;
+        case GL_INT_VEC4: return GLSL_TYPE_IVEC4;
+        case GL_BOOL_VEC2: return GLSL_TYPE_BVEC2;
+        case GL_BOOL_VEC3: return GLSL_TYPE_BVEC3;
+        case GL_BOOL_VEC4: return GLSL_TYPE_BVEC4;
         /* **A matrix uniform, which needed nothing but this.** The generator already stores a
          * matrix as `cols * rows` consecutive registers column-major and already multiplies one
          * by a vector at any shape - `glsl_emit_mat_mul_vec_cr` takes both dimensions as

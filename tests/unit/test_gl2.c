@@ -6322,6 +6322,79 @@ static void test_gl2_non_square_matrix_uniform(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * **An integer or boolean *vector* uniform in a compiled shader.**
+ *
+ * The scalars arrived with `GL_INT` and `GL_BOOL`; the four-wide forms were left out, and the
+ * reason is worth keeping: they are not a feature, they are the same argument four times over.
+ * The program's value pool has one representation for every uniform, so `glUniform4iv` has
+ * already turned the ints into floats before the compiler sees them - an `ivec4` is four floats
+ * in the pool and four registers here, which is exactly what a `vec4` is.
+ *
+ * SuperTuxKart's `coloredquad.frag` is the whole of the shape: one `uniform ivec4 color` and one
+ * divide. `tools/shader-survey.sh` found it, and it was the only fragment shader in that port's
+ * hundred that the front end compiled and the generator then refused.
+ */
+static void test_gl2_compiled_integer_vector_uniform(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* SuperTuxKart's shader, in 1.10 spelling - `gl_FragColor` for its `out vec4`. */
+    const GLuint prog = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "uniform ivec4 color;\n"
+        "varying vec4 vin;\n"
+        "void main() { gl_FragColor = vec4(color) / 255.0; }\n");
+    ASSERT_TRUE(prog != 0);
+    glUseProgram(prog);
+
+    const GLint loc = glGetUniformLocation(prog, "color");
+    ASSERT_TRUE(loc >= 0);
+    const GLint rgba[4] = {51, 102, 204, 255};
+    glUniform4iv(loc, 1, rgba);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    compile_and_run_prog(ctx, prog, attr, o);
+    ASSERT_NEAR(o[0], 51.0f / 255.0f, 1e-3f);
+    ASSERT_NEAR(o[1], 102.0f / 255.0f, 1e-3f);
+    ASSERT_NEAR(o[2], 204.0f / 255.0f, 1e-3f);
+
+    /* **A `bvec` reads as a condition**, which is the other thing these are for: `false` is 0.0
+     * and `true` is 1.0 in the pool, so the comparison and the `?:` work on the float unchanged
+     * and no integer instruction is needed for either. */
+    const GLuint prog2 = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "uniform bvec3 flags;\n"
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  gl_FragColor = vec4(flags.x ? 0.25 : 0.0,\n"
+        "                      flags.y ? 0.5 : 0.0,\n"
+        "                      flags.z ? 0.75 : 0.0, 1.0);\n"
+        "}\n");
+    ASSERT_TRUE(prog2 != 0);
+    glUseProgram(prog2);
+    const GLint fl = glGetUniformLocation(prog2, "flags");
+    ASSERT_TRUE(fl >= 0);
+    /* The middle one off, so a shader that ignored the uniform and took every branch would give
+     * three channels rather than two. */
+    const GLint flags[3] = {1, 0, 1};
+    glUniform3iv(fl, 1, flags);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    compile_and_run_prog(ctx, prog2, attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.0f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.75f, 1e-3f);
+
+    glUseProgram(0);
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_structs(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -7389,6 +7462,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_early_return);
     RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_non_square_matrix_uniform);
+    RUN_TEST(test_gl2_compiled_integer_vector_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);
