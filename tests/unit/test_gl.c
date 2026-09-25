@@ -8269,7 +8269,11 @@ static void test_gl_texture_combine(void) {
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
   glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE1);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
-  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE2);
+  /* **One past the last unit, named from the limit rather than written out.** This asserted
+   * GL_TEXTURE2 while there were two units, so raising the count turned a refusal into a legal
+   * source and failed a test that was about the refusal, not about the number two. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB,
+            (GLint)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS));
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE0);
   glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 1.5f);
@@ -10005,7 +10009,7 @@ static void test_gl_multitexture_state_is_per_unit(void) {
   GLfloat fv[16];
 
   glGetIntegerv(GL_MAX_TEXTURE_UNITS, iv);
-  ASSERT_EQ(iv[0], 2);
+  ASSERT_EQ(iv[0], OOPS_GL_MAX_TEXTURE_UNITS);
   glGetIntegerv(GL_ACTIVE_TEXTURE, iv);
   ASSERT_EQ(iv[0], (GLint)GL_TEXTURE0);
   glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE, iv);
@@ -10032,14 +10036,14 @@ static void test_gl_multitexture_state_is_per_unit(void) {
 
   /* A unit past the maximum is refused and writes nothing - a refusal that still wrote some unit
    * would be worse than none. Null vectors are ignored rather than dereferenced. */
-  glMultiTexCoord2f(GL_TEXTURE2, 9.0f, 9.0f);
+  glMultiTexCoord2f((GLenum)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS), 9.0f, 9.0f);
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.5f && ctx->cur_texcoord[1][0] == 1.0f);
-  glActiveTexture(GL_TEXTURE2);
+  glActiveTexture((GLenum)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS));
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glGetIntegerv(GL_ACTIVE_TEXTURE, iv);
   ASSERT_EQ(iv[0], (GLint)GL_TEXTURE1);
-  glClientActiveTexture(GL_TEXTURE3);
+  glClientActiveTexture((GLenum)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS));
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
   glMultiTexCoord4fv(GL_TEXTURE1, NULL);
   ASSERT_EQ(glGetError(), GL_NO_ERROR);
@@ -10234,8 +10238,9 @@ static void test_gl_two_texture_units_draw(void) {
   glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE0);
   QUAD();
   ASSERT_EQ(CENTRE(), 0xff0000u);
-  /* A crossbar source naming a unit past the last is refused. */
-  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE2);
+  /* A crossbar source naming a unit past the last is refused - the last, from the limit. */
+  glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB,
+            (GLint)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS));
   ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
   glDisable(GL_TEXTURE_2D);
