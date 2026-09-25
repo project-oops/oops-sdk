@@ -1022,10 +1022,11 @@ written from the specification - every step of it was the thing actually standin
 ### The other corpus: the specification
 
 A corpus of shipped shaders can only find what someone shipped, and once every one of them
-generates it has nothing left to say. `tools/shader-conformance/` is the other half: thirty small
+generates it has nothing left to say. `tools/shader-conformance/` is the other half: small
 shaders written against the GLSL 1.10/1.20 specification rather than taken from a port, each
 named for the outcome it expects - `refused-compile-*` must be refused by the front end,
-`refused-gen-*` must compile and be refused by the generator, everything else must do both.
+`refused-gen-*` must compile and be refused by the generator, a `.vert` must compile (the vertex
+stage runs on the CPU, so there is no second gate), and everything else must do both.
 `tools/shader-conformance/check.sh` asserts that and exits non-zero, so it is a gate rather than
 a histogram to read.
 
@@ -1033,7 +1034,7 @@ a histogram to read.
 whether the harness ran; `refused-compile-switch.frag` uses a word GLSL 1.10 reserves, and if it
 ever starts compiling then either the dialect changed or the script stopped looking.
 
-It found two real gaps on the day it was written, neither reachable from any port's shaders:
+It found four real gaps in its first two runs, none reachable from any port's shaders:
 
 - **an array as a struct member** (`struct S { float w[3]; }`), which GLSL 1.10 4.1.9 allows and
   the semantic stage refused for indexing something that is neither a vector nor a matrix. The
@@ -1046,6 +1047,20 @@ It found two real gaps on the day it was written, neither reachable from any por
   by comparing the first component and stopping - so two structs differing in any later member
   were equal. The generator and the interpreter were wrong in different ways, which is what two
   harnesses are for.
+- **a macro inside a function-like macro's body.** Rescanning worked; *splicing* did not. A
+  macro's body was queued and re-read so that any macro in it would expand in turn, but the
+  expansion was **appended** to that queue rather than inserted where the reading had got to -
+  so `#define SCALE(x) ((x) * HALF)` queued `( ( 1.0 ) * HALF )`, read as far as `HALF`, and put
+  `0.5` after the closing paren. The parser saw `((1.0) * ) 0.5`. It only shows when the inner
+  macro is not the *last* token of the outer body, which is why every macro in every port corpus
+  expanded correctly: `#define F(x) G(x)` ends on the nested call, where appending and splicing
+  are the same thing.
+- **whole-array assignment refused by the wrong stage.** `v = w` was caught by the code
+  generator, on the true but irrelevant grounds that a run of registers cannot be copied. GLSL
+  1.10 5.8 lists what an l-value is and an array is not among them, so it is ill-formed before
+  any back end has an opinion - and the interpreter, which has a float array and would happily
+  have copied something, was never asked. The rule has to sit at the assignment rather than in
+  `glsl_is_lvalue`, because that recurses *through* the array's name on the way to `v[0]`.
 
 The survey has been wrong three times, each time about the corpus rather than the compiler -
 reading a shader's stage off its file extension, pairing every fragment shader with one fixed

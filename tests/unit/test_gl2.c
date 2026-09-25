@@ -5501,15 +5501,6 @@ static void test_gl2_arrays_refuse_what_a_register_file_cannot_do(void) {
          "  gl_FragColor = vec4(w[int(k)], 0.0, 0.0, 1.0);\n"
          "}\n",
          "known when the shader is compiled"},
-        /* A whole array as a value, which the language has no expression for either. */
-        {"void main() {\n"
-         "  float w[4];\n"
-         "  float v[4];\n"
-         "  w[0] = 0.1;\n"
-         "  v = w;\n"
-         "  gl_FragColor = vec4(v[0], 0.0, 0.0, 1.0);\n"
-         "}\n",
-         "element at a time"},
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -5524,6 +5515,55 @@ static void test_gl2_arrays_refuse_what_a_register_file_cannot_do(void) {
         }
         ASSERT_TRUE(strstr(log, cases[i].wants) != NULL);
     }
+
+    /* **A whole array as a destination is a *language* error, so the front end owns it.**
+     *
+     * It used to be caught here, by the generator, on the grounds that a run of registers cannot
+     * be copied - which is true and is not the reason. GLSL 1.10 section 5.8 lists what an
+     * l-value is and an array is not among them, so `v = w` is ill-formed before any back end
+     * has an opinion. That distinction is not pedantic: the interpreter has a float array and
+     * would have copied something, and it was never asked, so the two paths disagreed about a
+     * shader the language rejects outright.
+     *
+     * Element assignment through the same name still works, which is the thing a rule written
+     * one node higher would have broken - `v[0] = w[0]` reaches the array's name too. */
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "void main() {\n"
+                       "  float w[4];\n"
+                       "  float v[4];\n"
+                       "  w[0] = 0.1;\n"
+                       "  v = w;\n"
+                       "  gl_FragColor = vec4(v[0], 0.0, 0.0, 1.0);\n"
+                       "}\n"),
+              GL_FALSE);
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "void main() {\n"
+                       "  float w[4];\n"
+                       "  float v[4];\n"
+                       "  w[0] = 0.1;\n"
+                       "  v[0] = w[0];\n"
+                       "  gl_FragColor = vec4(v[0], 0.0, 0.0, 1.0);\n"
+                       "}\n"),
+              GL_TRUE);
+    /* And a struct's array member, which is the other spelling of the same name. */
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "struct S { float w[3]; };\n"
+                       "void main() {\n"
+                       "  S a; S b;\n"
+                       "  a.w[0] = 0.5;\n"
+                       "  b.w = a.w;\n"
+                       "  gl_FragColor = vec4(b.w[0], 0.0, 0.0, 1.0);\n"
+                       "}\n"),
+              GL_FALSE);
+    /* A whole *struct* is assignable, and stays so - 5.8 names entire structures outright. */
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "struct S { float a; vec2 b; };\n"
+                       "void main() {\n"
+                       "  S p; p.a = 0.5; p.b = vec2(1.0, 2.0);\n"
+                       "  S q; q = p;\n"
+                       "  gl_FragColor = vec4(q.a, q.b, 1.0);\n"
+                       "}\n"),
+              GL_TRUE);
 
     glContextDestroy(ctx);
 }

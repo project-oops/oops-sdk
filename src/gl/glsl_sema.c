@@ -1075,6 +1075,25 @@ static GLboolean check_statement(glsl_sema_t *s, int32_t node);
 /* An assignment's target is checked here rather than in glsl_type_of, because typing an
  * expression and deciding it may be written to are different questions and only statements ask
  * the second one. Walks the whole expression so a nested assignment is caught too. */
+/* Whether this node is a name - or a struct's member - standing for a whole array rather than
+ * for one of its elements. Both spellings reach here: `a` for a declared array, and `s.w` for a
+ * member declared with a length. */
+static GLboolean names_whole_array(glsl_sema_t *s, int32_t node) {
+    if (node == GLSL_NO_NODE) return GL_FALSE;
+    const glsl_node_t *n = &s->ast->nodes[node];
+    if (n->kind == GLSL_NODE_IDENTIFIER) {
+        const glsl_symbol_t *sym = lookup(s, n->text, n->length);
+        return (GLboolean)(sym && !sym->is_function && sym->array_size > 0);
+    }
+    if (n->kind == GLSL_NODE_FIELD) {
+        const glsl_type_t owner = glsl_type_of(s, n->a);
+        if (!glsl_type_is_struct(owner)) return GL_FALSE;
+        const glsl_struct_member_t *m = glsl_struct_member(s, owner, n->text, n->length);
+        return (GLboolean)(m && m->array_size > 0);
+    }
+    return GL_FALSE;
+}
+
 static GLboolean check_assign_targets(glsl_sema_t *s, int32_t node) {
     if (node == GLSL_NO_NODE || s->error) return !s->error;
     const glsl_node_t *n = &s->ast->nodes[node];
@@ -1082,6 +1101,24 @@ static GLboolean check_assign_targets(glsl_sema_t *s, int32_t node) {
     if (n->kind == GLSL_NODE_ASSIGN) {
         if (!glsl_is_lvalue(s, n->a)) {
             sema_fail(s, "assignment to something that cannot be assigned to", node);
+            return GL_FALSE;
+        }
+        /* **A whole array is not an l-value.** GLSL 1.10 section 5.8 lists what is - built-in
+         * types, entire structures, fields, swizzles without repeats, and l-values in
+         * parentheses - and an array is not among them.
+         *
+         * Asked here rather than in `glsl_is_lvalue`, because that function recurses *through*
+         * the array's name on the way to `a[0]`: refusing an array identifier there would refuse
+         * every element assignment with it. The question is only about a name standing alone as
+         * the whole destination, which is exactly what this node's left child is.
+         *
+         * It was caught before this - by the *code generator*, which has no memory to copy an
+         * array into. That is one back end refusing it and the interpreter, which has a float
+         * array and would happily have copied something, never being asked. A language error
+         * belongs to the front end so that both paths refuse it for the same reason. */
+        if (names_whole_array(s, n->a)) {
+            sema_fail(s, "an array is assigned an element at a time; GLSL 1.10 does not make a "
+                         "whole array an l-value (5.8)", node);
             return GL_FALSE;
         }
     }

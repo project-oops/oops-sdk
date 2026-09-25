@@ -15,6 +15,9 @@
 #
 #   refused-compile-<what>.frag   the front end must refuse it
 #   refused-gen-<what>.frag       it must compile and the generator must refuse it
+#   <anything else>.vert          it must compile; the vertex stage runs on the CPU, so there is
+#                                 no second gate and expecting one would expect a pass from a
+#                                 gate that never ran
 #   <anything else>.frag          it must compile *and* generate
 #
 # **The `refused-` files are the negative controls**, and they are what stops this suite from
@@ -63,6 +66,12 @@ while IFS= read -r line; do
       want="COMP-FAIL" ;;
     refused-gen-*)
       want="GEN-FAIL" ;;
+    *.vert)
+      # **A vertex shader has one gate here, not two.** The vertex stage runs on the CPU, so
+      # there is nothing for the code generator to refuse about one and compiling is the whole
+      # of its answer. Expecting GENERATES of a `.vert` would be expecting a pass from a gate
+      # that never ran.
+      want="COMPILES" ;;
     *)
       want="GENERATES" ;;
   esac

@@ -943,12 +943,37 @@ static GLboolean expand(glsl_pp_t *pp, glsl_macro_t *m, const pp_args_t *args) {
         src = &pp->pool[m->first_token];
         count = (int)m->token_count;
     }
-    const int room = GLSL_MAX_PENDING - pp->pending_tail;
-    if (count > room) {
+    /*
+     * **The body goes in front of what is still queued, not after it.**
+     *
+     * Rescanning is what makes a macro inside a macro work: the body is queued, read back, and
+     * any macro in it expands in turn. But the queue already holds the *rest of the outer body*
+     * when that happens, and appending puts the inner expansion behind it - so
+     *
+     *     #define HALF 0.5
+     *     #define SCALE(x) ((x) * HALF)
+     *     SCALE(1.0)
+     *
+     * queued `( ( 1.0 ) * HALF )`, read as far as `HALF`, and appended `0.5` after the `)`.
+     * What the parser saw was `((1.0) * ) 0.5` - "expected an expression", reported against the
+     * `#define` line, because that is where the body's tokens come from.
+     *
+     * It only shows when the inner macro is not the *last* token of the outer body, which is why
+     * every macro in every port corpus expanded correctly: `#define F(x) G(x)` ends on the
+     * nested call and appending is indistinguishable from splicing there.
+     */
+    const int left = pp->pending_tail - pp->pending_head;
+    if (count + left > GLSL_MAX_PENDING) {
         pp_fail(pp, "macro expansion too large", pp->error_line);
         return GL_FALSE;
     }
-    for (int i = 0; i < count; i++) pp->pending[pp->pending_tail++] = src[i];
+    /* Backwards, so a queue that overlaps its own destination is not overwritten as it moves. */
+    for (int i = left - 1; i >= 0; i--) {
+        pp->pending[count + i] = pp->pending[pp->pending_head + i];
+    }
+    for (int i = 0; i < count; i++) pp->pending[i] = src[i];
+    pp->pending_head = 0;
+    pp->pending_tail = count + left;
     m->expanding = GL_TRUE;
     return GL_TRUE;
 }
