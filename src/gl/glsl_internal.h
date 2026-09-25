@@ -571,6 +571,11 @@ GLboolean glsl_array_ctor_of(glsl_sema_t *s, int32_t node, glsl_type_t *elem, in
  * length to an `INTCONST` when it typed the call, so there is nothing left to evaluate. */
 GLboolean glsl_array_ctor_shape(const glsl_ast_t *ast, int32_t node, glsl_type_t *elem,
                                 int *count);
+/* **The element type and length of a node naming a whole array**, or false. `a` for a declared
+ * array and `s.w` for a struct member with a length. The type system has no array type - an
+ * expression carries a type and a symbol carries the length - so any rule needing both halves,
+ * in the front end or either back end, asks this. */
+GLboolean glsl_whole_array_info(glsl_sema_t *s, int32_t node, glsl_type_t *elem, int *size);
 
 /* -------------------------------------------------------------------------
  * The built-in library

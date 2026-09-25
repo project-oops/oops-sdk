@@ -1153,16 +1153,17 @@ static GLboolean gen_place_of(glsl_gen_t *g, int32_t node, gen_place_t *out) {
             (void)gen_fail(g, "a matrix is not assignable here", node);
             return GL_FALSE;
         }
-        if (v->value.count > GLSL_GEN_MAX_PLACE_REGS) {
+        /* **A whole array is a place under GLSL 1.20**, which added `=` on arrays alongside the
+         * constructors. The elements lie end to end, so the place is the whole run - and the
+         * semantic stage has already checked that the other side is an array of the same element
+         * type and length, which is the part this cannot see. A 1.10 shader never reaches here:
+         * 5.8 does not make an array an l-value and sema refuses it by version. */
+        const int width = v->value.count * ((v->array_size > 0) ? v->array_size : 1);
+        if (width > GLSL_GEN_MAX_PLACE_REGS) {
             (void)gen_fail(g, "this value is wider than a place can name", node);
             return GL_FALSE;
         }
-        if (v->array_size > 0) {
-            (void)gen_fail(g, "an array is assigned an element at a time here; GLSL 1.10 has no "
-                              "whole-array assignment either", node);
-            return GL_FALSE;
-        }
-        out->count = v->value.count;
+        out->count = width;
         for (int i = 0; i < out->count; i++) out->reg[i] = v->value.base + (uint32_t)i;
         return GL_TRUE;
     }
@@ -2885,8 +2886,14 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
                                    "body are generated so far", node);
             }
             if (v->array_size > 0) {
-                return gen_fail(g, "an array is used an element at a time here; the language "
-                                   "has no array-valued expressions either", node);
+                /* **A whole array reads as its whole run**, which GLSL 1.20 needs for `=` and
+                 * `==` and nothing else here uses: `a[k]` goes through `gen_index_of`, which
+                 * reads the element width off the variable rather than off this value, and a
+                 * call's array argument is matched against the parameter's own length. Sema has
+                 * refused every other context, so anything arriving here wants the run. */
+                glsl_value_t whole = v->value;
+                whole.count = v->value.count * v->array_size;
+                return whole;
             }
             return v->value;
         }

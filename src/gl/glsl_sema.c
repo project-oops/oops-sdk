@@ -44,6 +44,11 @@ GLboolean glsl_type_is_matrix(glsl_type_t t);
 GLboolean glsl_type_is_sampler(glsl_type_t t);
 glsl_type_t glsl_type_base(glsl_type_t t);
 glsl_type_t glsl_type_vector_of(glsl_type_t base, int n);
+/* Defined with the other array rules, below the expression checker that needs it: `==` has to
+ * ask about whole arrays before it compares element types, and the array rules sit beside the
+ * assignment ones rather than beside the operators. */
+static GLboolean both_whole_arrays(glsl_sema_t *s, int32_t a, int32_t b, int *count,
+                                   GLboolean *mismatch);
 
 void glsl_sema_init(glsl_sema_t *s, glsl_ast_t *ast) {
     if (!s) return;
@@ -671,12 +676,32 @@ static glsl_type_t binary_type(glsl_sema_t *s, glsl_token_type_t op, glsl_type_t
             }
             return GLSL_TYPE_BOOL;
 
-        case GLSL_TOK_EQ: case GLSL_TOK_NE:
+        case GLSL_TOK_EQ: case GLSL_TOK_NE: {
+            /* **An array compares whole, and the element types alone cannot see that.**
+             * `glsl_type_of` answers a whole array with its *element*'s type, so `v == w` on two
+             * `float[2]` arrives here as FLOAT against FLOAT and would pass the equality below
+             * having compared nothing about the lengths. The array question is asked first. */
+            const glsl_node_t *bn = &s->ast->nodes[node];
+            int count = 0;
+            GLboolean mismatch = GL_FALSE;
+            if (both_whole_arrays(s, bn->a, bn->b, &count, &mismatch)) {
+                if (s->version < 120) {
+                    sema_fail(s, "GLSL 1.10 does not compare arrays (5.9); 1.20 does", node);
+                    return GLSL_TYPE_ERROR;
+                }
+                return GLSL_TYPE_BOOL;
+            }
+            if (mismatch) {
+                sema_fail(s, "== and != on arrays need the same element type and the same "
+                             "length", node);
+                return GLSL_TYPE_ERROR;
+            }
             if (l != r) {
                 sema_fail(s, "== and != need both sides to be the same type", node);
                 return GLSL_TYPE_ERROR;
             }
             return GLSL_TYPE_BOOL;
+        }
 
         case GLSL_TOK_LT: case GLSL_TOK_GT: case GLSL_TOK_LE: case GLSL_TOK_GE:
             /* **Ordering is scalars only.** GLSL has `lessThan()` for vectors precisely because
@@ -1213,20 +1238,55 @@ static GLboolean check_statement(glsl_sema_t *s, int32_t node);
 /* Whether this node is a name - or a struct's member - standing for a whole array rather than
  * for one of its elements. Both spellings reach here: `a` for a declared array, and `s.w` for a
  * member declared with a length. */
-static GLboolean names_whole_array(glsl_sema_t *s, int32_t node) {
-    if (node == GLSL_NO_NODE) return GL_FALSE;
+/* **The element type and length of a node that names a whole array**, or false. Both spellings:
+ * `a` for a declared array, `s.w` for a struct member declared with a length. The type system has
+ * no array type, so this is how any rule that needs both halves asks for them. */
+GLboolean glsl_whole_array_info(glsl_sema_t *s, int32_t node, glsl_type_t *elem, int *size) {
+    if (!s || node == GLSL_NO_NODE) return GL_FALSE;
     const glsl_node_t *n = &s->ast->nodes[node];
     if (n->kind == GLSL_NODE_IDENTIFIER) {
         const glsl_symbol_t *sym = lookup(s, n->text, n->length);
-        return (GLboolean)(sym && !sym->is_function && sym->array_size > 0);
+        if (!sym || sym->is_function || sym->array_size <= 0) return GL_FALSE;
+        *elem = sym->type;
+        *size = sym->array_size;
+        return GL_TRUE;
     }
     if (n->kind == GLSL_NODE_FIELD) {
         const glsl_type_t owner = glsl_type_of(s, n->a);
         if (!glsl_type_is_struct(owner)) return GL_FALSE;
         const glsl_struct_member_t *m = glsl_struct_member(s, owner, n->text, n->length);
-        return (GLboolean)(m && m->array_size > 0);
+        if (!m || m->array_size <= 0) return GL_FALSE;
+        *elem = m->type;
+        *size = m->array_size;
+        return GL_TRUE;
     }
     return GL_FALSE;
+}
+
+static GLboolean names_whole_array(glsl_sema_t *s, int32_t node) {
+    glsl_type_t elem = GLSL_TYPE_ERROR;
+    int size = 0;
+    return glsl_whole_array_info(s, node, &elem, &size);
+}
+
+/* **Two whole arrays of the same element type and length**, which is what 1.20 lets `=`, `==`
+ * and `!=` take. Answers false when neither side is an array, so a caller can ask first and fall
+ * through to the ordinary rules. `mismatch` distinguishes "not arrays" from "arrays that do not
+ * match", because those want different diagnostics. */
+static GLboolean both_whole_arrays(glsl_sema_t *s, int32_t a, int32_t b, int *count,
+                                   GLboolean *mismatch) {
+    glsl_type_t ea = GLSL_TYPE_ERROR, eb = GLSL_TYPE_ERROR;
+    int na = 0, nb = 0;
+    const GLboolean la = glsl_whole_array_info(s, a, &ea, &na);
+    const GLboolean lb = glsl_whole_array_info(s, b, &eb, &nb);
+    *mismatch = GL_FALSE;
+    if (!la && !lb) return GL_FALSE;
+    if (!la || !lb || ea != eb || na != nb) {
+        *mismatch = GL_TRUE;
+        return GL_FALSE;
+    }
+    *count = na;
+    return GL_TRUE;
 }
 
 static GLboolean check_assign_targets(glsl_sema_t *s, int32_t node) {
@@ -1252,18 +1312,31 @@ static GLboolean check_assign_targets(glsl_sema_t *s, int32_t node) {
          * array and would happily have copied something, never being asked. A language error
          * belongs to the front end so that both paths refuse it for the same reason. */
         if (names_whole_array(s, n->a)) {
-            /* **The reason differs by version and the message says which.** GLSL 1.10 5.8 lists
-             * what an l-value is and an array is not among them, so there it is ill-formed.
-             * GLSL 1.20 relaxed that along with adding array constructors, so there it is legal
-             * and simply not implemented - and claiming the language forbids it would be a
-             * diagnostic that sends its author to read a spec that agrees with them. */
-            sema_fail(s, (s->version >= 120)
-                             ? "assigning a whole array is GLSL 1.20's and is not implemented "
-                               "here; assign its elements"
-                             : "an array is assigned an element at a time; GLSL 1.10 does not "
-                               "make a whole array an l-value (5.8)",
-                      node);
-            return GL_FALSE;
+            /* **GLSL 1.10 5.8 lists what an l-value is and an array is not among them**, so
+             * there a whole array is not assignable at all. 1.20 relaxed that alongside adding
+             * array constructors, and it is implemented - the rule below is the 1.20 one. */
+            if (s->version < 120) {
+                sema_fail(s, "an array is assigned an element at a time; GLSL 1.10 does not "
+                             "make a whole array an l-value (5.8)", node);
+                return GL_FALSE;
+            }
+            /* **Only plain `=`.** A compound assignment is an arithmetic operator and an
+             * assignment together, and 1.20 gives arrays neither - `a += b` would have to mean
+             * an elementwise add the language does not define. */
+            if (n->op != GLSL_TOK_ASSIGN) {
+                sema_fail(s, "a compound assignment on a whole array is not GLSL: 1.20 gives an "
+                             "array `=` and not arithmetic", node);
+                return GL_FALSE;
+            }
+            int count = 0;
+            GLboolean mismatch = GL_FALSE;
+            if (!both_whole_arrays(s, n->a, n->b, &count, &mismatch)) {
+                sema_fail(s, mismatch ? "both sides of a whole-array assignment need the same "
+                                        "element type and the same length"
+                                      : "a whole array is assigned from a whole array",
+                          node);
+                return GL_FALSE;
+            }
         }
     }
     /* `++x` and `x++` write to their operand too. */

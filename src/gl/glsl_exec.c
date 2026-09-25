@@ -71,6 +71,11 @@
 
 typedef struct {
     glsl_type_t type;
+    /* **How many of `v` are live, when the type cannot say.** A whole array's type is its
+     * *element*'s - the length lives on the symbol, because there is no array type here - so a
+     * value holding one needs to carry its own width. Zero means "ask the type", which is every
+     * value but an array and keeps every existing construction site correct without touching it. */
+    int count;
     float v[EXEC_MAX_VAL_FLOATS];
 } exec_val_t;
 
@@ -206,6 +211,7 @@ static const glsl_struct_member_t *exec_member(const exec_t *e, glsl_type_t t,
 static exec_val_t val_zero(glsl_type_t t) {
     exec_val_t v;
     v.type = t;
+    v.count = 0; /* "ask the type" - only a whole array overrides this */
     for (int i = 0; i < EXEC_MAX_VAL_FLOATS; i++) v.v[i] = 0.0f;
     return v;
 }
@@ -390,8 +396,12 @@ static exec_place_t place_of_rw(exec_t *e, int32_t node, GLboolean for_write) {
         p.addr = v->store;
         /* `exec_comps`, so a struct's place covers the whole struct. `comps_of` answers 1 for
          * one, which would make `s = t` copy a single component and a member read past the
-         * first look like a read past the end. */
-        p.comps = exec_comps(e, v->type);
+         * first look like a read past the end.
+         *
+         * **Times the length for a whole array**, so `v = w` copies all of it - 1.20's rule. An
+         * element's place is not this: `a[k]` is handled above, off the variable's own store and
+         * stride, so widening here reaches only a whole-array assignment. */
+        p.comps = exec_comps(e, v->type) * ((v->array > 0) ? v->array : 1);
         p.type = v->type;
         return p;
     }
@@ -494,7 +504,10 @@ static void place_write(exec_t *e, const exec_place_t *p, const exec_val_t *v) {
     /* **`exec_comps`, because `comps_of` reports 1 for a struct** - and a width of 1 is the
      * broadcast case below, which would copy the struct's first component across the whole of
      * it. A struct assignment is a straight copy of its components. */
-    const int n = exec_comps(e, v->type);
+    /* A whole array carries its own width, because its type is only its element's - without
+     * that, `q = p` on a `vec2[3]` copies the first element and zeroes the rest, which reads as
+     * an assignment that happened and a comparison that then disagrees. */
+    const int n = (v->count > 0) ? v->count : exec_comps(e, v->type);
     /* A scalar assigned to a wider place broadcasts, which is only reachable through a
      * constructor here; anything else the semantic stage already refused. */
     for (int i = 0; i < p->comps; i++) {
@@ -509,6 +522,10 @@ static exec_val_t place_read(const exec_place_t *p) {
     for (int i = 0; i < p->comps && i < EXEC_MAX_VAL_FLOATS; i++) {
         v.v[i] = p->addr[p->swizzled ? p->map[i] : i];
     }
+    /* **The place knows a width the type cannot state**, which is a whole array's. Carried on
+     * the value so a later write or comparison covers all of it; left at zero otherwise, so
+     * every other value keeps asking its type. */
+    v.count = p->comps;
     return v;
 }
 
@@ -1219,7 +1236,8 @@ static exec_val_t arith(exec_t *e, glsl_token_type_t op, const exec_val_t *l,
  * shader written against the specification: GLSL 1.10 section 5.9 gives `==` to every type but
  * an array, which includes a struct. */
 static GLboolean vals_equal(const exec_t *e, const exec_val_t *a, const exec_val_t *b) {
-    const int n = exec_comps(e, a->type);
+    /* A whole array carries its own width, because its type is only its element's. */
+    const int n = (a->count > 0) ? a->count : exec_comps(e, a->type);
     for (int i = 0; i < n; i++) {
         if (a->v[i] != b->v[i]) return GL_FALSE;
     }
@@ -1272,9 +1290,19 @@ static exec_val_t eval(exec_t *e, int32_t node) {
             }
             if (v->store) {
                 /* `exec_comps` rather than `comps_of`, so reading a struct variable copies the
-                 * whole of it and not the one component a non-struct type would report. */
-                const int n_comp = exec_comps(e, v->type);
-                for (int i = 0; i < n_comp && i < EXEC_MAX_VAL_FLOATS; i++) out.v[i] = v->store[i];
+                 * whole of it and not the one component a non-struct type would report.
+                 *
+                 * **And times the length for a whole array**, which GLSL 1.20's `=` and `==`
+                 * need. `a[k]` never comes through here - the index path takes the variable's
+                 * own store and stride - so a value this wide only reaches a rule that wants the
+                 * run. It carries its own `count` because its type is its element's. */
+                const int n_comp = exec_comps(e, v->type) * ((v->array > 0) ? v->array : 1);
+                if (n_comp > EXEC_MAX_VAL_FLOATS) {
+                    fail(e, "this array is wider than a value this interpreter carries");
+                    return val_zero(GLSL_TYPE_ERROR);
+                }
+                for (int i = 0; i < n_comp; i++) out.v[i] = v->store[i];
+                if (v->array > 0) out.count = n_comp;
             }
             return out;
         }

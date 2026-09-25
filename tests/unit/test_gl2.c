@@ -7152,6 +7152,201 @@ static void test_gl2_array_constructors(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * **GLSL 1.20's whole-array assignment and comparison**, the last of 1.20's arrays.
+ *
+ * `v = w` and `v == w`. 1.10 5.8 does not make an array an l-value and 5.9 does not compare one;
+ * 1.20 gives both, alongside the constructors. Neither needed a new storage shape - an array is
+ * already its elements end to end in both back ends - so the work was letting a whole array *be*
+ * a place and *be* a value, which each back end refused on the grounds that the language had no
+ * array-valued expression. It has one now, in these two rules and nowhere else.
+ *
+ * The thing neither back end can see for itself is the **length**: an expression here carries a
+ * type and only a symbol carries a length, and a whole array's type is its element's. So `v == w`
+ * on two `float[2]` arrives at the operator as FLOAT against FLOAT, and the semantic stage has to
+ * ask about the arrays before it compares the element types - otherwise two arrays of different
+ * lengths compare equal on their first element.
+ */
+static void test_gl2_whole_array_assign_and_compare(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* Assignment copies every element, read back out of order so a partial copy is a rotation
+     * rather than a near miss. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  float a[3];\n"
+                    "  float b[3];\n"
+                    "  a[0] = 0.25; a[1] = 0.5; a[2] = 0.75;\n"
+                    "  b[0] = 0.0; b[1] = 0.0; b[2] = 0.0;\n"
+                    "  b = a;\n"
+                    "  gl_FragColor = vec4(b[2], b[0], b[1], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, 2e-3f);
+    ASSERT_NEAR(o[1], 0.25f, 2e-3f);
+    ASSERT_NEAR(o[2], 0.5f, 2e-3f);
+
+    /* **The copy is a copy.** Writing the destination afterwards must not disturb the source -
+     * which is what says the elements were moved and not aliased. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  float a[2];\n"
+                    "  float b[2];\n"
+                    "  a[0] = 0.25; a[1] = 0.5;\n"
+                    "  b = a;\n"
+                    "  b[0] = 1.0;\n"
+                    "  gl_FragColor = vec4(a[0], b[0], a[1], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 2e-3f); /* the source is untouched */
+    ASSERT_NEAR(o[1], 1.0f, 2e-3f);
+    ASSERT_NEAR(o[2], 0.5f, 2e-3f);
+
+    /* An element wider than one register, so the run is the elements times their width. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  vec2 p[3];\n"
+                    "  vec2 q[3];\n"
+                    "  p[0] = vec2(0.1, 0.2); p[1] = vec2(0.3, 0.4); p[2] = vec2(0.5, 0.6);\n"
+                    "  q = p;\n"
+                    "  gl_FragColor = vec4(q[2].y, q[1].x, q[0].y, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.6f, 2e-3f);
+    ASSERT_NEAR(o[1], 0.3f, 2e-3f);
+    ASSERT_NEAR(o[2], 0.2f, 2e-3f);
+
+    /* **Comparison reduces over the whole run, and the difference is in the last element** - so
+     * a reduction that stopped at the first, or at the first *register*, would call them equal.
+     * The third arm checks `!=` agrees rather than being wired separately. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  float a[3];\n"
+                    "  float b[3];\n"
+                    "  float c[3];\n"
+                    "  a[0] = 0.25; a[1] = 0.5; a[2] = 0.75;\n"
+                    "  b[0] = 0.25; b[1] = 0.5; b[2] = 0.75;\n"
+                    "  c[0] = 0.25; c[1] = 0.5; c[2] = 9.0;\n"
+                    "  gl_FragColor = vec4((a == b) ? 0.75 : 0.0,\n"
+                    "                      (a == c) ? 1.0 : 0.25,\n"
+                    "                      (a != c) ? 0.5 : 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, 2e-3f);
+    ASSERT_NEAR(o[1], 0.25f, 2e-3f);
+    ASSERT_NEAR(o[2], 0.5f, 2e-3f);
+
+    /* And a difference in the *first* element, so the reduction is not merely reading the tail. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  float a[3];\n"
+                    "  float c[3];\n"
+                    "  a[0] = 0.25; a[1] = 0.5; a[2] = 0.75;\n"
+                    "  c[0] = 9.0; c[1] = 0.5; c[2] = 0.75;\n"
+                    "  gl_FragColor = vec4((a == c) ? 1.0 : 0.25, (a != c) ? 0.5 : 0.0,\n"
+                    "                      0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 2e-3f);
+    ASSERT_NEAR(o[1], 0.5f, 2e-3f);
+
+    /* **The refusals**, each for its own reason and each naming it. */
+    struct { const char *src; const char *wants; } bad[] = {
+        /* 1.10 has neither. */
+        {"void main() {\n"
+         "  float a[2]; float b[2];\n"
+         "  a[0] = 0.25; a[1] = 0.5;\n"
+         "  b = a;\n"
+         "  gl_FragColor = vec4(b[0], b[1], 0.0, 1.0);\n"
+         "}\n",
+         "1.10 does not"},
+        {"void main() {\n"
+         "  float a[2]; float b[2];\n"
+         "  a[0] = 0.25; a[1] = 0.5; b[0] = 0.25; b[1] = 0.5;\n"
+         "  gl_FragColor = (a == b) ? vec4(1.0) : vec4(0.0);\n"
+         "}\n",
+         "1.10 does not compare arrays"},
+        /* Lengths have to match - the case the element types alone cannot see. */
+        {"#version 120\n"
+         "void main() {\n"
+         "  float a[2]; float b[3];\n"
+         "  a[0] = 0.25; a[1] = 0.5;\n"
+         "  b = a;\n"
+         "  gl_FragColor = vec4(b[0], b[1], b[2], 1.0);\n"
+         "}\n",
+         "same length"},
+        {"#version 120\n"
+         "void main() {\n"
+         "  float a[2]; float b[3];\n"
+         "  a[0] = 0.25; a[1] = 0.5;\n"
+         "  gl_FragColor = (a == b) ? vec4(1.0) : vec4(0.0);\n"
+         "}\n",
+         "same length"},
+        /* **A compound assignment is arithmetic**, and 1.20 gives arrays `=` and not that. */
+        {"#version 120\n"
+         "void main() {\n"
+         "  float a[2]; float b[2];\n"
+         "  a[0] = 0.25; a[1] = 0.5; b[0] = 0.1; b[1] = 0.2;\n"
+         "  b += a;\n"
+         "  gl_FragColor = vec4(b[0], b[1], 0.0, 1.0);\n"
+         "}\n",
+         "compound assignment"},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        const GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+        source_of(sh, bad[i].src);
+        glCompileShader(sh);
+        GLint ok = 0;
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        char log[256] = {0};
+        glGetShaderInfoLog(sh, (GLsizei)sizeof(log), NULL, log);
+        if (ok != GL_FALSE || strstr(log, bad[i].wants) == NULL) {
+            printf("\n    case %d: wanted a refusal mentioning '%s', got ok=%d log='%s'\n",
+                   (int)i, bad[i].wants, (int)ok, log);
+        }
+        ASSERT_EQ(ok, GL_FALSE);
+        ASSERT_TRUE(strstr(log, bad[i].wants) != NULL);
+    }
+
+    glContextDestroy(ctx);
+}
+
+/* And through the software reference, whose values carry their own width for this - an array's
+ * type is its element's, so a value holding one cannot get its length from the type. */
+static void test_gl2_whole_array_assign_and_compare_run(void) {
+    gl2_target_t t = gl2_target();
+    const GLuint prog = linked_program(
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+        "#version 120\n"
+        "void main() {\n"
+        "  vec2 p[3];\n"
+        "  vec2 q[3];\n"
+        "  vec2 r[3];\n"
+        "  p[0] = vec2(0.25, 0.1); p[1] = vec2(0.5, 0.2); p[2] = vec2(0.75, 0.3);\n"
+        "  q = p;\n"
+        "  r = p; r[2] = vec2(9.0, 9.0);\n"
+        "  gl_FragColor = vec4(q[0].x, (q == p) ? 0.5 : 0.0, (r == p) ? 0.0 : 0.75, 1.0);\n"
+        "}\n");
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(prog);
+    draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+    const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+    ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);    /* 0.25 - the copy landed */
+    ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);  /* 0.50 - equal to its source */
+    ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);  /* 0.75 - and differs in the last element */
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 /* And through the software reference, which fills the run from its own evaluation of each
  * argument - an `exec_val_t` holds one value's worth of floats, so an array could never have
  * come through the scalar initialiser path however short it was. */
@@ -8523,6 +8718,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_builtin_constants);
     RUN_TEST(test_gl2_builtin_constants_run);
     RUN_TEST(test_gl2_array_constructors);
+    RUN_TEST(test_gl2_whole_array_assign_and_compare);
+    RUN_TEST(test_gl2_whole_array_assign_and_compare_run);
     RUN_TEST(test_gl2_array_constructors_run);
     RUN_TEST(test_gl2_vertex_stage_computes);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
