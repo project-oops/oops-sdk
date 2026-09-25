@@ -122,6 +122,13 @@ struct timespec {
 
 int clock_gettime(int clk_id, struct timespec *ts);
 
+/* Sleeps at least the requested interval, and always completes.
+ *
+ * `rem` exists so a caller can resume a sleep a signal cut short. There is no signal delivery on
+ * this platform, so nothing can cut one short and `rem` is always zeroed - see the definition in
+ * `oops-apps/common/posix/posix.c`, which is also where the sub-microsecond rounding is argued. */
+int nanosleep(const struct timespec *req, struct timespec *rem);
+
 #ifdef __cplusplus
 }
 #endif
