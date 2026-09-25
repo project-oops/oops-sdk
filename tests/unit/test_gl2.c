@@ -6647,6 +6647,170 @@ static void test_gl2_compiled_integer_vector_uniform(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * **An array inside a struct, and a struct compared with another.**
+ *
+ * Both are GLSL 1.10 and neither appears in any port corpus, which is why they went unnoticed
+ * until a corpus of the *specification* was pointed at the compiler rather than a corpus of
+ * shipped shaders. 4.1.9 allows an array as a struct member; 5.9 gives `==` and `!=` to every
+ * type but an array, which includes a struct.
+ *
+ * Neither needed a new storage shape. A struct is already its members end to end and an array is
+ * already its elements end to end, so a member that is an array is a run inside a run - the
+ * member table has carried its length all along. What was missing was one rule in the semantic
+ * stage, which typed `s.w[0]` by asking whether `s.w` was a vector or a matrix and refused it
+ * for being neither, and one gate in the generator, which let a matrix through the equality
+ * reduction and not a struct although both are the same run of registers.
+ */
+static void test_gl2_compiled_struct_arrays_and_equality(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* Read back in the reverse order, so an index that runs the wrong way is a rotation rather
+     * than a near miss. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct S { float w[3]; };\n"
+                    "void main() {\n"
+                    "  S s;\n"
+                    "  s.w[0] = 0.25; s.w[1] = 0.5; s.w[2] = 0.75;\n"
+                    "  gl_FragColor = vec4(s.w[2], s.w[1], s.w[0], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.5f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.25f, 1e-3f);
+
+    /* **A member in front of the array**, so the array does not start at the struct's own base.
+     * An offset that ignored the leading member would read `s.a` as `s.w[0]` and shift every
+     * channel by one - which is a picture, not an error. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct S { float a; float w[3]; };\n"
+                    "void main() {\n"
+                    "  S s;\n"
+                    "  s.a = 0.125;\n"
+                    "  s.w[0] = 0.25; s.w[1] = 0.5; s.w[2] = 0.75;\n"
+                    "  gl_FragColor = vec4(s.a, s.w[0], s.w[2], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.125f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.25f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.75f, 1e-3f);
+
+    /* An array of vectors inside a struct, where the element is wider than one register and the
+     * stride is what an index multiplies by. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct S { vec2 p[3]; };\n"
+                    "void main() {\n"
+                    "  S s;\n"
+                    "  s.p[0] = vec2(0.1, 0.2);\n"
+                    "  s.p[1] = vec2(0.3, 0.4);\n"
+                    "  s.p[2] = vec2(0.5, 0.6);\n"
+                    "  gl_FragColor = vec4(s.p[2].y, s.p[1].x, s.p[0].y, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.6f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.3f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.2f, 1e-3f);
+
+    /* **Equality over the whole run, which the third struct is the witness for**: `r` differs
+     * from `p` in the *last* component of the *last* member, so a reduction that stopped early -
+     * at the first member, or at the first register - would call them equal. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct S { float a; vec2 b; };\n"
+                    "void main() {\n"
+                    "  S p; p.a = 1.0; p.b = vec2(2.0, 3.0);\n"
+                    "  S q; q.a = 1.0; q.b = vec2(2.0, 3.0);\n"
+                    "  S r; r.a = 1.0; r.b = vec2(2.0, 4.0);\n"
+                    "  gl_FragColor = vec4((p == q) ? 0.75 : 0.0,\n"
+                    "                      (p == r) ? 1.0 : 0.25,\n"
+                    "                      (p != r) ? 0.5 : 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.25f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.5f, 1e-3f);
+
+    /* And a difference in the *first* member, so the reduction is not merely reading the tail. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "struct S { float a; vec2 b; };\n"
+                    "void main() {\n"
+                    "  S p; p.a = 1.0; p.b = vec2(2.0, 3.0);\n"
+                    "  S r; r.a = 9.0; r.b = vec2(2.0, 3.0);\n"
+                    "  gl_FragColor = vec4((p == r) ? 1.0 : 0.25, (p != r) ? 0.5 : 0.0,\n"
+                    "                      0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.5f, 1e-3f);
+
+    /* **Order is still refused**, which is the half of 5.9 that is a restriction: `<` on a
+     * struct is not a thing the language has, and letting the reduction take it would answer a
+     * question nobody may ask. */
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "struct S { float a; };\n"
+                       "void main() {\n"
+                       "  S p; p.a = 1.0;\n"
+                       "  S q; q.a = 2.0;\n"
+                       "  gl_FragColor = (p < q) ? vec4(1.0) : vec4(0.0);\n"
+                       "}\n"),
+              GL_FALSE);
+
+    glContextDestroy(ctx);
+}
+
+/* The same two through the software reference, which lays a struct out as floats rather than
+ * registers and reaches none of the code above - see the note on the two harnesses. */
+static void test_gl2_struct_arrays_and_equality_run(void) {
+    gl2_target_t t = gl2_target();
+    static const char *const VS =
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n";
+
+    {
+        const GLuint prog = linked_program(
+            VS,
+            "struct S { float a; float w[3]; };\n"
+            "void main() {\n"
+            "  S s;\n"
+            "  s.a = 0.125;\n"
+            "  s.w[0] = 0.25; s.w[1] = 0.5; s.w[2] = 0.75;\n"
+            "  gl_FragColor = vec4(s.w[0], s.w[1], s.w[2], 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);    /* 0.25, not 0.125 */
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);
+    }
+
+    {
+        const GLuint prog = linked_program(
+            VS,
+            "struct S { float a; vec2 b; };\n"
+            "void main() {\n"
+            "  S p; p.a = 1.0; p.b = vec2(2.0, 3.0);\n"
+            "  S q; q.a = 1.0; q.b = vec2(2.0, 3.0);\n"
+            "  S r; r.a = 1.0; r.b = vec2(2.0, 4.0);\n"
+            "  gl_FragColor = vec4((p == q) ? 0.25 : 0.0,\n"
+            "                      (p == r) ? 1.0 : 0.5,\n"
+            "                      (p != r) ? 0.75 : 0.0, 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);    /* 0.25 - equal */
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);  /* 0.50 - not equal */
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);  /* 0.75 - and != agrees */
+    }
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 static void test_gl2_compiled_structs(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -7719,6 +7883,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_uniform_arrays_run);
     RUN_TEST(test_gl2_compiled_integer_vector_uniform);
     RUN_TEST(test_gl2_compiled_structs);
+    RUN_TEST(test_gl2_compiled_struct_arrays_and_equality);
+    RUN_TEST(test_gl2_struct_arrays_and_equality_run);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);
     RUN_TEST(test_gl2_compiled_swizzle_writes_land_where_they_are_named);

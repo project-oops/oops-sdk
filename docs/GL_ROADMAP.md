@@ -1019,6 +1019,34 @@ could not carry; once it could, for a loop it could not unroll; once it could, f
 could not read. That is what a survey is for, and it is a better order to work in than a list
 written from the specification - every step of it was the thing actually standing in the way.
 
+### The other corpus: the specification
+
+A corpus of shipped shaders can only find what someone shipped, and once every one of them
+generates it has nothing left to say. `tools/shader-conformance/` is the other half: thirty small
+shaders written against the GLSL 1.10/1.20 specification rather than taken from a port, each
+named for the outcome it expects - `refused-compile-*` must be refused by the front end,
+`refused-gen-*` must compile and be refused by the generator, everything else must do both.
+`tools/shader-conformance/check.sh` asserts that and exits non-zero, so it is a gate rather than
+a histogram to read.
+
+**The `refused-` files are why it can fail.** A suite of shaders that all pass says nothing about
+whether the harness ran; `refused-compile-switch.frag` uses a word GLSL 1.10 reserves, and if it
+ever starts compiling then either the dialect changed or the script stopped looking.
+
+It found two real gaps on the day it was written, neither reachable from any port's shaders:
+
+- **an array as a struct member** (`struct S { float w[3]; }`), which GLSL 1.10 4.1.9 allows and
+  the semantic stage refused for indexing something that is neither a vector nor a matrix. The
+  member table had carried the length all along and both back ends already lay a struct out as
+  its members end to end - what was missing was the rule. A member whose element is a *vector*
+  needed one thing more: the stride is the element's width, and a member's type is its element
+  type, so `vec2 p[3]` looked from the type alone like a six-component value.
+- **`p == q` on two structs**, which 5.9 gives to every type but an array. The generator refused
+  it although a struct is the same run of registers a matrix is, and the interpreter answered it
+  by comparing the first component and stopping - so two structs differing in any later member
+  were equal. The generator and the interpreter were wrong in different ways, which is what two
+  harnesses are for.
+
 The survey has been wrong three times, each time about the corpus rather than the compiler -
 reading a shader's stage off its file extension, pairing every fragment shader with one fixed
 vertex shader, and counting a Prism template or a library with no `main` as a refusal. Each is

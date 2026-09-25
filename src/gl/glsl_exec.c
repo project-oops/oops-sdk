@@ -1189,8 +1189,14 @@ static exec_val_t arith(exec_t *e, glsl_token_type_t op, const exec_val_t *l,
     return out;
 }
 
-static GLboolean vals_equal(const exec_val_t *a, const exec_val_t *b) {
-    const int n = comps_of(a->type);
+/* **`exec_comps`, because `comps_of` answers 1 for a struct** - its width lives in the semantic
+ * table beside the type and not in the type. With `comps_of` here, `p == q` on two structs
+ * compared the first component and stopped, so two structs differing in any later member were
+ * equal. Nothing in a port corpus compares structs, so the only thing that found it was a
+ * shader written against the specification: GLSL 1.10 section 5.9 gives `==` to every type but
+ * an array, which includes a struct. */
+static GLboolean vals_equal(const exec_t *e, const exec_val_t *a, const exec_val_t *b) {
+    const int n = exec_comps(e, a->type);
     for (int i = 0; i < n; i++) {
         if (a->v[i] != b->v[i]) return GL_FALSE;
     }
@@ -1362,8 +1368,8 @@ static exec_val_t eval(exec_t *e, int32_t node) {
             switch (n->op) {
                 case GLSL_TOK_XOR_XOR:
                     return val_bool((GLboolean)((l.v[0] != 0.0f) != (r.v[0] != 0.0f)));
-                case GLSL_TOK_EQ: return val_bool(vals_equal(&l, &r));
-                case GLSL_TOK_NE: return val_bool((GLboolean)!vals_equal(&l, &r));
+                case GLSL_TOK_EQ: return val_bool(vals_equal(e, &l, &r));
+                case GLSL_TOK_NE: return val_bool((GLboolean)!vals_equal(e, &l, &r));
                 case GLSL_TOK_LT: return val_bool((GLboolean)(l.v[0] < r.v[0]));
                 case GLSL_TOK_GT: return val_bool((GLboolean)(l.v[0] > r.v[0]));
                 case GLSL_TOK_LE: return val_bool((GLboolean)(l.v[0] <= r.v[0]));

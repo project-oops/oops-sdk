@@ -577,15 +577,24 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
          * element - which is exactly what `gen_compare` already does for a vector, because a
          * matrix is the same run of registers a wider vector would be. This said matrices stay
          * out on the grounds that a reduction is not a comparison; the reduction was already
-         * written. */
+         * written.
+         *
+         * **And a struct, for the same reason and out of the same sentence.** 5.9 excludes
+         * arrays and nothing else, so `p == q` on two structs is a bool - and a struct here is
+         * its members end to end, which is again the run `gen_compare` reduces over. It needs no
+         * knowledge of the layout because both operands have the same one: two values of the
+         * same struct type are the same members in the same order, so comparing the runs
+         * element by element compares the members. */
         const glsl_type_t clt = glsl_type_of(g->sema, n->a);
         const glsl_type_t crt = glsl_type_of(g->sema, n->b);
         const GLboolean equality = (GLboolean)(op == GLSL_TOK_EQ || op == GLSL_TOK_NE);
-        if ((!is_float_family(clt) && !is_bool_family(clt) && !is_int_family(clt)) ||
-            (!is_float_family(crt) && !is_bool_family(crt) && !is_int_family(crt)) ||
-            ((is_matrix(clt) || is_matrix(crt)) && !equality)) {
+        const GLboolean aggregate =
+            (GLboolean)(is_matrix(clt) || is_matrix(crt) ||
+                        glsl_type_is_struct(clt) || glsl_type_is_struct(crt));
+        if ((!is_generated(clt) || !is_generated(crt)) || (aggregate && !equality)) {
             return gen_fail(g, "only float, int, vector and bool comparisons are generated, and "
-                                "a matrix compares for equality but not for order", node);
+                                "a matrix or a struct compares for equality but not for order",
+                            node);
         }
         glsl_value_t ca = gen_expr(g, n->a);
         if (is_bad(ca)) return ca;
@@ -609,16 +618,6 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
         return gen_fail(g, "only float, vec, mat and int arithmetic is generated; bool has no "
                            "verified instruction here", node);
     }
-    /* **Integer division is refused, and the reason is the reciprocal.** There is no float
-     * divide on this part: `a / b` is `a * rcp(b)`, and `v_rcp_f32` is accurate to one unit in
-     * the last place. That is invisible under a float result and decisive under an integer one,
-     * where the truncation that follows turns a result a hair below `n` into `n - 1`. `7 / 7`
-     * coming out 0 is the shape of it.
-     *
-     * Getting this right means a quotient fixup - one multiply and a compare to check whether
-     * the truncated answer times the divisor has overshot - which is a handful of instructions
-     * this does not yet emit. Until it does, the shader is told rather than given an answer
-     * that is right for most divisors. */
     glsl_value_t a = gen_expr(g, n->a);
     if (is_bad(a)) return a;
     glsl_value_t b = gen_expr(g, n->b);
@@ -1064,6 +1063,30 @@ static GLboolean gen_index_of(glsl_gen_t *g, int32_t node, glsl_value_t *out) {
             }
             out->base = v->value.base + (uint32_t)(k * v->value.count);
             out->count = v->value.count;
+            return GL_TRUE;
+        }
+    }
+
+    /* **A struct member that is an array**, which is the same run with a field in front of it
+     * instead of a name. It has to be recognised here rather than fall through, because below
+     * the stride comes from the *type* - and a member's type is its element type, so a
+     * `vec2 p[3]` looks from there like a six-component value and `p[0]` like one component of
+     * it. The element width is the stride and the length is the bound; neither is derivable
+     * from the type alone, which is exactly why the name case above exists too. */
+    if (base->kind == GLSL_NODE_FIELD) {
+        const glsl_type_t owner = glsl_type_of(g->sema, base->a);
+        const glsl_struct_member_t *mem =
+            glsl_struct_member(g->sema, owner, base->text, base->length);
+        if (mem && mem->array_size > 0) {
+            glsl_value_t run = gen_expr(g, n->a);
+            if (is_bad(run)) return GL_FALSE;
+            if (k >= mem->array_size) {
+                (void)gen_fail(g, "this array index is outside the array", node);
+                return GL_FALSE;
+            }
+            const int w = gen_comps(g, mem->type);
+            out->base = run.base + (uint32_t)(k * w);
+            out->count = w;
             return GL_TRUE;
         }
     }

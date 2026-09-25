@@ -703,6 +703,37 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
                         return sym->type;
                     }
                 }
+                /* **A member that is an array is indexed the same way**, and `s.w[0]` reaches
+                 * here with a field rather than a name underneath. GLSL 1.10 allows an array as
+                 * a struct member (4.1.9) and the member table has carried its length all along
+                 * - both back ends lay the elements out end to end from the member's offset -
+                 * so the only thing missing was this rule. Without it a field's type came back
+                 * as the *element* type, which is not a vector or a matrix, and the index was
+                 * refused for indexing something that cannot be indexed. */
+                if (base_n->kind == GLSL_NODE_FIELD) {
+                    const glsl_type_t owner = glsl_type_of(s, base_n->a);
+                    if (owner == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
+                    if (glsl_type_is_struct(owner)) {
+                        const glsl_struct_member_t *m =
+                            glsl_struct_member(s, owner, base_n->text, base_n->length);
+                        if (m && m->array_size > 0) {
+                            glsl_type_t idx_t = glsl_type_of(s, n->b);
+                            if (idx_t == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
+                            if (idx_t != GLSL_TYPE_INT) {
+                                sema_fail(s, "an index must be an int", node);
+                                return GLSL_TYPE_ERROR;
+                            }
+                            const glsl_node_t *idx_n = &s->ast->nodes[n->b];
+                            if (idx_n->kind == GLSL_NODE_INTCONST &&
+                                ((int)idx_n->value < 0 ||
+                                 (int)idx_n->value >= m->array_size)) {
+                                sema_fail(s, "array index out of range", node);
+                                return GLSL_TYPE_ERROR;
+                            }
+                            return m->type;
+                        }
+                    }
+                }
             }
             glsl_type_t base = glsl_type_of(s, n->a);
             glsl_type_t idx = glsl_type_of(s, n->b);

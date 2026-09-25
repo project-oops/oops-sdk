@@ -32,8 +32,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SDK="$(cd "$HERE/.." && pwd)"
 OUT="${TMPDIR:-/tmp}/oops-shader-survey"
 
+# `--per-file` prints one line per shader instead of a histogram, which is what a caller that
+# has an expected outcome per file needs - see `tools/shader-conformance/`.
+PER_FILE=()
+if [ "${1:-}" = "--per-file" ]; then
+  PER_FILE=(--per-file)
+  shift
+fi
+
 if [ "$#" -eq 0 ]; then
-  echo "usage: $0 <dir-or-file>..." >&2
+  echo "usage: $0 [--per-file] <dir-or-file>..." >&2
   exit 2
 fi
 
@@ -65,5 +73,7 @@ if [ "${#FILES[@]}" -eq 0 ]; then
   exit 1
 fi
 
-echo "surveying ${#FILES[@]} shader files"
-"$OUT" "${FILES[@]}"
+if [ "${#PER_FILE[@]}" -eq 0 ]; then
+  echo "surveying ${#FILES[@]} shader files"
+fi
+"$OUT" "${PER_FILE[@]}" "${FILES[@]}"

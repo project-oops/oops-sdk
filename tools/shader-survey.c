@@ -241,18 +241,37 @@ int main(int argc, char **argv) {
     glContextMakeCurrent(ctx);
     glContextSetVersion(2, 0);
 
+    /*
+     * **`--per-file` turns a report into something that can be a gate.**
+     *
+     * The histogram below answers "what is the most common refusal", which is the right question
+     * when pointing this at a corpus of real shaders and deciding what to implement next. It is
+     * the wrong question for a corpus written *against the specification*, where each file has an
+     * expected outcome and the thing worth knowing is whether any file departed from it. One line
+     * per file lets a caller assert that, so a conformance corpus fails a build rather than
+     * printing a number nobody reads.
+     */
+    int per_file = 0;
+    int first_arg = 1;
+    if (argc > 1 && strcmp(argv[1], "--per-file") == 0) {
+        per_file = 1;
+        first_arg = 2;
+    }
+
     int total = 0, ok = 0, unreadable = 0, not_a_unit = 0;
     int gen_total = 0, gen_ok = 0, gen_link_failed = 0;
-    for (int a = 1; a < argc; a++) {
+    for (int a = first_arg; a < argc; a++) {
         long len = 0;
         char *src = slurp(argv[a], &len);
         if (!src || len == 0) {
             unreadable++;
+            if (per_file) printf("UNREADABLE %s\n", argv[a]);
             free(src);
             continue;
         }
         if (!is_translation_unit(src)) {
             not_a_unit++;
+            if (per_file) printf("NOT-A-UNIT %s\n", argv[a]);
             free(src);
             continue;
         }
@@ -292,6 +311,7 @@ int main(int argc, char **argv) {
                 glGetProgramiv(prog, GL_LINK_STATUS, &linked);
                 if (!linked) {
                     gen_link_failed++;
+                    if (per_file) printf("LINK-FAIL  %s\n", argv[a]);
                 } else {
                     const gl_program_object_t *po =
                         gl_find_program((gl_context_t *)ctx, prog);
@@ -301,12 +321,18 @@ int main(int argc, char **argv) {
                     if (po && gl_program_compile_fragment(po, words, 4096u, &count, &vgprs,
                                                           NULL, &ena, glog, sizeof(glog))) {
                         gen_ok++;
+                        if (per_file) printf("GENERATES  %s\n", argv[a]);
                     } else {
                         tally_gen(glog, argv[a]);
+                        if (per_file) printf("GEN-FAIL   %s: %s\n", argv[a], glog);
                     }
                 }
                 glDeleteProgram(prog);
                 glDeleteShader(vs);
+            } else if (per_file) {
+                /* A vertex shader has no second gate here - the vertex stage runs on the CPU -
+                 * so compiling is the whole of its answer and it says so in its own word. */
+                printf("COMPILES   %s\n", argv[a]);
             }
         } else {
             char log[1024];
@@ -314,9 +340,18 @@ int main(int argc, char **argv) {
             glGetShaderInfoLog(sh, (GLsizei)sizeof(log), &got, log);
             log[(got > 0 && got < (GLsizei)sizeof(log)) ? got : 0] = '\0';
             tally(log, argv[a]);
+            if (per_file) printf("COMP-FAIL  %s: %s\n", argv[a], log);
         }
         glDeleteShader(sh);
         free(src);
+    }
+
+    if (per_file) {
+        /* **The histogram is the other question and printing both mixes them.** A caller reading
+         * one line per file has to be able to take the whole of stdout as those lines; a summary
+         * after them is text that parses as a status and a filename and is neither. */
+        glContextDestroy(ctx);
+        return 0;
     }
 
     printf("\n%d of %d shaders compile (%d unreadable, %d not a standalone shader)\n",
