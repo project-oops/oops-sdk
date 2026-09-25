@@ -1035,6 +1035,17 @@ a histogram to read.
 whether the harness ran; `refused-compile-switch.frag` uses a word GLSL 1.10 reserves, and if it
 ever starts compiling then either the dialect changed or the script stopped looking.
 
+**The vertex stage needs a second instrument, because a corpus can only compile one.** A fragment
+shader's answer is a pixel; a vertex shader's is a *position*, and every drawing test here covers
+the middle of the framebuffer with a quad and reads the pixel there - so a vertex shader that
+computes the wrong thing still draws. `test_gl2_vertex_stage_computes` carries the shader's
+working into a varying and reads it back as colour, which turns a disagreement into a channel.
+Two of its arms are things that can be wrong while everything around them is right:
+`ftransform()` must equal `gl_ModelViewProjectionMatrix * gl_Vertex`, which is the whole reason
+the function exists, and `gl_NormalMatrix` is the modelview's upper 3x3 **inverse transposed** -
+the one built-in matrix that is derived rather than copied. Under the test's (2, 1, 1) scale the
+two readings differ by a factor of four.
+
 It found nine real gaps in its first four runs, none reachable from any port's shaders:
 
 - **an array as a struct member** (`struct S { float w[3]; }`), which GLSL 1.10 4.1.9 allows and

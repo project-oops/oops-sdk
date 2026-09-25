@@ -6992,6 +6992,138 @@ static void test_gl2_builtin_constants(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * **The vertex stage, which every test above reaches through and none measures.**
+ *
+ * A fragment shader's answer is a pixel and a wrong one is visible. A vertex shader's answer is a
+ * *position*, and a wrong one moves the triangle - which every test here hides, because they all
+ * draw a quad that covers the middle of the framebuffer and read the pixel there. Two of the
+ * shapes below would draw perfectly well while computing the wrong thing.
+ *
+ * So the vertex shader's working is carried into a varying and read back as colour. That makes a
+ * disagreement a channel rather than a geometry change, and it is the only way this harness can
+ * see one at all.
+ */
+static void test_gl2_vertex_stage_computes(void) {
+    gl2_target_t t = gl2_target();
+
+    /* **A transform that is not the identity**, or both sides of every comparison below are the
+     * vertex itself and none of them can fail. Checked by reading one transformed component back
+     * as well as the difference. */
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glTranslatef(0.25f, 0.0f, 0.0f);
+    glScalef(2.0f, 1.0f, 1.0f);
+
+    /* **`ftransform()` is `gl_ModelViewProjectionMatrix * gl_Vertex`** (1.10, 8.10), and it
+     * exists precisely so a shader can get the *same* answer the fixed-function pipeline would -
+     * so if the two disagree, a shader mixing them draws a seam. Red is the disagreement and
+     * green says the transform was applied at all, which is what stops this passing on two
+     * identical wrong answers. */
+    {
+        const GLuint prog = linked_program(
+            "attribute vec3 pos;\n"
+            "varying vec4 diff;\n"
+            "varying float moved;\n"
+            "void main() {\n"
+            "  vec4 a = ftransform();\n"
+            "  vec4 b = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+            "  diff = abs(a - b);\n"
+            "  moved = abs(b.x - gl_Vertex.x);\n"
+            "  gl_Position = vec4(pos, 1.0);\n"
+            "}\n",
+            "varying vec4 diff;\n"
+            "varying float moved;\n"
+            "void main() {\n"
+            "  float m = max(max(diff.x, diff.y), max(diff.z, diff.w));\n"
+            "  gl_FragColor = vec4(m > 0.0001 ? 1.0 : 0.0,\n"
+            "                      moved > 0.01 ? 1.0 : 0.0, 0.0, 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) < 8);    /* they agree */
+        ASSERT_TRUE(px_g(p) > 247);  /* and the transform was not the identity */
+    }
+
+    /* **`gl_NormalMatrix` is the inverse transpose of the modelview's upper 3x3** (1.10, 7.4),
+     * not the upper 3x3 itself. The scale above is (2, 1, 1), so element (0,0) is 0.5 one way
+     * and 2.0 the other - a factor of four, and the only arrangement in which reading it back
+     * scaled by 0.5 gives 0.25 rather than 1.0.
+     *
+     * This is the one built-in matrix whose value is *derived* rather than copied, so it is the
+     * one that can be wrong while every other matrix is right. */
+    {
+        const GLuint prog = linked_program(
+            "attribute vec3 pos;\n"
+            "varying float nm;\n"
+            "void main() { nm = gl_NormalMatrix[0][0]; gl_Position = vec4(pos, 1.0); }\n",
+            "varying float nm;\n"
+            "void main() { gl_FragColor = vec4(nm * 0.5, 0.0, 0.0, 1.0); }\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72); /* 0.5 * 0.5 = 0.25, not 2.0 clamped to 1 */
+    }
+
+    /* **A varying of every width reaches the fragment stage intact.** They are packed into
+     * parameter slots by the linker, and a float that took a whole slot or a vec3 that lost its
+     * third component is the shape of the bug - so each carries a value only it has. */
+    {
+        const GLuint prog = linked_program(
+            "attribute vec3 pos;\n"
+            "varying float a;\n"
+            "varying vec2 b;\n"
+            "varying vec3 c;\n"
+            "void main() {\n"
+            "  a = 0.125; b = vec2(0.25, 0.375); c = vec3(0.5, 0.625, 0.75);\n"
+            "  gl_Position = vec4(pos, 1.0);\n"
+            "}\n",
+            "varying float a;\n"
+            "varying vec2 b;\n"
+            "varying vec3 c;\n"
+            "void main() { gl_FragColor = vec4(a + b.y, c.x, c.z, 1.0); }\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 120 && px_r(p) < 136);  /* 0.125 + 0.375 */
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);  /* 0.5 */
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);  /* 0.75 */
+    }
+
+    /* **A `struct` and a loop in the *vertex* stage**, which is a different interpreter entry
+     * from the fragment one and has had none of the attention. */
+    {
+        const GLuint prog = linked_program(
+            "struct K { float g; float s; };\n"
+            "attribute vec3 pos;\n"
+            "varying float lit;\n"
+            "void main() {\n"
+            "  K k; k.g = 0.1; k.s = 0.05;\n"
+            "  float t = k.g;\n"
+            "  for (int i = 0; i < 3; i++) { t += k.s; }\n"
+            "  lit = t;\n"
+            "  gl_Position = vec4(pos, 1.0);\n"
+            "}\n",
+            "varying float lit;\n"
+            "void main() { gl_FragColor = vec4(lit, 0.0, 0.0, 1.0); }\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72); /* 0.1 + 3 * 0.05 = 0.25 */
+    }
+
+    glUseProgram(0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 /* And through the software reference, which looks them up in its own identifier path. */
 static void test_gl2_builtin_constants_run(void) {
     gl2_target_t t = gl2_target();
@@ -8204,6 +8336,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_spec_corners_run);
     RUN_TEST(test_gl2_builtin_constants);
     RUN_TEST(test_gl2_builtin_constants_run);
+    RUN_TEST(test_gl2_vertex_stage_computes);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);
     RUN_TEST(test_gl2_compiled_swizzle_writes_land_where_they_are_named);
