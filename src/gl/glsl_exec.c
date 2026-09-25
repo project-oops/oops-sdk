@@ -873,6 +873,19 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
         return r;
     }
 
+    /* --- noise -------------------------------------------------------------------------- */
+    /* **Zero, which is the implementation and not a stand-in for one.** GLSL 1.10 section 8.9
+     * describes a statistical noise and forbids no constant; every desktop driver has answered
+     * zero for as long as they have existed - Mesa's own source says so at
+     * `builtin_functions.cpp:8237` - and GLSL 4.4 made it the specified behaviour. The argument
+     * is evaluated anyway, because it may assign. */
+    if (is_name(callee, "noise1") || is_name(callee, "noise2") ||
+        is_name(callee, "noise3") || is_name(callee, "noise4")) {
+        if (first_arg != GLSL_NO_NODE) (void)eval(e, first_arg);
+        const int w = callee->text[callee->length - 1u] - '0';
+        return val_zero(glsl_type_vector_of(GLSL_TYPE_FLOAT, w));
+    }
+
     /* --- ftransform --------------------------------------------------------------------- */
     if (is_name(callee, "ftransform")) {
         /* The fixed-function transform of `gl_Vertex`, which is what the function is for: a

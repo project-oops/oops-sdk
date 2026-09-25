@@ -86,6 +86,19 @@ typedef enum {
     BI_NOT,         /* (bvecN) -> bvecN */
     BI_TEXTURE,     /* (sampler, coord [, bias]) -> vec4 */
     BI_FTRANSFORM,  /* () -> vec4 */
+    /*
+     * **The noise functions, which return zero** - `(genType) -> float|vec2|vec3|vec4`, the width
+     * fixed by the name rather than by the argument.
+     *
+     * GLSL 1.10 section 8.9 describes them as returning a statistical noise, and says nothing
+     * that forbids a constant. Every desktop driver has answered zero for as long as they have
+     * existed - Mesa says so in its own source, `builtin_functions.cpp:8237`, "Mesa has always
+     * returned 0 for noise on most drivers" - and GLSL 4.4 made that the specified behaviour.
+     *
+     * So this is the implementation, not a stub standing in for one. A shader calling `noise1`
+     * gets what it would get on a desktop.
+     */
+    BI_NOISE,
     BI_REFUSED      /* a name that is a built-in and is not implemented - see the file comment */
 } bi_rule_t;
 
@@ -207,11 +220,13 @@ static const bi_entry_t BUILTINS[] = {
     {"dFdy",   BI_GEN1, 0, 0, GL_FRAGMENT_SHADER, 0},
     {"fwidth", BI_GEN1, 0, 0, GL_FRAGMENT_SHADER, 0},
 
-    /* Named so the diagnostic is about the thing that is missing. */
-    {"noise1", BI_REFUSED, 0, 0, 0, "the noise functions are not implemented"},
-    {"noise2", BI_REFUSED, 0, 0, 0, "the noise functions are not implemented"},
-    {"noise3", BI_REFUSED, 0, 0, 0, "the noise functions are not implemented"},
-    {"noise4", BI_REFUSED, 0, 0, 0, "the noise functions are not implemented"},
+    /* 8.9 Noise. Zero, which is what every desktop driver answers - see BI_NOISE. The `coord`
+     * column carries the *result* width here, since the name fixes it and the argument does not;
+     * it is otherwise the texture forms' coordinate width and they are the only other reader. */
+    {"noise1", BI_NOISE, 0, 1, 0, 0},
+    {"noise2", BI_NOISE, 0, 2, 0, 0},
+    {"noise3", BI_NOISE, 0, 3, 0, 0},
+    {"noise4", BI_NOISE, 0, 4, 0, 0},
 };
 
 /* -------------------------------------------------------------------------
@@ -410,6 +425,12 @@ glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
         case BI_FTRANSFORM:
             if (argc != 0) break;
             return GLSL_TYPE_VEC4;
+
+        /* One argument of any float width; the result's width is the name's. */
+        case BI_NOISE:
+            if (argc != 1) break;
+            if (!is_gen(args[0])) break;
+            return glsl_type_vector_of(GLSL_TYPE_FLOAT, e->coord);
 
         case BI_REFUSED:
             break;

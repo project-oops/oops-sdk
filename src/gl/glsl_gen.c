@@ -574,15 +574,21 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
          * stops being exact, which is a limit this back end's integers already have everywhere
          * - `i + 1` is a float add there too.
          *
-         * Matrices stay out: GLSL has no relational operator on them, and `==` on one would be
-         * a reduction over every element rather than a comparison. */
+         * **A matrix compares for equality and not for order**, which is what GLSL 1.10 section
+         * 5.9 says: `==` and `!=` take every type but an array and give one bool, and the
+         * relational operators take scalars only. `==` on a matrix is a reduction over every
+         * element - which is exactly what `gen_compare` already does for a vector, because a
+         * matrix is the same run of registers a wider vector would be. This said matrices stay
+         * out on the grounds that a reduction is not a comparison; the reduction was already
+         * written. */
         const glsl_type_t clt = glsl_type_of(g->sema, n->a);
         const glsl_type_t crt = glsl_type_of(g->sema, n->b);
+        const GLboolean equality = (GLboolean)(op == GLSL_TOK_EQ || op == GLSL_TOK_NE);
         if ((!is_float_family(clt) && !is_bool_family(clt) && !is_int_family(clt)) ||
             (!is_float_family(crt) && !is_bool_family(crt) && !is_int_family(crt)) ||
-            is_matrix(clt) || is_matrix(crt)) {
-            return gen_fail(g, "only float, int, vector and bool comparisons are generated; a "
-                                "matrix has no comparison here", node);
+            ((is_matrix(clt) || is_matrix(crt)) && !equality)) {
+            return gen_fail(g, "only float, int, vector and bool comparisons are generated, and "
+                                "a matrix compares for equality but not for order", node);
         }
         glsl_value_t ca = gen_expr(g, n->a);
         if (is_bad(ca)) return ca;
@@ -846,6 +852,13 @@ static glsl_type_t constructor_target(const glsl_node_t *callee) {
         {"vec2", GLSL_TYPE_VEC2}, {"vec3", GLSL_TYPE_VEC3}, {"vec4", GLSL_TYPE_VEC4},
         {"mat2", GLSL_TYPE_MAT2}, {"mat3", GLSL_TYPE_MAT3}, {"mat4", GLSL_TYPE_MAT4},
         {"bool", GLSL_TYPE_BOOL}, {"int", GLSL_TYPE_INT},
+        /* **The integer and boolean vectors**, which are the same run of registers a `vecN` is:
+         * an `int` and a `bool` are the float they already are here, so `ivec2(1, 2)` builds the
+         * same two registers `vec2(1.0, 2.0)` would. They were missing from this table alone -
+         * the semantic stage typed them and the generator then reported the name as neither a
+         * constructor nor a function. */
+        {"ivec2", GLSL_TYPE_IVEC2}, {"ivec3", GLSL_TYPE_IVEC3}, {"ivec4", GLSL_TYPE_IVEC4},
+        {"bvec2", GLSL_TYPE_BVEC2}, {"bvec3", GLSL_TYPE_BVEC3}, {"bvec4", GLSL_TYPE_BVEC4},
     };
     for (size_t i = 0; i < sizeof(ctors) / sizeof(ctors[0]); i++) {
         size_t len = 0;
@@ -910,11 +923,14 @@ static glsl_value_t gen_construct(glsl_gen_t *g, glsl_type_t target, int32_t fir
     for (int32_t a = first_arg; a != GLSL_NO_NODE; a = g->ast->nodes[a].sibling) {
         const glsl_type_t at = glsl_type_of(g->sema, a);
         /* An `int` argument needs no conversion: it is already a whole float in a register, so
-         * `float(i)` is a move and `vec3(i, x, y)` packs it like any other component. A `bool`
-         * is 0.0 or 1.0 and would behave the same, but GLSL's `float(b)` is a conversion this
-         * has not been asked for yet, so it stays refused and named. */
-        if (!is_float_family(at) && !is_int_family(at)) {
-            return gen_fail(g, "only float, vec, mat and int constructor arguments are "
+         * `float(i)` is a move and `vec3(i, x, y)` packs it like any other component.
+         *
+         * **A `bool` is the same**, and was refused here on the grounds that `float(b)` is a
+         * conversion nobody had asked for. GLSL 1.10 section 5.4.1 defines it - false is 0.0 and
+         * true is 1.0 - and that is already the representation a bool has in these registers,
+         * so the conversion is the move that was being refused. `bvec2(true, false)` needed it. */
+        if (!is_float_family(at) && !is_int_family(at) && !is_bool_family(at)) {
+            return gen_fail(g, "only float, vec, mat, int and bool constructor arguments are "
                                "generated", node);
         }
         supplied += glsl_type_components(at);
@@ -1682,6 +1698,21 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
      * `dFdy`'s sign follows the window's y, which counts down the screen - so this is the
      * bottom row less the top, matching the reference's own finite difference rather than
      * GL's bottom-left convention. */
+    /* **`noise1`..`noise4` are zero**, which is the implementation rather than a stand-in - see
+     * `glsl_builtin.c`'s `BI_NOISE`. The argument is already evaluated in `arg[0]`, which is
+     * what makes an argument that assigns still happen. */
+    if (nm_is(nm, len, "noise1") || nm_is(nm, len, "noise2") ||
+        nm_is(nm, len, "noise3") || nm_is(nm, len, "noise4")) {
+        if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
+        const int noise_w = nm[len - 1u] - '0';
+        glsl_value_t out = gen_alloc(g, noise_w, node);
+        if (is_bad(out)) return out;
+        for (int cc = 0; cc < noise_w; cc++) {
+            glsl_emit_mov_imm(g->code, out.base + (uint32_t)cc, float_bits(0.0f));
+        }
+        return out;
+    }
+
     if (nm_is(nm, len, "dFdx") || nm_is(nm, len, "dFdy") || nm_is(nm, len, "fwidth")) {
         if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
         glsl_value_t d = gen_alloc(g, arg[0].count, node);

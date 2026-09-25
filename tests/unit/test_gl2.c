@@ -5493,6 +5493,70 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
  * has one - so the two uniforms here hold different numbers and the one past the first sixteen
  * floats is the one read.
  */
+/*
+ * **Three corners of GLSL 1.10 the generator had not reached**, each measured through the
+ * simulator rather than by whether it compiles.
+ *
+ * All three were one-line gaps behind a refusal that read like a design decision: `ivec`/`bvec`
+ * were missing from the generator's constructor table alone, a `bool` constructor argument was
+ * refused as "a conversion nobody asked for" when it is the move the registers already hold, and
+ * a matrix `==` was refused as "a reduction, not a comparison" when the reduction was already
+ * written for vectors.
+ */
+static void test_gl2_compiled_glsl110_corners(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float tol = 2e-3f;
+
+    /* **`noise` is zero**, which is the answer every desktop driver gives and what GLSL 4.4
+     * later specified. The argument is still evaluated, so a side effect in it happens. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float n1 = noise1(0.5);\n"
+                    "  vec2 n2 = noise2(1.5);\n"
+                    "  gl_FragColor = vec4(n1 + 0.25, n2.x + 0.5, n2.y + 0.75, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.75f, tol);
+
+    /* **`ivec` and `bvec` constructors.** The integer one truncates, which is what makes it an
+     * integer here - 2.9 has to arrive as 2, not as 2.9 scaled. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  ivec2 iv = ivec2(1, 3);\n"
+                    "  bvec2 bv = bvec2(true, false);\n"
+                    "  gl_FragColor = vec4(float(iv.x) * 0.25, float(iv.y) * 0.25,\n"
+                    "                      bv.x ? 0.75 : 0.0, bv.y ? 1.0 : 0.5);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.75f, tol);
+    ASSERT_NEAR(o[2], 0.75f, tol);   /* true  */
+    ASSERT_NEAR(o[3], 0.5f, tol);    /* false */
+
+    /* **A matrix compares for equality**, and the reduction is over *every* element - so two
+     * matrices differing in one component are not equal. Both directions are checked, because a
+     * reduction that always answered true would pass the first on its own. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  mat2 a = mat2(1.0, 2.0, 3.0, 4.0);\n"
+                    "  mat2 b = mat2(1.0, 2.0, 3.0, 4.0);\n"
+                    "  mat2 c = mat2(1.0, 2.0, 3.0, 5.0);\n"
+                    "  gl_FragColor = vec4((a == b) ? 0.25 : 0.0,\n"
+                    "                      (a == c) ? 0.0 : 0.5,\n"
+                    "                      (a != c) ? 0.75 : 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);   /* equal matrices are equal */
+    ASSERT_NEAR(o[1], 0.5f, tol);    /* and one differing element is enough */
+    ASSERT_NEAR(o[2], 0.75f, tol);
+
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_uniform_window(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -6838,6 +6902,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_increment);
     RUN_TEST(test_gl2_compiled_texcoord_builtin);
     RUN_TEST(test_gl2_compiled_uniform_window);
+    RUN_TEST(test_gl2_compiled_glsl110_corners);
     RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
