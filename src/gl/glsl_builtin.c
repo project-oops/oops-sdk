@@ -375,21 +375,25 @@ glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
                 return GLSL_TYPE_ERROR;
             }
             if (e->rule == BI_TRANSPOSE) {
-                /* Square matrices only, which is all this front end has - 1.20's non-square
-                 * `mat2x3` and its relatives are not implemented, so there is no shape for a
-                 * non-square transpose to return. */
+                /* **`transpose(matCxR)` is `matRxC`**, which for a square matrix is its own
+                 * shape - the case this returned while only square ones existed. */
                 if (argc != 1 || !glsl_type_is_matrix(args[0])) break;
-                return args[0];
+                return glsl_type_matrix_of(glsl_type_matrix_rows(args[0]),
+                                           glsl_type_matrix_cols(args[0]));
             }
-            /* `outerProduct(vecN, vecN)` is the NxN matrix of their products. Two vectors of
-             * different widths would give a non-square matrix, which this refuses. */
-            if (argc != 2 || !glsl_type_is_vector(args[0]) || args[1] != args[0]) break;
-            if (glsl_type_base(args[0]) != GLSL_TYPE_FLOAT) break;
-            switch (glsl_type_components(args[0])) {
-                case 2: return GLSL_TYPE_MAT2;
-                case 3: return GLSL_TYPE_MAT3;
-                case 4: return GLSL_TYPE_MAT4;
-                default: break;
+            /* **`outerProduct(vecR, vecC)` is `matCxR`** - the first is a column and the second
+             * a row, so the result has one column per entry of the second and one row per entry
+             * of the first. Two vectors of different widths give a non-square matrix, which is
+             * a type now rather than a refusal. */
+            if (argc != 2 || !glsl_type_is_vector(args[0]) || !glsl_type_is_vector(args[1])) break;
+            if (glsl_type_base(args[0]) != GLSL_TYPE_FLOAT ||
+                glsl_type_base(args[1]) != GLSL_TYPE_FLOAT) {
+                break;
+            }
+            {
+                const glsl_type_t m = glsl_type_matrix_of(glsl_type_components(args[1]),
+                                                          glsl_type_components(args[0]));
+                if (m != GLSL_TYPE_ERROR) return m;
             }
             break;
 

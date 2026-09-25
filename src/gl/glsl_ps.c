@@ -162,10 +162,11 @@ static glsl_type_t type_from_gl(GLenum t) {
         case GL_INT: return GLSL_TYPE_INT;
         case GL_BOOL: return GLSL_TYPE_BOOL;
         /* **A matrix uniform, which needed nothing but this.** The generator already stores a
-         * matrix as `n*n` consecutive registers column-major and already multiplies one by a
-         * vector at any `n` - `glsl_emit_mat_mul_vec` takes the dimension as an argument and
-         * `glsl_emit_mat4_mul_vec4` is a wrapper on it - so the whole of the gap was that this
-         * function had no case and the uniform was refused before reaching any of it.
+         * matrix as `cols * rows` consecutive registers column-major and already multiplies one
+         * by a vector at any shape - `glsl_emit_mat_mul_vec_cr` takes both dimensions as
+         * arguments and the square and `mat4` forms are wrappers on it - so the whole of the gap
+         * was that this function had no case and the uniform was refused before reaching any of
+         * it. The non-square six arrived the same way, for the same reason.
          *
          * The value pool holds a matrix column-major, which is the order `glUniformMatrix*fv`
          * writes without `transpose` and the order the registers are read in, so the copy into
@@ -173,6 +174,12 @@ static glsl_type_t type_from_gl(GLenum t) {
         case GL_FLOAT_MAT2: return GLSL_TYPE_MAT2;
         case GL_FLOAT_MAT3: return GLSL_TYPE_MAT3;
         case GL_FLOAT_MAT4: return GLSL_TYPE_MAT4;
+        case GL_FLOAT_MAT2x3: return GLSL_TYPE_MAT2X3;
+        case GL_FLOAT_MAT2x4: return GLSL_TYPE_MAT2X4;
+        case GL_FLOAT_MAT3x2: return GLSL_TYPE_MAT3X2;
+        case GL_FLOAT_MAT3x4: return GLSL_TYPE_MAT3X4;
+        case GL_FLOAT_MAT4x2: return GLSL_TYPE_MAT4X2;
+        case GL_FLOAT_MAT4x3: return GLSL_TYPE_MAT4X3;
         default: return GLSL_TYPE_ERROR;
     }
 }

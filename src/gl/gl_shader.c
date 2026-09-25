@@ -806,6 +806,9 @@ static int type_floats(GLenum t) {
         case GL_FLOAT_MAT2: return 4;
         case GL_FLOAT_MAT3: return 9;
         case GL_FLOAT_MAT4: return 16;
+        case GL_FLOAT_MAT2x3: case GL_FLOAT_MAT3x2: return 6;
+        case GL_FLOAT_MAT2x4: case GL_FLOAT_MAT4x2: return 8;
+        case GL_FLOAT_MAT3x4: case GL_FLOAT_MAT4x3: return 12;
         default: return 1;  /* every sampler: its unit number */
     }
 }
@@ -826,16 +829,40 @@ static GLboolean type_is_int(GLenum t) {
 }
 
 static GLboolean type_is_matrix(GLenum t) {
-    return (GLboolean)(t == GL_FLOAT_MAT2 || t == GL_FLOAT_MAT3 || t == GL_FLOAT_MAT4);
+    return (GLboolean)(t == GL_FLOAT_MAT2 || t == GL_FLOAT_MAT3 || t == GL_FLOAT_MAT4 ||
+                       t == GL_FLOAT_MAT2x3 || t == GL_FLOAT_MAT2x4 ||
+                       t == GL_FLOAT_MAT3x2 || t == GL_FLOAT_MAT3x4 ||
+                       t == GL_FLOAT_MAT4x2 || t == GL_FLOAT_MAT4x3);
+}
+
+/* A matrix uniform's shape. Both 0 for anything that is not a matrix, so a caller asks once. */
+static void type_matrix_shape(GLenum t, int *cols, int *rows) {
+    switch (t) {
+        case GL_FLOAT_MAT2:   *cols = 2; *rows = 2; return;
+        case GL_FLOAT_MAT3:   *cols = 3; *rows = 3; return;
+        case GL_FLOAT_MAT4:   *cols = 4; *rows = 4; return;
+        case GL_FLOAT_MAT2x3: *cols = 2; *rows = 3; return;
+        case GL_FLOAT_MAT2x4: *cols = 2; *rows = 4; return;
+        case GL_FLOAT_MAT3x2: *cols = 3; *rows = 2; return;
+        case GL_FLOAT_MAT3x4: *cols = 3; *rows = 4; return;
+        case GL_FLOAT_MAT4x2: *cols = 4; *rows = 2; return;
+        case GL_FLOAT_MAT4x3: *cols = 4; *rows = 3; return;
+        default:              *cols = 0; *rows = 0; return;
+    }
 }
 
 /* The shared body of every `glUniform`. `comps` is the command's own width, `integer` whether
- * it is an `i` form, and `matrix_dim` non-zero for the matrix forms.
+ * it is an `i` form, and `matrix_type` the GL enum the matrix forms name - 0 for the rest.
+ *
+ * **The matrix check is by type and not by float count**, because `glUniformMatrix2x3fv` and
+ * `glUniformMatrix3x2fv` both carry six floats: comparing the counts would let either command
+ * set either uniform and transpose the value of one of them. The specification requires the
+ * command to match the declared type exactly, and here that is the whole of the check.
  *
  * Returns the destination to write `count` elements into, or NULL when the call should do
  * nothing - which is both the error cases and **a location of -1, which is defined to be
  * ignored silently** so that a program need not branch on a uniform the linker removed. */
-static float *uniform_dest(GLint location, int comps, GLboolean integer, int matrix_dim,
+static float *uniform_dest(GLint location, int comps, GLboolean integer, GLenum matrix_type,
                            GLsizei count, int *out_elements) {
     gl_context_t *ctx = gl2_ctx();
     if (!ctx) return (float *)0;
@@ -856,8 +883,8 @@ static float *uniform_dest(GLint location, int comps, GLboolean integer, int mat
         return (float *)0;
     }
 
-    if (matrix_dim) {
-        if (!type_is_matrix(u->type) || type_floats(u->type) != matrix_dim * matrix_dim) {
+    if (matrix_type) {
+        if (u->type != matrix_type) {
             gl_record_error(ctx, GL_INVALID_OPERATION);
             return (float *)0;
         }
@@ -954,22 +981,29 @@ void glUniform4iv(GLint location, GLsizei count, const GLint *v) { uniform_write
 
 /* The matrices. **Stored column-major whatever the caller passed**, because that is what the
  * shading language's `mat4 * vec4` reads and what `gl_ModelViewMatrix` already is - so
- * `transpose` is applied here, once, rather than every time the value is used. */
-static void uniform_write_matrix(GLint location, int dim, GLsizei count, GLboolean transpose,
+ * `transpose` is applied here, once, rather than every time the value is used.
+ *
+ * **`transpose` on a non-square matrix reads a different shape than it writes.** The source of a
+ * transposed `mat2x3` is three columns of two - it is the `mat3x2` whose transpose this is - so
+ * the read stride is the destination's column count and not its row count. Written with one
+ * dimension, as this was while every matrix was square, the transposed form walks off the end. */
+static void uniform_write_matrix(GLint location, GLenum type, GLsizei count, GLboolean transpose,
                                  const GLfloat *v) {
+    int cols = 0, rows = 0;
+    type_matrix_shape(type, &cols, &rows);
     int n = 0;
-    float *dst = uniform_dest(location, dim * dim, GL_FALSE, dim, count, &n);
+    const int per = cols * rows;
+    float *dst = uniform_dest(location, per, GL_FALSE, type, count, &n);
     if (!dst || !v) return;
-    const int per = dim * dim;
     for (int e = 0; e < n; e++) {
         const GLfloat *src = v + (size_t)e * (size_t)per;
         float *out = dst + (size_t)e * (size_t)per;
         if (!transpose) {
             for (int i = 0; i < per; i++) out[i] = src[i];
         } else {
-            for (int col = 0; col < dim; col++) {
-                for (int row = 0; row < dim; row++) {
-                    out[col * dim + row] = src[row * dim + col];
+            for (int col = 0; col < cols; col++) {
+                for (int row = 0; row < rows; row++) {
+                    out[col * rows + row] = src[row * cols + col];
                 }
             }
         }
@@ -977,13 +1011,31 @@ static void uniform_write_matrix(GLint location, int dim, GLsizei count, GLboole
 }
 
 void glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *v) {
-    uniform_write_matrix(location, 2, count, transpose, v);
+    uniform_write_matrix(location, GL_FLOAT_MAT2, count, transpose, v);
 }
 void glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *v) {
-    uniform_write_matrix(location, 3, count, transpose, v);
+    uniform_write_matrix(location, GL_FLOAT_MAT3, count, transpose, v);
 }
 void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *v) {
-    uniform_write_matrix(location, 4, count, transpose, v);
+    uniform_write_matrix(location, GL_FLOAT_MAT4, count, transpose, v);
+}
+void glUniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *v) {
+    uniform_write_matrix(location, GL_FLOAT_MAT2x3, count, transpose, v);
+}
+void glUniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *v) {
+    uniform_write_matrix(location, GL_FLOAT_MAT3x2, count, transpose, v);
+}
+void glUniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *v) {
+    uniform_write_matrix(location, GL_FLOAT_MAT2x4, count, transpose, v);
+}
+void glUniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *v) {
+    uniform_write_matrix(location, GL_FLOAT_MAT4x2, count, transpose, v);
+}
+void glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *v) {
+    uniform_write_matrix(location, GL_FLOAT_MAT3x4, count, transpose, v);
+}
+void glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *v) {
+    uniform_write_matrix(location, GL_FLOAT_MAT4x3, count, transpose, v);
 }
 
 /* The read-back pair. Unlike `glUniform` these name a program rather than acting on the current

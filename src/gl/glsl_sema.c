@@ -44,7 +44,6 @@ GLboolean glsl_type_is_matrix(glsl_type_t t);
 GLboolean glsl_type_is_sampler(glsl_type_t t);
 glsl_type_t glsl_type_base(glsl_type_t t);
 glsl_type_t glsl_type_vector_of(glsl_type_t base, int n);
-int glsl_type_matrix_dim(glsl_type_t t);
 
 void glsl_sema_init(glsl_sema_t *s, glsl_ast_t *ast) {
     if (!s) return;
@@ -111,6 +110,12 @@ glsl_type_t glsl_type_from_token(glsl_token_type_t t) {
         case GLSL_TOK_KW_MAT2:  return GLSL_TYPE_MAT2;
         case GLSL_TOK_KW_MAT3:  return GLSL_TYPE_MAT3;
         case GLSL_TOK_KW_MAT4:  return GLSL_TYPE_MAT4;
+        case GLSL_TOK_KW_MAT2X3: return GLSL_TYPE_MAT2X3;
+        case GLSL_TOK_KW_MAT2X4: return GLSL_TYPE_MAT2X4;
+        case GLSL_TOK_KW_MAT3X2: return GLSL_TYPE_MAT3X2;
+        case GLSL_TOK_KW_MAT3X4: return GLSL_TYPE_MAT3X4;
+        case GLSL_TOK_KW_MAT4X2: return GLSL_TYPE_MAT4X2;
+        case GLSL_TOK_KW_MAT4X3: return GLSL_TYPE_MAT4X3;
         case GLSL_TOK_KW_SAMPLER1D: return GLSL_TYPE_SAMPLER1D;
         case GLSL_TOK_KW_SAMPLER2D: return GLSL_TYPE_SAMPLER2D;
         case GLSL_TOK_KW_SAMPLER3D: return GLSL_TYPE_SAMPLER3D;
@@ -127,7 +132,40 @@ static GLboolean is_vector(glsl_type_t t) {
                        (t >= GLSL_TYPE_BVEC2 && t <= GLSL_TYPE_BVEC4));
 }
 static GLboolean is_matrix(glsl_type_t t) {
-    return (GLboolean)(t >= GLSL_TYPE_MAT2 && t <= GLSL_TYPE_MAT4);
+    return (GLboolean)(t >= GLSL_TYPE_MAT2 && t <= GLSL_TYPE_MAT4X3);
+}
+
+/* **A matrix's shape, from a table.** `matCxR` is C columns of R rows; the square names are the
+ * ones the language gives short spellings to, and `mat3` is `mat3x3`. Zero for anything that is
+ * not a matrix, so a caller can ask without checking first. */
+static int matrix_cols(glsl_type_t t) {
+    switch (t) {
+        case GLSL_TYPE_MAT2: case GLSL_TYPE_MAT2X3: case GLSL_TYPE_MAT2X4: return 2;
+        case GLSL_TYPE_MAT3: case GLSL_TYPE_MAT3X2: case GLSL_TYPE_MAT3X4: return 3;
+        case GLSL_TYPE_MAT4: case GLSL_TYPE_MAT4X2: case GLSL_TYPE_MAT4X3: return 4;
+        default: return 0;
+    }
+}
+static int matrix_rows(glsl_type_t t) {
+    switch (t) {
+        case GLSL_TYPE_MAT3X2: case GLSL_TYPE_MAT4X2: case GLSL_TYPE_MAT2: return 2;
+        case GLSL_TYPE_MAT2X3: case GLSL_TYPE_MAT4X3: case GLSL_TYPE_MAT3: return 3;
+        case GLSL_TYPE_MAT2X4: case GLSL_TYPE_MAT3X4: case GLSL_TYPE_MAT4: return 4;
+        default: return 0;
+    }
+}
+
+/* The matrix with these dimensions, or ERROR if there is none. */
+static glsl_type_t matrix_of(int cols, int rows) {
+    switch (cols) {
+        case 2: return rows == 2 ? GLSL_TYPE_MAT2 : rows == 3 ? GLSL_TYPE_MAT2X3
+                     : rows == 4 ? GLSL_TYPE_MAT2X4 : GLSL_TYPE_ERROR;
+        case 3: return rows == 2 ? GLSL_TYPE_MAT3X2 : rows == 3 ? GLSL_TYPE_MAT3
+                     : rows == 4 ? GLSL_TYPE_MAT3X4 : GLSL_TYPE_ERROR;
+        case 4: return rows == 2 ? GLSL_TYPE_MAT4X2 : rows == 3 ? GLSL_TYPE_MAT4X3
+                     : rows == 4 ? GLSL_TYPE_MAT4 : GLSL_TYPE_ERROR;
+        default: return GLSL_TYPE_ERROR;
+    }
 }
 static GLboolean is_scalar(glsl_type_t t) {
     return (GLboolean)(t == GLSL_TYPE_BOOL || t == GLSL_TYPE_INT || t == GLSL_TYPE_FLOAT);
@@ -189,6 +227,14 @@ int glsl_type_components(glsl_type_t t) {
         case GLSL_TYPE_MAT2: return 4;
         case GLSL_TYPE_MAT3: return 9;
         case GLSL_TYPE_MAT4: return 16;
+        /* C columns of R rows, laid out column-major - the same run of registers everything
+         * else here is, counted the way the name says. */
+        case GLSL_TYPE_MAT2X3: return 6;
+        case GLSL_TYPE_MAT2X4: return 8;
+        case GLSL_TYPE_MAT3X2: return 6;
+        case GLSL_TYPE_MAT3X4: return 12;
+        case GLSL_TYPE_MAT4X2: return 8;
+        case GLSL_TYPE_MAT4X3: return 12;
         default: return 0;
     }
 }
@@ -211,18 +257,15 @@ static glsl_type_t vector_of(glsl_type_t base, int n) {
     return GLSL_TYPE_ERROR;
 }
 
-/* Matrix dimension: mat2 is 2, mat3 is 3, mat4 is 4. */
-static int matrix_dim(glsl_type_t t) {
-    return t == GLSL_TYPE_MAT2 ? 2 : t == GLSL_TYPE_MAT3 ? 3 : t == GLSL_TYPE_MAT4 ? 4 : 0;
-}
-
 void glsl_sema_fail(glsl_sema_t *s, const char *why, int32_t node) { sema_fail(s, why, node); }
 GLboolean glsl_type_is_vector(glsl_type_t t) { return is_vector(t); }
 GLboolean glsl_type_is_matrix(glsl_type_t t) { return is_matrix(t); }
 GLboolean glsl_type_is_sampler(glsl_type_t t) { return is_sampler(t); }
 glsl_type_t glsl_type_base(glsl_type_t t) { return base_of(t); }
 glsl_type_t glsl_type_vector_of(glsl_type_t base, int n) { return vector_of(base, n); }
-int glsl_type_matrix_dim(glsl_type_t t) { return matrix_dim(t); }
+int glsl_type_matrix_cols(glsl_type_t t) { return matrix_cols(t); }
+int glsl_type_matrix_rows(glsl_type_t t) { return matrix_rows(t); }
+glsl_type_t glsl_type_matrix_of(int cols, int rows) { return matrix_of(cols, rows); }
 
 /* -------------------------------------------------------------------------
  * Scopes
@@ -518,27 +561,44 @@ static glsl_type_t binary_type(glsl_sema_t *s, glsl_token_type_t op, glsl_type_t
         return GLSL_TYPE_ERROR;
     }
 
-    /* `mat * vec` and `vec * mat` are linear transforms; the dimensions have to meet. */
+    /*
+     * **`mat * vec` and `vec * mat` are linear transforms, and the two are not the same one.**
+     *
+     * `matCxR * vecC` is `vecR` - the vector is a column, so it has one entry per *column* of
+     * the matrix and the result has one per row. `vecR * matCxR` is the product with the
+     * transpose: the vector is a row, so it matches the rows and the result has one entry per
+     * column. For a square matrix both read as "the dimension", which is why this worked while
+     * only square ones existed.
+     */
     if (op == GLSL_TOK_STAR && is_matrix(l) && is_vector(r)) {
-        if (glsl_type_components(r) != matrix_dim(l) || base_of(r) != GLSL_TYPE_FLOAT) {
+        if (glsl_type_components(r) != matrix_cols(l) || base_of(r) != GLSL_TYPE_FLOAT) {
             sema_fail(s, "matrix and vector dimensions do not meet", node);
             return GLSL_TYPE_ERROR;
         }
-        return r;
+        return vector_of(GLSL_TYPE_FLOAT, matrix_rows(l));
     }
     if (op == GLSL_TOK_STAR && is_vector(l) && is_matrix(r)) {
-        if (glsl_type_components(l) != matrix_dim(r) || base_of(l) != GLSL_TYPE_FLOAT) {
+        if (glsl_type_components(l) != matrix_rows(r) || base_of(l) != GLSL_TYPE_FLOAT) {
             sema_fail(s, "vector and matrix dimensions do not meet", node);
             return GLSL_TYPE_ERROR;
         }
-        return l;
+        return vector_of(GLSL_TYPE_FLOAT, matrix_cols(r));
     }
+    /* **`matCxR * matPxC` is `matPxR`**: the left's columns have to match the right's rows, and
+     * the result takes the right's columns and the left's rows. Equal types were the whole rule
+     * while every matrix was square, and that is the special case where P = C = R. */
     if (op == GLSL_TOK_STAR && is_matrix(l) && is_matrix(r)) {
-        if (l != r) {
-            sema_fail(s, "matrix dimensions do not meet", node);
+        if (matrix_cols(l) != matrix_rows(r)) {
+            sema_fail(s, "matrix dimensions do not meet: the left's columns and the right's "
+                         "rows have to be the same number", node);
             return GLSL_TYPE_ERROR;
         }
-        return l;
+        const glsl_type_t product = matrix_of(matrix_cols(r), matrix_rows(l));
+        if (product == GLSL_TYPE_ERROR) {
+            sema_fail(s, "this matrix product has no type in GLSL 1.20", node);
+            return GLSL_TYPE_ERROR;
+        }
+        return product;
     }
 
     /* A scalar against a vector or matrix is component-wise and keeps the larger type, in
@@ -651,8 +711,9 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
                 sema_fail(s, "an index must be an int", node);
                 return GLSL_TYPE_ERROR;
             }
-            /* Indexing a matrix gives a column; indexing a vector gives a component. */
-            if (is_matrix(base)) return vector_of(GLSL_TYPE_FLOAT, matrix_dim(base));
+            /* Indexing a matrix gives a **column**, which has one entry per row - so `mat2x3[0]`
+             * is a `vec3` and not a `vec2`. Indexing a vector gives a component. */
+            if (is_matrix(base)) return vector_of(GLSL_TYPE_FLOAT, matrix_rows(base));
             if (is_vector(base)) return base_of(base);
             sema_fail(s, "indexing something that is neither a vector nor a matrix", node);
             return GLSL_TYPE_ERROR;
@@ -673,6 +734,13 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
                 {"ivec2", GLSL_TYPE_IVEC2}, {"ivec3", GLSL_TYPE_IVEC3}, {"ivec4", GLSL_TYPE_IVEC4},
                 {"bvec2", GLSL_TYPE_BVEC2}, {"bvec3", GLSL_TYPE_BVEC3}, {"bvec4", GLSL_TYPE_BVEC4},
                 {"mat2", GLSL_TYPE_MAT2}, {"mat3", GLSL_TYPE_MAT3}, {"mat4", GLSL_TYPE_MAT4},
+                /* 1.20's non-square matrices, and the long spellings of the square ones - the
+                 * language gives `mat3` and `mat3x3` both, and they are one type. */
+                {"mat2x2", GLSL_TYPE_MAT2}, {"mat3x3", GLSL_TYPE_MAT3},
+                {"mat4x4", GLSL_TYPE_MAT4},
+                {"mat2x3", GLSL_TYPE_MAT2X3}, {"mat2x4", GLSL_TYPE_MAT2X4},
+                {"mat3x2", GLSL_TYPE_MAT3X2}, {"mat3x4", GLSL_TYPE_MAT3X4},
+                {"mat4x2", GLSL_TYPE_MAT4X2}, {"mat4x3", GLSL_TYPE_MAT4X3},
             };
             for (size_t i = 0; i < sizeof(ctors) / sizeof(ctors[0]); i++) {
                 size_t len = 0;
@@ -684,6 +752,16 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
                     }
                     if (match) { ctor = ctors[i].type; break; }
                 }
+            }
+            /* A non-square matrix constructor is 1.20's, the same as the type name is. The
+             * parser refuses the declaration; this refuses `mat2x3(1.0)[0]` in an expression,
+             * which never passes through a declaration and would otherwise be the one way into
+             * the type in a 1.10 shader. */
+            if (ctor != GLSL_TYPE_ERROR && s->version != 0 && s->version < 120 &&
+                matrix_cols(ctor) != matrix_rows(ctor)) {
+                sema_fail(s, "the non-square matrix types are GLSL 1.20; this shader is 1.10",
+                          node);
+                return GLSL_TYPE_ERROR;
             }
             if (ctor != GLSL_TYPE_ERROR) return constructor_type(s, ctor, n->b, node);
 

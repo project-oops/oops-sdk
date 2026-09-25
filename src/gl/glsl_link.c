@@ -95,6 +95,15 @@ GLenum glsl_type_to_gl(glsl_type_t t) {
         case GLSL_TYPE_MAT2:  return GL_FLOAT_MAT2;
         case GLSL_TYPE_MAT3:  return GL_FLOAT_MAT3;
         case GLSL_TYPE_MAT4:  return GL_FLOAT_MAT4;
+        /* 1.20's non-square matrices. Missing here, a `uniform mat2x3` links with a type of 0,
+         * which `glGetActiveUniform` reports as nothing and no `glUniform` command matches - so
+         * the uniform exists, has a location, and cannot be written. */
+        case GLSL_TYPE_MAT2X3: return GL_FLOAT_MAT2x3;
+        case GLSL_TYPE_MAT2X4: return GL_FLOAT_MAT2x4;
+        case GLSL_TYPE_MAT3X2: return GL_FLOAT_MAT3x2;
+        case GLSL_TYPE_MAT3X4: return GL_FLOAT_MAT3x4;
+        case GLSL_TYPE_MAT4X2: return GL_FLOAT_MAT4x2;
+        case GLSL_TYPE_MAT4X3: return GL_FLOAT_MAT4x3;
         case GLSL_TYPE_SAMPLER1D:       return GL_SAMPLER_1D;
         case GLSL_TYPE_SAMPLER2D:       return GL_SAMPLER_2D;
         case GLSL_TYPE_SAMPLER3D:       return GL_SAMPLER_3D;
@@ -489,6 +498,21 @@ static GLboolean check_fragment_varyings(gl_program_object_t *p, const glsl_unit
     return GL_TRUE;
 }
 
+/* **How many attribute slots one declaration takes: one per column.**
+ *
+ * `matCxR` takes C of them, so a `mat3x2` takes three and a `mat2x3` two - the *columns*, not
+ * the floats and not the larger side. This was written out twice as a three-way ladder over the
+ * square types, which made adding the other six a matter of finding both copies; one function is
+ * one place to be wrong. */
+static int attrib_slot_span(GLenum type) {
+    switch (type) {
+        case GL_FLOAT_MAT2: case GL_FLOAT_MAT2x3: case GL_FLOAT_MAT2x4: return 2;
+        case GL_FLOAT_MAT3: case GL_FLOAT_MAT3x2: case GL_FLOAT_MAT3x4: return 3;
+        case GL_FLOAT_MAT4: case GL_FLOAT_MAT4x2: case GL_FLOAT_MAT4x3: return 4;
+        default: return 1;
+    }
+}
+
 /* A slot nothing has claimed, for an attribute the caller did not bind. */
 static GLint lowest_free_slot(const gl_program_object_t *p, int need) {
     for (GLint base = 0; base + need <= OOPS_GL_MAX_VERTEX_ATTRIBS; base++) {
@@ -498,10 +522,7 @@ static GLint lowest_free_slot(const gl_program_object_t *p, int need) {
             if (loc < 0) continue;
             /* A matrix attribute takes one slot per column, which is why this is a range
              * overlap rather than an equality. */
-            const int span = p->attribs[i].type == GL_FLOAT_MAT2   ? 2
-                             : p->attribs[i].type == GL_FLOAT_MAT3 ? 3
-                             : p->attribs[i].type == GL_FLOAT_MAT4 ? 4
-                                                                   : 1;
+            const int span = attrib_slot_span(p->attribs[i].type);
             if (base < loc + span && loc < base + need) clash = GL_TRUE;
         }
         if (!clash) return base;
@@ -635,11 +656,7 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     }
     for (int i = 0; i < p->attrib_count; i++) {
         if (p->attribs[i].location >= 0) continue;
-        const int span = p->attribs[i].type == GL_FLOAT_MAT2   ? 2
-                         : p->attribs[i].type == GL_FLOAT_MAT3 ? 3
-                         : p->attribs[i].type == GL_FLOAT_MAT4 ? 4
-                                                               : 1;
-        const GLint slot = lowest_free_slot(p, span);
+        const GLint slot = lowest_free_slot(p, attrib_slot_span(p->attribs[i].type));
         if (slot < 0) {
             oops_snprintf(p->info_log, sizeof(p->info_log),
                           "the attributes do not fit in %d slots", OOPS_GL_MAX_VERTEX_ATTRIBS);

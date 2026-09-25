@@ -49,6 +49,11 @@ typedef enum {
     GLSL_TOK_KW_IVEC2, GLSL_TOK_KW_IVEC3, GLSL_TOK_KW_IVEC4,
     GLSL_TOK_KW_BVEC2, GLSL_TOK_KW_BVEC3, GLSL_TOK_KW_BVEC4,
     GLSL_TOK_KW_MAT2, GLSL_TOK_KW_MAT3, GLSL_TOK_KW_MAT4,
+    /* GLSL 1.20's non-square spellings. `mat2x2`, `mat3x3` and `mat4x4` are the same words as
+     * the three above and lex to them, so there are six tokens rather than nine. */
+    GLSL_TOK_KW_MAT2X3, GLSL_TOK_KW_MAT2X4,
+    GLSL_TOK_KW_MAT3X2, GLSL_TOK_KW_MAT3X4,
+    GLSL_TOK_KW_MAT4X2, GLSL_TOK_KW_MAT4X3,
     GLSL_TOK_KW_SAMPLER1D, GLSL_TOK_KW_SAMPLER2D, GLSL_TOK_KW_SAMPLER3D,
     GLSL_TOK_KW_SAMPLERCUBE, GLSL_TOK_KW_SAMPLER1DSHADOW, GLSL_TOK_KW_SAMPLER2DSHADOW,
     /* Reserved by 1.10 for future use. Recognised so they can be **refused with their own
@@ -363,7 +368,20 @@ typedef enum {
     GLSL_TYPE_VEC2, GLSL_TYPE_VEC3, GLSL_TYPE_VEC4,
     GLSL_TYPE_IVEC2, GLSL_TYPE_IVEC3, GLSL_TYPE_IVEC4,
     GLSL_TYPE_BVEC2, GLSL_TYPE_BVEC3, GLSL_TYPE_BVEC4,
+    /*
+     * **`matCxR` is C columns of R rows**, which is GLSL's order and the opposite of the one
+     * most people say aloud. `mat2x3` is two columns of three, six components, and a `mat4 * vec4`
+     * generalises to `matCxR * vecC -> vecR`.
+     *
+     * The square ones keep their short names because the language does: `mat3` *is* `mat3x3`.
+     * The six below are contiguous with them so `is_matrix` stays a range check, and their sizes
+     * come from a table rather than from arithmetic on the enum - an ordering that encodes the
+     * dimensions is a cleverness that breaks the first time a type is inserted.
+     */
     GLSL_TYPE_MAT2, GLSL_TYPE_MAT3, GLSL_TYPE_MAT4,
+    GLSL_TYPE_MAT2X3, GLSL_TYPE_MAT2X4,
+    GLSL_TYPE_MAT3X2, GLSL_TYPE_MAT3X4,
+    GLSL_TYPE_MAT4X2, GLSL_TYPE_MAT4X3,
     GLSL_TYPE_SAMPLER1D, GLSL_TYPE_SAMPLER2D, GLSL_TYPE_SAMPLER3D,
     GLSL_TYPE_SAMPLERCUBE, GLSL_TYPE_SAMPLER1DSHADOW, GLSL_TYPE_SAMPLER2DSHADOW,
 
@@ -504,8 +522,17 @@ GLboolean glsl_type_is_sampler(glsl_type_t t);
 glsl_type_t glsl_type_base(glsl_type_t t);
 /* The n-component vector of a base type - `vector_of(FLOAT, 1)` is FLOAT itself. */
 glsl_type_t glsl_type_vector_of(glsl_type_t base, int n);
-/* 2, 3 or 4 for a matrix; 0 for anything else. */
-int glsl_type_matrix_dim(glsl_type_t t);
+/* **A matrix has two sizes, and asking for one number is the bug.** There was a
+ * `glsl_type_matrix_dim` here returning the side of a square matrix and 0 otherwise, which every
+ * site used as both the stride and the bound. That is right only while C == R, and a caller that
+ * kept it would answer 0 for a `mat2x3` and refuse it with no diagnostic - so it is gone rather
+ * than deprecated, and the compiler names anything still reaching for it.
+ *
+ * `matCxR` is C columns of R rows; both are 0 for a type that is not a matrix. */
+int glsl_type_matrix_cols(glsl_type_t t);
+int glsl_type_matrix_rows(glsl_type_t t);
+/* The matrix type with these dimensions, or ERROR. */
+glsl_type_t glsl_type_matrix_of(int cols, int rows);
 /* **Whether a value of `got` may be used where `want` is expected**, which is the one place the
  * implicit-conversion rule lives: exact equality always, plus int to float and `ivecN` to
  * `vecN` when the unit is GLSL 1.20. Every assignment, initialiser, argument and return goes
@@ -774,10 +801,18 @@ void glsl_emit_mov(glsl_code_t *c, uint32_t d, uint32_t s);
 void glsl_emit_mov_imm(glsl_code_t *c, uint32_t d, uint32_t bits);
 void glsl_emit_endpgm(glsl_code_t *c);
 void glsl_emit_nop(glsl_code_t *c);
+/* `dst[0..rows-1] = m * v` for a `cols` x `rows` matrix, column-major, where `v` has `cols`
+ * components. `dst` must not overlap `m` or `v`. */
+void glsl_emit_mat_mul_vec_cr(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v,
+                              uint32_t cols, uint32_t rows);
 /* `dst[0..n-1] = m * v` for an n x n matrix, column-major. `dst` must not overlap `m` or `v`. */
 void glsl_emit_mat_mul_vec(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v, uint32_t n);
 /* `dst[0..3] = m * v`, column-major. `dst` must not overlap `v`. */
 void glsl_emit_mat4_mul_vec4(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v);
+/* `dst[0..cols-1] = v * m`, the product with the transpose and **not** `m * v`: `v` has `rows`
+ * components and the result has one per column. */
+void glsl_emit_vec_mul_mat_cr(glsl_code_t *c, uint32_t dst, uint32_t v, uint32_t m,
+                              uint32_t cols, uint32_t rows);
 /* `dst[0..n-1] = v * m`, which is the product with the transpose and **not** `m * v`. */
 void glsl_emit_vec_mul_mat(glsl_code_t *c, uint32_t dst, uint32_t v, uint32_t m, uint32_t n);
 

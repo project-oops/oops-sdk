@@ -151,7 +151,10 @@ static int32_t parse_primary(glsl_parser_t *p) {
         case GLSL_TOK_KW_VEC2: case GLSL_TOK_KW_VEC3: case GLSL_TOK_KW_VEC4:
         case GLSL_TOK_KW_IVEC2: case GLSL_TOK_KW_IVEC3: case GLSL_TOK_KW_IVEC4:
         case GLSL_TOK_KW_BVEC2: case GLSL_TOK_KW_BVEC3: case GLSL_TOK_KW_BVEC4:
-        case GLSL_TOK_KW_MAT2: case GLSL_TOK_KW_MAT3: case GLSL_TOK_KW_MAT4: {
+        case GLSL_TOK_KW_MAT2: case GLSL_TOK_KW_MAT3: case GLSL_TOK_KW_MAT4:
+        case GLSL_TOK_KW_MAT2X3: case GLSL_TOK_KW_MAT2X4:
+        case GLSL_TOK_KW_MAT3X2: case GLSL_TOK_KW_MAT3X4:
+        case GLSL_TOK_KW_MAT4X2: case GLSL_TOK_KW_MAT4X3: {
             int32_t at = node_new(p, GLSL_NODE_IDENTIFIER);
             if (at == GLSL_NO_NODE) return at;
             p->ast->nodes[at].text = p->tok.text;
@@ -501,9 +504,27 @@ static GLboolean is_type_name(glsl_token_type_t t) {
         case GLSL_TOK_KW_IVEC2: case GLSL_TOK_KW_IVEC3: case GLSL_TOK_KW_IVEC4:
         case GLSL_TOK_KW_BVEC2: case GLSL_TOK_KW_BVEC3: case GLSL_TOK_KW_BVEC4:
         case GLSL_TOK_KW_MAT2: case GLSL_TOK_KW_MAT3: case GLSL_TOK_KW_MAT4:
+        case GLSL_TOK_KW_MAT2X3: case GLSL_TOK_KW_MAT2X4:
+        case GLSL_TOK_KW_MAT3X2: case GLSL_TOK_KW_MAT3X4:
+        case GLSL_TOK_KW_MAT4X2: case GLSL_TOK_KW_MAT4X3:
         case GLSL_TOK_KW_SAMPLER1D: case GLSL_TOK_KW_SAMPLER2D: case GLSL_TOK_KW_SAMPLER3D:
         case GLSL_TOK_KW_SAMPLERCUBE:
         case GLSL_TOK_KW_SAMPLER1DSHADOW: case GLSL_TOK_KW_SAMPLER2DSHADOW:
+            return GL_TRUE;
+        default:
+            return GL_FALSE;
+    }
+}
+
+/* The six matrix types GLSL 1.20 added. `mat2x2` and its two siblings are not here because the
+ * lexer folds them into the square tokens, so by this point they are indistinguishable from
+ * `mat2`, `mat3` and `mat4` - the same looseness the keyword table there already accepts for
+ * `invariant` and the precision words, and for the same reason. */
+static GLboolean is_nonsquare_matrix_name(glsl_token_type_t t) {
+    switch (t) {
+        case GLSL_TOK_KW_MAT2X3: case GLSL_TOK_KW_MAT2X4:
+        case GLSL_TOK_KW_MAT3X2: case GLSL_TOK_KW_MAT3X4:
+        case GLSL_TOK_KW_MAT4X2: case GLSL_TOK_KW_MAT4X3:
             return GL_TRUE;
         default:
             return GL_FALSE;
@@ -713,6 +734,15 @@ static int32_t parse_type_specifier(glsl_parser_t *p, glsl_token_type_t *type_to
     }
     if (!is_type_name(p->tok.type)) {
         fail(p, "expected a type at the start of a declaration");
+        return GLSL_NO_NODE;
+    }
+    /* **The non-square matrices are 1.20's**, like `transpose` and `outerProduct` beside them,
+     * so a 1.10 shader is told which word it may not use rather than meeting the type and a
+     * surprise later. Recognised by the lexer whatever the version, for the reason the table
+     * there gives: a 1.10 shader using `mat2x3` as an identifier was already unportable, and
+     * naming it is the better diagnostic either way. */
+    if (is_nonsquare_matrix_name(p->tok.type) && p->version != 0 && p->version < 120) {
+        fail(p, "the non-square matrix types are GLSL 1.20; this shader is 1.10");
         return GLSL_NO_NODE;
     }
     *type_tok = p->tok.type;

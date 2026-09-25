@@ -1938,6 +1938,15 @@ typedef char GLchar;
 #define GL_SAMPLER_CUBE                         0x8B60
 #define GL_SAMPLER_1D_SHADOW                    0x8B61
 #define GL_SAMPLER_2D_SHADOW                    0x8B62
+/* The non-square matrices, which GLSL 1.20 added and GL 2.1 named. A `#version 120` shader may
+ * declare one, so the uniform machinery has to be able to report and set it - the alternative
+ * is a uniform that links with a type of zero and cannot be written. */
+#define GL_FLOAT_MAT2x3                         0x8B65
+#define GL_FLOAT_MAT2x4                         0x8B66
+#define GL_FLOAT_MAT3x2                         0x8B67
+#define GL_FLOAT_MAT3x4                         0x8B68
+#define GL_FLOAT_MAT4x2                         0x8B69
+#define GL_FLOAT_MAT4x3                         0x8B6A
 
 /* The programmable pipeline's limits, every one of them a glGet. Their values are this
  * implementation's and are stated where they are answered, in gl_state.c. */
@@ -2011,6 +2020,21 @@ void glUniform4iv(GLint location, GLsizei count, const GLint *value);
 void glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 void glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+/* **`CxR` is columns then rows, so `2x3` sends six floats as two columns of three.** The name
+ * reads the other way round from the dimensions most people say aloud, and taking it as rows
+ * first transposes every uniform a port sets. */
+void glUniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value);
+void glUniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value);
+void glUniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value);
+void glUniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value);
+void glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value);
+void glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value);
 
 /* Generic vertex attributes.
  *

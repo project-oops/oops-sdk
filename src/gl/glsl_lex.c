@@ -131,6 +131,14 @@ static glsl_token_type_t keyword_of(const char *text, size_t n) {
         {"ivec2", GLSL_TOK_KW_IVEC2}, {"ivec3", GLSL_TOK_KW_IVEC3}, {"ivec4", GLSL_TOK_KW_IVEC4},
         {"bvec2", GLSL_TOK_KW_BVEC2}, {"bvec3", GLSL_TOK_KW_BVEC3}, {"bvec4", GLSL_TOK_KW_BVEC4},
         {"mat2", GLSL_TOK_KW_MAT2},   {"mat3", GLSL_TOK_KW_MAT3},   {"mat4", GLSL_TOK_KW_MAT4},
+        /* **1.20's non-square matrices, and the long spellings of the square ones.** `mat2x2` is
+         * `mat2` - the same type under a second name the language also gives it - so it lexes to
+         * the same token rather than to one of its own. The parser then has one case per type
+         * and not one per spelling. */
+        {"mat2x2", GLSL_TOK_KW_MAT2}, {"mat3x3", GLSL_TOK_KW_MAT3}, {"mat4x4", GLSL_TOK_KW_MAT4},
+        {"mat2x3", GLSL_TOK_KW_MAT2X3}, {"mat2x4", GLSL_TOK_KW_MAT2X4},
+        {"mat3x2", GLSL_TOK_KW_MAT3X2}, {"mat3x4", GLSL_TOK_KW_MAT3X4},
+        {"mat4x2", GLSL_TOK_KW_MAT4X2}, {"mat4x3", GLSL_TOK_KW_MAT4X3},
         {"sampler1D", GLSL_TOK_KW_SAMPLER1D},
         {"sampler2D", GLSL_TOK_KW_SAMPLER2D},
         {"sampler3D", GLSL_TOK_KW_SAMPLER3D},

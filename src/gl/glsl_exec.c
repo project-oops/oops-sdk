@@ -417,11 +417,15 @@ static exec_place_t place_of_rw(exec_t *e, int32_t node, GLboolean for_write) {
         exec_place_t bp = place_of_rw(e, n->a, for_write);
         if (!bp.addr) return p;
         if (glsl_type_is_matrix(bp.type)) {
-            const int dim = glsl_type_matrix_dim(bp.type);
-            if (i < 0 || i >= dim) { fail(e, "matrix column out of range"); return p; }
-            p.addr = bp.addr + (size_t)i * (size_t)dim;
-            p.comps = dim;
-            p.type = glsl_type_vector_of(GLSL_TYPE_FLOAT, dim);
+            /* A `matCxR` has C columns, each R floats long: the bound is the column count and
+             * the stride is the row count. Reading one for the other is invisible on a square
+             * matrix and walks into the next column on a `mat2x4`. */
+            const int cols = glsl_type_matrix_cols(bp.type);
+            const int rows = glsl_type_matrix_rows(bp.type);
+            if (i < 0 || i >= cols) { fail(e, "matrix column out of range"); return p; }
+            p.addr = bp.addr + (size_t)i * (size_t)rows;
+            p.comps = rows;
+            p.type = glsl_type_vector_of(GLSL_TYPE_FLOAT, rows);
             return p;
         }
         if (i < 0 || i >= bp.comps) { fail(e, "vector component out of range"); return p; }
@@ -795,25 +799,27 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
         return r;
     }
     if (is_name(callee, "transpose")) {
-        /* Column-major throughout, so element (col, row) is `v[col * dim + row]` and the
-         * transpose swaps the two indices. */
-        const int dim = glsl_type_matrix_dim(a[0].type);
-        exec_val_t r = val_zero(a[0].type);
-        for (int c = 0; c < dim; c++) {
-            for (int row = 0; row < dim; row++) r.v[c * dim + row] = a[0].v[row * dim + c];
+        /* Column-major throughout, so element (col, row) is `v[col * rows + row]` and the
+         * transpose swaps the two indices - and the shape with them, since `matCxR` transposes
+         * to `matRxC`. The result's stride is therefore the source's column count. */
+        const int cols = glsl_type_matrix_cols(a[0].type);
+        const int rows = glsl_type_matrix_rows(a[0].type);
+        exec_val_t r = val_zero(glsl_type_matrix_of(rows, cols));
+        for (int c = 0; c < rows; c++) {
+            for (int row = 0; row < cols; row++) r.v[c * cols + row] = a[0].v[row * rows + c];
         }
         return r;
     }
     if (is_name(callee, "outerProduct")) {
         /* **`outerProduct(c, r)` has `c` down the columns and `r` across them**: element
          * (col, row) is `c[row] * r[col]`. The other way round is the transpose, which is a
-         * different matrix and still draws. */
-        const int n = comps_of(a[0].type);
-        const glsl_type_t mt = (n == 2) ? GLSL_TYPE_MAT2
-                                        : ((n == 3) ? GLSL_TYPE_MAT3 : GLSL_TYPE_MAT4);
-        exec_val_t r = val_zero(mt);
-        for (int c = 0; c < n; c++) {
-            for (int row = 0; row < n; row++) r.v[c * n + row] = a[0].v[row] * a[1].v[c];
+         * different matrix and still draws.
+         *
+         * The two vectors need not be the same width: `outerProduct(vecR, vecC)` is a `matCxR`. */
+        const int rows = comps_of(a[0].type), cols = comps_of(a[1].type);
+        exec_val_t r = val_zero(glsl_type_matrix_of(cols, rows));
+        for (int c = 0; c < cols; c++) {
+            for (int row = 0; row < rows; row++) r.v[c * rows + row] = a[0].v[row] * a[1].v[c];
         }
         return r;
     }
@@ -1072,7 +1078,7 @@ static exec_val_t call_user(exec_t *e, int32_t fn, int32_t first_arg) {
 static exec_val_t construct(exec_t *e, glsl_type_t target, int32_t first_arg) {
     exec_val_t r = val_zero(target);
     const int want = comps_of(target);
-    const int dim = glsl_type_matrix_dim(target);
+    const int mcols = glsl_type_matrix_cols(target), mrows = glsl_type_matrix_rows(target);
 
     /* Gather every argument's components into one run, which is what a GLSL constructor does:
      * `vec4(v.xy, 1.0, 0.0)` is four values from three arguments. */
@@ -1088,10 +1094,12 @@ static exec_val_t construct(exec_t *e, glsl_type_t target, int32_t first_arg) {
     if (n == 0) return r;
     /* **One scalar fills.** For a vector it broadcasts; for a matrix it is the diagonal, and the
      * off-diagonal stays zero - `mat4(1.0)` is the identity and not a matrix of ones, which is
-     * the constructor people get wrong. */
+     * the constructor people get wrong. A non-square matrix's diagonal runs out at the shorter
+     * side, so `mat2x4(1.0)` has two entries on it and six zeroes. */
     if (args == 1 && n == 1) {
-        if (dim > 0) {
-            for (int i = 0; i < dim; i++) r.v[i * dim + i] = flat[0];
+        if (mcols > 0) {
+            const int diag = (mcols < mrows) ? mcols : mrows;
+            for (int i = 0; i < diag; i++) r.v[i * mrows + i] = flat[0];
         } else {
             for (int i = 0; i < want; i++) r.v[i] = flat[0];
         }
@@ -1119,31 +1127,43 @@ static exec_val_t arith(exec_t *e, glsl_token_type_t op, const exec_val_t *l,
     if (op == GLSL_TOK_STAR) {
         /* **`mat * vec` is a linear transform, `vec * mat` is the other one, and `mat * mat` is
          * a matrix product.** Only `mat * scalar` and the component-wise cases fall through. */
-        const int ld = glsl_type_matrix_dim(l->type), rd = glsl_type_matrix_dim(rr->type);
-        if (ld > 0 && rd > 0) {
-            for (int c = 0; c < ld; c++) {
-                for (int row = 0; row < ld; row++) {
+        /* Every index below is an element `(col, row)` at `col * rows + row`, with the *rows* of
+         * whichever matrix it belongs to. On a square matrix the two counts coincide and the
+         * distinction is invisible; off it, using the wrong one addresses another column. */
+        const int lcols = glsl_type_matrix_cols(l->type);
+        const int lrows = glsl_type_matrix_rows(l->type);
+        const int rcols = glsl_type_matrix_cols(rr->type);
+        const int rrows = glsl_type_matrix_rows(rr->type);
+        if (lcols > 0 && rcols > 0) {
+            /* `matCxR * matPxC -> matPxR`: the sum runs over the left's columns, which are the
+             * right's rows, and the result takes its columns from the right and rows from the
+             * left. */
+            for (int c = 0; c < rcols; c++) {
+                for (int row = 0; row < lrows; row++) {
                     float s = 0.0f;
-                    for (int k = 0; k < ld; k++) s += l->v[k * ld + row] * rr->v[c * ld + k];
-                    out.v[c * ld + row] = s;
+                    for (int k = 0; k < lcols; k++) s += l->v[k * lrows + row] * rr->v[c * rrows + k];
+                    out.v[c * lrows + row] = s;
                 }
             }
             return out;
         }
-        if (ld > 0 && rc == ld) {
-            for (int row = 0; row < ld; row++) {
+        if (lcols > 0 && rc == lcols) {
+            /* `matCxR * vecC -> vecR`. */
+            for (int row = 0; row < lrows; row++) {
                 float s = 0.0f;
-                for (int k = 0; k < ld; k++) s += l->v[k * ld + row] * rr->v[k];
+                for (int k = 0; k < lcols; k++) s += l->v[k * lrows + row] * rr->v[k];
                 out.v[row] = s;
             }
             return out;
         }
-        if (rd > 0 && lc == rd) {
+        if (rcols > 0 && lc == rrows) {
             /* The row vector times the matrix, which is the transpose's product - and is why
-             * `v * m` and `m * v` are different answers rather than a convenience. */
-            for (int c = 0; c < rd; c++) {
+             * `v * m` and `m * v` are different answers rather than a convenience. `vecR *
+             * matCxR -> vecC`: the vector matches the rows and the result has one entry per
+             * column, the opposite way round from the case above. */
+            for (int c = 0; c < rcols; c++) {
                 float s = 0.0f;
-                for (int k = 0; k < rd; k++) s += l->v[k] * rr->v[c * rd + k];
+                for (int k = 0; k < rrows; k++) s += l->v[k] * rr->v[c * rrows + k];
                 out.v[c] = s;
             }
             return out;
@@ -1268,14 +1288,15 @@ static exec_val_t eval(exec_t *e, int32_t node) {
             {
                 const exec_val_t idx = eval(e, n->b);
                 const int i = (int)idx.v[0];
-                const int dim = glsl_type_matrix_dim(base.type);
-                if (dim > 0) {
-                    if (i < 0 || i >= dim) {
+                const int mcols = glsl_type_matrix_cols(base.type);
+                const int mrows = glsl_type_matrix_rows(base.type);
+                if (mcols > 0) {
+                    if (i < 0 || i >= mcols) {
                         fail(e, "matrix column out of range");
                         return val_zero(GLSL_TYPE_ERROR);
                     }
-                    exec_val_t out = val_zero(glsl_type_vector_of(GLSL_TYPE_FLOAT, dim));
-                    for (int k = 0; k < dim; k++) out.v[k] = base.v[i * dim + k];
+                    exec_val_t out = val_zero(glsl_type_vector_of(GLSL_TYPE_FLOAT, mrows));
+                    for (int k = 0; k < mrows; k++) out.v[k] = base.v[i * mrows + k];
                     return out;
                 }
                 if (i < 0 || i >= comps_of(base.type)) {
@@ -1350,15 +1371,26 @@ static exec_val_t eval(exec_t *e, int32_t node) {
                 default: break;
             }
             /* The result's shape: the matrix's if one is a matrix and the other a scalar, the
-             * vector's if one is a vector, and a vector of the matrix's dimension for a
-             * transform. The semantic stage decided this already; recomputing it here from the
-             * values is what keeps this file able to run without one. */
+             * vector's if one is a vector, and for a transform a vector of the matrix's *other*
+             * side - `matCxR * vecC` is a `vecR` and `vecR * matCxR` is a `vecC`. The semantic
+             * stage decided this already; recomputing it here from the values is what keeps this
+             * file able to run without one.
+             *
+             * A matrix-times-matrix result takes its columns from the right operand and its rows
+             * from the left, so it is only the left's own type while both are square. */
             glsl_type_t rt = l.type;
-            const int ld = glsl_type_matrix_dim(l.type), rd = glsl_type_matrix_dim(r.type);
-            if (n->op == GLSL_TOK_STAR && ld > 0 && rd == 0 && comps_of(r.type) == ld) {
-                rt = glsl_type_vector_of(GLSL_TYPE_FLOAT, ld);
-            } else if (n->op == GLSL_TOK_STAR && rd > 0 && ld == 0 && comps_of(l.type) == rd) {
-                rt = glsl_type_vector_of(GLSL_TYPE_FLOAT, rd);
+            const int lcols = glsl_type_matrix_cols(l.type);
+            const int lrows = glsl_type_matrix_rows(l.type);
+            const int rcols = glsl_type_matrix_cols(r.type);
+            const int rrows = glsl_type_matrix_rows(r.type);
+            if (n->op == GLSL_TOK_STAR && lcols > 0 && rcols > 0 && rrows == lcols) {
+                rt = glsl_type_matrix_of(rcols, lrows);
+            } else if (n->op == GLSL_TOK_STAR && lcols > 0 && rcols == 0 &&
+                       comps_of(r.type) == lcols) {
+                rt = glsl_type_vector_of(GLSL_TYPE_FLOAT, lrows);
+            } else if (n->op == GLSL_TOK_STAR && rcols > 0 && lcols == 0 &&
+                       comps_of(l.type) == rrows) {
+                rt = glsl_type_vector_of(GLSL_TYPE_FLOAT, rcols);
             } else if (comps_of(l.type) == 1 && comps_of(r.type) > 1) {
                 rt = r.type;
             }
@@ -1413,6 +1445,16 @@ static exec_val_t eval(exec_t *e, int32_t node) {
                 {"ivec2", GLSL_TYPE_IVEC2}, {"ivec3", GLSL_TYPE_IVEC3}, {"ivec4", GLSL_TYPE_IVEC4},
                 {"bvec2", GLSL_TYPE_BVEC2}, {"bvec3", GLSL_TYPE_BVEC3}, {"bvec4", GLSL_TYPE_BVEC4},
                 {"mat2", GLSL_TYPE_MAT2}, {"mat3", GLSL_TYPE_MAT3}, {"mat4", GLSL_TYPE_MAT4},
+                /* 1.20's non-square matrices, and the long spellings of the square ones, which
+                 * are the same three types under a second name. There is a table like this in
+                 * the semantic stage and another in the generator, and a name missing from only
+                 * this one type-checks, compiles for the console, and then reports "a call to a
+                 * function with no body" the first time the software path draws it. */
+                {"mat2x2", GLSL_TYPE_MAT2}, {"mat3x3", GLSL_TYPE_MAT3},
+                {"mat4x4", GLSL_TYPE_MAT4},
+                {"mat2x3", GLSL_TYPE_MAT2X3}, {"mat2x4", GLSL_TYPE_MAT2X4},
+                {"mat3x2", GLSL_TYPE_MAT3X2}, {"mat3x4", GLSL_TYPE_MAT3X4},
+                {"mat4x2", GLSL_TYPE_MAT4X2}, {"mat4x3", GLSL_TYPE_MAT4X3},
             };
             for (size_t i = 0; i < sizeof(ctors) / sizeof(ctors[0]); i++) {
                 if (is_name(callee, ctors[i].name)) return construct(e, ctors[i].type, n->b);
@@ -1691,6 +1733,12 @@ static void bind_program_uniforms(exec_t *e) {
             case GL_FLOAT_MAT2: t = GLSL_TYPE_MAT2; break;
             case GL_FLOAT_MAT3: t = GLSL_TYPE_MAT3; break;
             case GL_FLOAT_MAT4: t = GLSL_TYPE_MAT4; break;
+            case GL_FLOAT_MAT2x3: t = GLSL_TYPE_MAT2X3; break;
+            case GL_FLOAT_MAT2x4: t = GLSL_TYPE_MAT2X4; break;
+            case GL_FLOAT_MAT3x2: t = GLSL_TYPE_MAT3X2; break;
+            case GL_FLOAT_MAT3x4: t = GLSL_TYPE_MAT3X4; break;
+            case GL_FLOAT_MAT4x2: t = GLSL_TYPE_MAT4X2; break;
+            case GL_FLOAT_MAT4x3: t = GLSL_TYPE_MAT4X3; break;
             case GL_SAMPLER_1D: t = GLSL_TYPE_SAMPLER1D; break;
             case GL_SAMPLER_2D: t = GLSL_TYPE_SAMPLER2D; break;
             case GL_SAMPLER_3D: t = GLSL_TYPE_SAMPLER3D; break;
@@ -1740,13 +1788,14 @@ static void bind_generic_attributes(exec_t *e, const gl_vertex_t *vtx) {
         }
         if (loc < 0 || loc >= OOPS_GL_MAX_VERTEX_ATTRIBS) continue;
         const int want = comps_of(t);
-        const int dim = glsl_type_matrix_dim(t);
-        if (dim > 0) {
-            /* A matrix attribute takes one slot per column. */
-            for (int c = 0; c < dim; c++) {
+        const int mcols = glsl_type_matrix_cols(t), mrows = glsl_type_matrix_rows(t);
+        if (mcols > 0) {
+            /* A matrix attribute takes one slot per column, and a slot supplies as many
+             * components as the matrix has rows. */
+            for (int c = 0; c < mcols; c++) {
                 const int slot = loc + c;
                 if (slot >= OOPS_GL_MAX_VERTEX_ATTRIBS) break;
-                for (int r = 0; r < dim; r++) store[c * dim + r] = vtx->attrib[slot][r];
+                for (int r = 0; r < mrows; r++) store[c * mrows + r] = vtx->attrib[slot][r];
             }
             continue;
         }

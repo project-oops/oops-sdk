@@ -595,21 +595,30 @@ void glsl_emit_endpgm(glsl_code_t *c) {
  * `dst` must not overlap `v`, because the first component of the result is written before the
  * last component of the vector is read. Overlapping `m` is fine.
  */
-void glsl_emit_mat_mul_vec(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v, uint32_t n) {
+void glsl_emit_mat_mul_vec_cr(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v,
+                              uint32_t cols, uint32_t rows) {
     /* The first column multiplies, the rest accumulate: one instruction per element either
      * way, and no separate zeroing pass.
      *
      * **Column-major**, which is GLSL's storage and the reason this is a sum over columns
      * rather than a dot product per row: element `row` of the result takes `m[col][row]` for
-     * every column, and those are `n` apart in the register run. */
-    for (uint32_t row = 0; row < n; row++) {
+     * every column, and those are `rows` apart in the register run.
+     *
+     * `matCxR * vecC` is a `vecR`: the vector has one entry per column and the result one per
+     * row. Those were the same number while every matrix was square, which is why this took a
+     * single `n`. */
+    for (uint32_t row = 0; row < rows; row++) {
         glsl_emit_mul_f32(c, dst + row, m + row, v + 0u);
     }
-    for (uint32_t col = 1; col < n; col++) {
-        for (uint32_t row = 0; row < n; row++) {
-            glsl_emit_fmac_f32(c, dst + row, m + col * n + row, v + col);
+    for (uint32_t col = 1; col < cols; col++) {
+        for (uint32_t row = 0; row < rows; row++) {
+            glsl_emit_fmac_f32(c, dst + row, m + col * rows + row, v + col);
         }
     }
+}
+
+void glsl_emit_mat_mul_vec(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v, uint32_t n) {
+    glsl_emit_mat_mul_vec_cr(c, dst, m, v, n, n);
 }
 
 void glsl_emit_mat4_mul_vec4(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v) {
@@ -623,11 +632,19 @@ void glsl_emit_mat4_mul_vec4(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t 
  *
  * A column is contiguous here - column `i` starts at `m + i*n` - so each component is a
  * multiply and `n-1` accumulates over consecutive registers. */
-void glsl_emit_vec_mul_mat(glsl_code_t *c, uint32_t dst, uint32_t v, uint32_t m, uint32_t n) {
-    for (uint32_t i = 0; i < n; i++) {
-        glsl_emit_mul_f32(c, dst + i, v + 0u, m + i * n);
-        for (uint32_t row = 1; row < n; row++) {
-            glsl_emit_fmac_f32(c, dst + i, v + row, m + i * n + row);
+void glsl_emit_vec_mul_mat_cr(glsl_code_t *c, uint32_t dst, uint32_t v, uint32_t m,
+                              uint32_t cols, uint32_t rows) {
+    /* `vecR * matCxR` is a `vecC`: the vector matches the *rows* because it is a row vector, and
+     * the result has one entry per column - the opposite way round from the product above, and
+     * indistinguishable from it while every matrix was square. */
+    for (uint32_t i = 0; i < cols; i++) {
+        glsl_emit_mul_f32(c, dst + i, v + 0u, m + i * rows);
+        for (uint32_t row = 1; row < rows; row++) {
+            glsl_emit_fmac_f32(c, dst + i, v + row, m + i * rows + row);
         }
     }
+}
+
+void glsl_emit_vec_mul_mat(glsl_code_t *c, uint32_t dst, uint32_t v, uint32_t m, uint32_t n) {
+    glsl_emit_vec_mul_mat_cr(c, dst, v, m, n, n);
 }

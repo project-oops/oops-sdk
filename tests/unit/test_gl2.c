@@ -58,6 +58,17 @@ static GLuint compiled(GLenum type, const char *src) {
     return sh;
 }
 
+/* Whether a shader compiles, without requiring that it does - which is what a test about a
+ * refusal needs, and the reason it is a second helper rather than a flag on the one above. */
+static GLboolean compiles(GLenum type, const char *src) {
+    GLuint sh = glCreateShader(type);
+    source_of(sh, src);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    return (GLboolean)(ok == GL_TRUE);
+}
+
 static const char *const VS_SIMPLE =
     "uniform mat4 mvp;\n"
     "attribute vec3 pos;\n"
@@ -5047,6 +5058,334 @@ static void test_gl2_matrix_by_matrix_and_by_scalar(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * **The non-square matrices, which are where one number stops being enough.**
+ *
+ * Every matrix site in this back end used to ask a single question - "what size is this matrix" -
+ * and use the answer as both the stride between columns and the number of columns. That is right
+ * for `mat2`, `mat3` and `mat4` and for nothing else, so the whole of GLSL 1.20's `matCxR` was
+ * unreachable and a shape mistake was undetectable: on a square matrix, reading the column count
+ * where the row count was meant is the same number.
+ *
+ * So the cases below are chosen so that **the shapes disagree**. A `mat2x3` has two columns of
+ * three, and the two products that involve it produce vectors of *different widths* - `m * vec2`
+ * is a `vec3` and `vec3 * m` is a `vec2`. A stride taken from the wrong side does not give a
+ * slightly wrong number here; it reads the next column, or past the end of the matrix.
+ *
+ * Every value is distinct and non-symmetric for the same reason as the square tests above: a
+ * transposed answer, a componentwise answer and the product are three different numbers.
+ */
+static void test_gl2_non_square_matrices(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **`mat2x3 * vec2` is a `vec3`**, and the vector's width matches the *columns*.
+     *
+     * m = mat2x3(1,2,3, 4,5,6): col0 = (1,2,3), col1 = (4,5,6).
+     * m * (1, 10) = col0 * 1 + col1 * 10 = (41, 52, 63).
+     *
+     * A stride of 2 instead of 3 would read col1 as starting at element 2, giving (3,4,5) - so
+     * the three channels come back as a different triple rather than as a near miss. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat2x3 m = mat2x3(1.0, 2.0, 3.0,  4.0, 5.0, 6.0);\n"
+                    "  vec3 p = m * vec2(1.0, 10.0);\n"
+                    "  gl_FragColor = vec4(p.x * 0.01, p.y * 0.01, p.z * 0.01, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.41f, 1e-5f);
+    ASSERT_NEAR(o[1], 0.52f, 1e-5f);
+    ASSERT_NEAR(o[2], 0.63f, 1e-5f);
+
+    /* **`vec3 * mat2x3` is a `vec2`**, the other way round: the vector matches the *rows* and
+     * the result has one entry per column. On a square matrix these two are the same widths and
+     * the distinction is invisible, which is why it went unnoticed.
+     *
+     * (1, 10, 100) * m = (dot with col0, dot with col1) = (1+20+300, 4+50+600) = (321, 654). */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat2x3 m = mat2x3(1.0, 2.0, 3.0,  4.0, 5.0, 6.0);\n"
+                    "  vec2 q = vec3(1.0, 10.0, 100.0) * m;\n"
+                    "  gl_FragColor = vec4(q.x * 0.001, q.y * 0.001, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.321f, 1e-5f);
+    ASSERT_NEAR(o[1], 0.654f, 1e-5f);
+
+    /* **`[]` gives a column, whose length is the row count.** `m[1]` is (4,5,6), so `m[1][2]` is
+     * 6 and `m[0][2]` is 3 - and an index of 2 is out of range, because there are two columns.
+     * A bound taken from the rows would accept `m[2]` and read off the end. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat2x3 m = mat2x3(1.0, 2.0, 3.0,  4.0, 5.0, 6.0);\n"
+                    "  gl_FragColor = vec4(m[1][2] * 0.1, m[0][2] * 0.1, m[1][0] * 0.1, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.6f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.3f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.4f, 1e-6f);
+
+    /* **`transpose` changes the shape, not just the indices**: a `mat2x3` transposes to a
+     * `mat3x2`, whose columns are two long. t = transpose(m) has col0 = (1,4), col1 = (2,5),
+     * col2 = (3,6) - so `t[2]` exists and `m[2]` does not. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat2x3 m = mat2x3(1.0, 2.0, 3.0,  4.0, 5.0, 6.0);\n"
+                    "  mat3x2 t = transpose(m);\n"
+                    "  gl_FragColor = vec4(t[0][1] * 0.1, t[2][0] * 0.1, t[1][1] * 0.1, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.4f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.3f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.5f, 1e-6f);
+
+    /* **`matCxR * matPxC` is a `matPxR`**, so the two operands of a product need not be the same
+     * shape and the result need be neither of them.
+     *
+     * A = mat3x2(1,2, 3,4, 5,6) is 2 rows by 3 columns; B = mat2x3(1,0,2, 0,1,3) is 3 by 2.
+     * A * B is 2x2 - a `mat2` - with col0 = (11, 14) and col1 = (18, 22). */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat3x2 a = mat3x2(1.0, 2.0,  3.0, 4.0,  5.0, 6.0);\n"
+                    "  mat2x3 b = mat2x3(1.0, 0.0, 2.0,  0.0, 1.0, 3.0);\n"
+                    "  mat2 p = a * b;\n"
+                    "  gl_FragColor = vec4(p[0][0] * 0.01, p[0][1] * 0.01, p[1][1] * 0.01, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.11f, 1e-5f);
+    ASSERT_NEAR(o[1], 0.14f, 1e-5f);
+    ASSERT_NEAR(o[2], 0.22f, 1e-5f);
+
+    /* **The same two matrices the other way round give a `mat3`**, which is the clearest thing
+     * a square-only back end cannot express: same operands, different shape, and the result is
+     * larger than either of them. B * A has col0 = (1,2,8), col1 = (3,4,18), col2 = (5,6,28). */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat3x2 a = mat3x2(1.0, 2.0,  3.0, 4.0,  5.0, 6.0);\n"
+                    "  mat2x3 b = mat2x3(1.0, 0.0, 2.0,  0.0, 1.0, 3.0);\n"
+                    "  mat3 q = b * a;\n"
+                    "  gl_FragColor = vec4(q[0][2] * 0.01, q[2][2] * 0.01, q[1][1] * 0.01, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.08f, 1e-5f);
+    ASSERT_NEAR(o[1], 0.28f, 1e-5f);
+    ASSERT_NEAR(o[2], 0.04f, 1e-5f);
+
+    /* **`outerProduct` of two different widths.** `outerProduct(vecR, vecC)` is a `matCxR`, so
+     * a `vec3` and a `vec2` give a `mat2x3`: col0 = (10,20,30), col1 = (20,40,60). */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat2x3 o = outerProduct(vec3(1.0, 2.0, 3.0), vec2(10.0, 20.0));\n"
+                    "  gl_FragColor = vec4(o[1][2] * 0.01, o[0][1] * 0.01, o[1][0] * 0.01, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.6f, 1e-5f);
+    ASSERT_NEAR(o[1], 0.2f, 1e-5f);
+    ASSERT_NEAR(o[2], 0.2f, 1e-5f);
+
+    /* **A scalar fills the diagonal, and the diagonal runs out at the shorter side.** `mat2x4`
+     * has two columns of four, so only two elements are on it: (0,0) and (1,1). Written as a
+     * stride of `n + 1` - which is how the square case reads - element 5 would be right by
+     * accident and element 10 would be past the end of the eight this matrix has. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat2x4 d = mat2x4(0.5);\n"
+                    "  gl_FragColor = vec4(d[0][0], d[1][1], d[1][0] + d[0][3] + d[1][3], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.5f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.0f, 1e-6f);
+
+    /* **`matNxN` is a spelling of `matN`**, not a seventh, eighth and ninth type. The language
+     * gives both names and they denote one type, so this has to assign without a conversion. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#version 120\n"
+                    "void main() {\n"
+                    "  mat3x3 a = mat3x3(2.0);\n"
+                    "  mat3 b = a;\n"
+                    "  gl_FragColor = vec4(b[1][1] * 0.25, b[1][0], b[2][2] * 0.25, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-6f);
+    ASSERT_NEAR(o[1], 0.0f, 1e-6f);
+    ASSERT_NEAR(o[2], 0.5f, 1e-6f);
+
+    glContextDestroy(ctx);
+}
+
+/*
+ * **The same shapes through the software reference**, which is a different program.
+ *
+ * Everything above goes through `gl_program_compile_fragment` and a gfx1030 simulator - the
+ * generator. The interpreter in `glsl_exec.c` is a second implementation of the same language
+ * and had the same one-number-per-matrix assumption in six places, and nothing that runs the
+ * compiled path can see any of them. So these draw, and read the pixel back.
+ *
+ * The values are the ones above divided down into the unit range, because a channel here is
+ * eight bits: what is being checked is that the two back ends agree about which element is
+ * where, which a wrong stride moves by whole components rather than by a rounding.
+ */
+static void test_gl2_non_square_matrices_run(void) {
+    gl2_target_t t = gl2_target();
+    static const char *const VS =
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n";
+
+    /* `mat2x3 * vec2 -> vec3`, the interpreter's own walk. m * (1, 10) = (41, 52, 63) as above,
+     * scaled to (0.41, 0.52, 0.63). */
+    {
+        const GLuint prog = linked_program(
+            VS,
+            "#version 120\n"
+            "void main() {\n"
+            "  mat2x3 m = mat2x3(1.0, 2.0, 3.0,  4.0, 5.0, 6.0);\n"
+            "  vec3 p = m * vec2(1.0, 10.0);\n"
+            "  gl_FragColor = vec4(p * 0.01, 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 100 && px_r(p) < 110); /* 0.41 */
+        ASSERT_TRUE(px_g(p) > 128 && px_g(p) < 138); /* 0.52 */
+        ASSERT_TRUE(px_b(p) > 156 && px_b(p) < 166); /* 0.63 */
+    }
+
+    /* `vec3 * mat2x3 -> vec2`, the other width. (321, 654) scaled to (0.321, 0.654). */
+    {
+        const GLuint prog = linked_program(
+            VS,
+            "#version 120\n"
+            "void main() {\n"
+            "  mat2x3 m = mat2x3(1.0, 2.0, 3.0,  4.0, 5.0, 6.0);\n"
+            "  vec2 q = vec3(1.0, 10.0, 100.0) * m;\n"
+            "  gl_FragColor = vec4(q * 0.001, 0.0, 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 77 && px_r(p) < 87);    /* 0.321 */
+        ASSERT_TRUE(px_g(p) > 162 && px_g(p) < 172);  /* 0.654 */
+        ASSERT_TRUE(px_b(p) < 8);
+    }
+
+    /* `matCxR * matPxC -> matPxR`, where the result is neither operand's shape: `mat2x3 *
+     * mat3x2` is a `mat3`, whose (row 2, col 2) is 28 - scaled to 0.28. The other two channels
+     * take (row 2, col 0) = 8 and (row 1, col 1) = 4. */
+    {
+        const GLuint prog = linked_program(
+            VS,
+            "#version 120\n"
+            "void main() {\n"
+            "  mat3x2 a = mat3x2(1.0, 2.0,  3.0, 4.0,  5.0, 6.0);\n"
+            "  mat2x3 b = mat2x3(1.0, 0.0, 2.0,  0.0, 1.0, 3.0);\n"
+            "  mat3 q = b * a;\n"
+            "  gl_FragColor = vec4(q[0][2] * 0.01, q[2][2] * 0.01, q[1][1] * 0.01, 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 16 && px_r(p) < 25);   /* 0.08 */
+        ASSERT_TRUE(px_g(p) > 67 && px_g(p) < 76);   /* 0.28 */
+        ASSERT_TRUE(px_b(p) > 6 && px_b(p) < 15);    /* 0.04 */
+    }
+
+    /* `transpose` of a `mat2x3` is a `mat3x2`, so `t[2]` exists. (t[0][1], t[2][0], t[1][1]) is
+     * (4, 3, 5), scaled to (0.4, 0.3, 0.5). */
+    {
+        const GLuint prog = linked_program(
+            VS,
+            "#version 120\n"
+            "void main() {\n"
+            "  mat2x3 m = mat2x3(1.0, 2.0, 3.0,  4.0, 5.0, 6.0);\n"
+            "  mat3x2 tr = transpose(m);\n"
+            "  gl_FragColor = vec4(tr[0][1] * 0.1, tr[2][0] * 0.1, tr[1][1] * 0.1, 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 97 && px_r(p) < 107);   /* 0.4 */
+        ASSERT_TRUE(px_g(p) > 71 && px_g(p) < 81);    /* 0.3 */
+        ASSERT_TRUE(px_b(p) > 123 && px_b(p) < 133);  /* 0.5 */
+    }
+
+    /* The diagonal constructor, which runs out at the shorter side. `mat2x4(0.5)` has 0.5 at
+     * (0,0) and (1,1) and zero everywhere else - eight elements, two of them on the diagonal. */
+    {
+        const GLuint prog = linked_program(
+            VS,
+            "#version 120\n"
+            "void main() {\n"
+            "  mat2x4 d = mat2x4(0.5);\n"
+            "  gl_FragColor = vec4(d[0][0], d[1][1], d[1][0] + d[0][3] + d[1][3], 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 123 && px_r(p) < 133);
+        ASSERT_TRUE(px_g(p) > 123 && px_g(p) < 133);
+        ASSERT_TRUE(px_b(p) < 8);
+    }
+
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
+/* **The non-square types are 1.20's, and a 1.10 shader is told so.**
+ *
+ * The negative control for the block above. Every one of those shaders says `#version 120`, and
+ * a front end that ignored the version would pass all of them while accepting a 1.10 shader that
+ * no other implementation would compile - which is the failure mode that makes a port build here
+ * and not anywhere else.
+ *
+ * Both ways in are checked, because they are separate paths: a declaration goes through the
+ * parser's type rule, and a constructor in an expression never does.
+ */
+static void test_gl2_non_square_matrices_are_refused_in_110(void) {
+    void *ctx = gl2_context();
+
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "void main() {\n"
+                       "  mat2x3 m = mat2x3(1.0);\n"
+                       "  gl_FragColor = vec4(m[0], 1.0);\n"
+                       "}\n"),
+              GL_FALSE);
+
+    /* No declaration anywhere - the type appears only in call position, which the parser reads
+     * as an identifier and hands to the semantic stage. */
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "void main() { gl_FragColor = vec4(mat2x3(1.0)[0], 1.0); }\n"),
+              GL_FALSE);
+
+    /* And the same two in 1.20, so the refusal above is the version and not the feature. */
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "#version 120\n"
+                       "void main() {\n"
+                       "  mat2x3 m = mat2x3(1.0);\n"
+                       "  gl_FragColor = vec4(m[0], 1.0);\n"
+                       "}\n"),
+              GL_TRUE);
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "#version 120\n"
+                       "void main() { gl_FragColor = vec4(mat2x3(1.0)[0], 1.0); }\n"),
+              GL_TRUE);
+
+    glContextDestroy(ctx);
+}
+
 /* **A local array is a run of registers**, indexed where the shader is compiled.
  *
  * There is no addressable memory behind one, so the index has to be known at compile time. The
@@ -5900,6 +6239,84 @@ static void test_gl2_compiled_matrix_uniform(void) {
     ASSERT_NEAR(o[0], 1.0f + 20.0f + 300.0f, 1e-3f);    /* 321 */
     ASSERT_NEAR(o[1], 2.0f + 40.0f + 600.0f, 1e-3f);    /* 642 */
     ASSERT_NEAR(o[2], 3.0f + 60.0f + 900.0f, 1e-3f);    /* 963 */
+
+    glUseProgram(0);
+    glContextDestroy(ctx);
+}
+
+/*
+ * **A non-square matrix uniform, set through GL 2.1's own entry point.**
+ *
+ * A `uniform mat2x3` that the shader can read is only half of it: without `glUniformMatrix2x3fv`
+ * the uniform links, reports a location, and cannot be written - so a port declaring one gets
+ * zeroes and draws black. The six commands and the six `GL_FLOAT_MAT*x*` enums are what makes
+ * the type reachable from outside the shader.
+ *
+ * **The command has to match the declared type and not the float count.** `mat2x3` and `mat3x2`
+ * are both six floats, so a check written on the count would let `glUniformMatrix3x2fv` set a
+ * `mat2x3` - and silently transpose it, which still draws.
+ */
+static void test_gl2_non_square_matrix_uniform(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    const GLuint prog = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "#version 120\n"
+        "uniform mat2x3 m;\n"
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  vec3 r = m * vec2(1.0, 10.0);\n"
+        "  gl_FragColor = vec4(r * 0.01, 1.0);\n"
+        "}\n");
+    ASSERT_TRUE(prog != 0);
+
+    /* The linker reports the type and the size the shader declared. A type of 0 here is the
+     * failure this test exists for: it links, and nothing can write it. */
+    {
+        GLint size = 0;
+        GLenum type = 0;
+        char name[32] = {0};
+        glGetActiveUniform(prog, 0, (GLsizei)sizeof(name), NULL, &size, &type, name);
+        ASSERT_EQ(type, (GLenum)GL_FLOAT_MAT2x3);
+        ASSERT_EQ(size, 1);
+    }
+
+    glUseProgram(prog);
+    const GLint loc = glGetUniformLocation(prog, "m");
+    ASSERT_TRUE(loc >= 0);
+
+    /* Column-major: the first three floats are column 0. m * (1, 10) = (41, 52, 63). */
+    const GLfloat m[6] = {1.0f, 2.0f, 3.0f,  4.0f, 5.0f, 6.0f};
+    glUniformMatrix2x3fv(loc, 1, GL_FALSE, m);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    compile_and_run_prog(ctx, prog, attr, o);
+    ASSERT_NEAR(o[0], 0.41f, 1e-4f);
+    ASSERT_NEAR(o[1], 0.52f, 1e-4f);
+    ASSERT_NEAR(o[2], 0.63f, 1e-4f);
+
+    /* **The other six-float command is refused**, and does not disturb the value. Both this and
+     * `glUniformMatrix3fv` carry a matrix; neither carries *this* matrix. */
+    const GLfloat wrong[6] = {9.0f, 9.0f, 9.0f, 9.0f, 9.0f, 9.0f};
+    glUniformMatrix3x2fv(loc, 1, GL_FALSE, wrong);
+    ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+    compile_and_run_prog(ctx, prog, attr, o);
+    ASSERT_NEAR(o[0], 0.41f, 1e-4f);
+
+    /* `transpose` reads the source as the *other* shape - three columns of two - and writes the
+     * `mat2x3` this uniform is. Passing the same six floats transposed must give the same
+     * matrix back, which is the only arrangement that does. */
+    const GLfloat t[6] = {1.0f, 4.0f,  2.0f, 5.0f,  3.0f, 6.0f};
+    glUniformMatrix2x3fv(loc, 1, GL_TRUE, t);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    compile_and_run_prog(ctx, prog, attr, o);
+    ASSERT_NEAR(o[0], 0.41f, 1e-4f);
+    ASSERT_NEAR(o[1], 0.52f, 1e-4f);
+    ASSERT_NEAR(o[2], 0.63f, 1e-4f);
 
     glUseProgram(0);
     glContextDestroy(ctx);
@@ -6954,6 +7371,9 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_front_facing_is_a_sign_not_a_flag);
     RUN_TEST(test_gl2_user_functions_are_inlined);
     RUN_TEST(test_gl2_matrix_by_matrix_and_by_scalar);
+    RUN_TEST(test_gl2_non_square_matrices);
+    RUN_TEST(test_gl2_non_square_matrices_run);
+    RUN_TEST(test_gl2_non_square_matrices_are_refused_in_110);
     RUN_TEST(test_gl2_local_arrays_are_indexed_where_the_shader_is_compiled);
     RUN_TEST(test_gl2_arrays_refuse_what_a_register_file_cannot_do);
     RUN_TEST(test_gl2_an_early_return_ends_the_function_and_nothing_else);
@@ -6968,6 +7388,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_glsl110_corners);
     RUN_TEST(test_gl2_compiled_early_return);
     RUN_TEST(test_gl2_compiled_matrix_uniform);
+    RUN_TEST(test_gl2_non_square_matrix_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);

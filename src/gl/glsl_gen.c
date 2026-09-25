@@ -180,6 +180,9 @@ static GLboolean is_float_family(glsl_type_t t) {
         case GLSL_TYPE_FLOAT:
         case GLSL_TYPE_VEC2: case GLSL_TYPE_VEC3: case GLSL_TYPE_VEC4:
         case GLSL_TYPE_MAT2: case GLSL_TYPE_MAT3: case GLSL_TYPE_MAT4:
+        case GLSL_TYPE_MAT2X3: case GLSL_TYPE_MAT2X4:
+        case GLSL_TYPE_MAT3X2: case GLSL_TYPE_MAT3X4:
+        case GLSL_TYPE_MAT4X2: case GLSL_TYPE_MAT4X3:
             return GL_TRUE;
         default:
             return GL_FALSE;
@@ -187,18 +190,12 @@ static GLboolean is_float_family(glsl_type_t t) {
 }
 
 static GLboolean is_matrix(glsl_type_t t) {
-    return (t == GLSL_TYPE_MAT2 || t == GLSL_TYPE_MAT3 || t == GLSL_TYPE_MAT4) ? GL_TRUE : GL_FALSE;
+    return glsl_type_matrix_cols(t) > 0 ? GL_TRUE : GL_FALSE;
 }
 
-/* The side of a square matrix, or 0 for anything else. */
-static int mat_dim(glsl_type_t t) {
-    switch (t) {
-        case GLSL_TYPE_MAT2: return 2;
-        case GLSL_TYPE_MAT3: return 3;
-        case GLSL_TYPE_MAT4: return 4;
-        default: return 0;
-    }
-}
+/* `matCxR`'s C and R. Both 0 for anything that is not a matrix, so a caller can ask first. */
+static int mat_cols(glsl_type_t t) { return glsl_type_matrix_cols(t); }
+static int mat_rows(glsl_type_t t) { return glsl_type_matrix_rows(t); }
 
 /*
  * **A bool is a float that is 0.0 or 1.0, in a register of its own.**
@@ -627,50 +624,64 @@ static glsl_value_t gen_binary(glsl_gen_t *g, int32_t node) {
     glsl_value_t b = gen_expr(g, n->b);
     if (is_bad(b)) return b;
 
-    /* **`m * v` and `v * m`, at every square size.** The encoder owns the column-major walk,
-     * and the two are separate calls because they are separate products: `v * m` is the one
-     * with the transpose, so it is a dot with each *column* rather than a sum over columns. A
-     * back end that folded them together would give the same answer twice and be right only
-     * for a symmetric matrix. */
+    /* **`m * v` and `v * m`, at every shape.** The encoder owns the column-major walk, and the
+     * two are separate calls because they are separate products: `v * m` is the one with the
+     * transpose, so it is a dot with each *column* rather than a sum over columns. A back end
+     * that folded them together would give the same answer twice and be right only for a
+     * symmetric matrix.
+     *
+     * Which side the vector's width has to match is the thing a square matrix hides. `matCxR *
+     * vec` consumes a `vecC` and produces a `vecR`; `vec * matCxR` consumes a `vecR` and
+     * produces a `vecC`. Those are the same number only when C == R, which is why this read as
+     * one rule for as long as there were only square matrices. */
     if (op == GLSL_TOK_STAR && is_matrix(lt) && !is_matrix(rt)) {
-        const int dim = mat_dim(lt);
-        if (b.count == dim) {
-            glsl_value_t mv = gen_alloc(g, dim, node);
+        const int cols = mat_cols(lt), rows = mat_rows(lt);
+        if (b.count == cols) {
+            glsl_value_t mv = gen_alloc(g, rows, node);
             if (is_bad(mv)) return mv;
-            glsl_emit_mat_mul_vec(g->code, mv.base, a.base, b.base, (uint32_t)dim);
+            glsl_emit_mat_mul_vec_cr(g->code, mv.base, a.base, b.base, (uint32_t)cols,
+                                     (uint32_t)rows);
             return mv;
         }
     }
     if (op == GLSL_TOK_STAR && !is_matrix(lt) && is_matrix(rt)) {
-        const int dim = mat_dim(rt);
-        if (a.count == dim) {
-            glsl_value_t vm = gen_alloc(g, dim, node);
+        const int cols = mat_cols(rt), rows = mat_rows(rt);
+        if (a.count == rows) {
+            glsl_value_t vm = gen_alloc(g, cols, node);
             if (is_bad(vm)) return vm;
-            glsl_emit_vec_mul_mat(g->code, vm.base, a.base, b.base, (uint32_t)dim);
+            glsl_emit_vec_mul_mat_cr(g->code, vm.base, a.base, b.base, (uint32_t)cols,
+                                     (uint32_t)rows);
             return vm;
         }
     }
-    /* **`m * m` is n of the products above, one per column of the right operand.**
+    /* **`m * m` is one of the products above per column of the right operand.**
      *
      * Column `c` of the result is `A` times column `c` of `B`, which is the definition and also
      * exactly what `glsl_exec.c` computes - so the two paths agree by construction rather than
      * by arithmetic that happens to match. Column-major storage is what makes it that simple:
-     * a column of `B` is already a run of `n` registers, so it is handed to the matrix-vector
+     * a column of `B` is already a run of registers, so it is handed to the matrix-vector
      * emitter as it stands with no gather.
+     *
+     * The shape rule is `matCxR * matPxC -> matPxR`: the right operand's *rows* have to match the
+     * left operand's *columns*, and the result takes its columns from the right and its rows from
+     * the left. Each column of `B` is a `vecC`, which is exactly what `A` consumes.
      *
      * The destination is freshly allocated, so it overlaps neither operand - which the emitter
      * requires of the vector it reads, because it writes the first component of a result before
      * reading the last of its input. */
     if (op == GLSL_TOK_STAR && is_matrix(lt) && is_matrix(rt)) {
-        const int dim = mat_dim(lt);
-        if (mat_dim(rt) != dim) {
-            return gen_fail(g, "both matrices in a product have to be the same size", node);
+        const int a_cols = mat_cols(lt), a_rows = mat_rows(lt);
+        const int b_cols = mat_cols(rt), b_rows = mat_rows(rt);
+        if (b_rows != a_cols) {
+            return gen_fail(g, "the right matrix in a product needs as many rows as the left one "
+                               "has columns", node);
         }
-        glsl_value_t mm = gen_alloc(g, dim * dim, node);
+        glsl_value_t mm = gen_alloc(g, b_cols * a_rows, node);
         if (is_bad(mm)) return mm;
-        for (int c = 0; c < dim; c++) {
-            glsl_emit_mat_mul_vec(g->code, mm.base + (uint32_t)(c * dim), a.base,
-                                  b.base + (uint32_t)(c * dim), (uint32_t)dim);
+        for (int c = 0; c < b_cols; c++) {
+            glsl_emit_mat_mul_vec_cr(g->code, mm.base + (uint32_t)(c * a_rows), a.base,
+                                     b.base + (uint32_t)(c * b_rows), (uint32_t)a_cols,
+                                     (uint32_t)a_rows);
         }
         return mm;
     }
@@ -851,6 +862,12 @@ static glsl_type_t constructor_target(const glsl_node_t *callee) {
         {"float", GLSL_TYPE_FLOAT},
         {"vec2", GLSL_TYPE_VEC2}, {"vec3", GLSL_TYPE_VEC3}, {"vec4", GLSL_TYPE_VEC4},
         {"mat2", GLSL_TYPE_MAT2}, {"mat3", GLSL_TYPE_MAT3}, {"mat4", GLSL_TYPE_MAT4},
+        /* `matNxN` is a spelling of `matN`, not a type of its own, so it constructs the same
+         * thing. The six genuinely non-square shapes follow. */
+        {"mat2x2", GLSL_TYPE_MAT2}, {"mat3x3", GLSL_TYPE_MAT3}, {"mat4x4", GLSL_TYPE_MAT4},
+        {"mat2x3", GLSL_TYPE_MAT2X3}, {"mat2x4", GLSL_TYPE_MAT2X4},
+        {"mat3x2", GLSL_TYPE_MAT3X2}, {"mat3x4", GLSL_TYPE_MAT3X4},
+        {"mat4x2", GLSL_TYPE_MAT4X2}, {"mat4x3", GLSL_TYPE_MAT4X3},
         {"bool", GLSL_TYPE_BOOL}, {"int", GLSL_TYPE_INT},
         /* **The integer and boolean vectors**, which are the same run of registers a `vecN` is:
          * an `int` and a `bool` are the float they already are here, so `ivec2(1, 2)` builds the
@@ -941,14 +958,20 @@ static glsl_value_t gen_construct(glsl_gen_t *g, glsl_type_t target, int32_t fir
         glsl_value_t s = gen_expr(g, first_arg);
         if (is_bad(s)) return s;
         if (is_matrix(target)) {
-            /* The diagonal takes the scalar, everything else is zero. Column-major, so the
-             * diagonal of an n x n matrix is at 0, n+1, 2n+2 ... */
-            int n = target == GLSL_TYPE_MAT2 ? 2 : (target == GLSL_TYPE_MAT3 ? 3 : 4);
-            for (int i = 0; i < needed; i++) {
-                if (i % (n + 1) == 0) {
-                    glsl_emit_mov(g->code, out.base + (uint32_t)i, s.base);
-                } else {
-                    glsl_emit_mov_imm(g->code, out.base + (uint32_t)i, 0u);
+            /* The diagonal takes the scalar, everything else is zero. Column-major, so element
+             * `(col, row)` is at `col * rows + row` and the diagonal is `col == row` - which
+             * runs out at the shorter side, so a `mat2x4` gets two diagonal entries and six
+             * zeroes. Writing it as a stride of `n + 1` is the same walk only while the matrix
+             * is square. */
+            const int cols = mat_cols(target), rows = mat_rows(target);
+            for (int col = 0; col < cols; col++) {
+                for (int row = 0; row < rows; row++) {
+                    const uint32_t at = out.base + (uint32_t)(col * rows + row);
+                    if (col == row) {
+                        glsl_emit_mov(g->code, at, s.base);
+                    } else {
+                        glsl_emit_mov_imm(g->code, at, 0u);
+                    }
                 }
             }
         } else {
@@ -1056,9 +1079,12 @@ static GLboolean gen_index_of(glsl_gen_t *g, int32_t node, glsl_value_t *out) {
     const glsl_type_t bt = glsl_type_of(g->sema, n->a);
     glsl_value_t bv = gen_expr(g, n->a);
     if (is_bad(bv)) return GL_FALSE;
-    const int dim = mat_dim(bt);
-    const int width = (dim > 0) ? dim : 1;
-    const int count = (dim > 0) ? dim : bv.count;
+    /* A `matCxR` has C columns of R registers each, so the *stride* is the row count and the
+     * *bound* is the column count. They are the same number only for a square matrix, and
+     * reading one for the other on a `mat2x4` walks off the end of the second column. */
+    const int cols = mat_cols(bt), rows = mat_rows(bt);
+    const int width = (cols > 0) ? rows : 1;
+    const int count = (cols > 0) ? cols : bv.count;
     if (count < 2) {
         (void)gen_fail(g, "this is not something `[]` indexes: an array, a matrix and a vector "
                           "are", node);
@@ -2273,19 +2299,22 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
         return d;
     }
 
-    /* Element `(col, row)` is `v[col * dim + row]`, so the transpose swaps the two indices.
-     * **The type decides, not the width**: a `vec4` and a `mat2` are both four registers, and
-     * transposing a vector is not a thing the language has. */
+    /* Element `(col, row)` is `v[col * rows + row]`, so the transpose swaps the two indices -
+     * and, for a non-square matrix, the shape too: `matCxR` transposes to `matRxC`, whose
+     * columns are `C` long. The destination's stride is therefore the *source's* column count.
+     * **The type decides, not the width**: a `vec4`, a `mat2` and a `mat2x2` are all four
+     * registers, and transposing a vector is not a thing the language has. */
     if (nm_is(nm, len, "transpose")) {
         if (argc != 1) return gen_fail(g, "wrong number of arguments", node);
-        const int dim = mat_dim(glsl_type_of(g->sema, first_arg));
-        if (dim == 0) return gen_fail(g, "transpose takes a square matrix", node);
-        glsl_value_t d = gen_alloc(g, dim * dim, node);
+        const glsl_type_t mt = glsl_type_of(g->sema, first_arg);
+        const int cols = mat_cols(mt), rows = mat_rows(mt);
+        if (cols == 0) return gen_fail(g, "transpose takes a matrix", node);
+        glsl_value_t d = gen_alloc(g, cols * rows, node);
         if (is_bad(d)) return d;
-        for (int col = 0; col < dim; col++) {
-            for (int row = 0; row < dim; row++) {
-                glsl_emit_mov(g->code, d.base + (uint32_t)(col * dim + row),
-                              arg[0].base + (uint32_t)(row * dim + col));
+        for (int col = 0; col < rows; col++) {
+            for (int row = 0; row < cols; row++) {
+                glsl_emit_mov(g->code, d.base + (uint32_t)(col * cols + row),
+                              arg[0].base + (uint32_t)(row * rows + col));
             }
         }
         return d;
@@ -2293,18 +2322,21 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee, int32_
 
     /* **`outerProduct(c, r)` has `c` down the columns and `r` across them**: element
      * `(col, row)` is `c[row] * r[col]`. The other way round is the transpose of the answer,
-     * which is a different matrix and still draws - so the order is the whole of it. */
+     * which is a different matrix and still draws - so the order is the whole of it.
+     *
+     * The widths need not agree: `outerProduct(vecR, vecC)` is a `matCxR`, and only when the two
+     * happen to be the same width is the answer square. */
     if (nm_is(nm, len, "outerProduct")) {
         if (argc != 2) return gen_fail(g, "wrong number of arguments", node);
-        const int n = arg[0].count;
-        if (n != arg[1].count || n < 2 || n > 4) {
-            return gen_fail(g, "outerProduct takes two vectors of the same width", node);
+        const int rows = arg[0].count, cols = arg[1].count;
+        if (rows < 2 || rows > 4 || cols < 2 || cols > 4) {
+            return gen_fail(g, "outerProduct takes two vectors", node);
         }
-        glsl_value_t d = gen_alloc(g, n * n, node);
+        glsl_value_t d = gen_alloc(g, cols * rows, node);
         if (is_bad(d)) return d;
-        for (int col = 0; col < n; col++) {
-            for (int row = 0; row < n; row++) {
-                glsl_emit_mul_f32(g->code, d.base + (uint32_t)(col * n + row),
+        for (int col = 0; col < cols; col++) {
+            for (int row = 0; row < rows; row++) {
+                glsl_emit_mul_f32(g->code, d.base + (uint32_t)(col * rows + row),
                                   arg[0].base + (uint32_t)row, arg[1].base + (uint32_t)col);
             }
         }
