@@ -135,12 +135,19 @@ void oops_kprintf_level(oops_log_level_t level, const char *tag, const char *fmt
 const char *oops_test_get_last_klog(void);
 
 /**
- * Enable an unbuffered crash-resilient disk sink for oops_klog / oops_log.
+ * Enable a crash-resilient disk sink for oops_klog / oops_log.
  *
  * Probes candidate storage locations (USB storage /mnt/usb0, /mnt/usb1, then
- * internal persistent /data/<app_name>) and opens unbuffered write streams.
- * Every subsequent oops_klog / oops_log call is written immediately via direct
- * syscall so that telemetry survives an unhandled kernel fault or GPU hang.
+ * internal persistent /data/<app_name>) and opens write streams.
+ *
+ * **WARN and worse go to disk immediately**, by direct syscall, so that the lines explaining a
+ * fault survive it. INFO and below are batched and written when the buffer fills, when a warning
+ * forces it out, on `oops_log_flush_disk_sink`, or on close.
+ *
+ * That split is deliberate. The sink used to issue one write syscall per line, on top of the
+ * `klog` and `stdout` writes every line already costs - so a program logging inside its frame loop
+ * paid four syscalls a line and the instrument set the frame rate. A game measured `0fps` with the
+ * sink on. Nothing that explains a crash is batched; only the routine chatter is.
  *
  * app_name: Application identifier (NULL defaults to oops_log_get_app_id()).
  * archive_timestamped: If non-zero, also writes an archived log-<timestamp>.txt.
@@ -154,6 +161,15 @@ int oops_log_enable_disk_sink(const char *app_name, int archive_timestamped);
  * Returns NULL if disk sink is not enabled.
  */
 const char *oops_log_get_disk_sink_path(void);
+
+/**
+ * Write out whatever the disk sink has buffered.
+ *
+ * The sink batches `INFO` and below and flushes `WARN` and worse immediately, so that a per-frame
+ * log line costs no syscall while the lines before a fault still reach disk. Call this for a
+ * barrier of your own - before something that may hang the GPU, say. Harmless with no sink open.
+ */
+void oops_log_flush_disk_sink(void);
 
 /**
  * Flush and close the active disk sink.

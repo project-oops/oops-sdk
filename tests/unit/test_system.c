@@ -191,6 +191,22 @@ static void test_system_disk_sink(void) {
   oops_klog("DISK", "first disk telemetry record");
   oops_kprintf("DISK", "number=%d", 12345);
 
+  /* **Buffered below WARN, and that is the contract now.** An INFO line costs no syscall - the
+   * sink used to issue one per line, which made the instrument set the frame rate for anything
+   * logging inside a frame. Nothing is on disk yet. */
+  ASSERT_EQ(oops_fs_exists(path), 1);
+  ASSERT_EQ(oops_fs_file_size(path), 0);
+
+  /* An explicit flush writes what is held. */
+  oops_log_flush_disk_sink();
+  ASSERT_TRUE(oops_fs_file_size(path) > 0);
+
+  /* **A warning flushes itself**, which is the half that keeps the sink worth having: the lines
+   * that precede a fault reach disk before it does. */
+  const int64_t before_warn = oops_fs_file_size(path);
+  oops_log_warn("DISK", "a warning flushes without being asked");
+  ASSERT_TRUE(oops_fs_file_size(path) > before_warn);
+
   /* Verify file exists and has content */
   ASSERT_EQ(oops_fs_exists(path), 1);
   ASSERT_TRUE(oops_fs_file_size(path) > 0);

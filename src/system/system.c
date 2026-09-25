@@ -602,6 +602,71 @@ const char *oops_log_get_app_id(void) {
 static oops_log_level_t s_log_level = OOPS_LOG_INFO;
 static int s_disk_sink_fd = -1;
 static int s_disk_sink_ts_fd = -1;
+
+/* ---------------------------------------------------------------------------
+ * The disk sink's buffer.
+ *
+ * **Why it is buffered at all.** The sink used to issue one `write` syscall per line, on top of
+ * the `SYS_klog` and `SYS_write` that every line already costs. A game logging at debug then pays
+ * four syscalls a line, and the back end logs a line per flip - so the instrument, not the work,
+ * sets the frame rate. Craft's own HUD read `0fps` with the sink on; Neverball measured the same
+ * shape earlier, where `gl=debug` was 174ms of a 200ms frame.
+ *
+ * **Why it is still crash-resilient, which is the reason the sink exists.** Anything at `WARN` or
+ * worse flushes immediately, so the lines that precede a fault are on disk before it happens. Only
+ * `INFO` and below - the per-frame chatter - waits for the buffer to fill. A hard fault can
+ * therefore lose some trailing routine lines and cannot lose the error that explains it.
+ *
+ * `oops_log_flush_disk_sink` is public for a caller that wants a barrier before something risky.
+ * --------------------------------------------------------------------------- */
+#define OOPS_DISK_SINK_BUF 4096
+static char s_disk_sink_buf[OOPS_DISK_SINK_BUF];
+static size_t s_disk_sink_len = 0;
+
+static void oops_disk_sink_raw(int fd, const char *data, size_t len) {
+  if (fd < 0 || len == 0u) {
+    return;
+  }
+#ifndef OOPS_HOST_BUILD
+  (void)sys_call(SYS_write, fd, (long)data, (long)len, 0, 0, 0);
+#else
+  (void)write(fd, data, len);
+#endif
+}
+
+void oops_log_flush_disk_sink(void) {
+  if (s_disk_sink_len == 0u) {
+    return;
+  }
+  oops_disk_sink_raw(s_disk_sink_fd, s_disk_sink_buf, s_disk_sink_len);
+  oops_disk_sink_raw(s_disk_sink_ts_fd, s_disk_sink_buf, s_disk_sink_len);
+  s_disk_sink_len = 0u;
+}
+
+/* Append one already-formatted line, flushing when it will not fit or when it is severe enough
+ * that losing it would defeat the point. A line longer than the whole buffer is written straight
+ * through rather than truncated. */
+static void oops_disk_sink_put(oops_log_level_t level, const char *line, size_t len) {
+  if (s_disk_sink_fd < 0 && s_disk_sink_ts_fd < 0) {
+    return;
+  }
+  if (len >= sizeof(s_disk_sink_buf)) {
+    oops_log_flush_disk_sink();
+    oops_disk_sink_raw(s_disk_sink_fd, line, len);
+    oops_disk_sink_raw(s_disk_sink_ts_fd, line, len);
+    return;
+  }
+  if (s_disk_sink_len + len > sizeof(s_disk_sink_buf)) {
+    oops_log_flush_disk_sink();
+  }
+  for (size_t i = 0; i < len; i++) {
+    s_disk_sink_buf[s_disk_sink_len + i] = line[i];
+  }
+  s_disk_sink_len += len;
+  if (level <= OOPS_LOG_WARN) {
+    oops_log_flush_disk_sink();
+  }
+}
 static char s_disk_sink_path[128] = {0};
 
 void oops_log_set_level(oops_log_level_t level) {
@@ -878,24 +943,14 @@ void oops_klog_level(oops_log_level_t level, const char *tag, const char *msg) {
 #ifndef OOPS_HOST_BUILD
   (void)sys_call(SYS_klog, 7, (long)buf, 0, 0, 0, 0);
   (void)sys_call(SYS_write, 1, (long)buf, (long)pos, 0, 0, 0);
-  if (s_disk_sink_fd >= 0) {
-    (void)sys_call(SYS_write, s_disk_sink_fd, (long)buf, (long)pos, 0, 0, 0);
-  }
-  if (s_disk_sink_ts_fd >= 0) {
-    (void)sys_call(SYS_write, s_disk_sink_ts_fd, (long)buf, (long)pos, 0, 0, 0);
-  }
+  oops_disk_sink_put(level, buf, pos);
 #else
   for (size_t i = 0; i < sizeof(s_host_last_klog) - 1 && buf[i] != '\0'; i++) {
     s_host_last_klog[i] = buf[i];
     s_host_last_klog[i + 1] = '\0';
   }
   fputs(buf, stderr);
-  if (s_disk_sink_fd >= 0) {
-    (void)write(s_disk_sink_fd, buf, pos);
-  }
-  if (s_disk_sink_ts_fd >= 0) {
-    (void)write(s_disk_sink_ts_fd, buf, pos);
-  }
+  oops_disk_sink_put(level, buf, pos);
 #endif
 }
 
@@ -1023,6 +1078,8 @@ const char *oops_log_get_disk_sink_path(void) {
 }
 
 void oops_log_close_disk_sink(void) {
+  /* Anything still buffered belongs on disk before the descriptor goes away. */
+  oops_log_flush_disk_sink();
   if (s_disk_sink_fd >= 0) {
 #ifndef OOPS_HOST_BUILD
     (void)sys_call(SYS_close, s_disk_sink_fd, 0, 0, 0, 0, 0);
