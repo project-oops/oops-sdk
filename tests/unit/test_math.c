@@ -199,6 +199,78 @@ static void test_math_ldexp_and_frexp_round_trip(void) {
   ASSERT_FLOAT_NEAR(nearbyint(2.5), 2.0, 0.0);
 }
 
+
+/*
+ * The double kernels, against the host's own libm.
+ *
+ * **The first case is the one that matters and it is not about accuracy.** Extreme Tux Racer's
+ * quaternion interpolation asks `acos` for an argument a hair below 1 - upstream guards the
+ * singularity at 1e-13, which is generous for a double and invisible to a float. A float-backed
+ * `acos` returns a flat 0 there, so upstream's `sin(acos(x))` divisor is 0, the interpolation is
+ * `0/0`, and a NaN quaternion reaches the course lookup and faults two layers down. The assertion
+ * below fails on the old implementation and passes on this one.
+ *
+ * The rest compare against `<math.h>` because the host build has a real libm and a hand-written
+ * kernel is exactly the kind of code that is wrong in the third digit of the fifth case.
+ */
+static void test_math_double_precision(void) {
+  /* The case that cost a day on hardware. */
+  const double near_one = 1.0 - 1e-13;
+  ASSERT_TRUE(oops_acos(near_one) > 1e-7);
+  ASSERT_TRUE(fabs(oops_acos(near_one) - acos(near_one)) < 1e-9);
+  ASSERT_TRUE(oops_sin(oops_acos(near_one)) > 1e-7); /* the divisor that was zero */
+
+  /* sqrt is exact, so it is compared exactly. */
+  ASSERT_TRUE(oops_sqrt(2.0) == sqrt(2.0));
+  ASSERT_TRUE(oops_sqrt(1e300) == sqrt(1e300));
+  ASSERT_TRUE(oops_sqrt(0.0) == 0.0);
+
+  static const double xs[] = {-8.75,   -3.0,  -1.0, -0.5,  -1e-9, 0.0,  1e-9,
+                              0.3,     0.5,   1.0,  1.5,   2.5,   3.0,  6.28318,
+                              12.5664, 100.0, 1e4,  1e6};
+  for (unsigned i = 0; i < sizeof(xs) / sizeof(xs[0]); i++) {
+    const double x = xs[i];
+    ASSERT_TRUE(fabs(oops_sin(x) - sin(x)) < 1e-12);
+    ASSERT_TRUE(fabs(oops_cos(x) - cos(x)) < 1e-12);
+    ASSERT_TRUE(fabs(oops_atan(x) - atan(x)) < 1e-12);
+    if (x > 0.0) {
+      ASSERT_TRUE(fabs(oops_ln(x) - log(x)) < 1e-12);
+      ASSERT_TRUE(fabs(oops_sqrt(x) - sqrt(x)) < 1e-12);
+    }
+    if (x > -20.0 && x < 20.0) {
+      ASSERT_TRUE(fabs(oops_exp(x) - exp(x)) < 1e-9 * (exp(x) + 1.0));
+    }
+  }
+
+  /* asin/acos across the range, including both endpoints. */
+  for (int i = -20; i <= 20; i++) {
+    const double x = (double)i / 20.0;
+    ASSERT_TRUE(fabs(oops_asin(x) - asin(x)) < 1e-12);
+    ASSERT_TRUE(fabs(oops_acos(x) - acos(x)) < 1e-12);
+  }
+
+  /* atan2 in all four quadrants and on the axes. */
+  static const double q[] = {-3.0, -1.0, 0.0, 1.0, 3.0};
+  for (unsigned a = 0; a < 5; a++) {
+    for (unsigned b = 0; b < 5; b++) {
+      if (q[a] == 0.0 && q[b] == 0.0) continue;
+      ASSERT_TRUE(fabs(oops_atan2(q[a], q[b]) - atan2(q[a], q[b])) < 1e-12);
+    }
+  }
+
+  ASSERT_TRUE(fabs(oops_pow(2.0, 10.0) - 1024.0) < 1e-9);
+  ASSERT_TRUE(fabs(oops_pow(10.0, -3.0) - 0.001) < 1e-15);
+  ASSERT_TRUE(fabs(oops_pow(-2.0, 3.0) + 8.0) < 1e-9);
+  ASSERT_TRUE(fabs(oops_fmod(7.5, 2.0) - 1.5) < 1e-15);
+  ASSERT_TRUE(fabs(oops_fmod(-7.5, 2.0) + 1.5) < 1e-15);
+  ASSERT_TRUE(oops_floor(-2.5) == -3.0 && oops_ceil(-2.5) == -2.0);
+
+  /* A NaN in is a NaN out rather than a plausible number: every guard downstream tests for it. */
+  const double nan_in = 0.0 / 0.0;
+  ASSERT_TRUE(oops_acos(nan_in) != oops_acos(nan_in));
+  ASSERT_TRUE(oops_sin(nan_in) != oops_sin(nan_in));
+}
+
 void run_unit_tests_math(void) {
   TEST_SUITE_BEGIN("Freestanding Math Library");
   RUN_TEST(test_math_ldexp_and_frexp_round_trip);
@@ -207,6 +279,7 @@ void run_unit_tests_math(void) {
   RUN_TEST(test_math_exp_log_pow);
   RUN_TEST(test_math_vector3);
   RUN_TEST(test_math_matrix4);
+  RUN_TEST(test_math_double_precision);
   TEST_SUITE_END();
 }
 

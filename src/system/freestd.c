@@ -68,6 +68,27 @@ char *obs_strncpy(char *dest, const char *src, size_t n) {
   return dest;
 }
 
+char *obs_strstr(const char *haystack, const char *needle) {
+  if (!haystack || !needle) {
+    return NULL;
+  }
+  if (*needle == '\0') {
+    return (char *)(uintptr_t)haystack;
+  }
+  for (; *haystack != '\0'; haystack++) {
+    const char *h = haystack;
+    const char *n = needle;
+    while (*h != '\0' && *n != '\0' && *h == *n) {
+      h++;
+      n++;
+    }
+    if (*n == '\0') {
+      return (char *)(uintptr_t)haystack;
+    }
+  }
+  return NULL;
+}
+
 size_t obs_format_u64(char *dest, uint64_t value) {
   char scratch[OBS_NUM_MAX];
   size_t n = 0;
@@ -292,6 +313,89 @@ static inline void snprintf_putc(snprintf_ctx_t *ctx, char c) {
   ctx->written++;
 }
 
+/*
+ * **`%f` and its family, written out by hand because this target has no libc to borrow one from.**
+ *
+ * Fixed-point, which is what a diagnostic wants: `%e` and `%g` are routed here too rather than
+ * left unimplemented, because an unimplemented conversion does not just print badly - it leaves
+ * the argument on the stack and corrupts every conversion after it in the same call.
+ *
+ * The value is split into an integer part and `prec` fractional digits, rounded half-away-from-zero
+ * by adding half an ulp of the last printed digit before the split. Magnitudes too large for
+ * `uint64_t` print as `<big>` rather than silently wrapping: a port that hits that has a bug
+ * upstream of here, and a wrapped number would hide it.
+ *
+ * Returns the length written into `out`, which the caller then pads to `width`.
+ */
+static size_t snprintf_fixed(char *out, size_t cap, double v, int prec, int plus_sign,
+                             int space_sign) {
+  size_t n = 0;
+  int neg = 0;
+
+  if (prec < 0) prec = 6;
+  if (prec > 17) prec = 17;
+
+  /* NaN is the only value not equal to itself, and it must be named rather than computed with:
+     every comparison below would be false and it would print as 0. */
+  if (v != v) {
+    const char *s = "nan";
+    while (*s && n + 1 < cap) out[n++] = *s++;
+    return n;
+  }
+  if (v < 0.0) {
+    neg = 1;
+    v = -v;
+  }
+  if (neg && n + 1 < cap) out[n++] = '-';
+  else if (plus_sign && n + 1 < cap) out[n++] = '+';
+  else if (space_sign && n + 1 < cap) out[n++] = ' ';
+
+  /* Infinity: larger than the largest finite double. */
+  if (v > 1.7976931348623157e308) {
+    const char *s = "inf";
+    while (*s && n + 1 < cap) out[n++] = *s++;
+    return n;
+  }
+
+  double round_at = 0.5;
+  for (int p = 0; p < prec; p++) round_at /= 10.0;
+  v += round_at;
+
+  if (v >= 18446744073709551615.0) {
+    const char *s = "<big>";
+    while (*s && n + 1 < cap) out[n++] = *s++;
+    return n;
+  }
+
+  uint64_t whole = (uint64_t)v;
+  double frac = v - (double)whole;
+
+  char digits[24];
+  size_t dn = 0;
+  if (whole == 0) {
+    digits[dn++] = '0';
+  } else {
+    while (whole > 0 && dn < sizeof(digits)) {
+      digits[dn++] = (char)('0' + (int)(whole % 10u));
+      whole /= 10u;
+    }
+  }
+  while (dn > 0 && n + 1 < cap) out[n++] = digits[--dn];
+
+  if (prec > 0 && n + 1 < cap) {
+    out[n++] = '.';
+    for (int p = 0; p < prec && n + 1 < cap; p++) {
+      frac *= 10.0;
+      int d = (int)frac;
+      if (d < 0) d = 0;
+      if (d > 9) d = 9;
+      out[n++] = (char)('0' + d);
+      frac -= (double)d;
+    }
+  }
+  return n;
+}
+
 static void snprintf_puts(snprintf_ctx_t *ctx, const char *s, size_t len, int left_align, size_t width, char pad_char) {
   if (!left_align && width > len) {
     for (size_t i = 0; i < width - len; i++) {
@@ -361,6 +465,30 @@ int oops_vsnprintf(char *buf, size_t size, const char *fmt, va_list args) {
     while (fmt[i] >= '0' && fmt[i] <= '9') {
       width = width * 10 + (size_t)(fmt[i] - '0');
       i++;
+    }
+
+    /* Parse precision.
+     *
+     * **It is parsed even where it is not used**, because the alternative is what this function
+     * used to do with `%f`: fall through to "unknown specifier", print the text verbatim, and -
+     * the part that does the damage - *not* consume the argument. Every conversion after it then
+     * reads the wrong vararg. A `printf("w=%f h=%f n=%d", w, h, n)` did not merely fail to print
+     * two doubles; it printed a plausible and entirely wrong `n`. Extreme Tux Racer's course
+     * loader was diagnosed against such a line on 2026-09-24. */
+    int precision = -1; /* -1: unspecified */
+    if (fmt[i] == '.') {
+      i++;
+      precision = 0;
+      if (fmt[i] == '*') {
+        const int p = va_arg(args, int);
+        precision = (p < 0) ? -1 : p;
+        i++;
+      } else {
+        while (fmt[i] >= '0' && fmt[i] <= '9') {
+          precision = precision * 10 + (fmt[i] - '0');
+          i++;
+        }
+      }
     }
 
     /* Parse length modifier */
@@ -542,8 +670,20 @@ int oops_vsnprintf(char *buf, size_t size, const char *fmt, va_list args) {
           for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
         }
       }
+    } else if (spec == 'f' || spec == 'F' || spec == 'e' || spec == 'E' || spec == 'g' ||
+               spec == 'G') {
+      /* A float argument is promoted to `double` whatever the conversion, and `%Lf` is not
+         supported here - the length modifier is parsed and ignored, which is better than reading
+         the wrong number of bytes off the stack. */
+      const double dval = va_arg(args, double);
+      len = snprintf_fixed(scratch, sizeof(scratch), dval, precision, plus_sign, space_sign);
+      snprintf_puts(&ctx, scratch, len, left_align, width, zero_pad ? '0' : ' ');
     } else {
-      /* Unknown specifier: emit verbatim */
+      /* Unknown specifier: emit verbatim.
+       *
+       * **This branch cannot consume the argument**, because it does not know its size - which is
+       * exactly why every conversion this function understands has to be implemented rather than
+       * left to fall through here. See the note on precision above. */
       snprintf_putc(&ctx, '%');
       snprintf_putc(&ctx, spec);
     }

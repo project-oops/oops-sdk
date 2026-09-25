@@ -16,6 +16,13 @@ static void test_freestd_strings(void) {
   char dest[16];
   obs_strncpy(dest, "test", sizeof(dest));
   ASSERT_EQ(obs_strcmp(dest, "test"), 0);
+
+  ASSERT_TRUE(obs_strstr(NULL, "abc") == NULL);
+  ASSERT_TRUE(obs_strstr("abc", NULL) == NULL);
+  ASSERT_EQ(obs_strstr("hello world", "world"), &"hello world"[6]);
+  ASSERT_EQ(obs_strstr("hello world", ""), "hello world");
+  ASSERT_TRUE(obs_strstr("hello world", "xyz") == NULL);
+  ASSERT_TRUE(obs_strstr("short", "longer string") == NULL);
 }
 
 static void test_freestd_formatting(void) {
@@ -88,6 +95,48 @@ static void test_freestd_snprintf(void) {
   /* Null buffer gives required size */
   ret = oops_snprintf(NULL, 0, "Test %d", 100);
   ASSERT_EQ(ret, 8);
+}
+
+/*
+ * `%f` and the precision field.
+ *
+ * **The last assertion is the one that matters**, and it is not about floats. An unimplemented
+ * conversion used to print itself verbatim *and leave its argument on the stack*, so every
+ * conversion after it read the wrong vararg: `printf("w=%f n=%d", w, n)` printed a plausible and
+ * entirely wrong `n`. That is how a course loader was misdiagnosed on 2026-09-24 - the instrument
+ * lied about a value it had never been given. A conversion this function does not implement is
+ * therefore a bug in every line that follows it, not only its own.
+ */
+static void test_freestd_snprintf_floats(void) {
+  char buf[128];
+
+  oops_snprintf(buf, sizeof(buf), "%f", 1.5);
+  ASSERT_STR_EQ(buf, "1.500000");
+
+  oops_snprintf(buf, sizeof(buf), "%.2f", 3.14159);
+  ASSERT_STR_EQ(buf, "3.14");
+
+  oops_snprintf(buf, sizeof(buf), "%.0f", 2.0);
+  ASSERT_STR_EQ(buf, "2");
+
+  oops_snprintf(buf, sizeof(buf), "%.3f", -0.5);
+  ASSERT_STR_EQ(buf, "-0.500");
+
+  oops_snprintf(buf, sizeof(buf), "%.1f", 0.05);
+  ASSERT_STR_EQ(buf, "0.1"); /* rounds half away from zero */
+
+  oops_snprintf(buf, sizeof(buf), "%8.2f|%-8.2f|", 1.0, 1.0);
+  ASSERT_STR_EQ(buf, "    1.00|1.00    |");
+
+  /* Not a number, which compares false against everything including itself. Printing it as 0
+     would be the kind of quiet wrong answer this whole file exists to catch. */
+  double zero = 0.0;
+  oops_snprintf(buf, sizeof(buf), "%f", zero / zero);
+  ASSERT_STR_EQ(buf, "nan");
+
+  /* The argument after a float conversion still lands in the right place. */
+  oops_snprintf(buf, sizeof(buf), "w=%.1f h=%.1f n=%d", 90.0, 520.0, 61);
+  ASSERT_STR_EQ(buf, "w=90.0 h=520.0 n=61");
 }
 
 /* The set functions and the tokeniser, which are `<libc/string.h>`'s `strspn`, `strcspn`,
@@ -460,6 +509,7 @@ void run_unit_tests_freestd(void) {
   RUN_TEST(test_freestd_formatting);
   RUN_TEST(test_freestd_nid);
   RUN_TEST(test_freestd_snprintf);
+  RUN_TEST(test_freestd_snprintf_floats);
   RUN_TEST(test_freestd_sets_and_tokens);
   RUN_TEST(test_freestd_qsort_and_bsearch);
   RUN_TEST(test_freestd_sscanf);

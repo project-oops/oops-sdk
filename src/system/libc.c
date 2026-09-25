@@ -77,23 +77,36 @@ float truncf(float x) { return (x >= 0.0f) ? oops_floorf(x) : oops_ceilf(x); }
 float fminf(float a, float b) { return (a < b) ? a : b; }
 float fmaxf(float a, float b) { return (a > b) ? a : b; }
 
-/* The double forms are the float ones widened - see <libc/math.h>. */
-double sqrt(double x) { return (double)oops_sqrtf((float)x); }
+/*
+ * **The double forms are real doubles, and used not to be.**
+ *
+ * Each of these was the float kernel with the argument narrowed and the result widened, which
+ * costs nothing a shader notices and breaks anything that reasons about its own precision: it
+ * moves the smallest representable step from 1e-16 to 6e-8. Extreme Tux Racer's quaternion
+ * interpolation guards a singularity at `1 - cosphi > 1e-13` and then divides by
+ * `sin(acos(cosphi))` - correct for doubles, and through a float `acos` the argument rounds to
+ * exactly 1, `acos` returns 0, and the divide is `0/0`. The NaN reached the course lookup and
+ * faulted two layers below. `<oops/math.h>` carries the full account.
+ *
+ * `hypot`, `round` and `trunc` stay float-backed: nothing has needed their last digits, and this
+ * note is here so the next person converting one knows the others are deliberate.
+ */
+double sqrt(double x) { return oops_sqrt(x); }
 double fabs(double x) { return (x < 0.0) ? -x : x; }
-double floor(double x) { return (double)oops_floorf((float)x); }
-double ceil(double x) { return (double)oops_ceilf((float)x); }
-double fmod(double x, double y) { return (double)oops_fmodf((float)x, (float)y); }
-double sin(double x) { return (double)oops_sinf((float)x); }
-double cos(double x) { return (double)oops_cosf((float)x); }
-double tan(double x) { return (double)oops_tanf((float)x); }
-double asin(double x) { return (double)asinf((float)x); }
-double acos(double x) { return (double)acosf((float)x); }
-double atan(double x) { return (double)atanf((float)x); }
-double atan2(double y, double x) { return (double)oops_atan2f((float)y, (float)x); }
-double exp(double x) { return (double)oops_expf((float)x); }
-double log(double x) { return (double)oops_logf((float)x); }
-double log10(double x) { return (double)log10f((float)x); }
-double pow(double base, double exp_) { return (double)oops_powf((float)base, (float)exp_); }
+double floor(double x) { return oops_floor(x); }
+double ceil(double x) { return oops_ceil(x); }
+double fmod(double x, double y) { return oops_fmod(x, y); }
+double sin(double x) { return oops_sin(x); }
+double cos(double x) { return oops_cos(x); }
+double tan(double x) { return oops_tan(x); }
+double asin(double x) { return oops_asin(x); }
+double acos(double x) { return oops_acos(x); }
+double atan(double x) { return oops_atan(x); }
+double atan2(double y, double x) { return oops_atan2(y, x); }
+double exp(double x) { return oops_exp(x); }
+double log(double x) { return oops_ln(x); }
+double log10(double x) { return oops_ln(x) * 0.43429448190325182765; }
+double pow(double base, double exp_) { return oops_pow(base, exp_); }
 double hypot(double x, double y) { return (double)hypotf((float)x, (float)y); }
 double round(double x) { return (double)roundf((float)x); }
 double trunc(double x) { return (double)truncf((float)x); }
@@ -285,13 +298,7 @@ char *strrchr(const char *s, int c) {
 }
 
 char *strstr(const char *haystack, const char *needle) {
-    if (!*needle) return (char *)(size_t)haystack;
-    for (; *haystack; haystack++) {
-        const char *h = haystack, *n = needle;
-        while (*h && *n && *h == *n) { h++; n++; }
-        if (!*n) return (char *)(size_t)haystack;
-    }
-    return (char *)0;
+    return obs_strstr(haystack, needle);
 }
 
 /* The "C" locale's collating sequence is byte order, so this is `strcmp` - see `<libc/string.h>`

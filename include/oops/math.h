@@ -36,6 +36,40 @@ static inline float oops_lerpf(float a, float b, float t) {
   return a + t * (b - a);
 }
 
+/*
+ * **Double-precision scalar math, and why it is not the float set widened.**
+ *
+ * `<libc/math.h>`'s `sin`, `acos` and their siblings used to be one line each: cast the argument
+ * to `float`, call the float kernel, widen the result. That is right for a shader-adjacent
+ * calculation and wrong for anything that reasons about its own precision, because it silently
+ * moves the smallest representable step from 1e-16 to 6e-8.
+ *
+ * Extreme Tux Racer is the measurement. Its quaternion interpolation guards a singularity the way
+ * a double program should - `if (1.0 - cosphi > 1e-13)`, then divide by `sin(acos(cosphi))`. On a
+ * double `acos`, `cosphi = 1 - 1e-13` gives `4.5e-7` and the division is ordinary. Through a float
+ * `acos` the argument *rounds to exactly 1*, `acos` returns 0, and the division is `0/0`. Every
+ * frame in which the player's orientation barely changed produced a NaN quaternion, which reached
+ * the course lookup as a NaN position and faulted two layers later. Nothing in between was wrong.
+ *
+ * So these are real double kernels - argument reduction and polynomials carrying the full 53 bits
+ * - and `<libc/math.h>`'s double entry points are one line each on top of them. `tests/unit/
+ * test_math.c` checks them against the host's own libm, including the near-1 case above.
+ */
+double oops_sqrt(double x);
+double oops_sin(double x);
+double oops_cos(double x);
+double oops_tan(double x);
+double oops_atan(double x);
+double oops_atan2(double y, double x);
+double oops_asin(double x);
+double oops_acos(double x);
+double oops_exp(double x);
+double oops_ln(double x);
+double oops_pow(double base, double exp_);
+double oops_floor(double x);
+double oops_ceil(double x);
+double oops_fmod(double x, double y);
+
 float oops_floorf(float x);
 float oops_ceilf(float x);
 float oops_fmodf(float x, float y);
