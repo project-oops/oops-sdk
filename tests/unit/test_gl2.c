@@ -5345,6 +5345,52 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
  * register is a colour, not an error - so each case puts a different member in a different
  * channel and a layout off by one comes back rotated.
  */
+/*
+ * **A matrix uniform in a compiled shader**, which is what SuperTux's `mat3 fragcoord2uv` needs.
+ *
+ * The generator already stored a matrix as consecutive registers and already multiplied one by a
+ * vector at any dimension; the gap was that `type_from_gl` had no case for a matrix uniform, so
+ * it was refused before any of that ran. This checks the part that was never exercised: the pool
+ * the linker lays a matrix out in, and the offsets the compiler copies it from.
+ *
+ * **The matrix is deliberately not symmetric.** `m * v` and `transpose(m) * v` differ only for a
+ * matrix that is not, so a symmetric one would pass whichever convention the copy used - and
+ * column-major against row-major is exactly the mistake available here. The expected values are
+ * worked out for column-major, which is what `glUniformMatrix3fv` writes without `transpose`.
+ */
+static void test_gl2_compiled_matrix_uniform(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    const GLuint prog = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "uniform mat3 m;\n"
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  vec3 r = m * vec3(1.0, 2.0, 3.0);\n"
+        "  gl_FragColor = vec4(r, 1.0);\n"
+        "}\n");
+    ASSERT_TRUE(prog != 0);
+    glUseProgram(prog);
+    /* Column-major: the first three floats are column 0. */
+    const GLfloat m[9] = {1.0f, 2.0f, 3.0f,
+                          10.0f, 20.0f, 30.0f,
+                          100.0f, 200.0f, 300.0f};
+    glUniformMatrix3fv(glGetUniformLocation(prog, "m"), 1, GL_FALSE, m);
+
+    compile_and_run_prog(ctx, prog, attr, o);
+    /* row i = m[0][i]*1 + m[1][i]*2 + m[2][i]*3 */
+    ASSERT_NEAR(o[0], 1.0f + 20.0f + 300.0f, 1e-3f);    /* 321 */
+    ASSERT_NEAR(o[1], 2.0f + 40.0f + 600.0f, 1e-3f);    /* 642 */
+    ASSERT_NEAR(o[2], 3.0f + 60.0f + 900.0f, 1e-3f);    /* 963 */
+
+    glUseProgram(0);
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_structs(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -6399,6 +6445,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);
+    RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);

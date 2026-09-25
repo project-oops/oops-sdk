@@ -131,6 +131,18 @@ static glsl_type_t type_from_gl(GLenum t) {
          * stays `int` here, and the generator has no verified instruction for it. */
         case GL_INT: return GLSL_TYPE_INT;
         case GL_BOOL: return GLSL_TYPE_BOOL;
+        /* **A matrix uniform, which needed nothing but this.** The generator already stores a
+         * matrix as `n*n` consecutive registers column-major and already multiplies one by a
+         * vector at any `n` - `glsl_emit_mat_mul_vec` takes the dimension as an argument and
+         * `glsl_emit_mat4_mul_vec4` is a wrapper on it - so the whole of the gap was that this
+         * function had no case and the uniform was refused before reaching any of it.
+         *
+         * The value pool holds a matrix column-major, which is the order `glUniformMatrix*fv`
+         * writes without `transpose` and the order the registers are read in, so the copy into
+         * VGPRs below stays one float at a time with no reordering. */
+        case GL_FLOAT_MAT2: return GLSL_TYPE_MAT2;
+        case GL_FLOAT_MAT3: return GLSL_TYPE_MAT3;
+        case GL_FLOAT_MAT4: return GLSL_TYPE_MAT4;
         default: return GLSL_TYPE_ERROR;
     }
 }
@@ -441,11 +453,12 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         if (gl_type_is_sampler(u->type)) continue; /* its descriptors are in the scalar file */
         const glsl_type_t t = type_from_gl(u->type);
         if (t == GLSL_TYPE_ERROR || u->size != 1) {
-            /* A matrix or an array: the first would need a wider `type_from_gl`, the second an
-             * index this back end cannot generate. Named rather than silently skipped, because
-             * a skipped uniform reads as zero and draws. */
+            /* An array, which would need an index this back end cannot generate, or a type
+             * `type_from_gl` does not carry. Named rather than silently skipped, because a
+             * skipped uniform reads as zero and draws. */
             oops_snprintf(log, log_size,
-                          "uniform '%s' is not a float or a float vector, and the compiled "
+                          "uniform '%s' is not a float, a float vector or a matrix, and the "
+                          "compiled "
                           "path carries nothing else yet", u->name);
             ok = GL_FALSE;
             break;
