@@ -64,6 +64,18 @@ void srand(unsigned int seed);
 void exit(int status);
 void abort(void);
 
+/* **`atexit` accepts and never runs** (2026-09-25): `exit` above parks rather than returning
+ * through a C runtime, so there is no moment at which a registered handler could run. Refusing
+ * would be worse - SuperTux's `atexit(TTF_Quit)` would report failure for a cleanup that is
+ * pointless when the system tears the process down anyway. A program with cleanup that matters
+ * must call it itself, as the note on `exit` says. */
+int atexit(void (*fn)(void));
+
+/* **`system` has no shell to run** (2026-09-25). `system(NULL)` answers 0 - "no command processor
+ * is available", which is how C lets a caller ask - and any command answers -1 with `ENOSYS`.
+ * SuperTux's "open this folder" button and Squirrel's `system()` builtin both reach it. */
+int system(const char *command);
+
 /*
  * **Sorting and searching** (2026-09-20). `qsort` is here because depth-sorting transparent
  * geometry back to front is *the* GL 1.x way to draw it - there is no order-independent

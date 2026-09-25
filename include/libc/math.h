@@ -75,6 +75,11 @@ double asin(double x);
 double acos(double x);
 double atan(double x);
 double atan2(double y, double x);
+/* **`atan2l`, the one long-double function libc++ needs by name** (2026-09-25): `<complex>`'s
+ * `std::arg(long double)` calls it, so any file that includes `<complex>` stops compiling without
+ * it - OpenAL Soft's frequency-domain effects were the first. Computed in double: an 80-bit
+ * argument loses its last eleven bits, which no caller here can see in an angle. */
+long double atan2l(long double y, long double x);
 double exp(double x);
 double log(double x);
 double log10(double x);

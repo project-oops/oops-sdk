@@ -107,6 +107,7 @@ double exp(double x) { return oops_exp(x); }
 double log(double x) { return oops_ln(x); }
 double log10(double x) { return oops_ln(x) * 0.43429448190325182765; }
 double pow(double base, double exp_) { return oops_pow(base, exp_); }
+long double atan2l(long double y, long double x) { return oops_atan2((double)y, (double)x); }
 double hypot(double x, double y) { return (double)hypotf((float)x, (float)y); }
 double round(double x) { return (double)roundf((float)x); }
 double trunc(double x) { return (double)truncf((float)x); }
@@ -717,6 +718,18 @@ int *oops_errno_location(void) {
 static FILE s_stdout = {-1, 0, 0, 1, -1, 0, 0u, 0u, 1};
 static FILE s_stderr = {-1, 0, 0, 2, -1, 0, 0u, 0u, 1};
 static FILE s_stdin = {-1, 1, 0, 0, -1, 0, 0u, 0u, 1}; /* nothing to read; at EOF from the start */
+/* See `<stdlib.h>`: nothing ever runs these, so nothing is kept. */
+int atexit(void (*fn)(void)) {
+    (void)fn;
+    return 0;
+}
+
+int system(const char *command) {
+    if (command == NULL) return 0;
+    errno = ENOSYS;
+    return -1;
+}
+
 FILE *stdout = &s_stdout;
 FILE *stderr = &s_stderr;
 FILE *stdin = &s_stdin;
