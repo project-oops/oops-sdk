@@ -1034,7 +1034,7 @@ a histogram to read.
 whether the harness ran; `refused-compile-switch.frag` uses a word GLSL 1.10 reserves, and if it
 ever starts compiling then either the dialect changed or the script stopped looking.
 
-It found seven real gaps in its first three runs, none reachable from any port's shaders:
+It found nine real gaps in its first four runs, none reachable from any port's shaders:
 
 - **an array as a struct member** (`struct S { float w[3]; }`), which GLSL 1.10 4.1.9 allows and
   the semantic stage refused for indexing something that is neither a vector nor a matrix. The
@@ -1085,6 +1085,23 @@ It found seven real gaps in its first three runs, none reachable from any port's
   parameter is - so a body writing `w[0]` leaves the caller's array alone. `out` and `inout`
   arrays stay refused, and for the reason above: copying one back needs the argument to be a
   place, and 5.8 does not make a whole array one.
+- **the built-in constants** (7.4) - `gl_MaxTextureUnits` and the rest - which were not declared
+  at all, so a shader reading one was told "use of an undeclared name". **Every value is the
+  constant the matching `glGetIntegerv` answers with**, because that is the point of them: a
+  program sizes an array from the API and a shader sizes a loop from the constant, and nothing
+  but a shared definition makes the two agree. They are `const int`, so both back ends fold a use
+  into a literal and one may be an array's length.
+
+  `gl_MaxDrawBuffers` is the exception and is refused with a sentence rather than given a number.
+  GLSL declares `gl_FragData[gl_MaxDrawBuffers]`, so the constant and that array's length are
+  meant to be one fact, and here they are not: `GL_MAX_DRAW_BUFFERS` answers 2 for the front and
+  back surfaces, which both receive the same fragment colour, while the fragment stage exports one
+  target and `gl_FragData` has one element. Either could be made to agree with the other, and
+  which is a design decision about what a draw buffer means for a double-buffered window - so a
+  shader asking is told that instead of being handed a number that disagrees with something.
+- **`gl_` is reserved** (3.7), and a shader could declare a name beginning with it. The generator
+  tripped over the collision for a name it happened to have a built-in for; anything else went
+  through. Now the semantic stage refuses the declaration, and the parameter list too.
 
 The survey has been wrong three times, each time about the corpus rather than the compiler -
 reading a shader's stage off its file extension, pairing every fragment shader with one fixed

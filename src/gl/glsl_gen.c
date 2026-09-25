@@ -166,6 +166,13 @@ static GLboolean const_of(const glsl_gen_t *g, int32_t node, double *out) {
                 return GL_TRUE;
             }
         }
+        /* A built-in constant, after the declared names so a shader that shadows one gets its
+         * own. They are `const int` (7.4), so they are exactly what this is for. */
+        int bi = 0;
+        if (glsl_builtin_const_int(n->text, n->length, &bi)) {
+            *out = (double)bi;
+            return GL_TRUE;
+        }
     }
     return GL_FALSE;
 }
@@ -2861,8 +2868,22 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
         }
         case GLSL_NODE_IDENTIFIER: {
             glsl_gen_var_t *v = gen_find(g, n->text, n->length);
-            if (!v) return gen_fail(g, "this name has no register: only locals declared in this "
-                                       "body are generated so far", node);
+            if (!v) {
+                /* **A built-in constant is a number, so it becomes one here** rather than a
+                 * register the prologue had to declare. `gl_MaxDrawBuffers` and its relatives
+                 * are `const int` in GLSL 7.4 and their values are this implementation's own
+                 * limits; `const_of` answers for them too, so one may also be an array's length
+                 * or a loop's bound. */
+                int bi = 0;
+                if (glsl_builtin_const_int(n->text, n->length, &bi)) {
+                    glsl_value_t out = gen_alloc(g, 1, node);
+                    if (is_bad(out)) return out;
+                    glsl_emit_mov_imm(g->code, out.base, float_bits((float)bi));
+                    return out;
+                }
+                return gen_fail(g, "this name has no register: only locals declared in this "
+                                   "body are generated so far", node);
+            }
             if (v->array_size > 0) {
                 return gen_fail(g, "an array is used an element at a time here; the language "
                                    "has no array-valued expressions either", node);

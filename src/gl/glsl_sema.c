@@ -392,6 +392,16 @@ GLboolean glsl_declare(glsl_sema_t *s, const char *name, size_t len, glsl_type_t
     return GL_TRUE;
 }
 
+/* A `const int` with a known value: an array's length may be one, and so may a loop's bound.
+ * GLSL 7.4's built-in constants come in this way. */
+GLboolean glsl_declare_const_int(glsl_sema_t *s, const char *name, size_t len, int value) {
+    if (!glsl_declare(s, name, len, GLSL_TYPE_INT, GL_FALSE)) return GL_FALSE;
+    s->symbols[s->count - 1].qualifier = GLSL_TOK_KW_CONST;
+    s->symbols[s->count - 1].has_const_int = GL_TRUE;
+    s->symbols[s->count - 1].const_int = value;
+    return GL_TRUE;
+}
+
 GLboolean glsl_declare_array(glsl_sema_t *s, const char *name, size_t len, glsl_type_t type,
                              int count, glsl_token_type_t qualifier) {
     if (!glsl_declare(s, name, len, type, GL_FALSE)) return GL_FALSE;
@@ -1263,9 +1273,23 @@ static GLboolean check_struct_def(glsl_sema_t *s, int32_t d) {
     return GL_TRUE;
 }
 
+/* **`gl_` is reserved** (1.10, 3.7): a shader may not declare a name beginning with it, whether
+ * or not this implementation happens to have a built-in of that name. Checked at the shader's own
+ * declarations rather than inside `glsl_declare`, because that is what the built-in tables use to
+ * put the real ones in. */
+static GLboolean reserved_name(glsl_sema_t *s, const char *name, size_t len, int32_t node) {
+    if (len >= 3u && name[0] == 'g' && name[1] == 'l' && name[2] == '_') {
+        sema_fail(s, "a name beginning with `gl_` is reserved and a shader may not declare one",
+                  node);
+        return GL_TRUE;
+    }
+    return GL_FALSE;
+}
+
 static GLboolean check_declarator(glsl_sema_t *s, int32_t d) {
     const glsl_node_t *n = &s->ast->nodes[d];
     glsl_type_t t = node_declared_type(s, n);
+    if (reserved_name(s, n->text, n->length, d)) return GL_FALSE;
     if (t == GLSL_TYPE_ERROR) {
         sema_fail(s, "declaration of an unknown type", d);
         return GL_FALSE;
@@ -1557,6 +1581,10 @@ GLboolean glsl_check_unit(glsl_sema_t *s, int32_t unit) {
         for (int32_t p = n->b; p != GLSL_NO_NODE; p = s->ast->nodes[p].sibling) {
             const glsl_node_t *pn = &s->ast->nodes[p];
             if (pn->length == 0u) continue; /* unnamed parameter in a definition: nothing to bind */
+            if (reserved_name(s, pn->text, pn->length, p)) {
+                glsl_scope_pop(s);
+                return GL_FALSE;
+            }
             glsl_type_t pt = node_declared_type(s, pn);
             /* **A parameter may be an array** (1.10, 6.1), and it binds exactly as a local array
              * does: the symbol carries the element type and the length, and indexing is the only

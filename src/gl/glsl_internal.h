@@ -553,6 +553,9 @@ GLboolean glsl_declare(glsl_sema_t *s, const char *name, size_t len, glsl_type_t
  * plain variable, so a caller building a table does not need two calls. */
 GLboolean glsl_declare_array(glsl_sema_t *s, const char *name, size_t len, glsl_type_t type,
                              int count, glsl_token_type_t qualifier);
+/* The same, for a `const int` whose value is known - which an array's length and a loop's bound
+ * may both be. GLSL 7.4's built-in constants come in this way. */
+GLboolean glsl_declare_const_int(glsl_sema_t *s, const char *name, size_t len, int value);
 
 /* -------------------------------------------------------------------------
  * The built-in library
@@ -597,6 +600,11 @@ GLboolean glsl_unit_discards(const glsl_unit_t *u);
  * knows about. What turns "use of an undeclared name" - which reads as a typo - into a sentence
  * naming the feature that is missing. */
 const char *glsl_builtin_refusal(const char *name, size_t len);
+/* **The value of a built-in constant** (7.4), or false for any other name. Both back ends ask,
+ * so `gl_MaxDrawBuffers` becomes a literal in each rather than a register neither declared - and
+ * every value is the constant the matching `glGetIntegerv` answers with, so the shading language
+ * and the API cannot be told different numbers. */
+GLboolean glsl_builtin_const_int(const char *name, size_t len, int *out);
 /* -------------------------------------------------------------------------
  * The back end: RDNA2 instruction encoding
  *

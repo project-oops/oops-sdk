@@ -6906,6 +6906,116 @@ static void test_gl2_compiled_spec_corners(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * **The built-in constants** (1.10, 7.4), and that they are the numbers the API reports.
+ *
+ * That is the whole point of them: a program sizes an array from `glGetIntegerv` and a shader
+ * sizes a loop from the constant, and the two have to agree. Nothing but a shared definition
+ * makes them, so this asks both and compares - which is a test that can fail if someone adds a
+ * limit to one table and not the other.
+ *
+ * They fold: a use costs no register, because the value is known when the shader is compiled.
+ * `const_of` answers for them too, which is what lets one be an array's length.
+ */
+static void test_gl2_builtin_constants(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **Read from the API, then from a shader, and compare.** Written this way round rather than
+     * against literals so that changing a limit does not need this test changed too - what is
+     * asserted is that the two paths say the same thing. */
+    GLint api_units = 0, api_attribs = 0, api_images = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_UNITS, &api_units);
+    glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &api_attribs);
+    glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &api_images);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_TRUE(api_units > 0 && api_attribs > 0 && api_images > 0);
+
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(float(gl_MaxTextureUnits) * 0.01,\n"
+                    "                      float(gl_MaxVertexAttribs) * 0.01,\n"
+                    "                      float(gl_MaxTextureImageUnits) * 0.01, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], (float)api_units * 0.01f, 2e-3f);
+    ASSERT_NEAR(o[1], (float)api_attribs * 0.01f, 2e-3f);
+    ASSERT_NEAR(o[2], (float)api_images * 0.01f, 2e-3f);
+
+    /* **One as an array's length and a loop's bound**, which is what GLSL 4.1.9 means by an
+     * integral constant expression - and needs the generator to fold the name, not just to have
+     * a register holding it. Two elements written and read back in reverse. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  vec2 offs[gl_MaxTextureCoords];\n"
+                    "  int i;\n"
+                    "  for (i = 0; i < gl_MaxTextureCoords; i++) {\n"
+                    "    offs[i] = vec2(float(i) * 0.25 + 0.25);\n"
+                    "  }\n"
+                    "  gl_FragColor = vec4(offs[1].x, offs[0].y, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 2e-3f);
+    ASSERT_NEAR(o[1], 0.25f, 2e-3f);
+
+    /* **A shader may not redeclare one**, which is GLSL 1.10 3.7's rule about every name
+     * beginning with `gl_` and not something about these constants in particular. Worth an arm
+     * because the back ends look a constant up *after* the declared names - the safe order, and
+     * one that would quietly prefer a shader's own name if the language allowed it to have one. */
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "void main() {\n"
+                       "  const int gl_MaxTextureUnits = 7;\n"
+                       "  gl_FragColor = vec4(float(gl_MaxTextureUnits), 0.0, 0.0, 1.0);\n"
+                       "}\n"),
+              GL_FALSE);
+
+    /* **`gl_MaxDrawBuffers` is refused, and says why.** GLSL declares
+     * `gl_FragData[gl_MaxDrawBuffers]`, so the constant and that array's length are meant to be
+     * one fact - and here they are not: the API answers 2 for the front and back surfaces while
+     * the fragment stage exports one target. Handing the shader either number makes it disagree
+     * with something, so it is told instead. */
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "void main() { gl_FragColor = vec4(float(gl_MaxDrawBuffers)); }\n"),
+              GL_FALSE);
+    {
+        const GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+        source_of(sh, "void main() { gl_FragColor = vec4(float(gl_MaxDrawBuffers)); }\n");
+        glCompileShader(sh);
+        char log[256] = {0};
+        glGetShaderInfoLog(sh, (GLsizei)sizeof(log), NULL, log);
+        /* The diagnostic names the disagreement rather than the word, so its author is not sent
+         * to check their spelling. */
+        ASSERT_TRUE(strstr(log, "no settled value") != NULL);
+    }
+
+    glContextDestroy(ctx);
+}
+
+/* And through the software reference, which looks them up in its own identifier path. */
+static void test_gl2_builtin_constants_run(void) {
+    gl2_target_t t = gl2_target();
+    const GLuint prog = linked_program(
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+        "void main() {\n"
+        "  vec2 offs[gl_MaxTextureCoords];\n"
+        "  int i;\n"
+        "  for (i = 0; i < gl_MaxTextureCoords; i++) { offs[i] = vec2(float(i) * 0.5 + 0.25); }\n"
+        "  gl_FragColor = vec4(offs[0].x, offs[1].x, float(gl_MaxTextureUnits) * 0.25, 1.0);\n"
+        "}\n");
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(prog);
+    draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+    const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+    ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);    /* 0.25 */
+    ASSERT_TRUE(px_g(p) > 185 && px_g(p) < 200);  /* 0.75 */
+    ASSERT_TRUE(px_b(p) > 120 && px_b(p) < 136);  /* 2 * 0.25 */
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 /* The same three through the software reference, which is the other implementation of all of
  * it - see the note on the two harnesses. The preprocessor is shared, so the macro case is here
  * to say the whole pipeline agrees rather than to test a second copy of it. */
@@ -8092,6 +8202,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_struct_arrays_and_equality_run);
     RUN_TEST(test_gl2_compiled_spec_corners);
     RUN_TEST(test_gl2_spec_corners_run);
+    RUN_TEST(test_gl2_builtin_constants);
+    RUN_TEST(test_gl2_builtin_constants_run);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);
     RUN_TEST(test_gl2_compiled_swizzle_writes_land_where_they_are_named);

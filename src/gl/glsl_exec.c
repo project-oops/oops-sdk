@@ -1248,7 +1248,20 @@ static exec_val_t eval(exec_t *e, int32_t node) {
 
         case GLSL_NODE_IDENTIFIER: {
             exec_var_t *v = lookup(e, n->text, n->length);
-            if (!v) { fail(e, "a name with no value"); return val_zero(GLSL_TYPE_ERROR); }
+            if (!v) {
+                /* **A built-in constant is a number** (7.4), not a variable with storage - and
+                 * its value is the constant the matching `glGetIntegerv` answers with, so this
+                 * path and the API cannot say different things. Asked after the lookup, so a
+                 * shader that shadows one gets its own. */
+                int bi = 0;
+                if (glsl_builtin_const_int(n->text, n->length, &bi)) {
+                    exec_val_t c = val_zero(GLSL_TYPE_INT);
+                    c.v[0] = (float)bi;
+                    return c;
+                }
+                fail(e, "a name with no value");
+                return val_zero(GLSL_TYPE_ERROR);
+            }
             exec_val_t out = val_zero(v->type);
             if (v->kind == VAR_VARY_IN) {
                 const float *block = e->vary[e->which] ? e->vary[e->which] : e->vary[0];

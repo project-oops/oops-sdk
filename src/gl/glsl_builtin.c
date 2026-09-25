@@ -553,6 +553,40 @@ static const bi_var_t BUILTIN_FRAGMENT[] = {
     {"gl_FragData",    GLSL_TYPE_VEC4, 1, GLSL_TOK_EOF},
 };
 
+/*
+ * **The built-in constants** (1.10, 7.4), which are this implementation's own limits and not the
+ * specification's minima. Every value comes from the constant the matching `glGetIntegerv`
+ * answers with, so a shader and the API cannot be told different numbers - which is the whole
+ * hazard here: a program that sizes an array from `glGet` and a shader that sizes a loop from the
+ * constant have to agree, and nothing but a shared definition makes them.
+ *
+ * They are `const int`, so the semantic pass records a value and both back ends fold a use into a
+ * literal rather than spending a register on a number that is known. That is also what lets one
+ * appear as an array's length, which GLSL 4.1.9 requires of an integral constant expression.
+ */
+typedef struct { const char *name; int value; } bi_const_t;
+
+static const bi_const_t BUILTIN_CONSTS[] = {
+    {"gl_MaxLights", OOPS_GL_LIGHT_COUNT},
+    {"gl_MaxClipPlanes", OOPS_GL_CLIP_PLANE_COUNT},
+    {"gl_MaxTextureUnits", OOPS_GL_MAX_TEXTURE_UNITS},
+    /* The fixed-function stage count, because `gl_TexCoord[]` is a fixed-function array - the
+     * same answer `GL_MAX_TEXTURE_COORDS` gives and not the sampler count. */
+    {"gl_MaxTextureCoords", OOPS_GL_MAX_TEXTURE_UNITS},
+    {"gl_MaxVertexAttribs", OOPS_GL_MAX_VERTEX_ATTRIBS},
+    {"gl_MaxVertexUniformComponents", OOPS_GL_MAX_PROGRAM_UNIFORMS * 4},
+    {"gl_MaxVaryingFloats", OOPS_GL_MAX_VARYING_FLOATS},
+    /* **Zero, which is legal and is true**: the vertex stage on this hardware is not wired to
+     * the texture pipe, and saying otherwise sends a shader down a path that samples nothing. */
+    {"gl_MaxVertexTextureImageUnits", 0},
+    {"gl_MaxCombinedTextureImageUnits", OOPS_GL_MAX_TEXTURE_IMAGE_UNITS},
+    {"gl_MaxTextureImageUnits", OOPS_GL_MAX_TEXTURE_IMAGE_UNITS},
+    {"gl_MaxFragmentUniformComponents", OOPS_GL_MAX_PROGRAM_UNIFORMS * 4},
+    /* **`gl_MaxDrawBuffers` is deliberately absent**, and the refusal table says why: the API's
+     * answer and the shading language's need of it disagree here, and inventing a number for one
+     * of them would settle a question that is not this table's to settle. */
+};
+
 static GLboolean declare_table(glsl_sema_t *s, const bi_var_t *t, size_t n) {
     for (size_t i = 0; i < n; i++) {
         size_t len = 0;
@@ -593,6 +627,24 @@ const char *glsl_builtin_refusal(const char *name, size_t len) {
         {"gl_InstanceID", "gl_InstanceID is GLSL 1.40; this front end takes 1.10 and 1.20"},
         {"gl_VertexID", "gl_VertexID is GLSL 1.30; this front end takes 1.10 and 1.20"},
         {"gl_ClipDistance", "gl_ClipDistance is GLSL 1.30; use gl_ClipVertex"},
+        /*
+         * **The one built-in constant with no honest value here.**
+         *
+         * GLSL declares `gl_FragData[gl_MaxDrawBuffers]`, so this number and that array's length
+         * are meant to be one fact. They are not: `glGetIntegerv(GL_MAX_DRAW_BUFFERS)` answers 2,
+         * counting the front surface and the back one, both of which receive the same fragment
+         * colour - while the fragment stage exports one target, so `gl_FragData` has one element
+         * and `gl_FragData[1]` has nowhere to go.
+         *
+         * Either could be made to agree with the other and the choice is a design decision about
+         * what a draw buffer means for a double-buffered window, not a gap to fill quietly. So a
+         * shader asking is told that, rather than handed 1 and made to disagree with the API or
+         * handed 2 and made to index past its own array.
+         */
+        {"gl_MaxDrawBuffers",
+         "gl_MaxDrawBuffers has no settled value here: GL_MAX_DRAW_BUFFERS answers 2 for the "
+         "front and back surfaces, and gl_FragData has one element because the fragment stage "
+         "exports one target"},
     };
     if (!name || len == 0u) return (const char *)0;
     for (size_t i = 0; i < sizeof(REFUSED) / sizeof(REFUSED[0]); i++) {
@@ -601,8 +653,29 @@ const char *glsl_builtin_refusal(const char *name, size_t len) {
     return (const char *)0;
 }
 
+/* The value of a built-in constant, or false for any other name. Both back ends ask, so a use of
+ * one becomes a literal in each rather than a register neither declared. */
+GLboolean glsl_builtin_const_int(const char *name, size_t len, int *out) {
+    if (!name || len == 0u || !out) return GL_FALSE;
+    for (size_t i = 0; i < sizeof(BUILTIN_CONSTS) / sizeof(BUILTIN_CONSTS[0]); i++) {
+        if (name_is(name, len, BUILTIN_CONSTS[i].name)) {
+            *out = BUILTIN_CONSTS[i].value;
+            return GL_TRUE;
+        }
+    }
+    return GL_FALSE;
+}
+
 GLboolean glsl_declare_builtins(glsl_sema_t *s, GLenum stage) {
     if (!s) return GL_FALSE;
+    /* The constants first, and in every stage: 7.4 makes them available to both. */
+    for (size_t i = 0; i < sizeof(BUILTIN_CONSTS) / sizeof(BUILTIN_CONSTS[0]); i++) {
+        size_t len = 0;
+        while (BUILTIN_CONSTS[i].name[len] != '\0') len++;
+        if (!glsl_declare_const_int(s, BUILTIN_CONSTS[i].name, len, BUILTIN_CONSTS[i].value)) {
+            return GL_FALSE;
+        }
+    }
     if (!declare_table(s, BUILTIN_COMMON, sizeof(BUILTIN_COMMON) / sizeof(BUILTIN_COMMON[0]))) {
         return GL_FALSE;
     }
