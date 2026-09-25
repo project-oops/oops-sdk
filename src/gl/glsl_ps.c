@@ -78,6 +78,15 @@
  * s103, two below the s105 this part allows. */
 #define GL_PS_UNIFORM_SGPR_BASE 72u
 
+/* **How many floats of the block are resident at once.** The block carries
+ * `OOPS_GL_GL2_UNIFORM_FLOATS`; this is what fits above the loop masks and below the 106-register
+ * ceiling, and the two are different numbers for a reason - a program's pool is as big as both
+ * stages' uniforms together, and a fragment shader usually names a few of them. So a window of
+ * the block is loaded rather than all of it, and what the register file limits is the *span* of
+ * the uniforms one shader names. A `mat4` the vertex stage owns no longer costs the fragment
+ * shader anything. */
+#define GL_PS_UNIFORM_WINDOW_FLOATS 32
+
 /* **The draw's own constants**, loaded into s68..s71 - the last 4-aligned group below the
  * uniforms and above the exec masks, which end at s64. Four dwords, so a 4-aligned destination
  * is what the load needs and s68 is one. */
@@ -99,7 +108,9 @@ typedef char gl_ps_sgpr_map_fits[
      GL_PS_DRAWCONST_SGPR_BASE + (unsigned)OOPS_GL_GL2_DRAWCONST_FLOATS
              <= GL_PS_UNIFORM_SGPR_BASE &&
      GL_PS_UNIFORM_SGPR_BASE % 4u == 0u &&
-     GL_PS_UNIFORM_SGPR_BASE + (unsigned)OOPS_GL_GL2_UNIFORM_FLOATS <= 106u)
+     /* The *window*, not the block: only this much is ever resident. */
+     GL_PS_UNIFORM_WINDOW_FLOATS % 16 == 0 &&
+     GL_PS_UNIFORM_SGPR_BASE + (unsigned)GL_PS_UNIFORM_WINDOW_FLOATS <= 106u)
         ? 1 : -1];
 
 /* **Where the hardware puts the fragment's window position**, when `SPI_PS_INPUT_ENA` asks for
@@ -382,6 +393,46 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         ok = GL_FALSE;
     }
 
+    /*
+     * **The window of the block this shader needs resident**, which is the span of the uniforms
+     * it names rather than the whole pool.
+     *
+     * The pool is both stages' uniforms together, so a `mat4` the vertex shader owns sits in it
+     * and used to cost the fragment shader sixteen scalar registers it never read. Only the span
+     * between the first and last uniform this shader mentions has to be loaded.
+     *
+     * Aligned down and up to sixteen because that is the load's own granularity - the block is
+     * walked by `s_load_dwordx16` - and the destination has to stay four-aligned, which a
+     * multiple of sixteen is.
+     */
+    int win_lo = 0, win_hi = 0;
+    if (ok) {
+        int lo = p->value_floats, hi = 0;
+        for (int i = 0; i < p->uniform_count; i++) {
+            const gl_uniform_t *u = &p->uniforms[i];
+            if (!unit_declares_uniform(fs, u->name, lit_len(u->name))) continue;
+            if (gl_type_is_sampler(u->type)) continue;
+            /* One element's floats times the elements - the pool's own layout, so the span is
+             * measured in the same units the offsets are. */
+            const int n = u->floats * ((u->size > 0) ? u->size : 1);
+            if (u->offset < lo) lo = u->offset;
+            if (u->offset + n > hi) hi = u->offset + n;
+        }
+        if (hi > lo) {
+            win_lo = lo & ~15;
+            win_hi = (hi + 15) & ~15;
+        }
+        if (win_hi - win_lo > GL_PS_UNIFORM_WINDOW_FLOATS) {
+            /* **The span, not the pool** - a shader naming the first and last float of a wide
+             * pool asks for everything between them, and that is the number to report. */
+            oops_snprintf(log, log_size,
+                          "the uniforms this shader names span %d floats of the program's pool "
+                          "and a shader holds %d at once",
+                          win_hi - win_lo, GL_PS_UNIFORM_WINDOW_FLOATS);
+            ok = GL_FALSE;
+        }
+    }
+
     /* **Whether this shader is handed the block at all**, which decides two things together and
      * so is decided once: the scalar loads below, and how many user SGPRs the draw configures -
      * which in turn is where the SPI puts the primitive mask. The draw path reads the answer
@@ -428,9 +479,10 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX8, base, 0u, at);
             glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX4, base + 8u, 0u, at + 32u);
         }
-        for (int base = 0; base < p->value_floats; base += 16) {
+        /* The window, so `s72` holds float `win_lo` of the block and not float 0. */
+        for (int base = win_lo; base < win_hi; base += 16) {
             glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX16,
-                             GL_PS_UNIFORM_SGPR_BASE + (uint32_t)base, 0u,
+                             GL_PS_UNIFORM_SGPR_BASE + (uint32_t)(base - win_lo), 0u,
                              OOPS_GL_GL2_UNIFORM_AT + (uint32_t)base * 4u);
         }
         /* The draw's constants, under the one wait below with everything else. */
@@ -488,9 +540,13 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             ok = GL_FALSE;
             break;
         }
+        /* **Relative to the window**, because `s72` holds float `win_lo` of the block. Reading
+         * the pool's absolute offset here is what would make a windowed load return a different
+         * uniform's value rather than an error. */
         for (int c = 0; c < home.count; c++) {
             glsl_emit_vop1(&code, GLSL_VOP1_MOV_B32, home.base + (uint32_t)c,
-                           glsl_sgpr(GL_PS_UNIFORM_SGPR_BASE + (uint32_t)(u->offset + c)));
+                           glsl_sgpr(GL_PS_UNIFORM_SGPR_BASE +
+                                     (uint32_t)(u->offset + c - win_lo)));
         }
     }
 

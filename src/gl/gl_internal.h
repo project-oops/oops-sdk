@@ -2521,7 +2521,12 @@ static inline uint32_t gl_f32_bits(float f) {
 #define OOPS_GL_GL2_SLOT_STRIDE    0x200u /* four descriptor sets, then the uniforms */
 #define OOPS_GL_GL2_SLOTS          32u    /* 0x4000 .. 0x8000, the rest of the payload */
 #define OOPS_GL_GL2_UNIFORM_AT     0x100u /* the uniform block's offset within a slot */
-#define OOPS_GL_GL2_UNIFORM_FLOATS 32
+/* **How many floats the block carries**, which is not how many a shader can hold in registers.
+ * The slot has room for 64 between `OOPS_GL_GL2_UNIFORM_AT` and its end; the scalar file has
+ * room for 32 above the loop masks. `glsl_ps.c` loads a *window* of the block, so a program's
+ * pool may be this big as long as the uniforms one fragment shader names fall inside one
+ * window - which is the thing the register file actually limits. */
+#define OOPS_GL_GL2_UNIFORM_FLOATS 64
 
 /* **The draw's own constants**, four floats the shader may need that are not the program's
  * uniforms: the render target's height so far, which is what turns the hardware's window y into

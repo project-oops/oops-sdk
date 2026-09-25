@@ -2300,8 +2300,13 @@ static void gl_gl2_build_block(gl_context_t *ctx, const gl_program_object_t *pro
         set[10] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[unit], obj));
     }
     if (prog->value_floats > 0 && prog->values) {
-        memcpy((char *)block + OOPS_GL_GL2_UNIFORM_AT, prog->values,
-               (size_t)prog->value_floats * sizeof(float));
+        /* **Clamped to what the block holds.** The compiler refuses a pool larger than this, so
+         * the clamp never fires for a program that draws - but it is the bound that keeps this
+         * memcpy inside the slot, and relying on a check in another file to hold it there is
+         * how the next change to that check becomes a write into the next slot's descriptors. */
+        int n = prog->value_floats;
+        if (n > OOPS_GL_GL2_UNIFORM_FLOATS) n = OOPS_GL_GL2_UNIFORM_FLOATS;
+        memcpy((char *)block + OOPS_GL_GL2_UNIFORM_AT, prog->values, (size_t)n * sizeof(float));
     }
     /* **The draw's own constants**, which are not the program's and change without it. The
      * viewport height is what turns the hardware's window y - counted down from the top - into

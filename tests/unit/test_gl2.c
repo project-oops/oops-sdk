@@ -2795,30 +2795,26 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
      * primitive mask in the register after them. */
     ASSERT_EQ(words[0], 0xbefc0302u); /* s_mov_b32 m0, s2 */
 
-    /* **Then the uniforms**, because they are a memory load and the wait for it wants as much
-     * between it and the first read as possible. This program's pool is the vertex shader's
-     * `mat4 mvp` - sixteen floats, one `s_load_dwordx16` into s72..s87 - and the fragment
-     * shader names none of them, so nothing is moved into a VGPR for it.
+    /* **And then no uniform load at all**, which is the point of loading a window.
      *
-     * **The destination register is in the word**, so this literal moves when the scalar map
-     * does: the SGPR number sits in bits 6 and up, so s48 was 0xc00 and s72 is 0x1200. It went
-     * from s48 to s72 on 2026-09-25, when the sampler sets grew from two to four and pushed
-     * everything above them along. */
-    ASSERT_EQ(words[1], 0xf4101200u); /* s_load_dwordx16 s[72:87], s[0:1], 0x100 */
-    /* **0x100, not 0.** The block's first four 0x40 are the texture units' descriptors; the
-     * uniforms start after them, and a shader loading from 0 would compute with an image
-     * descriptor read as floats. */
-    ASSERT_EQ(words[2], 0xfa000100u);
-    ASSERT_EQ(words[3], 0xbf8cc07fu); /* s_waitcnt lgkmcnt(0) */
+     * This program's pool is the vertex shader's `mat4 mvp` - sixteen floats - and the fragment
+     * shader names none of them. It used to load all sixteen into s72..s87 and move none of them
+     * anywhere: sixteen scalar registers and a memory load spent on a value this stage cannot
+     * read. The window is the span of the uniforms *this* shader names, which here is empty, so
+     * the load is gone and `s_waitcnt` follows `m0` directly.
+     *
+     * The load itself is pinned in `test_gl2_compiled_uniform_window` below, where a shader
+     * names something. */
+    ASSERT_EQ(words[1], 0xbf8cc07fu); /* s_waitcnt lgkmcnt(0) */
 
     /* Then three components of one varying, each a `p1`/`p2` pair, into v8, v9, v10 - the first
      * registers above the ones the hardware owns. */
-    ASSERT_EQ(words[4], 0xc8200000u); /* v_interp_p1_f32 v8, v0, attr0.x */
-    ASSERT_EQ(words[5], 0xc8210001u); /* v_interp_p2_f32 v8, v1, attr0.x */
-    ASSERT_EQ(words[6], 0xc8240100u); /* v9, attr0.y */
-    ASSERT_EQ(words[7], 0xc8250101u);
-    ASSERT_EQ(words[8], 0xc8280200u); /* v10, attr0.z */
-    ASSERT_EQ(words[9], 0xc8290201u);
+    ASSERT_EQ(words[2], 0xc8200000u); /* v_interp_p1_f32 v8, v0, attr0.x */
+    ASSERT_EQ(words[3], 0xc8210001u); /* v_interp_p2_f32 v8, v1, attr0.x */
+    ASSERT_EQ(words[4], 0xc8240100u); /* v9, attr0.y */
+    ASSERT_EQ(words[5], 0xc8250101u);
+    ASSERT_EQ(words[6], 0xc8280200u); /* v10, attr0.z */
+    ASSERT_EQ(words[7], 0xc8290201u);
 
     /* **The block's address and the mask register are one decision.** Two user SGPRs is what
      * the draw configures into `SPI_SHADER_PGM_RSRC2_PS`, and it is also what puts the mask in
@@ -5484,6 +5480,63 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
  * element - and if both held the same thing, neither mistake would show. The vertex shader here
  * declares no varyings, which puts `gl_TexCoord[0]` in parameter 0 and `[1]` in parameter 1.
  */
+/*
+ * **The uniform window: a shader holds the span it names, not the whole pool.**
+ *
+ * The pool is both stages' uniforms together, so a vertex shader's `mat4` sat in it and cost the
+ * fragment shader sixteen scalar registers it could not read. The block carries
+ * `OOPS_GL_GL2_UNIFORM_FLOATS` and the register file holds `GL_PS_UNIFORM_WINDOW_FLOATS` of
+ * them, which are now different numbers.
+ *
+ * **The value is what is checked, not the register count.** A window whose base was right and
+ * whose offsets were not would return a *different uniform's* value - the failure this has, if it
+ * has one - so the two uniforms here hold different numbers and the one past the first sixteen
+ * floats is the one read.
+ */
+static void test_gl2_compiled_uniform_window(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float tol = 2e-3f;
+
+    /* `pad` is a vertex-stage `mat4`, sixteen floats the fragment shader never names; `tint`
+     * follows it in the pool. A pool of 19 floats, which is past what a shader holds at once
+     * and used to be refused outright. */
+    const GLuint prog = linked_program(
+        "attribute vec4 pos;\n"
+        "uniform mat4 pad;\n"
+        "void main() { gl_Position = pad * pos; }\n",
+        "uniform vec3 tint;\n"
+        "void main() { gl_FragColor = vec4(tint, 1.0); }\n");
+    ASSERT_TRUE(prog != 0);
+    glUseProgram(prog);
+    glUniform3f(glGetUniformLocation(prog, "tint"), 0.25f, 0.5f, 0.75f);
+
+    compile_and_run_prog(ctx, prog, attr, o);
+    ASSERT_NEAR(o[0], 0.25f, tol);
+    ASSERT_NEAR(o[1], 0.5f, tol);
+    ASSERT_NEAR(o[2], 0.75f, tol);
+
+    /* And a shader naming uniforms on both sides of a window boundary still reads both. */
+    const GLuint two = linked_program(
+        "attribute vec4 pos;\n"
+        "uniform mat4 pad;\n"
+        "void main() { gl_Position = pad * pos; }\n",
+        "uniform float a;\nuniform vec2 b;\n"
+        "void main() { gl_FragColor = vec4(a, b, 1.0); }\n");
+    ASSERT_TRUE(two != 0);
+    glUseProgram(two);
+    glUniform1f(glGetUniformLocation(two, "a"), 0.125f);
+    glUniform2f(glGetUniformLocation(two, "b"), 0.375f, 0.625f);
+    compile_and_run_prog(ctx, two, attr, o);
+    ASSERT_NEAR(o[0], 0.125f, tol);
+    ASSERT_NEAR(o[1], 0.375f, tol);
+    ASSERT_NEAR(o[2], 0.625f, tol);
+
+    glUseProgram(0);
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_texcoord_builtin(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -6784,6 +6837,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_unbounded_for_loops);
     RUN_TEST(test_gl2_compiled_increment);
     RUN_TEST(test_gl2_compiled_texcoord_builtin);
+    RUN_TEST(test_gl2_compiled_uniform_window);
     RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
