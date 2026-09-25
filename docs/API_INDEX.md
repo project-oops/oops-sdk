@@ -595,8 +595,14 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 - `glUniform4i`
 - `glUniform4iv`
 - `glUniformMatrix2fv`
+- `glUniformMatrix2x3fv`
+- `glUniformMatrix2x4fv`
 - `glUniformMatrix3fv`
+- `glUniformMatrix3x2fv`
+- `glUniformMatrix3x4fv`
 - `glUniformMatrix4fv`
+- `glUniformMatrix4x2fv`
+- `glUniformMatrix4x3fv`
 - `glUnmapBuffer`
 - `glUnmapBufferARB`
 - `glUseProgram`
@@ -935,15 +941,25 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 
 ## oops/math.h
 
+- `oops_acos`
+- `oops_asin`
+- `oops_atan`
+- `oops_atan2`
 - `oops_atan2f`
+- `oops_ceil`
 - `oops_ceilf`
 - `oops_clampf`
+- `oops_cos`
 - `oops_cosf`
+- `oops_exp`
 - `oops_expf`
 - `oops_fabsf`
+- `oops_floor`
 - `oops_floorf`
+- `oops_fmod`
 - `oops_fmodf`
 - `oops_lerpf`
+- `oops_ln`
 - `oops_logf`
 - `oops_mat4_identity`
 - `oops_mat4_lookat`
@@ -953,9 +969,13 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 - `oops_mat4_rotate`
 - `oops_mat4_scale`
 - `oops_mat4_translate`
+- `oops_pow`
 - `oops_powf`
+- `oops_sin`
 - `oops_sinf`
+- `oops_sqrt`
 - `oops_sqrtf`
+- `oops_tan`
 - `oops_tanf`
 - `oops_vec3_cross`
 - `oops_vec3_dot`
@@ -1115,6 +1135,7 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 - `oops_cond_wait`
 - `oops_mutex_destroy`
 - `oops_mutex_init`
+- `oops_mutex_init_recursive`
 - `oops_mutex_lock`
 - `oops_mutex_trylock`
 - `oops_mutex_unlock`
@@ -1133,6 +1154,10 @@ For declarative subsystem capabilities used in application Makefiles, see [**doc
 - `oops_thread_self`
 - `oops_thread_t`
 - `oops_thread_yield`
+- `oops_tls_create`
+- `oops_tls_delete`
+- `oops_tls_get`
+- `oops_tls_set`
 
 ## oops/time.h
 
