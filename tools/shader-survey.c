@@ -1,0 +1,323 @@
+/*
+ * Compile a corpus of real shaders with oops-gl's own front end and histogram what it refuses.
+ *
+ * The point is to decide what to implement next from evidence rather than from guessing which
+ * GLSL features ports use. It calls glCreateShader/glShaderSource/glCompileShader - the same
+ * entry points a title calls - so what it measures is what a port would hit, not what a
+ * separately written parser would.
+ *
+ * Built and driven by `tools/shader-survey.sh`, which is where the usage and the two harness
+ * mistakes this has already made are written down. Takes a list of shader files.
+ *
+ * A file is classified by extension: .vert/.vs -> vertex, everything else -> fragment. A shader
+ * that is actually the other stage still exercises the whole front end; only the stage-specific
+ * built-in names differ, and those show up as their own refusal reason.
+ */
+#include <GL/gl.h>
+#include <oops/display.h>
+#include <oops/memory.h>
+
+/* The generator is reached through the same internal entry the unit tests use. A shader that
+ * compiles can still be refused for the console - the front end and the code generator are
+ * different gates, and only the second one decides whether a port runs on hardware. Surveying
+ * just the first says nothing about that. */
+#include "gl_internal.h"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* The host stubs the SDK's display and allocator need, same as gl2-probe's own runner. */
+static uint32_t *s_fb;
+static int s_dummy = 1;
+static unsigned int s_w = 256, s_h = 256;
+
+oops_display_t *
+oops_display_open(oops_display_backend_t backend, unsigned int width, unsigned int height) {
+    (void)backend;
+    s_w = width ? width : 256;
+    s_h = height ? height : 256;
+    if (!s_fb) {
+        s_fb = (uint32_t *)calloc((size_t)s_w * (size_t)s_h, sizeof(uint32_t));
+        if (!s_fb) return (oops_display_t *)0;
+    }
+    return (oops_display_t *)&s_dummy;
+}
+void oops_display_close(oops_display_t *d) { (void)d; }
+int oops_display_flip(oops_display_t *d) { (void)d; return 0; }
+uint32_t *oops_display_get_framebuffer(oops_display_t *d) { (void)d; return s_fb; }
+unsigned int oops_display_get_width(const oops_display_t *d) { (void)d; return s_w; }
+unsigned int oops_display_get_height(const oops_display_t *d) { (void)d; return s_h; }
+int oops_display_is_gpu_accelerated(const oops_display_t *d) { (void)d; return 0; }
+int oops_display_is_ready(const oops_display_t *d) { return d != (const oops_display_t *)0; }
+
+void *oops_mem_alloc(size_t size, size_t alignment, oops_mem_type_t type) {
+    (void)alignment;
+    (void)type;
+    return malloc(size);
+}
+void oops_mem_free(void *p) { free(p); }
+
+#define MAX_REASONS 256
+#define REASON_LEN 220
+
+typedef struct {
+    char text[REASON_LEN];
+    int count;
+    char first_file[256];
+} reason_t;
+
+static reason_t g_reason[MAX_REASONS];
+static int g_reasons;
+
+/* The generator's refusals, histogrammed separately - they are a different question from the
+ * front end's. A shader in this column compiles and runs on the software reference and is
+ * refused for the console. */
+static reason_t g_genreason[MAX_REASONS];
+static int g_genreasons;
+
+/* **The reason, with the shader's own identifiers taken out of it.** A diagnostic naming a
+ * variable produces one bucket per variable otherwise, and the histogram then has hundreds of
+ * rows of the same finding. Everything from the first ` - ` or `'` onward is dropped, which is
+ * where this compiler puts the specifics. */
+static void tally_into(const char *log, const char *file, int which);
+
+static void tally(const char *log, const char *file) { tally_into(log, file, 0); }
+static void tally_gen(const char *log, const char *file) { tally_into(log, file, 1); }
+
+static void tally_into(const char *log, const char *file, int which) {
+    char key[REASON_LEN];
+    size_t k = 0;
+    for (const char *p = log; *p && k + 1 < sizeof(key); p++) {
+        if (*p == '\n') break;
+        if (*p == '\'') break;
+        if (p[0] == ' ' && p[1] == '-' && p[2] == ' ') break;
+        key[k++] = *p;
+    }
+    while (k > 0 && (key[k - 1] == ' ' || key[k - 1] == ':')) k--;
+    key[k] = '\0';
+    if (k == 0) {
+        snprintf(key, sizeof(key), "(refused with an empty log)");
+    }
+
+    int *n = which ? &g_genreasons : &g_reasons;
+    reason_t *tab = which ? g_genreason : g_reason;
+    for (int i = 0; i < *n; i++) {
+        if (strcmp(tab[i].text, key) == 0) {
+            tab[i].count++;
+            return;
+        }
+    }
+    if (*n >= MAX_REASONS) return;
+    snprintf(tab[*n].text, REASON_LEN, "%s", key);
+    snprintf(tab[*n].first_file, sizeof(tab[*n].first_file), "%s", file);
+    tab[*n].count = 1;
+    (*n)++;
+}
+
+static char *slurp(const char *path, long *len_out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return (char *)0;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0 || n > (8 << 20)) {
+        fclose(f);
+        return (char *)0;
+    }
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf) {
+        fclose(f);
+        return (char *)0;
+    }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[got] = '\0';
+    *len_out = (long)got;
+    return buf;
+}
+
+static int ends_with(const char *s, const char *suf) {
+    const size_t ls = strlen(s), lf = strlen(suf);
+    return ls >= lf && strcmp(s + ls - lf, suf) == 0;
+}
+
+/*
+ * **The stage, sniffed from the source rather than taken from the extension.**
+ *
+ * The first version of this read the extension, and craft's vertex shaders are called
+ * `block_vertex.glsl` - so four of its eight shaders were compiled as fragment shaders and
+ * reported `gl_Position` as an undeclared name. That is a true statement about a fragment shader
+ * and a false finding about craft, and it would have sent me looking for a missing built-in that
+ * is not missing. mesa-demos' `vpglsl` directory is the same shape.
+ *
+ * Writing `gl_Position` or declaring an `attribute` makes it a vertex shader; writing
+ * `gl_FragColor` or `gl_FragData` makes it a fragment one. The extension is the tie-break.
+ */
+/*
+ * **A vertex shader that links against this fragment shader.**
+ *
+ * The first version of the generation phase paired every fragment shader with a fixed
+ * passthrough vertex shader, and three of craft's four would not link - a fragment shader's
+ * `varying` has to be declared by the vertex stage too. So it measured how often my stand-in
+ * was wrong and reported nothing at all about the generator.
+ *
+ * This copies the `varying` declarations out of the fragment source and restates them, which is
+ * what the vertex half of that program would have done. They are left unwritten: GL leaves a
+ * varying the vertex stage never assigns undefined rather than making it a link error, and the
+ * question here is whether the *fragment* shader generates.
+ */
+static void make_matching_vs(const char *fs, char *out, size_t cap) {
+    size_t w = 0;
+    const char *ver = strstr(fs, "#version");
+    if (ver) {
+        const char *end = strchr(ver, '\n');
+        const size_t n = end ? (size_t)(end - ver + 1) : strlen(ver);
+        if (w + n < cap) { memcpy(out + w, ver, n); w += n; }
+    }
+    /* Each `varying` declaration, restated verbatim - including any precision qualifier, which
+     * has to agree between the stages in ES. */
+    for (const char *p = fs; *p; p++) {
+        if (p != fs && p[-1] != '\n') continue;
+        const char *q = p;
+        while (*q == ' ' || *q == '\t') q++;
+        if (strncmp(q, "varying", 7) != 0) continue;
+        const char *end = strchr(q, ';');
+        if (!end) continue;
+        const size_t n = (size_t)(end - q + 1);
+        if (w + n + 1 >= cap) break;
+        memcpy(out + w, q, n);
+        w += n;
+        out[w++] = '\n';
+    }
+    const char *tail = "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n";
+    const size_t tn = strlen(tail);
+    if (w + tn < cap) { memcpy(out + w, tail, tn); w += tn; }
+    out[w < cap ? w : cap - 1] = '\0';
+}
+
+static GLenum sniff_stage(const char *src, const char *path) {
+    if (strstr(src, "gl_Position") || strstr(src, "attribute ")) return GL_VERTEX_SHADER;
+    if (strstr(src, "gl_FragColor") || strstr(src, "gl_FragData")) return GL_FRAGMENT_SHADER;
+    if (ends_with(path, ".vert") || ends_with(path, ".vs")) return GL_VERTEX_SHADER;
+    return GL_FRAGMENT_SHADER;
+}
+
+int main(int argc, char **argv) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 256, 256);
+    void *ctx = glContextCreate(disp);
+    if (!ctx) {
+        printf("no context\n");
+        return 1;
+    }
+    glContextMakeCurrent(ctx);
+    glContextSetVersion(2, 0);
+
+    int total = 0, ok = 0, unreadable = 0;
+    int gen_total = 0, gen_ok = 0, gen_link_failed = 0;
+    for (int a = 1; a < argc; a++) {
+        long len = 0;
+        char *src = slurp(argv[a], &len);
+        if (!src || len == 0) {
+            unreadable++;
+            free(src);
+            continue;
+        }
+        const GLenum stage = sniff_stage(src, argv[a]);
+        const GLuint sh = glCreateShader(stage);
+        const char *srcs[1] = {src};
+        glShaderSource(sh, 1, srcs, (const GLint *)0);
+        glCompileShader(sh);
+        GLint status = 0;
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &status);
+        total++;
+        if (status) {
+            ok++;
+            /*
+             * **And then ask the generator**, which is the gate that decides console support.
+             * Only a fragment shader: the vertex stage runs on the CPU here, so there is nothing
+             * for the generator to refuse about one.
+             *
+             * The passthrough vertex shader is a stand-in. A fragment shader reading varyings the
+             * stand-in does not write still links - GL leaves those values undefined rather than
+             * making it an error - which is what lets a corpus of fragment shaders be put through
+             * this without their own vertex halves.
+             */
+            if (stage == GL_FRAGMENT_SHADER) {
+                gen_total++;
+                const GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+                static char vbuf[8192];
+                make_matching_vs(src, vbuf, sizeof(vbuf));
+                const char *vsrc = vbuf;
+                glShaderSource(vs, 1, &vsrc, (const GLint *)0);
+                glCompileShader(vs);
+                const GLuint prog = glCreateProgram();
+                glAttachShader(prog, vs);
+                glAttachShader(prog, sh);
+                glLinkProgram(prog);
+                GLint linked = 0;
+                glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+                if (!linked) {
+                    gen_link_failed++;
+                } else {
+                    const gl_program_object_t *po =
+                        gl_find_program((gl_context_t *)ctx, prog);
+                    static uint32_t words[4096];
+                    uint32_t count = 0u, vgprs = 0u, ena = 0u;
+                    char glog[256] = {0};
+                    if (po && gl_program_compile_fragment(po, words, 4096u, &count, &vgprs,
+                                                          NULL, &ena, glog, sizeof(glog))) {
+                        gen_ok++;
+                    } else {
+                        tally_gen(glog, argv[a]);
+                    }
+                }
+                glDeleteProgram(prog);
+                glDeleteShader(vs);
+            }
+        } else {
+            char log[1024];
+            GLsizei got = 0;
+            glGetShaderInfoLog(sh, (GLsizei)sizeof(log), &got, log);
+            log[(got > 0 && got < (GLsizei)sizeof(log)) ? got : 0] = '\0';
+            tally(log, argv[a]);
+        }
+        glDeleteShader(sh);
+        free(src);
+    }
+
+    printf("\n%d of %d shaders compile (%d unreadable)\n", ok, total, unreadable);
+    printf("\n%-6s %s\n", "count", "refusal (identifiers stripped), and the first file it hit");
+    /* Descending, so the row worth acting on is first. */
+    for (int printed = 0; printed < g_reasons; printed++) {
+        int best = -1;
+        for (int i = 0; i < g_reasons; i++) {
+            if (g_reason[i].count < 0) continue;
+            if (best < 0 || g_reason[i].count > g_reason[best].count) best = i;
+        }
+        if (best < 0) break;
+        printf("%-6d %s\n           %s\n", g_reason[best].count, g_reason[best].text,
+               g_reason[best].first_file);
+        g_reason[best].count = -1;
+    }
+
+    printf("\n%d of %d fragment shaders generate for the console (%d did not link)\n",
+           gen_ok, gen_total, gen_link_failed);
+    printf("\n%-6s %s\n", "count", "the generator's refusal, and the first file it hit");
+    for (int printed = 0; printed < g_genreasons; printed++) {
+        int best = -1;
+        for (int i = 0; i < g_genreasons; i++) {
+            if (g_genreason[i].count < 0) continue;
+            if (best < 0 || g_genreason[i].count > g_genreason[best].count) best = i;
+        }
+        if (best < 0) break;
+        printf("%-6d %s\n           %s\n", g_genreason[best].count, g_genreason[best].text,
+               g_genreason[best].first_file);
+        g_genreason[best].count = -1;
+    }
+    glContextDestroy(ctx);
+    oops_display_close(disp);
+    free(s_fb);
+    return 0;
+}
