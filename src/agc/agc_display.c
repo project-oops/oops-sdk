@@ -140,6 +140,8 @@ static void agc_log(const char *tag, const char *msg, uint64_t val) {
   if (s_logger) {
     s_logger(tag, msg, val);
   }
+  oops_log_debug("AGC", "[%s] %s: 0x%llx (%lld)", tag, msg,
+                 (unsigned long long)val, (long long)val);
 }
 
 agc_display_t *agc_display_open(unsigned int width, unsigned int height) {
