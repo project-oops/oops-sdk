@@ -4096,44 +4096,25 @@ static void test_gl2_the_back_end_refuses_the_loops_it_cannot_bound(void) {
     char log[256] = {0};
 
     static const struct { const char *fs; const char *wants; } cases[] = {
-        /* A bound that is not known when the shader is compiled. **This is the one the guard
-         * cannot be built for**, and so the one that would genuinely hang. */
-        {"uniform float lim;\n"
-         "void main() {\n"
-         "  float t = 0.0;\n"
-         "  for (int i = 0; float(i) < lim; i++) { t += 1.0; }\n"
-         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
-         "}\n",
-         "constant"},
-        /* More trips than the generator will put a ceiling on. Branching does not make this one
-         * safe: a guard has to hold a number, and past some size the number stops being a
-         * bound worth having. */
+        /*
+         * **More trips than the guard will hold, which is the one shape still refused.**
+         *
+         * A loop whose count is *unknown* - a uniform bound, a body that moves its own counter -
+         * is generated now: the guard bounds it, and a shader that does what it says never
+         * reaches the ceiling. Those cases moved to `test_gl2_compiled_unbounded_for_loops`,
+         * where their values are checked.
+         *
+         * This one is different because the count is known *and* larger than the ceiling. The
+         * guard would certainly fire, so the loop would run 65536 times instead of 100000 and
+         * draw a wrong colour with no error. That is a truncation rather than a bound, and it is
+         * the distinction that decides which shapes fall through and which are refused.
+         */
         {"void main() {\n"
          "  float t = 0.0;\n"
          "  for (int i = 0; i < 100000; i++) { t += 1.0; }\n"
          "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
          "}\n",
          "bound"},
-        /* A body that moves its own counter. The trip count is worked out at compile time and
-         * this makes it wrong - silently, in both lowerings, which is why it is refused in
-         * neither one of them but before the choice between them. */
-        {"void main() {\n"
-         "  float t = 0.0;\n"
-         "  for (int i = 0; i < 4; i++) { t += 1.0; i = i + 2; }\n"
-         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
-         "}\n",
-         "assigns its own counter"},
-        /* **And the loop that is named is the one at fault.** The clean loop on line 3
-         * compiles; the one on line 4 does not, so the message begins "4:". A check that swept
-         * the whole shader rather than this loop's own body refuses line 3 first and reports
-         * that - a true sentence about the wrong loop, which is worse than no sentence. */
-        {"void main() {\n"
-         "  float t = 0.0;\n"
-         "  for (int i = 0; i < 2; i++) { t += 1.0; }\n"
-         "  for (int j = 0; j < 2; j++) { t += 1.0; j = j - 1; }\n"
-         "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
-         "}\n",
-         "4:"},
         /* Branched loops nested deeper than the scalar registers set aside for their masks.
          * Each of these three has a `break`, so each one branches; three loops that unrolled
          * would cost nothing here at all. */
@@ -5371,6 +5352,131 @@ static void test_gl2_the_back_end_refuses_the_calls_it_cannot_inline(void) {
  * trips would pass without the loop working at all - which is the shape of test this file has been
  * bitten by before.
  */
+/*
+ * **A `for` the unroller cannot read is a loop, not an error.**
+ *
+ * These four shapes were all refused with a message about what the unroller needs - a counter
+ * declared from a constant, a constant bound, a constant step, a body that leaves the counter
+ * alone. Since `while` is generated the same machinery takes any of them, so the shape it cannot
+ * recognise now takes the branched path instead of being turned away.
+ *
+ * **Each result counts the trips**, so a loop that ran the wrong number of times gives a
+ * different number rather than the same one. The counter's own final value is checked alongside
+ * the accumulator, because a step applied twice or not at all is invisible in the sum alone.
+ */
+/*
+ * **`++` and `--`, both ways round.**
+ *
+ * The counted `for` path has always emitted a float add for a recognised `i++`, and the
+ * expression generator refused the same operator - so a `for (...; ++i)` whose shape the unroller
+ * could not read failed on its step rather than on its shape.
+ *
+ * **Prefix and postfix differ only in the value handed back**, which is the whole of what a test
+ * here has to distinguish: both leave the variable the same. So each arm reads the *expression's*
+ * value and the variable separately, and the two differ by one.
+ */
+static void test_gl2_compiled_increment(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float tol = 2e-3f;
+
+    /* `++i` is the new value, `i++` the old one, and `i` ends at the same place either way. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float a = 1.0;\n"
+                    "  float pre = ++a;\n"
+                    "  float b = 1.0;\n"
+                    "  float post = b++;\n"
+                    "  gl_FragColor = vec4(pre, post, a, b);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 2.0f, tol);   /* ++a is the new value */
+    ASSERT_NEAR(o[1], 1.0f, tol);   /* b++ is the old one */
+    ASSERT_NEAR(o[2], 2.0f, tol);   /* and both variables moved */
+    ASSERT_NEAR(o[3], 2.0f, tol);
+
+    /* `--` the same way, so a sign dropped somewhere shows rather than cancelling out. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float a = 1.0;\n"
+                    "  float pre = --a;\n"
+                    "  float b = 1.0;\n"
+                    "  float post = b--;\n"
+                    "  gl_FragColor = vec4(pre + 1.0, post, a + 1.0, b + 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 1.0f, tol);   /* --a is 0 */
+    ASSERT_NEAR(o[1], 1.0f, tol);   /* b-- is the old 1 */
+    ASSERT_NEAR(o[2], 1.0f, tol);
+    ASSERT_NEAR(o[3], 1.0f, tol);
+
+    glContextDestroy(ctx);
+}
+
+static void test_gl2_compiled_unbounded_for_loops(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float tol = 2e-3f;
+
+    /* A bound that is a uniform, so the trip count cannot be known when the shader compiles. */
+    const GLuint prog = linked_program(
+        VS_ONE_VARYING,
+        "uniform float lim;\n"
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  float t = 0.0;\n"
+        "  for (float i = 0.0; i < lim; i += 1.0) { t += 1.0; }\n"
+        "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+        "}\n");
+    ASSERT_TRUE(prog != 0);
+    glUseProgram(prog);
+    glUniform1f(glGetUniformLocation(prog, "lim"), 3.0f);
+    compile_and_run_prog(ctx, prog, attr, o);
+    ASSERT_NEAR(o[0], 3.0f, tol);
+
+    /* **A body that moves its own counter**, which made the static count a lie and is exactly
+     * right here: the condition and the step are evaluated every trip. i goes 0, 3, 6 - so the
+     * body runs twice and the counter ends at 6. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float t = 0.0;\n"
+                    "  float i = 0.0;\n"
+                    "  for (; i < 4.0; i += 1.0) { t += 1.0; i += 2.0; }\n"
+                    "  gl_FragColor = vec4(t, i, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 2.0f, tol);
+    ASSERT_NEAR(o[1], 6.0f, tol);
+
+    /* An initialiser that declares nothing, over a counter from outside the loop. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float t = 0.0;\n"
+                    "  float i = 1.0;\n"
+                    "  for (i = 0.0; i < 3.0; i += 1.0) { t += 0.25; }\n"
+                    "  gl_FragColor = vec4(t, i, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.75f, tol);
+    ASSERT_NEAR(o[1], 3.0f, tol);
+
+    /* **`for (;;)` with a `break`**, which has no condition at all - GLSL says an absent one is
+     * true, and the guard is what bounds it rather than the condition. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  float t = 0.0;\n"
+                    "  for (;;) { t += 0.2; if (t > 0.5) break; }\n"
+                    "  gl_FragColor = vec4(t, 0.0, 0.0, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.6f, tol);
+
+    glUseProgram(0);
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_while_loops(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -6529,6 +6635,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);
     RUN_TEST(test_gl2_compiled_while_loops);
+    RUN_TEST(test_gl2_compiled_unbounded_for_loops);
+    RUN_TEST(test_gl2_compiled_increment);
     RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);

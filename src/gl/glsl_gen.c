@@ -1057,6 +1057,8 @@ static GLboolean gen_index_of(glsl_gen_t *g, int32_t node, glsl_value_t *out) {
     return GL_TRUE;
 }
 
+static glsl_value_t gen_inc_dec(glsl_gen_t *g, int32_t node, GLboolean postfix);
+
 static GLboolean gen_place_of(glsl_gen_t *g, int32_t node, gen_place_t *out) {
     if (node == GLSL_NO_NODE) {
         (void)gen_fail(g, "an assignment with no destination", node);
@@ -2761,6 +2763,9 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
                 glsl_emit_sub_f32(g->code, out.base, one.base, s.base);
                 return out;
             }
+            if (n->op == GLSL_TOK_INC || n->op == GLSL_TOK_DEC) {
+                return gen_inc_dec(g, node, GL_FALSE);
+            }
             if (n->op != GLSL_TOK_MINUS) {
                 return gen_fail(g, "this unary operator has no verified instruction yet", node);
             }
@@ -2831,6 +2836,22 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
             /* Not a type name and not defined here, so a built-in or a refusal. */
             return gen_builtin(g, callee, n->b, node);
         }
+        /*
+         * **`++i`, `--i`, `i++` and `i--`**, which are an add of one and a write back.
+         *
+         * An `int` here is the float it already is - `glsl_ps.c` says why - so "one" is 1.0 and
+         * the instruction is the float add, exactly as the counted `for` path has always emitted
+         * for a recognised `i++`. Refusing these while special-casing the same operator inside
+         * the unroller was the asymmetry that made a `for (...; ++i)` the unroller could not read
+         * fail on its step rather than on its shape.
+         *
+         * The difference between the two forms is which value is the expression's: prefix hands
+         * back the register it just changed, postfix a copy taken before the change. A postfix
+         * whose result nobody uses still costs that copy, which the register allocator's
+         * per-statement rewind gives straight back.
+         */
+        case GLSL_NODE_POSTFIX:
+            return gen_inc_dec(g, node, GL_TRUE);
         case GLSL_NODE_ASSIGN: {
             gen_place_t place;
             if (!gen_place_of(g, n->a, &place)) {
@@ -3063,6 +3084,44 @@ static uint32_t loop_trip_sgpr(int d)  { return loop_active_sgpr(d) + 2u; }
  * diagnostic rather than a hung part. Writing that twice would be two answers to one question,
  * and the answer is not obvious enough to have two.
  */
+/*
+ * **`++i`, `--i`, `i++` and `i--`**, which are an add of one and a write back.
+ *
+ * An `int` here is the float it already is - `glsl_ps.c` says why - so "one" is 1.0 and the
+ * instruction is the float add, exactly what the counted `for` path has always emitted for a
+ * recognised `i++`. Refusing these while special-casing the same operator inside the unroller was
+ * the asymmetry that made a `for (...; ++i)` the unroller could not read fail on its *step*
+ * rather than on its shape.
+ *
+ * The two forms differ in which value is the expression's: prefix hands back the register it just
+ * changed, postfix a copy taken before the change. A postfix whose result nobody uses still costs
+ * that copy, which the allocator's per-statement rewind gives straight back.
+ */
+static glsl_value_t gen_inc_dec(glsl_gen_t *g, int32_t node, GLboolean postfix) {
+    const glsl_node_t *n = &g->ast->nodes[node];
+    gen_place_t place;
+    if (!gen_place_of(g, n->a, &place)) {
+        glsl_value_t none; none.base = 0u; none.count = 0; return none;
+    }
+    if (place.count != 1) return gen_fail(g, "++ and -- take a single number", node);
+
+    glsl_value_t before; before.base = 0u; before.count = 0;
+    if (postfix) {
+        before = gen_alloc(g, 1, node);
+        if (is_bad(before)) return before;
+        glsl_emit_mov(g->code, before.base, place.reg[0]);
+    }
+    glsl_value_t one = gen_const(g, (n->op == GLSL_TOK_INC) ? 1.0 : -1.0, node);
+    if (is_bad(one)) return one;
+    glsl_emit_add_f32(g->code, place.reg[0], place.reg[0], one.base);
+    if (postfix) return before;
+
+    glsl_value_t out;
+    out.base = place.reg[0];
+    out.count = 1;
+    return out;
+}
+
 /* **A condition into VCC, lane by lane**, the same way `if` does it: compare the value against a
  * materialised zero, because a GLSL bool is a float here and "true" is "not zero". Shared so that
  * a loop's condition and an `if`'s cannot come to mean different things. */
@@ -3126,22 +3185,12 @@ static GLboolean gen_loop_close(glsl_gen_t *g, int32_t node, uint32_t s_entry, u
  * why it needs no branch around an empty first trip and why the condition is emitted after the
  * body rather than before it.
  */
-static GLboolean gen_while_branched(glsl_gen_t *g, int32_t node, GLboolean post_test) {
-    const glsl_node_t *n = &g->ast->nodes[node];
+static GLboolean gen_loop_branched(glsl_gen_t *g, int32_t node, int32_t init_node,
+                                   int32_t cond_node, int32_t step_node, int32_t body_node,
+                                   GLboolean post_test) {
     if (g->loop_depth >= GLSL_GEN_MAX_LOOP_DEPTH) {
         (void)gen_fail(g, "the branched loops in this shader nest deeper than the scalar "
                           "registers set aside for them", node);
-        return GL_FALSE;
-    }
-    /* **The two kinds hold their children the other way round**, which is worth reading off the
-     * parser rather than assuming: `while (c) s;` is the condition in `a` and the body in `b`,
-     * and `do s; while (c);` is the body in `a` and the condition in `b` - each in source order.
-     * Assuming they agreed fed the condition to the statement generator, which refused it as a
-     * statement with no instruction selection and named a column inside the condition. */
-    const int32_t cond_node = post_test ? n->b : n->a;
-    const int32_t body_node = post_test ? n->a : n->b;
-    if (cond_node == GLSL_NO_NODE) {
-        (void)gen_fail(g, "a loop with no condition has no trip count and no exit", node);
         return GL_FALSE;
     }
 
@@ -3151,17 +3200,35 @@ static GLboolean gen_while_branched(glsl_gen_t *g, int32_t node, GLboolean post_
     const uint32_t s_trip   = loop_trip_sgpr(d);
 
     const int vars_before = g->var_count;
+    /* **A scope of its own, because the initialiser may declare the counter.** Anything it
+     * declares belongs to the loop and not to the statement after it, and the mark below is
+     * outside the body's so a counter survives every trip - `gen_release` is a bump-allocator
+     * rewind and the body's mark would take it back. */
+    glsl_scope_push(g->sema);
     const uint32_t loop_mark = gen_mark(g);
+
+    GLboolean ok = GL_TRUE;
+    if (init_node != GLSL_NO_NODE) ok = glsl_gen_stmt(g, init_node);
+    if (!ok) {
+        gen_release(g, loop_mark);
+        glsl_scope_pop(g->sema);
+        g->var_count = vars_before;
+        return GL_FALSE;
+    }
+
     gen_loop_open(g, s_active, s_entry, s_trip);
 
     const uint32_t top = glsl_code_here(g->code);
-    GLboolean ok = GL_TRUE;
     uint32_t fix_empty = 0u;
     GLboolean have_empty = GL_FALSE;
 
     /* **A pre-tested loop narrows before the body; a post-tested one after it.** Everything else
-     * below is the same, which is why this is one function and a flag rather than two. */
-    if (!post_test) {
+     * below is the same, which is why this is one function and a flag rather than two.
+     *
+     * **No condition means every lane keeps going** - `for (;;)` is a legal shape and GLSL says
+     * an absent condition is true. It is not an unbounded loop here because the trip guard is
+     * what bounds it, and the guard does not come from the condition. */
+    if (!post_test && cond_node != GLSL_NO_NODE) {
         const uint32_t mark = gen_mark(g);
         ok = gen_cond_into_vcc(g, cond_node);
         gen_release(g, mark);
@@ -3185,9 +3252,19 @@ static GLboolean gen_while_branched(glsl_gen_t *g, int32_t node, GLboolean post_
     }
 
     if (ok) {
-        /* Back to the full loop mask before the condition: see `gen_loop_open` on `continue`. */
+        /* Back to the full loop mask before the step and the condition: see `gen_loop_open` on
+         * `continue`. A lane that skipped the rest of the body still takes the step. */
         glsl_emit_exec_restore(g->code, s_active);
-        if (post_test) {
+        if (step_node != GLSL_NO_NODE) {
+            const uint32_t mark = gen_mark(g);
+            glsl_value_t s = gen_expr(g, step_node);
+            if (is_bad(s)) ok = GL_FALSE;
+            gen_release(g, mark);
+        }
+    }
+
+    if (ok) {
+        if (post_test && cond_node != GLSL_NO_NODE) {
             const uint32_t mark = gen_mark(g);
             ok = gen_cond_into_vcc(g, cond_node);
             gen_release(g, mark);
@@ -3207,6 +3284,7 @@ static GLboolean gen_while_branched(glsl_gen_t *g, int32_t node, GLboolean post_
     }
 
     gen_release(g, loop_mark);
+    glsl_scope_pop(g->sema);
     g->var_count = vars_before;
     return (GLboolean)(ok && g->error == (const char *)0);
 }
@@ -3306,45 +3384,49 @@ static GLboolean gen_for_branched(glsl_gen_t *g, int32_t node, const glsl_node_t
     return (GLboolean)(ok && g->error == (const char *)0);
 }
 
+/* **A `for` whose shape the unroller cannot read is a loop, not an error.** Every refusal below
+ * used to say what the *unroller* needs; since `while` is generated the same machinery takes a
+ * `for` with any initialiser, condition and step, so not recognising the shape means taking the
+ * branched path instead of refusing. Its bound is the trip guard rather than a counted one.
+ *
+ * Nothing is emitted while the shape is analysed - it reads the tree only - so arriving here
+ * after a failed analysis leaves no half-written loop behind. */
+static GLboolean gen_for_generic(glsl_gen_t *g, int32_t node) {
+    const glsl_node_t *n = &g->ast->nodes[node];
+    return gen_loop_branched(g, node, n->a, n->b, n->c, n->d, GL_FALSE);
+}
+
+/*
+ * A counted `for`, recognised so it can be unrolled: the initialiser declares the counter from a
+ * constant, the condition compares it with one, and the step moves it by one. Anything else goes
+ * to `gen_for_generic`, which is the same loop without the compile-time count.
+ */
 static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
     const glsl_node_t *n = &g->ast->nodes[node];
 
     /* The initialiser has to declare the induction variable with a constant. `for (i = 0; ...)`
      * over a variable declared outside is a different shape and is not read here. */
     if (n->a == GLSL_NO_NODE || g->ast->nodes[n->a].kind != GLSL_NODE_DECL) {
-        (void)gen_fail(g, "a loop is unrolled only when its initialiser declares the counter - "
-                          "`for (int i = 0; ...)` - because that is what makes the trip count "
-                          "knowable here", node);
-        return GL_FALSE;
+        return gen_for_generic(g, node);
     }
     const glsl_node_t *decl = &g->ast->nodes[n->a];
     const glsl_type_t ind_t = glsl_type_from_token(decl->type_tok);
     double start = 0.0;
-    if (!const_of(g, decl->a, &start)) {
-        (void)gen_fail(g, "a loop's counter has to start at a constant for the trip count to "
-                          "be known when the shader is compiled", node);
-        return GL_FALSE;
-    }
+    if (!const_of(g, decl->a, &start)) return gen_for_generic(g, node);
 
     /* The condition: the counter against a constant. */
     if (n->b == GLSL_NO_NODE || g->ast->nodes[n->b].kind != GLSL_NODE_BINARY) {
-        (void)gen_fail(g, "a loop's condition has to compare the counter with a constant", node);
-        return GL_FALSE;
+        return gen_for_generic(g, node);
     }
     const glsl_node_t *cond = &g->ast->nodes[n->b];
     double limit = 0.0;
     if (!is_name(g, cond->a, decl->text, decl->length) || !const_of(g, cond->b, &limit)) {
-        (void)gen_fail(g, "a loop's condition has to be the counter compared with a constant, "
-                          "in that order", node);
-        return GL_FALSE;
+        return gen_for_generic(g, node);
     }
 
     /* The step: `i++`, `i--`, or `i += k`. */
     double step = 0.0;
-    if (n->c == GLSL_NO_NODE) {
-        (void)gen_fail(g, "a loop with no increment has no trip count this can know", node);
-        return GL_FALSE;
-    }
+    if (n->c == GLSL_NO_NODE) return gen_for_generic(g, node);
     {
         const glsl_node_t *inc = &g->ast->nodes[n->c];
         if ((inc->kind == GLSL_NODE_POSTFIX || inc->kind == GLSL_NODE_UNARY) &&
@@ -3358,11 +3440,7 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
                 else if (inc->op == GLSL_TOK_SUB_ASSIGN) step = -k;
             }
         }
-        if (step == 0.0) {
-            (void)gen_fail(g, "a loop's increment has to move the counter by a constant - `i++`,"
-                              " `i--` or `i += k` - and by something other than nothing", node);
-            return GL_FALSE;
-        }
+        if (step == 0.0) return gen_for_generic(g, node);
     }
 
     /* **The trip count, counted the way the reference runs it**: test, then body, then step. */
@@ -3375,14 +3453,23 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
             case GLSL_TOK_GT: go = (GLboolean)(v > limit); break;
             case GLSL_TOK_GE: go = (GLboolean)(v >= limit); break;
             case GLSL_TOK_NE: go = (GLboolean)(v != limit); break;
-            default:
-                (void)gen_fail(g, "a loop's condition is compared with <, <=, >, >= or != here",
-                               node);
-                return GL_FALSE;
+            default: return gen_for_generic(g, node);
         }
         if (!go) break;
         trips++;
     }
+    /*
+     * **More trips than the guard will hold, and this one stays refused.**
+     *
+     * Every other shape above falls through to the generic loop because its trip count is
+     * *unknown* - the guard is then the best bound available, and a shader that does what it says
+     * never reaches it. Here the count is known and it is larger than the ceiling, so the guard
+     * would certainly fire: the loop would run 65536 times instead of the number the shader
+     * asked for and draw a wrong colour with no error. Refusing says so.
+     *
+     * That is the difference between a bound and a truncation, and it is why this is not "fall
+     * back like the rest".
+     */
     if (trips > GLSL_GEN_MAX_TRIPS) {
         (void)gen_fail(g, "this loop asks for more trips than the generator will bound, and an "
                           "unbounded loop on this part is a hang rather than a wrong colour",
@@ -3390,14 +3477,10 @@ static GLboolean gen_for(glsl_gen_t *g, int32_t node) {
         return GL_FALSE;
     }
 
-    /* **A body that moves the counter makes the count above a lie**, and both paths below rest
-     * on it. Checked before anything is emitted. */
-    if (assigns_name(g, n->d, decl->text, decl->length)) {
-        (void)gen_fail(g, "a loop whose body assigns its own counter is not generated: the trip "
-                          "count is worked out when the shader is compiled, and an assignment "
-                          "inside the body would make that count wrong without failing", node);
-        return GL_FALSE;
-    }
+    /* **A body that moves the counter makes the count above a lie**, and both counted paths below
+     * rest on it - so that shape goes to the generic loop, which re-evaluates the condition every
+     * trip and needs no count. Checked before anything is emitted. */
+    if (assigns_name(g, n->d, decl->text, decl->length)) return gen_for_generic(g, node);
 
     /* **Which of the two shapes this loop takes.** Unrolling is the better one where it fits -
      * the counter stays a compile-time constant, so indexing and arithmetic on it fold away,
@@ -3760,10 +3843,15 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
          * which is the one failure worse than refusing. `for` with a `break` expresses the same
          * loop and is bounded, so the rewrite is small and it is named here.
          */
+        /* **The two kinds hold their children the other way round**, which is worth reading off
+         * the parser rather than assuming: `while (c) s;` is the condition in `a` and the body in
+         * `b`, and `do s; while (c);` is the body in `a` and the condition in `b` - each in source
+         * order. Assuming they agreed fed the condition to the statement generator, which refused
+         * it as a statement with no instruction selection and named a column inside it. */
         case GLSL_NODE_WHILE:
-            return gen_while_branched(g, node, GL_FALSE);
+            return gen_loop_branched(g, node, GLSL_NO_NODE, n->a, GLSL_NO_NODE, n->b, GL_FALSE);
         case GLSL_NODE_DO_WHILE:
-            return gen_while_branched(g, node, GL_TRUE);
+            return gen_loop_branched(g, node, GLSL_NO_NODE, n->b, GLSL_NO_NODE, n->a, GL_TRUE);
         default:
             (void)gen_fail(g, "this statement has no instruction selection yet: declarations, "
                               "expressions, blocks, `if`, `for`, `break`, `continue`, `return` "
