@@ -380,6 +380,34 @@ char *strerror(int errnum) {
     return (char *)(size_t) "unknown error";
 }
 
+/*
+ * **The reentrant one, which libc++ needs to compile at all.**
+ *
+ * `libcxx/src/system_error.cpp` calls `::strerror_r` unconditionally on anything that is not
+ * Windows, so its absence is not a link error a port discovers late - it is a *compile* error in
+ * the C++ standard library, and it stopped Extreme Tux Racer building on 2026-09-25.
+ *
+ * **The XSI signature, returning int**, not the GNU one returning `char *`. libc++ handles both
+ * through `handle_strerror_r_return` overloads, so either links; this is the POSIX one and the
+ * one FreeBSD provides, which is the platform this target names.
+ *
+ * It copies the same single string `strerror` returns, for the same reason: there is no errno
+ * here. ERANGE is returned when the caller's buffer cannot hold it, which is what a caller
+ * checking the return expects, rather than a silent truncation.
+ */
+int strerror_r(int errnum, char *buf, size_t buflen) {
+    const char *msg = strerror(errnum);
+    size_t n = 0;
+
+    if (!buf || buflen == 0) return 34; /* ERANGE */
+
+    while (msg[n] != '\0') n++;
+    if (n + 1 > buflen) return 34;      /* ERANGE - say so rather than truncate */
+
+    for (size_t i = 0; i <= n; i++) buf[i] = msg[i];
+    return 0;
+}
+
 /* ---------------------------------------------------------------------------
  * stdlib
  * --------------------------------------------------------------------------- */
@@ -928,6 +956,24 @@ void clearerr(FILE *f) {
     if (f) {
         f->eof = 0;
         f->err = 0;
+    }
+}
+
+/*
+ * **`errno` is read first, before anything else can disturb it.**
+ *
+ * That is the whole subtlety here: `fprintf` may set `errno` itself, so reading it after the
+ * prefix has been printed would report the failure of the printing rather than the failure the
+ * caller wanted named. Every correct implementation captures it on entry.
+ */
+void perror(const char *prefix) {
+    const int saved = errno;
+    const char *msg = strerror(saved);
+
+    if (prefix != NULL && prefix[0] != '\0') {
+        fprintf(stderr, "%s: %s\n", prefix, msg);
+    } else {
+        fprintf(stderr, "%s\n", msg);
     }
 }
 

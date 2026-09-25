@@ -68,4 +68,13 @@ typedef int64_t suseconds_t;
 #define _SUSECONDS_T_DECLARED
 #endif
 
+/* `usleep`'s argument, and not the unsigned twin of `suseconds_t` above despite the names: that
+ * one is a signed *difference* inside `struct timeval` and is 64-bit here, while this is a count
+ * of microseconds to wait and is 32-bit on FreeBSD and on Linux both. A port that assumed they
+ * matched would silently truncate a long sleep on one of them. */
+#ifndef _USECONDS_T_DECLARED
+typedef unsigned int useconds_t;
+#define _USECONDS_T_DECLARED
+#endif
+
 #endif /* _SYS_TYPES_H */

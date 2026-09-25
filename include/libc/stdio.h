@@ -91,6 +91,11 @@ int ferror(FILE *f);
  * stream" - without it a caller that recovers from a short read has no way to stop `ferror`
  * answering yes forever. */
 void clearerr(FILE *f);
+
+/* `<prefix>: <reason>` on stderr, from the current `errno`. A NULL or empty prefix prints the
+ * reason alone, which is what C says. The reason comes from `strerror`, so it is as specific as
+ * that is - see its definition for what this platform can distinguish. */
+void perror(const char *prefix);
 int fflush(FILE *f);
 int fgetc(FILE *f);
 int getc(FILE *f);
