@@ -175,6 +175,14 @@ agc_display_t *agc_display_open_adopting(unsigned int width,
       agc_tile_surface_bytes(width, height) > AGC_STRIDE_BYTES ||
       (uint64_t)width * (uint64_t)height * 4u >
           AGC_TOTAL_ALLOC_BYTES - 2u * AGC_STRIDE_BYTES) {
+    /* **Logged, because this return used to be silent.** It is the first exit in the function and
+     * it precedes every `agc_log` below, so a refused size produced no output at all: the display
+     * reported 0x0, `glContextCreate` fell back to its own default, and the only visible symptom
+     * was the GL self-test reporting no framebuffer several layers away. Craft's GLFW shim passed
+     * 0x0 on the reasoning that the display knows its own size, and finding that took five
+     * hardware runs. */
+    oops_log_error("AGC", "display refuses %ux%u: zero, or larger than the 32 MB mapping allows",
+                   width, height);
     disp->last_error = -3;
     return disp;
   }
@@ -184,6 +192,9 @@ agc_display_t *agc_display_open_adopting(unsigned int width,
   agc_tile_init();
 
   if (!sceVideoOutOpen || !sceVideoOutRegisterBuffers2) {
+    /* Also logged, for the same reason: this is the other exit before the first `agc_log`. */
+    oops_log_error("AGC", "libSceVideoOut did not resolve (open=%p register=%p)",
+                   (void *)sceVideoOutOpen, (void *)sceVideoOutRegisterBuffers2);
     disp->last_error = -1;
     return disp;
   }
