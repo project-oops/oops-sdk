@@ -203,6 +203,27 @@ static void make_matching_vs(const char *fs, char *out, size_t cap) {
     out[w < cap ? w : cap - 1] = '\0';
 }
 
+/*
+ * **Is this a standalone GLSL translation unit at all?**
+ *
+ * A corpus directory holds things that are not: libultraship's shaders are Prism templates that
+ * open `@prism(type='fragment', ...)` and are expanded at run time; mesa-demos'
+ * `simplex-noise.glsl` is a library of functions meant to be included; retroarch vendors
+ * glslang's test suite, which contains deliberately invalid shaders.
+ *
+ * Counting those as refusals is the harness reporting a property of the corpus as a finding
+ * about the compiler - the same mistake as reading the stage off the extension, and the third
+ * time this tool has made a version of it. They are skipped and counted separately, so the
+ * compile column is about shaders and the skip count says how much of the directory was not one.
+ */
+static int is_translation_unit(const char *src) {
+    const char *p = src;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p == '@') return 0;                  /* a template, not a shader */
+    if (!strstr(src, "void main")) return 0;  /* an include, or not a shader */
+    return 1;
+}
+
 static GLenum sniff_stage(const char *src, const char *path) {
     if (strstr(src, "gl_Position") || strstr(src, "attribute ")) return GL_VERTEX_SHADER;
     if (strstr(src, "gl_FragColor") || strstr(src, "gl_FragData")) return GL_FRAGMENT_SHADER;
@@ -220,13 +241,18 @@ int main(int argc, char **argv) {
     glContextMakeCurrent(ctx);
     glContextSetVersion(2, 0);
 
-    int total = 0, ok = 0, unreadable = 0;
+    int total = 0, ok = 0, unreadable = 0, not_a_unit = 0;
     int gen_total = 0, gen_ok = 0, gen_link_failed = 0;
     for (int a = 1; a < argc; a++) {
         long len = 0;
         char *src = slurp(argv[a], &len);
         if (!src || len == 0) {
             unreadable++;
+            free(src);
+            continue;
+        }
+        if (!is_translation_unit(src)) {
+            not_a_unit++;
             free(src);
             continue;
         }
@@ -293,7 +319,8 @@ int main(int argc, char **argv) {
         free(src);
     }
 
-    printf("\n%d of %d shaders compile (%d unreadable)\n", ok, total, unreadable);
+    printf("\n%d of %d shaders compile (%d unreadable, %d not a standalone shader)\n",
+           ok, total, unreadable, not_a_unit);
     printf("\n%-6s %s\n", "count", "refusal (identifiers stripped), and the first file it hit");
     /* Descending, so the row worth acting on is first. */
     for (int printed = 0; printed < g_reasons; printed++) {
