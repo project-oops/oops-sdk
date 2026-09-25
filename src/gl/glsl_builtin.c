@@ -548,9 +548,12 @@ static const bi_var_t BUILTIN_FRAGMENT[] = {
     {"gl_PointCoord",  GLSL_TYPE_VEC2, 0, GLSL_TOK_KW_UNIFORM},
     {"gl_FragColor",   GLSL_TYPE_VEC4, 0, GLSL_TOK_EOF},
     {"gl_FragDepth",   GLSL_TYPE_FLOAT, 0, GLSL_TOK_EOF},
-    /* One draw buffer, so one element. A shader writing `gl_FragData[1]` is refused by the
-     * array bound rather than writing somewhere nothing reads. */
-    {"gl_FragData",    GLSL_TYPE_VEC4, 1, GLSL_TOK_EOF},
+    /* One draw buffer, so one element - and the *same* number `glGetIntegerv(GL_MAX_DRAW_BUFFERS)`
+     * answers and `gl_MaxDrawBuffers` reads, because GLSL declares this array as
+     * `gl_FragData[gl_MaxDrawBuffers]` and the three cannot be allowed to differ. A shader writing
+     * `gl_FragData[1]` is refused by the array bound rather than writing somewhere nothing
+     * reads. */
+    {"gl_FragData",    GLSL_TYPE_VEC4, OOPS_GL_MAX_DRAW_BUFFERS, GLSL_TOK_EOF},
 };
 
 /*
@@ -582,9 +585,12 @@ static const bi_const_t BUILTIN_CONSTS[] = {
     {"gl_MaxCombinedTextureImageUnits", OOPS_GL_MAX_TEXTURE_IMAGE_UNITS},
     {"gl_MaxTextureImageUnits", OOPS_GL_MAX_TEXTURE_IMAGE_UNITS},
     {"gl_MaxFragmentUniformComponents", OOPS_GL_MAX_PROGRAM_UNIFORMS * 4},
-    /* **`gl_MaxDrawBuffers` is deliberately absent**, and the refusal table says why: the API's
-     * answer and the shading language's need of it disagree here, and inventing a number for one
-     * of them would settle a question that is not this table's to settle. */
+    /* **And the one that was withheld until 2026-09-25.** GLSL declares
+     * `gl_FragData[gl_MaxDrawBuffers]`, so this constant and that array's length are one fact -
+     * and while `GL_MAX_DRAW_BUFFERS` answered 2 for the front and back surfaces, they were two.
+     * A shader could be handed 1 and disagree with the API, or 2 and index past its own array, so
+     * it was handed neither. The API answers 1 now; see `OOPS_GL_MAX_DRAW_BUFFERS`. */
+    {"gl_MaxDrawBuffers", OOPS_GL_MAX_DRAW_BUFFERS},
 };
 
 static GLboolean declare_table(glsl_sema_t *s, const bi_var_t *t, size_t n) {
@@ -627,24 +633,10 @@ const char *glsl_builtin_refusal(const char *name, size_t len) {
         {"gl_InstanceID", "gl_InstanceID is GLSL 1.40; this front end takes 1.10 and 1.20"},
         {"gl_VertexID", "gl_VertexID is GLSL 1.30; this front end takes 1.10 and 1.20"},
         {"gl_ClipDistance", "gl_ClipDistance is GLSL 1.30; use gl_ClipVertex"},
-        /*
-         * **The one built-in constant with no honest value here.**
-         *
-         * GLSL declares `gl_FragData[gl_MaxDrawBuffers]`, so this number and that array's length
-         * are meant to be one fact. They are not: `glGetIntegerv(GL_MAX_DRAW_BUFFERS)` answers 2,
-         * counting the front surface and the back one, both of which receive the same fragment
-         * colour - while the fragment stage exports one target, so `gl_FragData` has one element
-         * and `gl_FragData[1]` has nowhere to go.
-         *
-         * Either could be made to agree with the other and the choice is a design decision about
-         * what a draw buffer means for a double-buffered window, not a gap to fill quietly. So a
-         * shader asking is told that, rather than handed 1 and made to disagree with the API or
-         * handed 2 and made to index past its own array.
-         */
-        {"gl_MaxDrawBuffers",
-         "gl_MaxDrawBuffers has no settled value here: GL_MAX_DRAW_BUFFERS answers 2 for the "
-         "front and back surfaces, and gl_FragData has one element because the fragment stage "
-         "exports one target"},
+        /* `gl_MaxDrawBuffers` was here for one day, refused because `GL_MAX_DRAW_BUFFERS` answered
+         * 2 while `gl_FragData` had one element and no number could be given without disagreeing
+         * with one of them. The API answers 1 now and the constant is a constant - see
+         * `OOPS_GL_MAX_DRAW_BUFFERS` for which of the two was wrong and why. */
     };
     if (!name || len == 0u) return (const char *)0;
     for (size_t i = 0; i < sizeof(REFUSED) / sizeof(REFUSED[0]); i++) {

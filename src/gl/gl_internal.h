@@ -53,6 +53,33 @@
  */
 #define OOPS_GL_MAX_TEXTURE_IMAGE_UNITS 4
 
+/*
+ * **How many independent colour outputs a fragment shader has: one.**
+ *
+ * The fragment stage exports MRT0 and nothing else (`glsl_emit_export_mrt0`), so that is the
+ * number - and it has to be **one** number, because GLSL 1.10 section 7.2 declares
+ * `gl_FragData[gl_MaxDrawBuffers]`. `glGetIntegerv(GL_MAX_DRAW_BUFFERS)`, that array's length and
+ * the `gl_MaxDrawBuffers` constant a shader reads are the same fact seen from three places, and
+ * they disagreed: the glGet answered 2, counting the front surface and the back one, while
+ * `gl_FragData` had one element. A shader writing `for (i = 0; i < gl_MaxDrawBuffers; i++)
+ * gl_FragData[i]` believed the first and was refused by the second, so the constant had to be
+ * withheld from shaders entirely for a day rather than be given a number that disagreed with
+ * something.
+ *
+ * **Two surfaces is double buffering, not two draw buffers.** They receive the same fragment
+ * colour, which is what `glDrawBuffers` means for a window-system framebuffer - and GL 2.0 4.2.1
+ * says `GL_FRONT` and `GL_BACK` may not appear in that call's list at all, so a limit of 2 named
+ * a capacity no conformant call could fill. Front *and* back together is
+ * `glDrawBuffer(GL_FRONT_AND_BACK)`, which is the singular call and always worked;
+ * `glDrawBuffers(2, ...)` is now GL_INVALID_VALUE, which is what a limit of 1 means.
+ *
+ * **The deviation that remains, named rather than left implicit:** `glDrawBuffers(1, {GL_FRONT})`
+ * is accepted here. 4.2.1 excludes `GL_FRONT` from the list because on a stereo framebuffer it
+ * covers left and right; this implementation has no stereo, so the name covers one surface and
+ * refusing it would report a stereo constraint a program cannot have hit.
+ */
+#define OOPS_GL_MAX_DRAW_BUFFERS 1
+
 /* **How many sampler descriptor sets a compiled pixel shader carries**, which is one fact in two
  * layouts: the payload slot holds this many 0x40 descriptor sets before the uniform block, and
  * the scalar file holds this many at `GLSL_GEN_TEX_SGPR_BASE`. `glsl_internal.h` derives

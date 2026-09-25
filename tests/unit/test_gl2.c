@@ -2478,8 +2478,27 @@ static void test_gl2_draw_buffers(void) {
     void *ctx = gl2_context();
 
     GLint v = 0;
+
+    /* **The limit is one, and it is one because the shading language says so.**
+     *
+     * `GL_MAX_DRAW_BUFFERS` answered 2 until 2026-09-25, counting the front surface and the back
+     * one. GLSL declares `gl_FragData[gl_MaxDrawBuffers]`, so that number is also the length of
+     * an array a shader indexes - and the fragment stage exports one colour target, so the array
+     * has one element. Two surfaces receiving the same colour is double buffering; it is not two
+     * independent outputs, and GL 2.0 4.2.1 does not let `GL_FRONT` and `GL_BACK` share a
+     * `glDrawBuffers` list anyway.
+     *
+     * So `glDrawBuffers(2, ...)` is GL_INVALID_VALUE now. **Nothing the implementation could do
+     * has been taken away**: front and back together is `glDrawBuffer(GL_FRONT_AND_BACK)`, the
+     * singular call, checked below. */
     const GLenum both[2] = {GL_FRONT, GL_BACK};
+    glGetIntegerv(GL_MAX_DRAW_BUFFERS, &v);
+    ASSERT_EQ(v, 1);
     glDrawBuffers(2, both);
+    ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+
+    /* The singular call still names both, which is what a program wanting both asks for. */
+    glDrawBuffer(GL_FRONT_AND_BACK);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glGetIntegerv(GL_DRAW_BUFFER, &v);
     ASSERT_EQ(v, (GLint)GL_FRONT_AND_BACK);
@@ -2500,9 +2519,14 @@ static void test_gl2_draw_buffers(void) {
     const GLenum wide[1] = {GL_FRONT_AND_BACK};
     glDrawBuffers(1, wide);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+    /* **"A buffer named twice" is unreachable while the limit is one**, because naming one twice
+     * needs two entries and two entries is already GL_INVALID_VALUE. The check for it is still in
+     * `glDrawBuffers` and is still right; it is simply not a state this call can be put into. This
+     * arm asserts the error the call *does* give, so that it is measuring the implementation
+     * rather than a path the limit forecloses. */
     const GLenum twice[2] = {GL_BACK, GL_BACK};
     glDrawBuffers(2, twice);
-    ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+    ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
     const GLenum absent[1] = {GL_FRONT_RIGHT};
     glDrawBuffers(1, absent);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
@@ -6970,24 +6994,32 @@ static void test_gl2_builtin_constants(void) {
                        "}\n"),
               GL_FALSE);
 
-    /* **`gl_MaxDrawBuffers` is refused, and says why.** GLSL declares
-     * `gl_FragData[gl_MaxDrawBuffers]`, so the constant and that array's length are meant to be
-     * one fact - and here they are not: the API answers 2 for the front and back surfaces while
-     * the fragment stage exports one target. Handing the shader either number makes it disagree
-     * with something, so it is told instead. */
+    /* **`gl_MaxDrawBuffers` is the length of `gl_FragData`, and the API's answer, and one
+     * number.** GLSL declares `gl_FragData[gl_MaxDrawBuffers]`, so a shader that loops to the
+     * constant and indexes the array has to stay inside it - which is the whole reason the
+     * constant was withheld while the API answered 2 and the array had one element.
+     *
+     * Three readings compared: the glGet, the constant a shader reads, and the array's own bound
+     * as the front end enforces it. A change to any one of them without the others reds this. */
+    GLint api_draw = 0;
+    glGetIntegerv(GL_MAX_DRAW_BUFFERS, &api_draw);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() { gl_FragColor = vec4(float(gl_MaxDrawBuffers) * 0.25,\n"
+                    "                                  0.0, 0.0, 1.0); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], (float)api_draw * 0.25f, 2e-3f);
+
+    /* The array's bound agrees: element 0 exists and element `api_draw` does not. Written as
+     * `gl_FragData[1]` because the constant is 1 - if it ever rises, this arm is the one that
+     * says the array rose with it. */
+    ASSERT_EQ(api_draw, 1);
     ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
-                       "void main() { gl_FragColor = vec4(float(gl_MaxDrawBuffers)); }\n"),
+                       "void main() { gl_FragData[0] = vec4(1.0); }\n"),
+              GL_TRUE);
+    ASSERT_EQ(compiles(GL_FRAGMENT_SHADER,
+                       "void main() { gl_FragData[1] = vec4(1.0); }\n"),
               GL_FALSE);
-    {
-        const GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
-        source_of(sh, "void main() { gl_FragColor = vec4(float(gl_MaxDrawBuffers)); }\n");
-        glCompileShader(sh);
-        char log[256] = {0};
-        glGetShaderInfoLog(sh, (GLsizei)sizeof(log), NULL, log);
-        /* The diagnostic names the disagreement rather than the word, so its author is not sent
-         * to check their spelling. */
-        ASSERT_TRUE(strstr(log, "no settled value") != NULL);
-    }
 
     glContextDestroy(ctx);
 }

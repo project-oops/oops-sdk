@@ -1636,10 +1636,21 @@ void glDrawBuffer(GLenum buf) {
  * GL_COLOR_ATTACHMENT names, which are GL 3.0 and are not here. So this is `glDrawBuffer` of the
  * union, which is what the two existing colour targets already do under GL_FRONT_AND_BACK.
  *
+ * **`GL_MAX_DRAW_BUFFERS` is 1 here**, so this call takes at most one name and
+ * `glDrawBuffers(2, {GL_FRONT, GL_BACK})` is GL_INVALID_VALUE. That is not a narrowing of what
+ * the implementation can do - front *and* back together is `glDrawBuffer(GL_FRONT_AND_BACK)`,
+ * the singular call, and it always worked. It is the limit telling the truth: the fragment stage
+ * exports one colour, GLSL declares `gl_FragData[gl_MaxDrawBuffers]`, and a limit of 2 made that
+ * array's length disagree with the number a shader is told. `OOPS_GL_MAX_DRAW_BUFFERS` has the
+ * whole argument.
+ *
  * The specification's three errors, and each is a mistake worth naming rather than accepting:
- * `n` outside [0, GL_MAX_DRAW_BUFFERS] is GL_INVALID_VALUE; GL_FRONT, GL_BACK,
- * GL_FRONT_AND_BACK and GL_LEFT name more than one buffer each and may not appear in a list at
- * all (2.0, 4.2.1), which is GL_INVALID_OPERATION; and a buffer named twice is the same error.
+ * `n` outside [0, GL_MAX_DRAW_BUFFERS] is GL_INVALID_VALUE; a name covering more than one buffer
+ * may not appear in a list at all (2.0, 4.2.1), which is GL_INVALID_OPERATION; and a buffer named
+ * twice is the same error. **`GL_FRONT` and `GL_BACK` are single names here** and are accepted -
+ * 4.2.1 excludes them because on a stereo framebuffer each covers a left and a right buffer, and
+ * this implementation has no stereo, so refusing one would report a constraint no program here
+ * can have hit. `GL_FRONT_AND_BACK` genuinely covers two and is refused.
  */
 void glDrawBuffers(GLsizei n, const GLenum *bufs) {
     gl_context_t *ctx = gl_get_ctx();
@@ -2227,12 +2238,14 @@ void glGetIntegerv(GLenum pname, GLint *params) {
             if (!gl_require_version_enum(ctx, 2u, 0u)) break;
             params[0] = OOPS_GL_MAX_PROGRAM_UNIFORMS * 4;
             break;
-        /* One colour buffer per `glDrawBuffers` entry. Two exist - the front surface and the
-         * back one - and both receive the same fragment colour, which is what the call means
-         * for a window-system framebuffer. */
+        /* **One**, because the fragment stage exports one colour target - and because this is the
+         * same number as `gl_FragData`'s length and the `gl_MaxDrawBuffers` a shader reads, which
+         * GLSL ties together as `gl_FragData[gl_MaxDrawBuffers]`. See `OOPS_GL_MAX_DRAW_BUFFERS`
+         * for why the two surfaces of a double-buffered framebuffer are not two draw buffers, and
+         * for the one deviation from 4.2.1 that remains. */
         case GL_MAX_DRAW_BUFFERS:
             if (!gl_require_version_enum(ctx, 2u, 0u)) break;
-            params[0] = 2;
+            params[0] = OOPS_GL_MAX_DRAW_BUFFERS;
             break;
         case GL_CURRENT_PROGRAM:
             if (!gl_require_version_enum(ctx, 2u, 0u)) break;
