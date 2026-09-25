@@ -37,6 +37,12 @@ typedef enum {
      * primitive under multisampling. Both are recognised whatever the shader's version, and the
      * parser refuses them in a 1.10 shader by name. */
     GLSL_TOK_KW_INVARIANT, GLSL_TOK_KW_CENTROID,
+    /* **OpenGL ES 1.00's precision words.** ES makes a shader state the precision it needs;
+     * desktop GL has one precision and the specification says the qualifiers are accepted and
+     * have no effect. They are recognised here so an ES shader parses, and dropped by the
+     * parser rather than carried into the type system, because there is nothing downstream that
+     * could act on them differently. */
+    GLSL_TOK_KW_PRECISION, GLSL_TOK_KW_LOWP, GLSL_TOK_KW_MEDIUMP, GLSL_TOK_KW_HIGHP,
     GLSL_TOK_KW_FLOAT, GLSL_TOK_KW_INT, GLSL_TOK_KW_BOOL,
     GLSL_TOK_KW_TRUE, GLSL_TOK_KW_FALSE,
     GLSL_TOK_KW_VEC2, GLSL_TOK_KW_VEC3, GLSL_TOK_KW_VEC4,

@@ -199,9 +199,21 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
      * one and an error in the other. Compiling a 1.30 shader as either would take *its* rules -
      * `in`/`out` in place of `attribute`/`varying`, integer arithmetic that means it - somewhere
      * else silently, which is why the number is checked rather than hoped about. */
+    /* **`#version 100` is OpenGL ES 1.00, and it is this compiler's 1.10.** ES 1.00 is derived
+     * from GLSL 1.10 and shares its rules where it matters here: no implicit int-to-float
+     * conversion, `attribute` and `varying` rather than `in` and `out`, the same built-in
+     * library. What it adds is precision qualifiers, which the parser drops because this GL
+     * computes in single precision throughout and the specification says they have no effect.
+     *
+     * Accepting it is what lets SuperTux's shaders compile - all four of them are `#version 100`
+     * and nothing else about them was unsupported, which a survey of the ports' own shader
+     * corpora is how I found out rather than by reading them one at a time. */
+    if (u->version == 100) u->version = 110;
+
     if (u->version != 0 && u->version != 110 && u->version != 120) {
         log_write(log, log_size,
-                  "only GLSL 1.10 and 1.20 are implemented; this shader asks for another", 1, 1);
+                  "only GLSL 1.10, 1.20 and ES 1.00 are implemented; this shader asks for another",
+                  1, 1);
         gl_heap_free(pp);
         gl_heap_free(p);
         gl_glsl_unit_release(u);

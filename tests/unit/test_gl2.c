@@ -1403,6 +1403,62 @@ static void test_gl2_framebuffer_objects(void) {
 }
 
 /*
+ * **OpenGL ES 1.00 - `#version 100` and the precision qualifiers.**
+ *
+ * ES 1.00 is derived from GLSL 1.10 and shares everything this compiler cares about; what it
+ * adds is a shader stating the precision it wants. This GL computes in single precision
+ * throughout and the specification says the qualifiers then have no effect, so the parser drops
+ * them - and this checks that dropping them leaves the shader meaning what it said.
+ *
+ * All three spellings are here because they are parsed in three different places: the
+ * standalone `precision` statement, a qualifier between a storage qualifier and a type, and one
+ * on a function parameter. The first version of this change handled only the first, and the
+ * other two are what a survey of SuperTux's and craft's own shaders would not have caught -
+ * neither corpus uses them, so the tests are the only thing holding those two paths up.
+ */
+static void test_gl2_es_100_shaders(void) {
+    gl2_target_t t = gl2_target();
+
+    const GLuint prog = linked_program(
+        "#version 100\n"
+        "precision highp float;\n"
+        "attribute mediump vec3 pos;\n"
+        "void main() { gl_Position = vec4(pos, 1.0); }\n",
+        "#version 100\n"
+        "precision mediump float;\n"
+        "uniform lowp float scale;\n"
+        "mediump float doubled(lowp float v) { return v * 2.0; }\n"
+        "void main() {\n"
+        "  mediump float g = doubled(0.25);\n"
+        "  gl_FragColor = vec4(scale, g, 0.75, 1.0);\n"
+        "}\n");
+    ASSERT_TRUE(prog != 0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(prog);
+    glUniform1f(glGetUniformLocation(prog, "scale"), 0.25f);
+    draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+    const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+    ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);     /* the uniform, 0.25 */
+    ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);   /* 0.25 doubled through a parameter */
+    ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);   /* 0.75 */
+
+    /* **A version this compiler does not implement is still refused**, so accepting ES 1.00 did
+     * not turn the gate off. 3.30 is the one SuperTux ships beside its ES shaders. */
+    const GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+    const char *src330 = "#version 330\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n";
+    glShaderSource(sh, 1, &src330, (const GLint *)0);
+    glCompileShader(sh);
+    GLint status = 1;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &status);
+    ASSERT_TRUE(status == 0);
+    glDeleteShader(sh);
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
+/*
  * **A draw into a framebuffer object lands in the attachment and not on the display.**
  *
  * The object layer above is all state a program sets and reads back; this is the one that says
@@ -6141,6 +6197,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_limits_and_version_are_answered);
     RUN_TEST(test_gl2_a_program_draws);
     RUN_TEST(test_gl2_structs_run);
+    RUN_TEST(test_gl2_es_100_shaders);
     RUN_TEST(test_gl2_framebuffer_objects);
     RUN_TEST(test_gl2_draw_into_a_framebuffer_object);
     RUN_TEST(test_gl2_generate_mipmap);

@@ -145,6 +145,11 @@ static glsl_token_type_t keyword_of(const char *text, size_t n) {
          * rather than a version-dependent one, and the parser refuses them by name in a 1.10
          * shader, which is a better diagnostic than "syntax error" either way. */
         {"invariant", GLSL_TOK_KW_INVARIANT}, {"centroid", GLSL_TOK_KW_CENTROID},
+        /* ES 1.00's precision words, recognised whatever the version for the same reason as the
+         * two above: a desktop shader using one as an identifier was already unportable, and
+         * naming them gives a better diagnostic than a syntax error further on. */
+        {"precision", GLSL_TOK_KW_PRECISION}, {"lowp", GLSL_TOK_KW_LOWP},
+        {"mediump", GLSL_TOK_KW_MEDIUMP},     {"highp", GLSL_TOK_KW_HIGHP},
         /* Reserved by GLSL 1.10. Named so a program using one is told *which* word it may not
          * use, instead of meeting a syntax error somewhere downstream. */
         {"asm", GLSL_TOK_KW_RESERVED},      {"class", GLSL_TOK_KW_RESERVED},

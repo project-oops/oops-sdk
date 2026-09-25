@@ -467,13 +467,27 @@ static GLboolean is_qualifier(glsl_token_type_t t) {
  * Refused in a 1.10 shader by name, because they are 1.20's and a shader that uses one has said
  * which language it is written in.
  */
+/* **A precision qualifier in front of a type, dropped.** `uniform mediump float x;` declares the
+ * same thing here as `uniform float x;` - this GL computes in single precision throughout and
+ * the specification says the qualifiers are accepted with no effect - so they are skipped
+ * wherever a type may begin rather than carried into the type system, which has nothing that
+ * could act on them. */
+static void skip_precision_qualifiers(glsl_parser_t *p) {
+    while (check(p, GLSL_TOK_KW_LOWP) || check(p, GLSL_TOK_KW_MEDIUMP) ||
+           check(p, GLSL_TOK_KW_HIGHP)) {
+        bump(p);
+    }
+}
+
 static void parse_aux_qualifiers(glsl_parser_t *p) {
+    skip_precision_qualifiers(p);
     while (check(p, GLSL_TOK_KW_INVARIANT) || check(p, GLSL_TOK_KW_CENTROID)) {
         if (p->version != 0 && p->version < 120) {
             fail(p, "`invariant` and `centroid` are GLSL 1.20; this shader is 1.10");
             return;
         }
         bump(p);
+        skip_precision_qualifiers(p);
     }
 }
 
@@ -538,6 +552,13 @@ static GLboolean remember_struct_name(glsl_parser_t *p, const char *t, size_t n)
 
 static GLboolean starts_declaration(const glsl_parser_t *p) {
     if (is_qualifier(p->tok.type) || is_type_name(p->tok.type)) return GL_TRUE;
+    /* A precision qualifier begins a declaration the same way a storage one does - `mediump
+     * float x;` is a local in an ES shader - and `precision mediump float;` is a statement in
+     * its own right. Both are dropped once parsed; this only has to say they start something. */
+    if (p->tok.type == GLSL_TOK_KW_LOWP || p->tok.type == GLSL_TOK_KW_MEDIUMP ||
+        p->tok.type == GLSL_TOK_KW_HIGHP || p->tok.type == GLSL_TOK_KW_PRECISION) {
+        return GL_TRUE;
+    }
     /* `struct S { ... } s;` declares a type and maybe a variable, and either way begins one. */
     if (p->tok.type == GLSL_TOK_KW_STRUCT) return GL_TRUE;
     /* And the case that needed the list: `S s;` where `S` is a struct. */
@@ -784,6 +805,8 @@ int32_t glsl_parse_statement(glsl_parser_t *p) {
             qualifier = p->tok.type;
             bump(p);
         }
+        /* `uniform mediump float x;` - the precision word sits between the two. */
+        skip_precision_qualifiers(p);
         glsl_token_type_t type_tok = GLSL_TOK_EOF;
         const char *type_name = (const char *)0;
         size_t type_name_len = 0;
@@ -965,6 +988,8 @@ static int32_t parse_parameter_list(glsl_parser_t *p) {
             qualifier = p->tok.type;
             bump(p);
         }
+        /* `void f(in mediump float x)` - a parameter carries one the same way. */
+        skip_precision_qualifiers(p);
         /* **A parameter may be a struct**, so the same three-way type specifier the declarations
          * use applies here. `struct S { ... } f(...)` - a definition in a parameter's type - is
          * not GLSL, and `parse_type_specifier` would accept one; a definition here would also
@@ -1007,6 +1032,32 @@ static int32_t parse_parameter_list(glsl_parser_t *p) {
  * declaration. All three start with a type, so they are told apart by what follows the name -
  * `(` means a function, anything else a variable. */
 static int32_t parse_external_declaration(glsl_parser_t *p) {
+    /* **`precision mediump float;` is a whole declaration too**, and like the restatement below
+     * it declares nothing. ES makes a shader state the precision it wants; desktop GL has one
+     * precision and the specification says the qualifiers are accepted with no effect, so this
+     * consumes the statement and produces no node.
+     *
+     * It is taken before everything else because `precision` is followed by a type keyword, and
+     * every branch after this one would read that type as the start of a declaration. */
+    if (check(p, GLSL_TOK_KW_PRECISION)) {
+        bump(p);
+        if (!accept(p, GLSL_TOK_KW_LOWP) && !accept(p, GLSL_TOK_KW_MEDIUMP) &&
+            !accept(p, GLSL_TOK_KW_HIGHP)) {
+            fail(p, "expected `lowp`, `mediump` or `highp` after `precision`");
+            return GLSL_NO_NODE;
+        }
+        /* The type it applies to. Any type name is allowed to follow; nothing here needs to know
+         * which, because the statement has no effect either way. */
+        if (check(p, GLSL_TOK_EOF) || check(p, GLSL_TOK_SEMICOLON)) {
+            fail(p, "expected a type after a precision qualifier");
+            return GLSL_NO_NODE;
+        }
+        bump(p);
+        if (accept(p, GLSL_TOK_SEMICOLON)) return GLSL_NO_NODE;
+        fail(p, "expected `;` after a precision statement");
+        return GLSL_NO_NODE;
+    }
+
     /* **`invariant name;` on its own is a whole declaration** in GLSL 1.20 - a restatement that
      * a variable already declared, usually `gl_Position`, is invariant. It has no type and
      * declares nothing new, so it is consumed and produces no node. Taken before the qualifier
@@ -1033,6 +1084,7 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
         qualifier = p->tok.type;
         bump(p);
     }
+    skip_precision_qualifiers(p);
     glsl_token_type_t type_tok = GLSL_TOK_EOF;
     const char *type_name = (const char *)0;
     size_t type_name_len = 0;
