@@ -3125,7 +3125,17 @@ static float sim_src(sim_t *s, uint32_t src0, const uint32_t *w, uint32_t *i) {
         const uint32_t tail = w[++(*i)];
         return s->v[tail & 0xffu];
     }
-    if (src0 < 102u) {
+    /* **SGPRs run to s105 on this part, not to s101.** The bound here was 102, which is where
+     * `flat_scratch` sits in the GFX9 encoding - on GFX10 it does not, and s102..s105 are
+     * ordinary scalar registers. clang says so directly: `v_mov_b32 v0, s105` for gfx1030
+     * assembles to `7E000269`, operand 105, and `vcc_lo` is the next one up at 106. It matches
+     * the register map, which allows up to s105 (Mesa `ac_gpu_info.c:260`, `max_sgpr_alloc` 108
+     * with VCC at s[106-107]).
+     *
+     * Nothing had reached that far before, so the too-tight bound read as "an encoding no test
+     * has taught this simulator" the first time a uniform landed in the top of the window - an
+     * instrument refusing a correct shader. */
+    if (src0 < 106u) {
         /* **A scalar read with a load still in flight is the bug this models.** The hardware
          * would return whatever the register held; there is nothing to see on a host and
          * nothing to see in the words. */
@@ -6335,6 +6345,109 @@ static void test_gl2_non_square_matrix_uniform(void) {
  * divide. `tools/shader-survey.sh` found it, and it was the only fragment shader in that port's
  * hundred that the front end compiled and the generator then refused.
  */
+/*
+ * **A shader whose uniforms are wider than the scalar window.**
+ *
+ * The scalar file holds 32 floats of the uniform block at a time, and for a while that was what
+ * bounded a shader: the prologue loaded one window and held it, so a shader naming uniforms more
+ * than 32 floats apart was refused with that number. mesa-demos' `CH11-toyball.frag` wanted 48
+ * and `convolution.frag` 64, against a 64-float block that had the room.
+ *
+ * It was never a real budget, because a uniform is moved into a VGPR at the top of the shader
+ * and read from there afterwards - the scalar registers are dead the moment the move retires. So
+ * the window slides: one pass per 32 floats, each reloading the same registers from further
+ * along.
+ *
+ * **Three `mat4`s and a `vec4` is 52 floats**, which needs two passes and puts the last uniform
+ * 48 floats past the first. Every value is distinct, so a pass that reloaded from the wrong base
+ * would hand back a different uniform's number rather than a wrong-looking one - and the four
+ * channels say which.
+ */
+static void test_gl2_uniforms_wider_than_the_scalar_window(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    const GLuint prog = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "uniform mat4 a;\n"
+        "uniform mat4 b;\n"
+        "uniform mat4 c;\n"
+        "uniform vec4 d;\n"
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  gl_FragColor = vec4(a[0][0], b[1][1], c[2][2], d.w);\n"
+        "}\n");
+    ASSERT_TRUE(prog != 0);
+    glUseProgram(prog);
+
+    /* Each matrix is a scale, so `m[i][i]` is its own value and every off-diagonal is zero - a
+     * window read one column off gives 0.0 rather than a near miss. */
+    GLfloat m[16];
+    for (int k = 0; k < 16; k++) m[k] = 0.0f;
+
+    m[0] = 0.125f;
+    glUniformMatrix4fv(glGetUniformLocation(prog, "a"), 1, GL_FALSE, m);
+    m[0] = 0.0f;
+
+    m[5] = 0.375f;
+    glUniformMatrix4fv(glGetUniformLocation(prog, "b"), 1, GL_FALSE, m);
+    m[5] = 0.0f;
+
+    m[10] = 0.625f;
+    glUniformMatrix4fv(glGetUniformLocation(prog, "c"), 1, GL_FALSE, m);
+
+    glUniform4f(glGetUniformLocation(prog, "d"), 0.0f, 0.0f, 0.0f, 0.875f);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    compile_and_run_prog(ctx, prog, attr, o);
+    ASSERT_NEAR(o[0], 0.125f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.375f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.625f, 1e-3f);
+    ASSERT_NEAR(o[3], 0.875f, 1e-3f);
+
+    /* **The same uniforms, named in the other order in the source.** The passes are chosen from
+     * the uniforms' offsets in the pool and not from the order the shader mentions them, so this
+     * has to give the same four numbers - and would not if a pass were keyed off the first
+     * uniform a shader happens to read. */
+    const GLuint prog2 = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 vin;\n"
+        "void main() { vin = pos; gl_Position = pos; }\n",
+        "uniform mat4 a;\n"
+        "uniform mat4 b;\n"
+        "uniform mat4 c;\n"
+        "uniform vec4 d;\n"
+        "varying vec4 vin;\n"
+        "void main() {\n"
+        "  gl_FragColor = vec4(d.w, c[2][2], b[1][1], a[0][0]);\n"
+        "}\n");
+    ASSERT_TRUE(prog2 != 0);
+    glUseProgram(prog2);
+    for (int k = 0; k < 16; k++) m[k] = 0.0f;
+    m[0] = 0.125f;
+    glUniformMatrix4fv(glGetUniformLocation(prog2, "a"), 1, GL_FALSE, m);
+    m[0] = 0.0f;
+    m[5] = 0.375f;
+    glUniformMatrix4fv(glGetUniformLocation(prog2, "b"), 1, GL_FALSE, m);
+    m[5] = 0.0f;
+    m[10] = 0.625f;
+    glUniformMatrix4fv(glGetUniformLocation(prog2, "c"), 1, GL_FALSE, m);
+    glUniform4f(glGetUniformLocation(prog2, "d"), 0.0f, 0.0f, 0.0f, 0.875f);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    compile_and_run_prog(ctx, prog2, attr, o);
+    ASSERT_NEAR(o[0], 0.875f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.625f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.375f, 1e-3f);
+    ASSERT_NEAR(o[3], 0.125f, 1e-3f);
+
+    glUseProgram(0);
+    glContextDestroy(ctx);
+}
+
 static void test_gl2_compiled_integer_vector_uniform(void) {
     void *ctx = gl2_context();
     float o[4];
@@ -7462,6 +7575,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_early_return);
     RUN_TEST(test_gl2_compiled_matrix_uniform);
     RUN_TEST(test_gl2_non_square_matrix_uniform);
+    RUN_TEST(test_gl2_uniforms_wider_than_the_scalar_window);
     RUN_TEST(test_gl2_compiled_integer_vector_uniform);
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
