@@ -1558,6 +1558,30 @@ GLboolean glsl_check_unit(glsl_sema_t *s, int32_t unit) {
             const glsl_node_t *pn = &s->ast->nodes[p];
             if (pn->length == 0u) continue; /* unnamed parameter in a definition: nothing to bind */
             glsl_type_t pt = node_declared_type(s, pn);
+            /* **A parameter may be an array** (1.10, 6.1), and it binds exactly as a local array
+             * does: the symbol carries the element type and the length, and indexing is the only
+             * thing either can do. Declared without the length, `w[0]` inside the body asked the
+             * index rule to index a `float` and was refused for indexing something that is
+             * neither a vector nor a matrix. */
+            int psize = 0;
+            if (pn->array_size != GLSL_NO_NODE && !const_int_eval(s, pn->array_size, &psize)) {
+                sema_fail(s, "an array parameter's length has to be a constant", p);
+                glsl_scope_pop(s);
+                return GL_FALSE;
+            }
+            if (psize > 0) {
+                /* **Folded back into the tree, for the same reason a declarator's length is**:
+                 * the interpreter and the generator both read a length straight off this node
+                 * and both want a number by then. Leaving `float w[N]` as an identifier would
+                 * have the semantic pass agree the length is N while every consumer read 0. */
+                s->ast->nodes[pn->array_size].kind = GLSL_NODE_INTCONST;
+                s->ast->nodes[pn->array_size].value = (double)psize;
+                if (!glsl_declare_array(s, pn->text, pn->length, pt, psize, pn->qualifier)) {
+                    glsl_scope_pop(s);
+                    return GL_FALSE;
+                }
+                continue;
+            }
             if (!glsl_declare(s, pn->text, pn->length, pt, GL_FALSE)) {
                 glsl_scope_pop(s);
                 return GL_FALSE;

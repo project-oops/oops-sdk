@@ -825,12 +825,30 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
 
     /* `gl_FragColor` is a variable like any other and is moved into the export registers at the
      * end. Pinning it to v4 instead would save four moves and would mean every temporary the
-     * body allocated had to dodge it. */
+     * body allocated had to dodge it.
+     *
+     * **`gl_FragData[0]` is the same buffer under GLSL 1.10's other name**, and a shader writes
+     * one or the other (1.10, 7.2). The front end has carried it as a one-element array since
+     * the built-in table was written and the interpreter exports from it; only this path had no
+     * registers for it, so a shader spelling its output that way compiled, ran on the software
+     * reference, and was refused for the console with "this name has no register".
+     *
+     * One element because there is one draw buffer, which is what makes `gl_FragData[1]` a
+     * front-end refusal about the array's length rather than something to check here. */
+    const GLboolean wants_fragdata = glsl_unit_mentions(fs, "gl_FragData", 11u);
     if (ok) {
         const glsl_value_t colour =
             glsl_gen_declare_input(gen, "gl_FragColor", 12u, GLSL_TYPE_VEC4);
         if (colour.count == 0) {
             log_say(log, log_size, gen->error ? gen->error : "gl_FragColor has no register", 0, 0);
+            ok = GL_FALSE;
+        }
+    }
+    if (ok && wants_fragdata) {
+        const glsl_value_t data =
+            glsl_gen_declare_input_array(gen, "gl_FragData", 11u, GLSL_TYPE_VEC4, 1);
+        if (data.count != 4) {
+            log_say(log, log_size, gen->error ? gen->error : "gl_FragData has no register", 0, 0);
             ok = GL_FALSE;
         }
     }
@@ -883,9 +901,15 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
      * The epilogue
      * --------------------------------------------------------------------- */
     if (ok) {
+        /* **Whichever name this shader wrote.** They are the same buffer, so exporting from
+         * `gl_FragData[0]` where the shader used it is the whole of the difference - and a
+         * shader that named neither still exports `gl_FragColor`, which holds whatever the
+         * allocator had, exactly as one that declared it and never assigned does. */
+        const char *out_name = wants_fragdata ? "gl_FragData" : "gl_FragColor";
+        const size_t out_len = wants_fragdata ? 11u : 12u;
         glsl_value_t colour;
-        if (!glsl_gen_lookup(gen, "gl_FragColor", 12u, &colour) || colour.count != 4) {
-            log_say(log, log_size, "gl_FragColor did not survive to the export", 0, 0);
+        if (!glsl_gen_lookup(gen, out_name, out_len, &colour) || colour.count != 4) {
+            log_say(log, log_size, "the fragment colour did not survive to the export", 0, 0);
             ok = GL_FALSE;
         } else {
             /* **Back to the lanes that should export**, which does three things at once: it

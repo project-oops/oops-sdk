@@ -1030,8 +1030,31 @@ static exec_val_t call_user(exec_t *e, int32_t fn, int32_t first_arg) {
          * the shader. The symptom is a fragment shader that draws nothing rather than one that
          * draws the wrong colour - so it is only visible against a known background. */
         const glsl_type_t pt = exec_node_type(e, pn);
-        float *store = declare(e, pn->text, pn->length, pt, 0);
+        /* **An array parameter is a run and not a value** (1.10, 6.1). The semantic pass folded
+         * its length into the tree, so this reads a number. It cannot come through `argv`: an
+         * `exec_val_t` holds one value's worth of floats and an array is as long as it is, so
+         * the copy is store to store - which is also what makes it a *copy*, so a body that
+         * writes `w[0]` leaves the caller's array alone the way every other parameter does. */
+        int psize = 0;
+        if (pn->array_size != GLSL_NO_NODE) {
+            const glsl_node_t *sz = &ast->nodes[pn->array_size];
+            if (sz->kind == GLSL_NODE_INTCONST) psize = (int)sz->value;
+        }
+        float *store = declare(e, pn->text, pn->length, pt, psize);
         if (!store) break;
+        if (psize > 0) {
+            const glsl_node_t *an = &ast->nodes[argn[pi]];
+            const exec_var_t *src = (an->kind == GLSL_NODE_IDENTIFIER)
+                                        ? lookup(e, an->text, an->length)
+                                        : (const exec_var_t *)0;
+            if (!src || !src->store) {
+                fail(e, "an array argument has to be an array's name");
+                break;
+            }
+            const int total = exec_comps(e, pt) * psize;
+            for (int i = 0; i < total; i++) store[i] = src->store[i];
+            continue;
+        }
         if (pn->qualifier != GLSL_TOK_KW_OUT) {
             const int w = exec_comps(e, pt);
             for (int i = 0; i < w && i < EXEC_MAX_VAL_FLOATS; i++) store[i] = argv[pi].v[i];

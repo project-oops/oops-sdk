@@ -1034,7 +1034,7 @@ a histogram to read.
 whether the harness ran; `refused-compile-switch.frag` uses a word GLSL 1.10 reserves, and if it
 ever starts compiling then either the dialect changed or the script stopped looking.
 
-It found four real gaps in its first two runs, none reachable from any port's shaders:
+It found seven real gaps in its first three runs, none reachable from any port's shaders:
 
 - **an array as a struct member** (`struct S { float w[3]; }`), which GLSL 1.10 4.1.9 allows and
   the semantic stage refused for indexing something that is neither a vector nor a matrix. The
@@ -1061,6 +1061,30 @@ It found four real gaps in its first two runs, none reachable from any port's sh
   any back end has an opinion - and the interpreter, which has a float array and would happily
   have copied something, was never asked. The rule has to sit at the assignment rather than in
   `glsl_is_lvalue`, because that recurses *through* the array's name on the way to `v[0]`.
+- **a macro used twice with a macro for its argument.** The guard that stops a macro expanding
+  inside its own expansion was a flag cleared only when the reader went back to the lexer, which
+  made it "expands at most once before the next real token" rather than "not within itself". So
+  `#define DUP(a) ((a) + (a))` on `DUP(HALF)` expanded the first `HALF` and left the second as a
+  bare identifier, because nothing between them came from the lexer. One argument used once hides
+  it, which is every macro in every port corpus. Fixed with an end marker queued behind each
+  expansion; `#define A A` still terminates, because the `A` is read while the flag is set.
+- **a splice in the wrong direction.** The queue's tail moves over itself when a body is spliced
+  in, and which of source and destination is larger depends on how much had been read and how
+  long the body is. A loop in one fixed direction is right half the time; `DUP(HALF)` is three
+  tokens deep when a one-token body arrives, so the destination is *below* the source and only a
+  forward copy survives. This one was introduced by the fix above it and caught by the same
+  corpus one batch later, which is the argument for a gate over a report.
+- **`gl_FragData[0]`**, which is GLSL 1.10 7.2's other name for the colour a fragment shader
+  writes. The built-in table has carried it as a one-element array from the start and the
+  interpreter exports from it; only the compiled path had no registers for it, so a shader
+  spelling its output that way ran on the software reference and was refused for the console.
+- **an array as a function parameter** (6.1). The semantic pass declared the parameter without
+  its length, so `w[0]` in the body asked the index rule to index a `float`; the generator would
+  not hand a whole array to a call; and the interpreter could not have carried one through an
+  `exec_val_t`, which holds one value's worth of floats. It is still a *copy*, as every GLSL
+  parameter is - so a body writing `w[0]` leaves the caller's array alone. `out` and `inout`
+  arrays stay refused, and for the reason above: copying one back needs the argument to be a
+  place, and 5.8 does not make a whole array one.
 
 The survey has been wrong three times, each time about the corpus rather than the compiler -
 reading a shader's stage off its file extension, pairing every fragment shader with one fixed

@@ -89,10 +89,18 @@ static GLboolean raw_next(glsl_pp_t *pp, glsl_token_t *out) {
         pp->has_held = GL_FALSE;
         return (GLboolean)(out->type != GLSL_TOK_EOF);
     }
-    if (pp->pending_head < pp->pending_tail) {
+    while (pp->pending_head < pp->pending_tail) {
         *out = pp->pending[pp->pending_head++];
         if (pp->pending_head == pp->pending_tail) {
             pp->pending_head = pp->pending_tail = 0;
+        }
+        /* **An end marker is where one macro's expansion stops**, and reading it is what clears
+         * that macro's flag - see `expand`. It is not a token any consumer has heard of, so it is
+         * swallowed here and the loop reads on. */
+        if (out->type == GLSL_TOK_PP_MACRO_END) {
+            const int mi = (int)out->value;
+            if (mi >= 0 && mi < pp->macro_count) pp->macros[mi].expanding = GL_FALSE;
+            continue;
         }
         return GL_TRUE;
     }
@@ -962,18 +970,59 @@ static GLboolean expand(glsl_pp_t *pp, glsl_macro_t *m, const pp_args_t *args) {
      * every macro in every port corpus expanded correctly: `#define F(x) G(x)` ends on the
      * nested call and appending is indistinguishable from splicing there.
      */
+    /*
+     * **And an end marker behind it, because `expanding` has to stop being true somewhere.**
+     *
+     * The flag exists so a macro cannot expand inside its own expansion - `#define A A` has to
+     * leave an `A` rather than loop. It used to be cleared only when `raw_next` went back to the
+     * lexer, which made it "this macro expands at most once before the next real token" rather
+     * than "not within itself". So
+     *
+     *     #define HALF 0.5
+     *     #define DUP(a) ((a) + (a))
+     *     DUP(HALF)
+     *
+     * substituted to `( ( HALF ) + ( HALF ) )`, expanded the first HALF, and left the second as a
+     * bare identifier for the parser to reject - because nothing between them came from the
+     * lexer. One argument used once hid it, which is every macro in every port corpus.
+     *
+     * The marker travels with the body: splices go in *front* of what is queued, so an expansion
+     * nested inside this one lands before this marker and the flag clears at exactly the right
+     * token. `#define A A` still terminates - the `A` is read while the flag is set, emitted as
+     * an identifier, and the marker after it clears the flag.
+     */
     const int left = pp->pending_tail - pp->pending_head;
-    if (count + left > GLSL_MAX_PENDING) {
+    if (count + 1 + left > GLSL_MAX_PENDING) {
         pp_fail(pp, "macro expansion too large", pp->error_line);
         return GL_FALSE;
     }
-    /* Backwards, so a queue that overlaps its own destination is not overwritten as it moves. */
-    for (int i = left - 1; i >= 0; i--) {
-        pp->pending[count + i] = pp->pending[pp->pending_head + i];
+    /* **The tail moves over itself, so the direction is not a detail.** It lands at `count + 1`
+     * and starts at `pending_head`, and which of those is larger depends on how much of the
+     * queue had been read and how long this body is. Copying the wrong way round overwrites
+     * tokens that have not been moved yet - `DUP(HALF)` is three tokens deep when HALF's
+     * one-token body arrives, so the destination is *below* the source and only a forward copy
+     * is safe. This is what `memmove` does and what a loop in one fixed direction does not. */
+    if (count + 1 >= pp->pending_head) {
+        for (int i = left - 1; i >= 0; i--) {
+            pp->pending[count + 1 + i] = pp->pending[pp->pending_head + i];
+        }
+    } else {
+        for (int i = 0; i < left; i++) {
+            pp->pending[count + 1 + i] = pp->pending[pp->pending_head + i];
+        }
     }
     for (int i = 0; i < count; i++) pp->pending[i] = src[i];
+    glsl_token_t end;
+    end.type = GLSL_TOK_PP_MACRO_END;
+    end.text = (const char *)0;
+    end.length = 0;
+    end.value = (double)(int)(m - pp->macros);
+    end.line = pp->error_line;
+    end.column = 0;
+    end.error = (const char *)0;
+    pp->pending[count] = end;
     pp->pending_head = 0;
-    pp->pending_tail = count + left;
+    pp->pending_tail = count + 1 + left;
     m->expanding = GL_TRUE;
     return GL_TRUE;
 }

@@ -6799,6 +6799,171 @@ static void test_gl2_compiled_struct_arrays_and_equality(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * **Three more the specification has and no port's shader does.**
+ *
+ * A macro used twice with a macro for its argument, an array passed to a function, and
+ * `gl_FragData[0]` - which is GLSL 1.10's other name for the colour this shader writes.
+ */
+static void test_gl2_compiled_spec_corners(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* **A parameter used twice, with a macro as the argument.** The guard that stops a macro
+     * expanding inside itself was a flag cleared only on the next read from the lexer, so a
+     * macro expanded at most once per pending run: `((HALF) + (HALF))` expanded the first and
+     * left the second as a bare identifier. Two uses is the smallest shape that shows it, and
+     * one use is what every macro in every port corpus happens to be. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#define HALF 0.5\n"
+                    "#define DUP(a) ((a) + (a))\n"
+                    "void main() { gl_FragColor = vec4(DUP(HALF) * 0.5, 0.25, 0.125, 1.0); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-3f);
+
+    /* Nested function-like macros, and one whose body continues after the nested call - the
+     * case that says the expansion was spliced where the reading had got to and not appended
+     * behind what was still queued. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "#define Q 0.25\n"
+                    "#define ADD(a, b) ((a) + (b))\n"
+                    "#define TWICE(x) ADD(x, x) + 0.0\n"
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(TWICE(Q), ADD(Q, Q) + Q, ADD(Q, 0.5), 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.5f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.75f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.75f, 1e-3f);
+
+    /* **An array as a function parameter**, which 6.1 allows and which was refused twice over:
+     * the semantic stage declared the parameter without its length, so `w[0]` inside the body
+     * asked the index rule to index a `float`, and the generator would not hand a whole array to
+     * a call even once it had one to hand. The elements are distinct powers of two so a copy
+     * that shifted by one gives a different sum rather than a near one. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "float total(float w[4]) { return w[0] + w[1] + w[2] + w[3]; }\n"
+                    "void main() {\n"
+                    "  float a[4];\n"
+                    "  a[0] = 0.0625; a[1] = 0.125; a[2] = 0.25; a[3] = 0.5;\n"
+                    "  gl_FragColor = vec4(total(a), a[0], a[3], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.9375f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.0625f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.5f, 1e-3f);
+
+    /* **The parameter is a copy**, as every parameter is - a body that writes one changes
+     * nothing the caller can see, which for an array is the whole run and not its first
+     * element. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "float wipe(float w[3]) { w[0] = 9.0; w[2] = 9.0; return w[1]; }\n"
+                    "void main() {\n"
+                    "  float a[3];\n"
+                    "  a[0] = 0.25; a[1] = 0.5; a[2] = 0.75;\n"
+                    "  float got = wipe(a);\n"
+                    "  gl_FragColor = vec4(a[0], got, a[2], 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.5f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.75f, 1e-3f);
+
+    /* **An `out` array is refused rather than silently dropped.** Copying one back needs the
+     * argument to be a place and 5.8 does not make a whole array one - the same rule that
+     * refuses `v = w`. A back end that bound it anyway would run the body and throw the writes
+     * away, which draws. */
+    {
+        const GLuint prog = linked_program(
+            VS_ONE_VARYING,
+            "void fill(out float w[2]) { w[0] = 1.0; w[1] = 1.0; }\n"
+            "void main() {\n"
+            "  float a[2];\n"
+            "  fill(a);\n"
+            "  gl_FragColor = vec4(a[0], a[1], 0.0, 1.0);\n"
+            "}\n");
+        uint32_t words[512];
+        uint32_t count = 0u, vgprs = 0u;
+        char log[256] = {0};
+        ASSERT_EQ(gl_program_compile_fragment(gl_find_program((gl_context_t *)ctx, prog), words,
+                                              512u, &count, &vgprs, NULL, NULL, log, sizeof(log)),
+                  GL_FALSE);
+        ASSERT_TRUE(strstr(log, "array parameter is `in` here") != NULL);
+    }
+
+    /* **`gl_FragData[0]` is the same buffer as `gl_FragColor`** (1.10, 7.2) and a shader writes
+     * one or the other. The front end has carried it since the built-in table was written and
+     * the interpreter exports from it; only the compiled path had no registers for it, so a
+     * shader spelling its output that way ran on the reference and was refused for the console. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() { gl_FragData[0] = vec4(0.25, 0.5, 0.75, 1.0); }\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-3f);
+    ASSERT_NEAR(o[1], 0.5f, 1e-3f);
+    ASSERT_NEAR(o[2], 0.75f, 1e-3f);
+
+    glContextDestroy(ctx);
+}
+
+/* The same three through the software reference, which is the other implementation of all of
+ * it - see the note on the two harnesses. The preprocessor is shared, so the macro case is here
+ * to say the whole pipeline agrees rather than to test a second copy of it. */
+static void test_gl2_spec_corners_run(void) {
+    gl2_target_t t = gl2_target();
+    static const char *const VS =
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n";
+
+    {
+        const GLuint prog = linked_program(
+            VS,
+            "#define Q 0.25\n"
+            "#define DUP(a) ((a) + (a))\n"
+            "void main() { gl_FragColor = vec4(DUP(Q), DUP(Q) + Q, DUP(Q) * 3.0, 1.0); }\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 120 && px_r(p) < 136);  /* 0.50 */
+        ASSERT_TRUE(px_g(p) > 185 && px_g(p) < 200);  /* 0.75 */
+        ASSERT_TRUE(px_b(p) > 248);                   /* 1.50, clamped */
+    }
+
+    {
+        const GLuint prog = linked_program(
+            VS,
+            "float total(float w[4]) { return w[0] + w[1] + w[2] + w[3]; }\n"
+            "void main() {\n"
+            "  float a[4];\n"
+            "  a[0] = 0.0625; a[1] = 0.125; a[2] = 0.25; a[3] = 0.5;\n"
+            "  gl_FragColor = vec4(total(a), a[0], a[3], 1.0);\n"
+            "}\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 231 && px_r(p) < 247);  /* 0.9375 */
+        ASSERT_TRUE(px_g(p) > 8 && px_g(p) < 24);     /* 0.0625 */
+        ASSERT_TRUE(px_b(p) > 120 && px_b(p) < 136);  /* 0.50 */
+    }
+
+    {
+        const GLuint prog = linked_program(
+            VS, "void main() { gl_FragData[0] = vec4(0.25, 0.5, 0.75, 1.0); }\n");
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(prog);
+        draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+        const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+        ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);
+        ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);
+        ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);
+    }
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 /* The same two through the software reference, which lays a struct out as floats rather than
  * registers and reaches none of the code above - see the note on the two harnesses. */
 static void test_gl2_struct_arrays_and_equality_run(void) {
@@ -7925,6 +8090,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_compiled_structs);
     RUN_TEST(test_gl2_compiled_struct_arrays_and_equality);
     RUN_TEST(test_gl2_struct_arrays_and_equality_run);
+    RUN_TEST(test_gl2_compiled_spec_corners);
+    RUN_TEST(test_gl2_spec_corners_run);
     RUN_TEST(test_gl2_compiled_arithmetic_matches_the_language);
     RUN_TEST(test_gl2_compiled_geometry_matches_the_language);
     RUN_TEST(test_gl2_compiled_swizzle_writes_land_where_they_are_named);

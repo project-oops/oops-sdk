@@ -21,6 +21,12 @@ typedef enum {
     GLSL_TOK_EOF = 0,
     GLSL_TOK_ERROR,
 
+    /* **The preprocessor's own marker, which never reaches the lexer's consumers.** It is queued
+     * behind a macro's expansion and consumed by `raw_next`, which uses it to say "that macro's
+     * expansion ends here" - see `expand` in glsl_pp.c for why a flag alone will not do. `value`
+     * carries the macro's index. */
+    GLSL_TOK_PP_MACRO_END,
+
     GLSL_TOK_IDENTIFIER,
     GLSL_TOK_INTCONST,
     GLSL_TOK_FLOATCONST,

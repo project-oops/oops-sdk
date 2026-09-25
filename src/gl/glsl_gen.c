@@ -2596,8 +2596,22 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
         if (argc >= GEN_MAX_ARGS) {
             return gen_fail(g, "more arguments than this generator carries", node);
         }
-        argv[argc] = gen_expr(g, a);
-        if (is_bad(argv[argc])) return argv[argc];
+        /* **An array argument is the one thing `gen_expr` will not hand back**, and refusing it
+         * is right everywhere else: a whole array is not a value the language has, which is why
+         * reading one as an expression is an error. Passing it to a parameter that is also an
+         * array is the exception GLSL 1.10 6.1 makes, and here it is the run of registers behind
+         * the name - the same run a local array is. */
+        const glsl_node_t *an = &g->ast->nodes[a];
+        glsl_gen_var_t *av = (an->kind == GLSL_NODE_IDENTIFIER)
+                                 ? gen_find(g, an->text, an->length)
+                                 : (glsl_gen_var_t *)0;
+        if (av && av->array_size > 0) {
+            argv[argc] = av->value;
+            argv[argc].count = av->value.count * av->array_size;
+        } else {
+            argv[argc] = gen_expr(g, a);
+            if (is_bad(argv[argc])) return argv[argc];
+        }
         argc++;
     }
 
@@ -2681,7 +2695,28 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
                            node);
             break;
         }
-        if (gen_comps(g, pt) != argv[bound].count) {
+        /* **A parameter may be an array**, and then its width is the elements together - the
+         * argument is the caller's whole run and the copy below moves all of it. */
+        int pelems = 0;
+        if (pn->array_size != GLSL_NO_NODE) {
+            double sz = 0.0;
+            if (!const_of(g, pn->array_size, &sz) || sz < 1.0 || (double)(int)sz != sz) {
+                (void)gen_fail(g, "an array parameter's length has to be a constant", node);
+                break;
+            }
+            pelems = (int)sz;
+            /* **Not `out` or `inout`.** The copy back needs the argument to be a place, and a
+             * whole array is not one - GLSL 1.10 5.8 does not make it an l-value, which is the
+             * same rule that refuses `v = w`. Saying so here beats writing the values into a
+             * temporary and dropping them. */
+            if (writes_back) {
+                (void)gen_fail(g, "an array parameter is `in` here: copying one back needs the "
+                                  "argument to be assignable, and a whole array is not", node);
+                break;
+            }
+        }
+        const int pwidth = gen_comps(g, pt) * ((pelems > 0) ? pelems : 1);
+        if (pwidth != argv[bound].count) {
             (void)gen_fail(g, "an argument is a different width from the parameter it binds",
                            node);
             break;
@@ -2710,6 +2745,21 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
             }
             writeback_from[writebacks] = home;
             writebacks++;
+        }
+        if (pelems > 0) {
+            /* The run is the array; `value.count` stays the *element* width so every other
+             * reader - `gen_index_of`, a move, a width check - sees one element. */
+            glsl_value_t elem = home;
+            elem.count = gen_comps(g, pt);
+            glsl_gen_var_t *pv = gen_declare(g, pn->text, pn->length, pt, elem, node);
+            if (!pv) break;
+            pv->array_size = pelems;
+            if (!glsl_declare_array(g->sema, pn->text, pn->length, pt, pelems,
+                                    (glsl_token_type_t)0)) {
+                g->sema->error = (const char *)0;
+            }
+            bound++;
+            continue;
         }
         if (!gen_declare(g, pn->text, pn->length, pt, home, node)) break;
         if (!glsl_declare(g->sema, pn->text, pn->length, pt, GL_FALSE)) {
