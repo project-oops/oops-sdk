@@ -317,13 +317,19 @@ GLboolean glsl_declare(glsl_sema_t *s, const char *name, size_t len, glsl_type_t
         return GL_FALSE;
     }
     /* **Redeclaration is only an error in the *same* scope.** Shadowing an outer name is legal
-     * and common, so the check is against the current depth rather than the whole table. */
+     * and common, so the check is against the current depth rather than the whole table.
+     *
+     * **A function is exempt, because GLSL overloads by signature.** `permute` may be declared
+     * for `float`, `vec2`, `vec3` and `vec4` - that is how the built-in library is shaped and
+     * how shaders are written against it. Whether two *functions* of one name are distinct is a
+     * question about their parameters, which this does not have, so `glsl_declare_function`
+     * asks it. What stays an error here is a function and a variable sharing a name. */
     for (int i = s->count - 1; i >= 0; i--) {
         if (s->symbols[i].scope < s->scope) break;
-        if (same_name(&s->symbols[i], name, len)) {
-            sema_fail(s, "a name declared twice in one scope", GLSL_NO_NODE);
-            return GL_FALSE;
-        }
+        if (!same_name(&s->symbols[i], name, len)) continue;
+        if (is_function && s->symbols[i].is_function) continue;
+        sema_fail(s, "a name declared twice in one scope", GLSL_NO_NODE);
+        return GL_FALSE;
     }
     s->symbols[s->count].name = name;
     s->symbols[s->count].name_len = len;
@@ -338,6 +344,7 @@ GLboolean glsl_declare(glsl_sema_t *s, const char *name, size_t len, glsl_type_t
     s->symbols[s->count].has_const_int = GL_FALSE;
     s->symbols[s->count].const_int = 0;
     s->symbols[s->count].param_count = 0;
+    s->symbols[s->count].decl_node = GLSL_NO_NODE;
     s->count++;
     return GL_TRUE;
 }
@@ -755,31 +762,64 @@ glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node) {
                 }
             }
 
-            const glsl_symbol_t *sym = lookup(s, callee->text, callee->length);
-            if (!sym) {
-                sema_fail(s, "call to an undeclared function", node);
-                return GLSL_TYPE_ERROR;
-            }
-            if (!sym->is_function) {
-                sema_fail(s, "calling something that is not a function", node);
-                return GLSL_TYPE_ERROR;
-            }
-            /* **Arity and each argument's type, against the recorded signature.** GLSL 1.10 has
-             * no implicit conversion, so an argument that is merely close is wrong. */
+            /*
+             * **Which overload, decided from the argument types.**
+             *
+             * A name no longer identifies a function, so the arguments are evaluated once and
+             * then offered to every function of that name. An exact match wins outright; a
+             * match that needed a conversion `glsl_type_accepts` allows - 1.20's int-to-float -
+             * is taken only when nothing matched exactly, which is the rule that stops
+             * `f(int)` being passed over for `f(float)` when the shader wrote an integer.
+             */
+            glsl_type_t args[GLSL_MAX_PARAMS];
             int given = 0;
             for (int32_t a = n->b; a != GLSL_NO_NODE; a = s->ast->nodes[a].sibling) {
                 glsl_type_t at = glsl_type_of(s, a);
                 if (at == GLSL_TYPE_ERROR) return GLSL_TYPE_ERROR;
-                if (given < sym->param_count && !glsl_type_accepts(s, sym->params[given], at)) {
-                    sema_fail(s, "argument of the wrong type", a);
+                if (given >= GLSL_MAX_PARAMS) {
+                    sema_fail(s, "too many arguments", node);
                     return GLSL_TYPE_ERROR;
                 }
-                given++;
+                args[given++] = at;
             }
-            if (given != sym->param_count) {
-                sema_fail(s, "wrong number of arguments", node);
+
+            const glsl_symbol_t *exact = (const glsl_symbol_t *)0;
+            const glsl_symbol_t *convert = (const glsl_symbol_t *)0;
+            GLboolean any_name = GL_FALSE, any_non_function = GL_FALSE;
+            for (int i = s->count - 1; i >= 0; i--) {
+                const glsl_symbol_t *cand = &s->symbols[i];
+                if (!same_name(cand, callee->text, callee->length)) continue;
+                any_name = GL_TRUE;
+                if (!cand->is_function) { any_non_function = GL_TRUE; continue; }
+                if (cand->param_count != given) continue;
+                GLboolean fits = GL_TRUE, identical = GL_TRUE;
+                for (int k = 0; k < given; k++) {
+                    if (cand->params[k] != args[k]) identical = GL_FALSE;
+                    if (!glsl_type_accepts(s, cand->params[k], args[k])) { fits = GL_FALSE; break; }
+                }
+                if (!fits) continue;
+                if (identical) { exact = cand; break; }
+                if (!convert) convert = cand;
+            }
+
+            if (!any_name) {
+                sema_fail(s, "call to an undeclared function", node);
                 return GLSL_TYPE_ERROR;
             }
+            const glsl_symbol_t *sym = exact ? exact : convert;
+            if (!sym) {
+                /* Name found, nothing it could mean. The two cases are worth separating: a
+                 * variable called like a function is a different mistake from an argument list
+                 * no overload takes. */
+                if (any_non_function) {
+                    sema_fail(s, "calling something that is not a function", node);
+                } else {
+                    sema_fail(s, "no version of this function takes these arguments", node);
+                }
+                return GLSL_TYPE_ERROR;
+            }
+            /* **The decision is written onto the call**, so the back ends do not repeat it. */
+            s->ast->nodes[node].resolved = sym->decl_node;
             return sym->type;
         }
 
@@ -1267,9 +1307,10 @@ GLboolean glsl_declare_function(glsl_sema_t *s, int32_t node) {
         sema_fail(s, "function with an unknown return type", node);
         return GL_FALSE;
     }
-    if (!glsl_declare(s, n->text, n->length, ret, GL_TRUE)) return GL_FALSE;
-    glsl_symbol_t *sym = &s->symbols[s->count - 1];
-
+    /* **The signature is built before the symbol**, because whether this declaration is a new
+     * overload or a redefinition is a question about the parameters, and the table cannot be
+     * asked until they are known. */
+    glsl_type_t params[GLSL_MAX_PARAMS];
     int count = 0;
     for (int32_t p = n->b; p != GLSL_NO_NODE; p = s->ast->nodes[p].sibling) {
         if (count >= GLSL_MAX_PARAMS) {
@@ -1281,9 +1322,42 @@ GLboolean glsl_declare_function(glsl_sema_t *s, int32_t node) {
             sema_fail(s, "parameter with an unusable type", p);
             return GL_FALSE;
         }
-        sym->params[count++] = pt;
+        params[count++] = pt;
     }
+
+    /*
+     * **Two functions of one name are the same function when their parameters agree.** GLSL
+     * overloads on the parameter list and *not* on the return type, so `float f(int)` and
+     * `vec2 f(int)` are a redefinition rather than two overloads - a call could not choose
+     * between them, since the arguments are all a call site offers.
+     *
+     * A prototype followed by its definition is the ordinary way to arrive here twice with the
+     * same signature, so it is accepted: the second one takes over the entry, which is what
+     * gives the definition's body to a call that was checked against the prototype.
+     */
+    for (int i = s->count - 1; i >= 0; i--) {
+        glsl_symbol_t *prev = &s->symbols[i];
+        if (!prev->is_function || !same_name(prev, n->text, n->length)) continue;
+        if (prev->param_count != count) continue;
+        GLboolean same = GL_TRUE;
+        for (int k = 0; k < count; k++) {
+            if (prev->params[k] != params[k]) { same = GL_FALSE; break; }
+        }
+        if (!same) continue;
+        if (prev->type != ret) {
+            sema_fail(s, "two functions differing only in return type", node);
+            return GL_FALSE;
+        }
+        /* The body, if this one has it, is the one a call should reach. */
+        if (n->c != GLSL_NO_NODE) prev->decl_node = node;
+        return GL_TRUE;
+    }
+
+    if (!glsl_declare(s, n->text, n->length, ret, GL_TRUE)) return GL_FALSE;
+    glsl_symbol_t *sym = &s->symbols[s->count - 1];
+    for (int k = 0; k < count; k++) sym->params[k] = params[k];
     sym->param_count = count;
+    sym->decl_node = node;
     return GL_TRUE;
 }
 

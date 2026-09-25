@@ -2822,7 +2822,10 @@ static glsl_value_t gen_expr(glsl_gen_t *g, int32_t node) {
             /* **A function this shader defines wins over the built-in table**, which is GLSL's
              * own rule: a user function may share a name with a built-in and hides it. */
             {
-                const int32_t fn = gen_find_function(g, callee->text, callee->length);
+                /* The overload the semantic pass chose, or the name when it did not run. */
+                const int32_t fn = (n->resolved != GLSL_NO_NODE)
+                                       ? n->resolved
+                                       : gen_find_function(g, callee->text, callee->length);
                 if (fn != GLSL_NO_NODE) return gen_call_user(g, fn, n->b, node);
             }
             /* Not a type name and not defined here, so a built-in or a refusal. */

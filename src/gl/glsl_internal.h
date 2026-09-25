@@ -185,6 +185,15 @@ typedef struct {
     const char *text;       /* identifier or field name: into the source, never a copy */
     size_t length;
     double value;           /* for INTCONST/FLOATCONST/BOOLCONST */
+    /* **Which function a CALL binds to**, as a FUNCTION node index, decided by the semantic
+     * pass. GLSL_NO_NODE on every other kind of node and on a call to a built-in.
+     *
+     * It exists because a name no longer identifies a function: `permute` may be declared four
+     * times over different parameter types, and only the semantic pass has the argument types
+     * needed to say which one a call means. Recording the answer here is what keeps the
+     * interpreter and the generator from each having to resolve overloads again - and from
+     * disagreeing with this pass, or with each other, when they do. */
+    int32_t resolved;
     int line, column;
 } glsl_node_t;
 
@@ -433,6 +442,10 @@ typedef struct {
     int const_int;
     glsl_type_t params[GLSL_MAX_PARAMS];
     int param_count;
+    /* **Which FUNCTION node this symbol is**, so a resolved call can name it. GLSL_NO_NODE for a
+     * variable. Overloading is why it is needed: the back ends used to find a function by name,
+     * which stops identifying one as soon as two share a name. */
+    int32_t decl_node;
 } glsl_symbol_t;
 
 typedef struct {

@@ -85,6 +85,7 @@ static int32_t node_new(glsl_parser_t *p, glsl_node_kind_t kind) {
     n->text = (const char *)0;
     n->length = 0u;
     n->value = 0.0;
+    n->resolved = GLSL_NO_NODE;
     n->line = p->tok.line;
     n->column = p->tok.column;
     return at;

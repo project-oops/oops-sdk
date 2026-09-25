@@ -1403,6 +1403,89 @@ static void test_gl2_framebuffer_objects(void) {
 }
 
 /*
+ * **Function overloading, which GLSL has had since 1.10.**
+ *
+ * `simplex-noise.glsl` in mesa-demos declares `permute` four times over different parameter
+ * types; that is the ordinary shape of shader code, and the built-in library is written the same
+ * way. It was refused as a name declared twice.
+ *
+ * **Every overload here returns a different value**, so resolving to the wrong one gives a wrong
+ * colour rather than a right one. An overload set whose members agreed would pass whichever was
+ * picked, which is the shape of check that proves nothing.
+ */
+static void test_gl2_function_overloading(void) {
+    gl2_target_t t = gl2_target();
+
+    const GLuint prog = linked_program(
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+        /* By parameter type, by parameter count, and a struct against a vector - three
+         * different reasons two signatures differ. */
+        "struct S { float v; };\n"
+        "float pick(float a) { return 0.25; }\n"
+        "float pick(vec2 a) { return 0.5; }\n"
+        "float pick(vec2 a, float b) { return 0.75; }\n"
+        "float pick(S a) { return 1.0; }\n"
+        "void main() {\n"
+        "  gl_FragColor = vec4(pick(1.0), pick(vec2(1.0)), pick(vec2(1.0), 1.0),\n"
+        "                      pick(S(1.0)));\n"
+        "}\n");
+    ASSERT_TRUE(prog != 0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(prog);
+    draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+    const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+    ASSERT_TRUE(px_r(p) > 55 && px_r(p) < 72);     /* pick(float) */
+    ASSERT_TRUE(px_g(p) > 120 && px_g(p) < 136);   /* pick(vec2) */
+    ASSERT_TRUE(px_b(p) > 185 && px_b(p) < 200);   /* pick(vec2, float) */
+
+    /* **An exact match beats one that would need a conversion.** Under 1.20 an `int` argument
+     * converts to `float`, so both overloads below accept `two(1)` - and the `int` one is what
+     * the shader wrote. Picking by conversion first would return 0.5 here. */
+    const GLuint prog2 = linked_program(
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+        "#version 120\n"
+        "float two(int a) { return 0.25; }\n"
+        "float two(float a) { return 0.5; }\n"
+        "void main() { gl_FragColor = vec4(two(1), two(1.0), 0.75, 1.0); }\n");
+    ASSERT_TRUE(prog2 != 0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(prog2);
+    draw_quad(glGetAttribLocation(prog2, "pos"), 0.0f);
+    const uint32_t q = px(&t, GL2_W / 2, GL2_H / 2);
+    ASSERT_TRUE(px_r(q) > 55 && px_r(q) < 72);     /* two(int) */
+    ASSERT_TRUE(px_g(q) > 120 && px_g(q) < 136);   /* two(float) */
+
+    /* What overloading must not let through. */
+    const char *const bad[] = {
+        /* Differing only in return type: a call could not choose, since the arguments are all
+         * it offers. */
+        "float f(float a) { return 1.0; }\n"
+        "vec2 f(float a) { return vec2(1.0); }\n"
+        "void main() { gl_FragColor = vec4(f(1.0)); }\n",
+        /* A function and a variable of one name is still a redeclaration. */
+        "float g;\nfloat g(float a) { return a; }\n"
+        "void main() { gl_FragColor = vec4(g(1.0)); }\n",
+        /* No overload takes these arguments. */
+        "float h(float a) { return a; }\n"
+        "float h(vec2 a) { return a.x; }\n"
+        "void main() { gl_FragColor = vec4(h(vec3(1.0))); }\n",
+    };
+    for (int i = 0; i < 3; i++) {
+        const GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(sh, 1, &bad[i], (const GLint *)0);
+        glCompileShader(sh);
+        GLint status = 1;
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &status);
+        ASSERT_TRUE(status == 0);
+        glDeleteShader(sh);
+    }
+
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
+/*
  * **An array's length is an integral constant expression, not a literal.**
  *
  * `const int N = 8; uniform vec2 offs[N];` is what shaders write - mesa-demos' `vpglsl` uses it
@@ -6256,6 +6339,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_limits_and_version_are_answered);
     RUN_TEST(test_gl2_a_program_draws);
     RUN_TEST(test_gl2_structs_run);
+    RUN_TEST(test_gl2_function_overloading);
     RUN_TEST(test_gl2_array_length_constant_expressions);
     RUN_TEST(test_gl2_es_100_shaders);
     RUN_TEST(test_gl2_framebuffer_objects);

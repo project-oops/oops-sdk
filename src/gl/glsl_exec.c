@@ -1432,7 +1432,13 @@ static exec_val_t eval(exec_t *e, int32_t node) {
             GLboolean handled = GL_FALSE;
             const exec_val_t bi = call_builtin(e, callee, n->b, &handled);
             if (handled) return bi;
-            const int32_t fn = find_function(e, callee->text, callee->length);
+            /* **The overload the semantic pass chose**, when it chose one. A name is not enough
+             * once two functions share it, and this interpreter has no argument types to choose
+             * with - it has values. Falling back to the name keeps a unit that was never through
+             * `glsl_check_unit` working, which is how `glsl_ps.c` builds its own. */
+            const int32_t fn = (n->resolved != GLSL_NO_NODE)
+                                   ? n->resolved
+                                   : find_function(e, callee->text, callee->length);
             if (fn == GLSL_NO_NODE) {
                 fail(e, "a call to a function with no body");
                 return val_zero(GLSL_TYPE_ERROR);
