@@ -183,6 +183,10 @@ static void gl_scanout_begin(gl_context_t *ctx) {
     if (!next || !shown) return;
     ctx->hw_rx = GL_TRUE;
     ctx->color_tiled = GL_TRUE;
+    /* What `gl_draw_targets` puts back when no framebuffer object is bound. An attachment is
+     * linear, so these are cleared while one is - see `fb0_hw_rx`. */
+    ctx->fb0_hw_rx = GL_TRUE;
+    ctx->fb0_color_tiled = GL_TRUE;
     ctx->back_fb = next;
     ctx->front_fb = shown;
     /* So that oops_display_get_surface hands a program's CPU overlay - gl1-cube's HUD - the
@@ -1971,12 +1975,17 @@ void gl_draw_targets(gl_context_t *ctx) {
         ctx->width = (uint32_t)fbo.width;
         ctx->height = (uint32_t)fbo.height;
         ctx->depth_buffer = fbo_depth;
+        /* **An attachment is linear**, whatever swizzle the display's buffers are in. */
+        ctx->hw_rx = GL_FALSE;
+        ctx->color_tiled = GL_FALSE;
         return;
     }
     /* Back to the display, from wherever the last call left it. */
     ctx->width = ctx->fb0_width;
     ctx->height = ctx->fb0_height;
     ctx->depth_buffer = ctx->fb0_depth_buffer;
+    ctx->hw_rx = ctx->fb0_hw_rx;
+    ctx->color_tiled = ctx->fb0_color_tiled;
 
     const unsigned bits = gl_color_buffer_bits(ctx->draw_buffer);
     uint32_t *primary = ctx->back_fb;

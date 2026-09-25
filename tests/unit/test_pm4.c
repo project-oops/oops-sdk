@@ -4880,11 +4880,17 @@ static void test_pm4_gl_scanout_path_targets(void) {
   TRI();
   ASSERT_EQ((last_context_reg(dcb, ctx->dcb_words, 0x3b8u) >> 14) & 0x1fu, 0u);
 
-  /* Onto the scanout path, as gl_scanout_begin puts a console there. */
+  /* Onto the scanout path, as gl_scanout_begin puts a console there - **including the pair
+   * `gl_draw_targets` restores from**. The tiling belongs to the display's buffers and is
+   * cleared while a framebuffer object is bound, so the live flags are derived and these are
+   * where the display's own answer is kept. Setting only the live pair left this test being
+   * undone by the very call it was setting up for. */
   ctx->hw_frame_active = GL_FALSE;
   ctx->dcb_words = 0;
   ctx->hw_rx = GL_TRUE;
   ctx->color_tiled = GL_TRUE;
+  ctx->fb0_hw_rx = GL_TRUE;
+  ctx->fb0_color_tiled = GL_TRUE;
   ctx->back_fb = back;
   ctx->front_fb = front;
   gl_draw_targets(ctx);

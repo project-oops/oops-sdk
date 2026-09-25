@@ -1785,6 +1785,14 @@ typedef struct gl_context {
      * attachment leaves `depth_buffer` NULL, which the draw path already reads as "no depth test
      * here" - so an attachment-less depth needs no special case. */
     float *fb0_depth_buffer;
+    /* **And the display's tiling, which an attachment does not share.** On the console the
+     * scanout buffers are in a 64KB_R_X swizzle and `hw_rx`/`color_tiled` say so; an attachment
+     * is linear whatever the display is. Both are parked here and cleared while a framebuffer
+     * object is bound, because `gl_color_index` addresses with one and `gl_hw_begin_frame`
+     * programs `CB_COLOR0_ATTRIB3` from the other - so leaving either set would have the CPU and
+     * the command processor read a linear attachment as a tiled one. */
+    GLboolean fb0_hw_rx;
+    GLboolean fb0_color_tiled;
     /* The proxy targets' levels - 1D, 2D, 3D, cube map: sizes and formats only, never pixels. A
      * level that would not have fitted is all zeros, which is how a proxy says no. */
     gl_tex_level_t proxy[4][OOPS_GL_MAX_TEXTURE_LEVELS];
@@ -3435,12 +3443,15 @@ static inline gl_renderbuffer_object_t *gl_renderbuffer_slot(gl_context_t *ctx, 
  * shape of target as the one the frame already draws into. What it needs is for the attachment
  * to *be* GPU memory, which `gl_fbo_bound_target` checks per attachment.
  *
- * **The scanout path is the one that cannot.** There the colour buffer is the display's own
- * memory in a 64KB_R_X swizzle, and an attachment is not in that swizzle - `gl_color_index`
- * would address it one way and the command processor another.
+ * **The display's swizzle is not a reason to refuse**, which is what this said until a console
+ * run found it. On the console `gl_scanout_begin` sets `color_tiled`, and refusing while it was
+ * set refused framebuffer objects on the only machine that matters - for a property of the
+ * *display's* buffer, when the attachment being drawn into is linear either way.
+ * `gl_draw_targets` clears the tiling while a framebuffer object is bound and puts it back
+ * after, so the addressing follows the target rather than the display.
  */
 static inline GLboolean gl_fbo_path_can_render(const gl_context_t *ctx) {
-    return (GLboolean)(ctx && !ctx->color_tiled);
+    return (GLboolean)(ctx != (const gl_context_t *)0);
 }
 
 /*
