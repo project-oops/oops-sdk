@@ -37,10 +37,38 @@ int oops_thread_equal(oops_thread_t t1, oops_thread_t t2);
 
 /* Mutexes */
 int oops_mutex_init(oops_mutex_t *mutex, const char *name);
+/*
+ * **A mutex the owning thread may lock again.** `oops_mutex_init` creates the default kind,
+ * which deadlocks on a second lock from the same thread; this one counts.
+ *
+ * Added for C++'s `std::recursive_mutex`, which libc++ requires as a *distinct* type from
+ * `std::mutex` - its external threading contract has `__libcpp_recursive_mutex_t` alongside
+ * `__libcpp_mutex_t` and will not accept one standing in for both. Everything else about the
+ * two is the same, including `oops_mutex_lock` and the rest of the operations: only the
+ * initialiser differs, so there is one type and one set of verbs.
+ */
+int oops_mutex_init_recursive(oops_mutex_t *mutex, const char *name);
 int oops_mutex_lock(oops_mutex_t *mutex);
 int oops_mutex_trylock(oops_mutex_t *mutex);
 int oops_mutex_unlock(oops_mutex_t *mutex);
 int oops_mutex_destroy(oops_mutex_t *mutex);
+
+/*
+ * Thread-local storage, by key.
+ *
+ * A key is created once and then carries a different value per thread. Added for C++'s
+ * `thread_local` and for libc++'s `__libcpp_tls_*`, which every threaded C++ program reaches
+ * through `std::thread`'s own bookkeeping even when it declares no thread-local of its own.
+ *
+ * `oops_tls_get` on a thread that never set the key answers NULL rather than failing: that is
+ * what every caller of this shape expects, and it is what makes "first use on this thread"
+ * detectable without a second flag.
+ */
+typedef uint32_t oops_tls_key_t;
+int oops_tls_create(oops_tls_key_t *key, void (*destructor)(void *));
+int oops_tls_delete(oops_tls_key_t key);
+void *oops_tls_get(oops_tls_key_t key);
+int oops_tls_set(oops_tls_key_t key, const void *value);
 
 /* Condition variables */
 int oops_cond_init(oops_cond_t *cond, const char *name);

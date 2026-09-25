@@ -92,6 +92,36 @@ char *ctime(const time_t *t);
 char *ctime_r(const time_t *t, char *buf);
 double difftime(time_t end, time_t start);
 
+/*
+ * `clock_gettime` and the two clocks worth having.
+ *
+ * Added for C++: enabling threads in libc++ obliges `_LIBCPP_HAS_MONOTONIC_CLOCK`, and
+ * `std::chrono::steady_clock::now()` lands here. Nothing in this header could answer it before -
+ * `struct timespec` did not exist anywhere in the SDK or the apps shim, which is why it is
+ * declared here rather than assumed.
+ *
+ * **Declared here and implemented in `oops-apps/common/posix/posix.c`**, the same split
+ * `gettimeofday` already has: the shim is what every port linking a C library against this
+ * platform pulls in, and putting a second definition in the SDK would collide with it.
+ *
+ * `CLOCK_MONOTONIC` is the platform's own counter and is exactly what it claims to be.
+ * `CLOCK_REALTIME` carries the wall-clock second with the counter's nanoseconds on top, which is
+ * right to a second and is what a caller measuring intervals wants; a caller wanting a precise
+ * date wants `time()`. The values are FreeBSD's, because that is the kernel underneath.
+ */
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 4
+
+#ifndef OOPS_HAVE_STRUCT_TIMESPEC
+#define OOPS_HAVE_STRUCT_TIMESPEC 1
+struct timespec {
+  time_t tv_sec;
+  long tv_nsec;
+};
+#endif
+
+int clock_gettime(int clk_id, struct timespec *ts);
+
 #ifdef __cplusplus
 }
 #endif

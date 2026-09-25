@@ -176,6 +176,10 @@ int  setvbuf(FILE *f, char *buf, int mode, size_t size);
  * `fclose` on the result closes the descriptor, which is what POSIX specifies.
  */
 FILE *fdopen(int fd, const char *mode);
+/* The descriptor behind a stream - `fdopen`'s inverse, and the first half of "how big has this
+ * log file grown". Defined in `oops-apps/common/posix/posix.c`, beside the `fstat` that is the
+ * other half, so there is one copy per link. */
+int fileno(FILE *stream);
 
 /*
  * **`fseeko` / `ftello`, the 64-bit-offset pair** (2026-09-23). `basic_filebuf` seeks with these
