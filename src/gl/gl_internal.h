@@ -1148,6 +1148,15 @@ typedef struct {
     uint32_t hw_params;
     char hw_ps_log[OOPS_GL_INFO_LOG_SIZE];
 
+    /* The compiled vertex shader for this program, or NULL. */
+    uint32_t *hw_vs;
+    uint32_t hw_vs_words;
+    uint32_t hw_vs_vgprs;
+    uint32_t hw_vs_user_sgprs;
+    uint64_t hw_vs_serial;
+    GLboolean hw_vs_logged;
+    char hw_vs_log[OOPS_GL_INFO_LOG_SIZE];
+
     char info_log[OOPS_GL_INFO_LOG_SIZE];
 } gl_program_object_t;
 
@@ -1718,6 +1727,8 @@ typedef struct gl_context {
     /* The next serial to issue, so no two compiled shaders are ever confused for each
      * other. Starts at 1; 0 is "no shader". */
     uint64_t hw_ps_next_serial;
+    uint64_t hw_vs_resident;
+    uint64_t hw_vs_next_serial;
     /* What `SPI_PS_INPUT_ENA` and `_ADDR` currently hold, so a draw emits them only
      * when it wants something else. Set by `gl_hw_begin_frame` to whatever its table
      * wrote. */
@@ -1966,6 +1977,7 @@ typedef struct gl_context {
      * is "nothing yet". */
     uint32_t hw_gl2_slot;
     GLuint hw_gl2_slot_program;
+    uint32_t hw_attrib_slot;
     size_t depth_px; /* floats in depth_buffer: the 64KB_Z_X tiled extent, both axes
                         padded to 128 px */
     GLboolean use_hardware;
@@ -2514,7 +2526,18 @@ static inline uint32_t gl_hw_gl2_slot_offset(uint32_t slot) {
     return OOPS_GL_GL2_SLOT_OFFSET + slot * OOPS_GL_GL2_SLOT_STRIDE;
 }
 
-#define OOPS_GL_PAYLOAD_BYTES 0x8000u
+#define OOPS_GL_VS_GL2_OFFSET 0x8000u
+#define OOPS_GL_VS_GL2_WORDS 1024u
+
+#define OOPS_GL_ATTRIB_SLOT_OFFSET 0x9000u
+#define OOPS_GL_ATTRIB_SLOT_STRIDE 0x100u /* 16 attributes * 16 bytes */
+#define OOPS_GL_ATTRIB_SLOTS 32u          /* 32 * 256 = 8192 bytes, ends at 0xb000u */
+
+static inline uint32_t gl_hw_attrib_slot_offset(uint32_t slot) {
+    return OOPS_GL_ATTRIB_SLOT_OFFSET + slot * OOPS_GL_ATTRIB_SLOT_STRIDE;
+}
+
+#define OOPS_GL_PAYLOAD_BYTES 0x10000u
 
 #define OOPS_GL_DESC_RING_OFFSET 0x1800u
 #define OOPS_GL_DESC_SLOT_STRIDE 0x80u /* two units, 0x40 each */
@@ -2546,6 +2569,9 @@ typedef char oops_gl_payload_map_closes
       OOPS_GL_PS_UNTEX_WORDS == 128u && OOPS_GL_PS_TEX_WORDS == 320u &&
       OOPS_GL_PS_GL2_OFFSET + OOPS_GL_PS_GL2_WORDS * 4u <= OOPS_GL_GL2_SLOT_OFFSET &&
       OOPS_GL_GL2_SLOT_OFFSET + OOPS_GL_GL2_SLOTS * OOPS_GL_GL2_SLOT_STRIDE <=
+          OOPS_GL_VS_GL2_OFFSET &&
+      OOPS_GL_VS_GL2_OFFSET + OOPS_GL_VS_GL2_WORDS * 4u <= OOPS_GL_ATTRIB_SLOT_OFFSET &&
+      OOPS_GL_ATTRIB_SLOT_OFFSET + OOPS_GL_ATTRIB_SLOTS * OOPS_GL_ATTRIB_SLOT_STRIDE <=
           OOPS_GL_PAYLOAD_BYTES &&
       /* The uniform block has to start after every descriptor set and end inside the
          slot. */
@@ -4548,6 +4574,10 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                                       uint32_t *out_vgprs, uint32_t *out_user_sgprs,
                                       uint32_t *out_input_ena, char *log,
                                       size_t log_size);
+GLboolean gl_program_compile_vertex(const gl_program_object_t *p, uint32_t *words,
+                                    uint32_t capacity, uint32_t *out_count,
+                                    uint32_t *out_vgprs, uint32_t *out_user_sgprs,
+                                    char *log, size_t log_size);
 
 /* Submit before editing a shader the GPU may not have read yet. The draws already in
  * the stream were built against the words that are there now; changing them first

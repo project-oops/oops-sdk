@@ -60,7 +60,7 @@ void glsl_code_init(glsl_code_t *c, uint32_t *words, uint32_t capacity) {
 
 /* Overflow is recorded, never truncated silently: a prefix of a shader is a valid
  * instruction stream that stops in the middle, and the GPU would run it. */
-static void put(glsl_code_t *c, uint32_t word) {
+void glsl_code_put(glsl_code_t *c, uint32_t word) {
     if (!c || !c->words)
         return;
     if (c->count >= c->capacity) {
@@ -68,6 +68,10 @@ static void put(glsl_code_t *c, uint32_t word) {
         return;
     }
     c->words[c->count++] = word;
+}
+
+static void put(glsl_code_t *c, uint32_t word) {
+    glsl_code_put(c, word);
 }
 
 /* -------------------------------------------------------------------------
@@ -276,6 +280,52 @@ void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base) {
 
     put(c, (0x3eu << 26) | en | (target << 4) | (1u << 10) | (1u << 11) | (1u << 12));
     put(c, r | (g << 8));
+}
+
+void glsl_emit_export_param(glsl_code_t *c, uint32_t param_idx, uint32_t v0,
+                            uint32_t v1, uint32_t v2, uint32_t v3) {
+    const uint32_t en = 0xfu;
+    const uint32_t target = 32u + (param_idx & 0x1fu);
+    put(c, (0x3eu << 26) | en | (target << 4));
+    put(c, (v0 & 0xffu) | ((v1 & 0xffu) << 8) | ((v2 & 0xffu) << 16) |
+               ((v3 & 0xffu) << 24));
+}
+
+void glsl_emit_export_pos(glsl_code_t *c, uint32_t v0, uint32_t v1, uint32_t v2,
+                          uint32_t v3, GLboolean done) {
+    const uint32_t en = 0xfu;
+    const uint32_t target = 12u; /* POS0 */
+    put(c, (0x3eu << 26) | en | (target << 4) | (done ? (1u << 11) : 0u));
+    put(c, (v0 & 0xffu) | ((v1 & 0xffu) << 8) | ((v2 & 0xffu) << 16) |
+               ((v3 & 0xffu) << 24));
+}
+
+void glsl_emit_s_waitcnt_exp(glsl_code_t *c) {
+    put(c, 0xbf8cff0fu);
+}
+
+void glsl_emit_global_load_dwordx4(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
+                                   uint32_t offset) {
+    put(c, 0xdc388000u | (offset & 0xfffu));
+    put(c, ((vdst & 0xffu) << 24) | 0x7d00u | (vaddr & 0xffu));
+}
+
+void glsl_emit_global_load_dwordx3(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
+                                   uint32_t offset) {
+    put(c, 0xdc3c8000u | (offset & 0xfffu));
+    put(c, ((vdst & 0xffu) << 24) | 0x7d00u | (vaddr & 0xffu));
+}
+
+void glsl_emit_global_load_dwordx2(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
+                                   uint32_t offset) {
+    put(c, 0xdc348000u | (offset & 0xfffu));
+    put(c, ((vdst & 0xffu) << 24) | 0x7d00u | (vaddr & 0xffu));
+}
+
+void glsl_emit_global_load_dword(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
+                                 uint32_t offset) {
+    put(c, 0xdc308000u | (offset & 0xfffu));
+    put(c, ((vdst & 0xffu) << 24) | 0x7d00u | (vaddr & 0xffu));
 }
 
 /* -------------------------------------------------------------------------

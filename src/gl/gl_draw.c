@@ -3325,6 +3325,7 @@ static void gl_hw_begin_frame(gl_context_t *ctx) {
      * comparison is about. See `hw_desc_shadow`. */
     ctx->hw_desc_shadow_valid = 0u;
     ctx->hw_gl2_slot = 0u; /* the GL 2.0 block ring restarts with the frame ... */
+    ctx->hw_attrib_slot = 0u;
     /* ... and so does the textured shader's variant ring: no queued draw points at a
      * slot, so all are free. The keys go too, so a dead slot is never matched. */
     for (uint32_t i = 0u; i < OOPS_GL_PS_RING_SLOTS; i++) {
@@ -7901,6 +7902,305 @@ void glArrayElement(GLint i) {
     fetch_vertex(ctx, i, &ctx->imm_verts[ctx->imm_count++]);
 }
 
+/* Whether a draw can run entirely in hardware through the resident VBO pipeline (D014).
+ */
+static GLboolean gl_hw_can_resident_draw(gl_context_t *ctx, GLenum mode,
+                                         GLsizei count) {
+    if (!ctx || !ctx->use_hardware || ctx->hw_failed || !ctx->dcb_mem ||
+        !ctx->gpu_payload)
+        return GL_FALSE;
+    if (mode != GL_TRIANGLES || count <= 0 || (count % 3) != 0)
+        return GL_FALSE;
+    if (ctx->polygon_mode[0] != GL_FILL || ctx->polygon_mode[1] != GL_FILL)
+        return GL_FALSE;
+    if (ctx->cap_polygon_smooth)
+        return GL_FALSE;
+    for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
+        if (ctx->clip_plane_enabled[i])
+            return GL_FALSE;
+    }
+    const gl_program_object_t *const prog = gl_active_program(ctx);
+    if (!prog || !prog->linked)
+        return GL_FALSE;
+    if (!prog->vs || prog->hw_vs_words == 0u || !prog->hw_vs)
+        return GL_FALSE;
+    if (!prog->fs || prog->hw_ps_words == 0u || !prog->hw_ps)
+        return GL_FALSE;
+    for (int i = 0; i < prog->attrib_count; i++) {
+        const int loc = prog->attribs[i].location;
+        if (loc < 0 || loc >= (int)OOPS_GL_MAX_VERTEX_ATTRIBS)
+            return GL_FALSE;
+        const gl_vertex_attrib_t *ca = &ctx->vertex_attribs[loc];
+        if (!ca->enabled)
+            return GL_FALSE;
+        const gl_buffer_object_t *buf = gl_find_buffer(ctx, ca->buffer);
+        if (!buf || !buf->data)
+            return GL_FALSE;
+        if (ca->type != GL_FLOAT)
+            return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* Dispatches batched triangles with native vertex and fragment shaders. */
+static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint first,
+                                       GLsizei count) {
+    (void)mode;
+#ifndef OOPS_HOST_BUILD
+    const uint64_t draw_t0 = oops_time_get_ns();
+#endif
+    if (!ctx->hw_frame_active) {
+        gl_hw_begin_frame(ctx);
+    }
+    if (ctx->dcb_words + OOPS_GL_DCB_DRAW_MAX_DW + OOPS_GL_DCB_TRAILER_DW >=
+        ctx->dcb_capacity_dw) {
+        gl_hw_flush(ctx);
+        gl_hw_begin_frame(ctx);
+    }
+
+    gl_program_object_t *const prog = gl_active_program(ctx);
+    const uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
+
+    /* Upload pixel shader if stale */
+    const GLboolean both = (GLboolean)(ctx->fb_also != (uint32_t *)0);
+    if (ctx->hw_ps_resident != prog->hw_ps_serial || ctx->hw_ps_resident_both != both) {
+        uint32_t *const ps_slot =
+            (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_GL2_OFFSET);
+        gl_ps_sync_payload_edit(ctx, ps_slot, prog->hw_ps, prog->hw_ps_words);
+        memcpy(ps_slot, prog->hw_ps, prog->hw_ps_words * sizeof(uint32_t));
+        memcpy(ps_slot + prog->hw_ps_words - GL_PS_EXPORT_WORDS,
+               gl_ps_export_words(both), GL_PS_EXPORT_WORDS * sizeof(uint32_t));
+        gl_ps_flush_shaders(ctx);
+        ctx->hw_ps_resident = prog->hw_ps_serial;
+        ctx->hw_ps_resident_both = both;
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+    }
+
+    /* Upload vertex shader if stale */
+    if (ctx->hw_vs_resident != prog->hw_vs_serial) {
+        uint32_t *const vs_slot =
+            (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_VS_GL2_OFFSET);
+        gl_ps_sync_payload_edit(ctx, vs_slot, prog->hw_vs, prog->hw_vs_words);
+        memcpy(vs_slot, prog->hw_vs, prog->hw_vs_words * sizeof(uint32_t));
+        gl_ps_flush_shaders(ctx);
+        ctx->hw_vs_resident = prog->hw_vs_serial;
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+    }
+
+    /* Textures and GL2 block */
+    for (int s = 0; s < prog->hw_tex_sets; s++) {
+        gl_texture_object_t *obj = gl_gl2_sampler_texture(ctx, prog, s);
+        if (!obj)
+            continue;
+        gl_tex_hw_prepare(ctx, obj);
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+    }
+    if (!ctx->hw_frame_active)
+        gl_hw_begin_frame(ctx);
+
+    uint32_t gl2_block[OOPS_GL_GL2_SLOT_STRIDE / 4u];
+    gl_gl2_build_block(ctx, prog, gl2_block);
+
+    const void *slot =
+        (const char *)ctx->gpu_payload + gl_hw_gl2_slot_offset(ctx->hw_gl2_slot);
+    const GLboolean moved_block =
+        (GLboolean)(ctx->hw_gl2_slot_program != 0u &&
+                    (ctx->hw_gl2_slot_program != prog->name ||
+                     memcmp(slot, gl2_block, OOPS_GL_GL2_SLOT_STRIDE) != 0));
+    if (moved_block) {
+        if (ctx->hw_gl2_slot + 1u >= OOPS_GL_GL2_SLOTS) {
+            gl_hw_flush(ctx);
+            gl_hw_begin_frame(ctx);
+        } else {
+            ctx->hw_gl2_slot++;
+        }
+    }
+    ctx->hw_gl2_slot_program = prog->name;
+
+    const uint32_t boff = gl_hw_gl2_slot_offset(ctx->hw_gl2_slot);
+    char *dst = (char *)ctx->gpu_payload + boff;
+    memcpy(dst, gl2_block, OOPS_GL_GL2_SLOT_STRIDE);
+#if defined(__x86_64__)
+    for (uint32_t b = 0; b < OOPS_GL_GL2_SLOT_STRIDE; b += 64u) {
+        __builtin_ia32_clflush((const void *)(dst + b));
+    }
+#endif
+    const uint64_t desc_table_va = payload_va + boff;
+    const uint32_t ps_rsrc2 = (prog->hw_ps_user_sgprs & 0x1fu) << 1u;
+
+    /* Build Attribute Slot Table */
+    if (ctx->hw_attrib_slot + 1u >= OOPS_GL_ATTRIB_SLOTS) {
+        gl_hw_flush(ctx);
+        gl_hw_begin_frame(ctx);
+    } else {
+        ctx->hw_attrib_slot++;
+    }
+    const uint32_t aoff =
+        OOPS_GL_ATTRIB_SLOT_OFFSET + ctx->hw_attrib_slot * OOPS_GL_ATTRIB_SLOT_STRIDE;
+    uint32_t *adst = (uint32_t *)((char *)ctx->gpu_payload + aoff);
+    memset(adst, 0, OOPS_GL_ATTRIB_SLOT_STRIDE);
+
+    for (int i = 0; i < prog->attrib_count; i++) {
+        const int loc = prog->attribs[i].location;
+        if (loc < 0 || loc >= (int)OOPS_GL_MAX_VERTEX_ATTRIBS)
+            continue;
+        const gl_vertex_attrib_t *ca = &ctx->vertex_attribs[loc];
+        const gl_buffer_object_t *buf = gl_find_buffer(ctx, ca->buffer);
+        if (!buf || !buf->data)
+            continue;
+        const uint32_t stride = ca->stride
+                                    ? (uint32_t)ca->stride
+                                    : (uint32_t)ca->size * (uint32_t)sizeof(float);
+        const uint64_t base_va =
+            (uint64_t)(uintptr_t)((const char *)buf->data + (uintptr_t)ca->pointer +
+                                  (uint64_t)(uint32_t)first * (uint64_t)stride);
+        adst[loc * 4 + 0] = (uint32_t)base_va;
+        adst[loc * 4 + 1] = (uint32_t)(base_va >> 32);
+        adst[loc * 4 + 2] = stride;
+        adst[loc * 4 + 3] = (uint32_t)ca->size;
+    }
+#if defined(__x86_64__)
+    for (uint32_t b = 0; b < OOPS_GL_ATTRIB_SLOT_STRIDE; b += 64u) {
+        __builtin_ia32_clflush((const void *)((char *)adst + b));
+    }
+#endif
+    const uint64_t attrib_table_va = payload_va + aoff;
+
+    /* Emit render state */
+    gl_hw_draw_t hw;
+    memset(&hw, 0, sizeof(hw));
+#ifndef OOPS_HOST_BUILD
+    hw.vbo_t0 = oops_time_get_ns();
+#endif
+    gl_hw_tri_emit_state(ctx, &hw);
+    gl_hw_tri_emit_dynamic(ctx, &hw);
+    uint32_t *dw = hw.dw;
+
+    /* Parameter configuration */
+    const uint32_t params = (prog->hw_params >= 2u) ? prog->hw_params : 2u;
+    const uint32_t out_config = (params - 1u) * 2u;
+    const uint32_t in_control = GL_SPI_PS_W32_EN | params;
+    *dw++ = 0xc0016900u;
+    *dw++ = 0x1b1u;
+    *dw++ = out_config; /* SPI_VS_OUT_CONFIG */
+    *dw++ = 0xc0016900u;
+    *dw++ = 0x1b6u;
+    *dw++ = in_control; /* SPI_PS_IN_CONTROL */
+    for (uint32_t p = 2u; p < params && p < 32u; p++) {
+        *dw++ = 0xc0016900u;
+        *dw++ = 0x191u + p;
+        *dw++ = p;
+    }
+    ctx->hw_params = 0xffffffffu; /* Invalidate so fixed-function re-emits */
+
+    /* Pixel Shader PGM & RSRC2 */
+    const uint64_t ps_va = payload_va + OOPS_GL_PS_GL2_OFFSET;
+    *dw++ = 0xc0017600u; /* SET_SH_REG mmSPI_SHADER_PGM_LO_PS (0x08) */
+    *dw++ = 0x08u;
+    *dw++ = (uint32_t)(ps_va >> 8);
+    *dw++ = 0xc0017600u; /* SET_SH_REG mmSPI_SHADER_PGM_HI_PS (0x09) */
+    *dw++ = 0x09u;
+    *dw++ = (uint32_t)(ps_va >> 40);
+    *dw++ = 0xc0017600u; /* SET_SH_REG mmSPI_SHADER_PGM_RSRC2_PS (0x0b) */
+    *dw++ = 0x0bu;
+    *dw++ = ps_rsrc2;
+
+    /* Pixel Shader Inputs (SPI_PS_INPUT_ENA / ADDR) */
+    const uint32_t want_input = prog->hw_ps_input_ena;
+    if (want_input != ctx->hw_input_ena) {
+        *dw++ = 0xc0016900u;
+        *dw++ = 0x1b3u;
+        *dw++ = want_input;
+        *dw++ = 0xc0016900u;
+        *dw++ = 0x1b4u;
+        *dw++ = want_input;
+        ctx->hw_input_ena = want_input;
+    }
+
+    /* Depth export & discard control */
+    const GLboolean depth_ps = prog->hw_ps_exports_depth;
+    const GLboolean kill_ps = prog->hw_ps_kills;
+    const uint32_t want_zfmt = depth_ps ? 1u : 0u;
+    const uint32_t want_dbsc =
+        (depth_ps ? 0x00000001u : 0x00000010u) | (kill_ps ? 0x00000040u : 0u);
+    if (want_zfmt != ctx->hw_z_format) {
+        *dw++ = 0xc0016900u;
+        *dw++ = 0x1c4u;
+        *dw++ = want_zfmt;
+        ctx->hw_z_format = want_zfmt;
+    }
+    if (want_dbsc != ctx->hw_db_shader_control) {
+        *dw++ = 0xc0016900u;
+        *dw++ = 0x203u;
+        *dw++ = want_dbsc;
+        ctx->hw_db_shader_control = want_dbsc;
+    }
+
+    /* PS User Data (desc_table_va in s[0:1]) */
+    *dw++ = 0xc0017600u; /* mmSPI_SHADER_USER_DATA_PS_0 */
+    *dw++ = 0x0cu;
+    *dw++ = (uint32_t)desc_table_va;
+    *dw++ = 0xc0017600u; /* mmSPI_SHADER_USER_DATA_PS_1 */
+    *dw++ = 0x0du;
+    *dw++ = (uint32_t)(desc_table_va >> 32);
+
+    /* Vertex Shader NGG Program (GS & ES) */
+    const uint64_t vs_va = payload_va + OOPS_GL_VS_GL2_OFFSET;
+    static const uint32_t pgm_regs[2] = {0x88u,
+                                         0xc8u}; /* SPI_SHADER_PGM_LO_GS, _LO_ES */
+    for (int i = 0; i < 2; i++) {
+        *dw++ = 0xc0017600u;
+        *dw++ = pgm_regs[i];
+        *dw++ = (uint32_t)(vs_va >> 8);
+        *dw++ = 0xc0017600u;
+        *dw++ = pgm_regs[i] + 1u;
+        *dw++ = (uint32_t)(vs_va >> 40);
+    }
+
+    /* GS Resource Registers: RSRC1 (VGPRs) & RSRC2 (USER_SGPR=4, LDS_SIZE=1) */
+    const uint32_t vgpr_granule =
+        (prog->hw_vs_vgprs > 0u) ? ((prog->hw_vs_vgprs + 7u) / 8u - 1u) : 6u;
+    const uint32_t gs_rsrc1 = 0x622c0040u | (vgpr_granule & 0x3fu);
+    *dw++ = 0xc0017600u; /* mmSPI_SHADER_PGM_RSRC1_GS (0x8a) */
+    *dw++ = 0x8au;
+    *dw++ = gs_rsrc1;
+    *dw++ = 0xc0017600u; /* mmSPI_SHADER_PGM_RSRC2_GS (0x8b) */
+    *dw++ = 0x8bu;
+    *dw++ = 0x000b0008u; /* LDS_SIZE=1, USER_SGPR=4 */
+
+    /* GS User SGPRs: s[8:9] = desc_table_va, s[10:11] = attrib_table_va */
+    *dw++ = 0xc0017600u; /* mmSPI_SHADER_USER_DATA_GS_0 = 0x8c */
+    *dw++ = 0x8cu;
+    *dw++ = (uint32_t)desc_table_va;
+    *dw++ = 0xc0017600u; /* mmSPI_SHADER_USER_DATA_GS_1 = 0x8d */
+    *dw++ = 0x8du;
+    *dw++ = (uint32_t)(desc_table_va >> 32);
+    *dw++ = 0xc0017600u; /* mmSPI_SHADER_USER_DATA_GS_2 = 0x8e */
+    *dw++ = 0x8eu;
+    *dw++ = (uint32_t)attrib_table_va;
+    *dw++ = 0xc0017600u; /* mmSPI_SHADER_USER_DATA_GS_3 = 0x8f */
+    *dw++ = 0x8fu;
+    *dw++ = (uint32_t)(attrib_table_va >> 32);
+
+    /* Draw */
+    *dw++ = 0xc0002f00u; /* PACKET3_NUM_INSTANCES */
+    *dw++ = 1u;
+    *dw++ = 0xc0012d00u; /* DRAW_INDEX_AUTO */
+    *dw++ = (uint32_t)count;
+    *dw++ = 2u;
+
+    ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
+    ctx->triangles_drawn += (uint32_t)(count / 3);
+#ifndef OOPS_HOST_BUILD
+    ctx->hw_dcb_ns += oops_time_get_ns() - hw.dcb_t0;
+    ctx->hw_draw_ns += oops_time_get_ns() - draw_t0;
+    ctx->hw_draw_calls++;
+#endif
+}
+
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
@@ -7927,6 +8227,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         for (GLint i = 0; i < count; i++)
             gl_list_record_element(ctx, first + i);
         glEnd();
+        return;
+    }
+
+    if (gl_hw_can_resident_draw(ctx, mode, count)) {
+        gl_hw_draw_arrays_resident(ctx, mode, first, count);
         return;
     }
 

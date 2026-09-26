@@ -927,10 +927,10 @@ not agree with - `REQ-20260921T1810Z-3d92` asks for the two rows that would sett
 because a varying's float position becomes `parameter = n / 4`, so a program with 13 to 16
 varying floats is the case those two arms differ over.
 
-**Only the fragment stage is compiled.** The hardware vertex shader is a passthrough - the CPU
-builds each vertex already in clip space and the shader loads and exports it - so a GL 2.0 vertex
-shader runs on the CPU in `glsl_exec.c`, writing the same vertex the fixed-function path writes.
-There is nothing for a vertex-shader compiler to do that the interpreter is not already doing.
+**Both vertex and fragment stages are compiled.** The hardware vertex shader compiles
+to native gfx1030 machine instructions in `glsl_vs.c` (D014) and executes on the GPU via
+resident vertex buffers (`glDrawArrays`). The CPU vertex interpreter in `glsl_exec.c`
+serves as the reference implementation.
 
 What landed, in one day:
 

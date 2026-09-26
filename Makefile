@@ -72,6 +72,7 @@ OBJS := \
     $(BUILD)/gl/glsl_link.o \
     $(BUILD)/gl/glsl_exec.o \
     $(BUILD)/gl/glsl_ps.o \
+    $(BUILD)/gl/glsl_vs.o \
     $(BUILD)/gl/gl_shader.o \
     $(BUILD)/input/input.o \
     $(BUILD)/input/keyboard.o \
@@ -213,6 +214,7 @@ TEST_SRCS := \
     src/gl/glsl_link.c \
     src/gl/glsl_exec.c \
     src/gl/glsl_ps.c \
+    src/gl/glsl_vs.c \
     src/gl/gl_shader.c
 
 HOST_CFLAGS := -std=c11 -Wall -Wextra -Iinclude -I. -pthread -lm -D_GNU_SOURCE -DOOPS_HOST_BUILD $(OOPS_TARGET_FLAGS)

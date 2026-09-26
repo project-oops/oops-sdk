@@ -125,6 +125,7 @@ static void program_destroy(gl_program_object_t *p) {
     gl_glsl_unit_release(p->fs);
     gl_heap_free(p->values);
     gl_heap_free(p->hw_ps);
+    gl_heap_free(p->hw_vs);
     p->name = 0u;
     p->vs = (glsl_unit_t *)0;
     p->fs = (glsl_unit_t *)0;
@@ -135,12 +136,19 @@ static void program_destroy(gl_program_object_t *p) {
     p->hw_ps_user_sgprs = 0u;
     p->hw_ps_logged = GL_FALSE;
     p->hw_ps_serial = 0u;
+    p->hw_vs = (uint32_t *)0;
+    p->hw_vs_words = 0u;
+    p->hw_vs_vgprs = 0u;
+    p->hw_vs_user_sgprs = 0u;
+    p->hw_vs_logged = GL_FALSE;
+    p->hw_vs_serial = 0u;
     p->hw_color_param = -1;
     p->hw_texcoord_param = -1;
     p->hw_ps_exports_depth = GL_FALSE;
     p->hw_ps_kills = GL_FALSE;
     p->hw_params = 0u;
     p->hw_ps_log[0] = '\0';
+    p->hw_vs_log[0] = '\0';
     p->linked = GL_FALSE;
     p->flagged = GL_FALSE;
     p->validated = GL_FALSE;
@@ -653,6 +661,12 @@ void glGetProgramiv(GLuint program, GLenum pname, GLint *params) {
     case GL_PROGRAM_HW_PS_VGPRS:
         *params = (GLint)p->hw_ps_vgprs;
         break;
+    case GL_PROGRAM_HW_VS_WORDS:
+        *params = (GLint)p->hw_vs_words;
+        break;
+    case GL_PROGRAM_HW_VS_VGPRS:
+        *params = (GLint)p->hw_vs_vgprs;
+        break;
     case GL_PROGRAM_HW_PARAMS:
         *params = (GLint)p->hw_params;
         break;
@@ -723,7 +737,8 @@ void glGetProgramHardwareLog(GLuint program, GLsizei bufSize, GLsizei *length,
                                                           : GL_INVALID_VALUE);
         return;
     }
-    return_string(p->hw_ps_log, bufSize, length, infoLog);
+    return_string(p->hw_ps_log[0] ? p->hw_ps_log : p->hw_vs_log, bufSize, length,
+                  infoLog);
 }
 
 void glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei *count,

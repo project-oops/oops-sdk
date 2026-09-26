@@ -2946,6 +2946,54 @@ static void test_gl2_compiles_a_whole_pixel_shader(void) {
     glContextDestroy(ctx);
 }
 
+/* gl2-cube's vertex shader compiles to the expected console vertex shader. */
+static void test_gl2_compiles_a_whole_vertex_shader(void) {
+    void *ctx = gl2_context();
+
+    const GLuint prog = linked_program(
+        "uniform mat4 mvp;\n"
+        "attribute vec3 pos;\n"
+        "attribute vec3 colour;\n"
+        "varying vec3 vcolour;\n"
+        "void main() { vcolour = colour; gl_Position = mvp * vec4(pos, 1.0); }\n",
+        "varying vec3 vcolour;\n"
+        "void main() { gl_FragColor = vec4(vcolour, 1.0); }\n");
+
+    gl_context_t *c = (gl_context_t *)ctx;
+    const gl_program_object_t *p = gl_find_program(c, prog);
+    ASSERT_TRUE(p != NULL);
+    ASSERT_TRUE(p->hw_vs != NULL);
+    ASSERT_TRUE(p->hw_vs_words > 0u);
+
+    GLint vs_words = 0, vs_vgprs = 0;
+    glGetProgramiv(prog, GL_PROGRAM_HW_VS_WORDS, &vs_words);
+    glGetProgramiv(prog, GL_PROGRAM_HW_VS_VGPRS, &vs_vgprs);
+    ASSERT_EQ(vs_words, (GLint)p->hw_vs_words);
+    ASSERT_EQ(vs_vgprs, (GLint)p->hw_vs_vgprs);
+    ASSERT_TRUE(vs_vgprs >= 8);
+
+    /* Direct compilation check */
+    uint32_t words[1024];
+    uint32_t count = 0u, vgprs = 0u, user_sgprs = 99u;
+    char log[256] = {0};
+    const GLboolean ok = gl_program_compile_vertex(p, words, 1024u, &count, &vgprs,
+                                                   &user_sgprs, log, sizeof(log));
+    if (!ok)
+        printf("\n    vs compile failed: %s\n", log);
+    ASSERT_EQ(ok, GL_TRUE);
+    ASSERT_EQ(count, p->hw_vs_words);
+    ASSERT_EQ(user_sgprs,
+              4u); /* uniform block in s[8:9], attribute table in s[10:11] */
+    ASSERT_EQ(p->hw_vs_user_sgprs, 4u);
+
+    /* Epilogue: ends with s_endpgm */
+    ASSERT_EQ(words[count - 1u], 0xbf810000u); /* s_endpgm */
+    ASSERT_EQ(words[count - 2u], 0xbefe030cu); /* s_mov_b32 exec_lo, s12 */
+    ASSERT_EQ(words[count - 3u], 0xbf8cff0fu); /* s_waitcnt expcnt(0) */
+
+    glContextDestroy(ctx);
+}
+
 /* The back end refuses, with the limit in the log, what exceeds the hardware's limits.
  */
 static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
@@ -8489,6 +8537,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_an_early_return_ends_the_function_and_nothing_else);
     RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
+    RUN_TEST(test_gl2_compiles_a_whole_vertex_shader);
     RUN_TEST(test_gl2_link_refuses_a_null_context);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);
     RUN_TEST(test_gl2_compiled_while_loops);

@@ -583,6 +583,14 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
     p->hw_ps_words = 0u;
     p->hw_ps_vgprs = 0u;
     p->hw_ps_user_sgprs = 0u;
+    gl_heap_free(p->hw_vs);
+    p->hw_vs = (uint32_t *)0;
+    p->hw_vs_words = 0u;
+    p->hw_vs_vgprs = 0u;
+    p->hw_vs_user_sgprs = 0u;
+    p->hw_vs_logged = GL_FALSE;
+    p->hw_vs_serial = 0u;
+    p->hw_vs_log[0] = '\0';
     /* A relink is a new answer, so a program refused again says why again: the source
      * may have changed and the reason with it. */
     p->hw_ps_logged = GL_FALSE;
@@ -803,6 +811,29 @@ GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t
         /* No fragment stage: the fixed-function pixel shader in the payload is what
          * runs, and there is nothing to compile or to refuse. */
         p->hw_ps_log[0] = '\0';
+    }
+
+    if (vs) {
+        p->hw_vs = (uint32_t *)gl_heap_alloc(OOPS_GL_VS_GL2_WORDS * sizeof(uint32_t));
+        if (!p->hw_vs) {
+            oops_snprintf(p->hw_vs_log, sizeof(p->hw_vs_log),
+                          "no memory for a compiled vertex shader");
+        } else if (!gl_program_compile_vertex(p, p->hw_vs, OOPS_GL_VS_GL2_WORDS,
+                                              &p->hw_vs_words, &p->hw_vs_vgprs,
+                                              &p->hw_vs_user_sgprs, p->hw_vs_log,
+                                              sizeof(p->hw_vs_log))) {
+            gl_heap_free(p->hw_vs);
+            p->hw_vs = (uint32_t *)0;
+            p->hw_vs_words = 0u;
+            p->hw_vs_vgprs = 0u;
+            p->hw_vs_user_sgprs = 0u;
+        } else {
+            if (ctx->hw_vs_next_serial == 0u)
+                ctx->hw_vs_next_serial = 1u;
+            p->hw_vs_serial = ctx->hw_vs_next_serial++;
+        }
+    } else {
+        p->hw_vs_log[0] = '\0';
     }
     return GL_TRUE;
 }

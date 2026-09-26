@@ -27,6 +27,8 @@ decisions made with the reasoning to hand.
 | 🟢 | D010 | [oops-sdl is a backend inside upstream SDL, not an implementation of SDL](decisions/D010-oops-sdl-is-a-backend-inside-upstream.md) | decided | 2026-09-21 |
 | 🟢 | D011 | [The display names its scanout buffers once, and they must be plain](decisions/D011-the-display-names-its-scanout-buffers-once.md) | decided | 2026-09-21 |
 | 🟢 | D012 | [One renderer API, and the display open moves inside it](decisions/D012-one-renderer-api-and-the-display-open-moves-inside-it.md) | decided | 2026-09-21 |
+| ⚪ | D013 | [](decisions/D013-libc-open-descriptor-discards-writes-route-through-sys-open.md) | unrecorded | ~2026-09-21..09-26 |
+| 🟢 | D014 | [Throughput is an explicit dimension of completeness for oops-gl](decisions/D014-throughput-is-an-explicit-dimension-of-completeness.md) | decided | 2026-09-26 |
 
 | | meaning |
 |---|---|

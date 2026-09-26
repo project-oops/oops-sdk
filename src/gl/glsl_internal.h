@@ -728,6 +728,7 @@ typedef struct {
 #define GLSL_SMEM_LOAD_DWORDX16 4u
 
 void glsl_code_init(glsl_code_t *c, uint32_t *words, uint32_t capacity);
+void glsl_code_put(glsl_code_t *c, uint32_t word);
 uint32_t glsl_vgpr(uint32_t n);
 /* An SGPR as a source operand: the identity, spelled out so a call site says which file
  * it means. See `glsl_emit.c`. */
@@ -925,6 +926,24 @@ void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base);
 /* The depth a shader wrote, exported before the colour; see the definition for why it
  * carries neither `done` nor `vm`. */
 void glsl_emit_export_mrtz(glsl_code_t *c, uint32_t reg);
+/* SPI parameter export: param_idx is 0..31 (SPI target 32..63). */
+void glsl_emit_export_param(glsl_code_t *c, uint32_t param_idx, uint32_t v0,
+                            uint32_t v1, uint32_t v2, uint32_t v3);
+/* Position export: target 12 (POS0), with done flag if this is the final position
+ * export. */
+void glsl_emit_export_pos(glsl_code_t *c, uint32_t v0, uint32_t v1, uint32_t v2,
+                          uint32_t v3, GLboolean done);
+/* s_waitcnt expcnt(0) */
+void glsl_emit_s_waitcnt_exp(glsl_code_t *c);
+/* Vector global memory loads from 64-bit VGPR address [vaddr : vaddr+1]. */
+void glsl_emit_global_load_dwordx4(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
+                                   uint32_t offset);
+void glsl_emit_global_load_dwordx3(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
+                                   uint32_t offset);
+void glsl_emit_global_load_dwordx2(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
+                                   uint32_t offset);
+void glsl_emit_global_load_dword(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
+                                 uint32_t offset);
 
 /* The quad permutes a derivative needs, as `quad_perm` control values. A quad is laid
  * out (0,0) (1,0) / (0,1) (1,1), so the x pairs are lanes 0-1 and 2-3 and the y pairs
@@ -1186,5 +1205,11 @@ void glsl_scope_pop(glsl_sema_t *s);
 GLboolean glsl_check_unit(glsl_sema_t *s, int32_t unit);
 /* Whether an expression may appear on the left of an assignment. */
 GLboolean glsl_is_lvalue(glsl_sema_t *s, int32_t node);
+
+/* Compiles the linked vertex shader in `p` into gfx1030 machine instructions. */
+GLboolean gl_program_compile_vertex(const gl_program_object_t *p, uint32_t *words,
+                                    uint32_t capacity, uint32_t *out_count,
+                                    uint32_t *out_vgprs, uint32_t *out_user_sgprs,
+                                    char *log, size_t log_size);
 
 #endif /* __GLSL_INTERNAL_H__ */

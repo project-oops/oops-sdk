@@ -5723,10 +5723,136 @@ static void test_pm4_gl_unit1_is_the_base_when_unit0_has_no_texture(void) {
     glContextDestroy(ctx_handle);
     oops_display_close(disp);
 }
+
+/* glDrawArrays through a resident VBO with compiled VS and PS dispatches batched
+ * triangles via DRAW_INDEX_AUTO directly without decomposing into per-triangle packets
+ * (D014). */
+static void test_pm4_gl_resident_draw_arrays_dispatches_batched_triangles(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx_handle = glContextCreate(disp);
+    gl_context_t *ctx = (gl_context_t *)ctx_handle;
+    static _Alignas(4096) uint32_t dcb[4096];
+    static _Alignas(256) uint8_t payload[OOPS_GL_PAYLOAD_BYTES];
+    memset(dcb, 0, sizeof(dcb));
+    memset(payload, 0, sizeof(payload));
+    ctx->dcb_mem = dcb;
+    ctx->dcb_capacity_dw = 4096;
+    ctx->dcb_words = 0;
+    ctx->gpu_payload = payload;
+    ctx->use_hardware = GL_TRUE;
+    ctx->hw_frame_active = GL_FALSE;
+    glContextSetVersion(2, 0);
+
+    const GLuint prog = pm4_linked_program(
+        "attribute vec3 pos;\n"
+        "attribute vec3 col;\n"
+        "varying vec3 vcol;\n"
+        "void main() { vcol = col; gl_Position = vec4(pos, 1.0); }\n",
+        "varying vec3 vcol;\n"
+        "void main() { gl_FragColor = vec4(vcol, 1.0); }\n");
+    ASSERT_TRUE(prog != 0u);
+    glUseProgram(prog);
+
+    const gl_program_object_t *const po = gl_find_program(ctx, prog);
+    ASSERT_TRUE(po != NULL);
+    ASSERT_TRUE(po->hw_vs != NULL);
+    ASSERT_TRUE(po->hw_vs_words > 0u);
+    ASSERT_TRUE(po->hw_ps != NULL);
+    ASSERT_TRUE(po->hw_ps_words > 0u);
+
+    GLuint vbo = 0;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    static const float verts[36] = {
+        /* pos (vec3) */ /* col (vec3) */
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        1.0f,
+        1.0f,
+        0.0f,
+        1.0f,
+        1.0f,
+        0.0f,
+        2.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        1.0f,
+        1.0f,
+        2.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        1.0f,
+    };
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+
+    GLint pos_loc = glGetAttribLocation(prog, "pos");
+    GLint col_loc = glGetAttribLocation(prog, "col");
+    ASSERT_TRUE(pos_loc >= 0);
+    ASSERT_TRUE(col_loc >= 0);
+
+    glEnableVertexAttribArray((GLuint)pos_loc);
+    glVertexAttribPointer((GLuint)pos_loc, 3, GL_FLOAT, GL_FALSE,
+                          (GLsizei)(6 * sizeof(float)), 0);
+    glEnableVertexAttribArray((GLuint)col_loc);
+    glVertexAttribPointer((GLuint)col_loc, 3, GL_FLOAT, GL_FALSE,
+                          (GLsizei)(6 * sizeof(float)),
+                          (const void *)(3 * sizeof(float)));
+
+    /* 6 vertices = 2 triangles */
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_EQ(ctx->triangles_drawn, 2u);
+
+    /* Verify the stream was written and validates as valid Type3 PM4 */
+    oops_pm4_report_t report;
+    ASSERT_EQ(oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report), 0);
+    ASSERT_EQ(report.error_count, 0u);
+
+    /* Verify NGG VS/GS program counter was set to OOPS_GL_VS_GL2_OFFSET */
+    const uint64_t vs_va = (uint64_t)(uintptr_t)payload + OOPS_GL_VS_GL2_OFFSET;
+    ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0x88u), (uint32_t)(vs_va >> 8));
+    ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0xc8u), (uint32_t)(vs_va >> 8));
+
+    /* Verify PS program counter was set to OOPS_GL_PS_GL2_OFFSET */
+    const uint64_t ps_va = (uint64_t)(uintptr_t)payload + OOPS_GL_PS_GL2_OFFSET;
+    ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0x08u), (uint32_t)(ps_va >> 8));
+
+    /* Verify GS User SGPRs: s[8:9] (0x8c) and s[10:11] (0x8e) are non-zero */
+    ASSERT_NE(last_sh_reg(dcb, ctx->dcb_words, 0x8cu), 0u);
+    ASSERT_NE(last_sh_reg(dcb, ctx->dcb_words, 0x8eu), 0u);
+
+    /* Clean up */
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(prog);
+    ctx->use_hardware = GL_FALSE;
+    ctx->dcb_mem = NULL;
+    ctx->gpu_payload = NULL;
+    glContextDestroy(ctx_handle);
+    oops_display_close(disp);
+}
 void run_unit_tests_pm4(void);
 
 void run_unit_tests_pm4(void) {
     TEST_SUITE_BEGIN("PM4 Static Command Stream Validator (RDNA2 GFX10.3)");
+    RUN_TEST(test_pm4_gl_resident_draw_arrays_dispatches_batched_triangles);
     RUN_TEST(test_pm4_synthetic_valid_stream);
     RUN_TEST(test_pm4_real_sdk_draw_stream);
     RUN_TEST(test_pm4_gl_hardware_depth_stream);

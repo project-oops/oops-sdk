@@ -2168,6 +2168,8 @@ void glGetHardwareStatus(gl_hw_status_t *out);
 #define GL_PROGRAM_HW_PS_WORDS 0x9E00
 #define GL_PROGRAM_HW_PS_VGPRS 0x9E01
 #define GL_PROGRAM_HW_PARAMS 0x9E02
+#define GL_PROGRAM_HW_VS_WORDS 0x9E03
+#define GL_PROGRAM_HW_VS_VGPRS 0x9E04
 void glGetProgramHardwareLog(GLuint program, GLsizei bufSize, GLsizei *length,
                              GLchar *infoLog);
 
