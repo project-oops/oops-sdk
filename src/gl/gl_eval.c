@@ -192,6 +192,12 @@ static void gl_eval_define(GLenum target, GLfloat u1, GLfloat u2, GLint ustride,
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
+    /* Evaluators feed texture unit 0 only, so glMap is refused for any target while
+     * another unit is active (GL 2.1, 5.1, p. 231; Mesa main/eval.c:338). */
+    if (ctx->active_texture != 0u) {
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return;
+    }
     float *pts = (float *)gl_eval_alloc((size_t)uorder * (size_t)vorder * (size_t)k *
                                         sizeof(float));
     if (!pts) {

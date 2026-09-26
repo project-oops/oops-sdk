@@ -4964,6 +4964,16 @@ static void test_gl_evaluators(void) {
      * padding. */
     const GLfloat curve[12] = {-0.5f, -0.5f, 0.0f, 99.0f, 0.0f, 0.5f,
                                0.0f,  99.0f, 0.5f, -0.5f, 0.0f, 99.0f};
+    /* glMap is refused while the active texture unit is not TEXTURE0, whatever the
+     * target (GL 2.1, 5.1, p. 231), and defines nothing. */
+    glActiveTexture(GL_TEXTURE1);
+    glMap1f(GL_MAP1_VERTEX_3, 2.0f, 4.0f, 4, 3, curve);
+    ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+    glMap2f(GL_MAP2_VERTEX_3, 0.0f, 1.0f, 4, 1, 0.0f, 1.0f, 4, 1, curve);
+    ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+    glActiveTexture(GL_TEXTURE0);
+    glGetMapiv(GL_MAP1_VERTEX_3, GL_ORDER, iv);
+    ASSERT_EQ(iv[0], 1);
     glMap1f(GL_MAP1_VERTEX_3, 2.0f, 4.0f, 4, 3,
             curve); /* domain 2..4: u = 3 is the middle */
     glGetMapiv(GL_MAP1_VERTEX_3, GL_ORDER, iv);
