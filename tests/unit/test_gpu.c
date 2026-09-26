@@ -103,7 +103,8 @@ static void test_gpu_pm4_constants(void) {
     /* Verify Color Buffer Context Registers */
     ASSERT_EQ(OOPS_AGC_REG_CB_TARGET_MASK, 0x08eu);
     ASSERT_EQ(OOPS_AGC_REG_CB_SHADER_MASK, 0x08fu);
-    ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_BASE, 0x200u);
+    /* gfx103.json:5430, byte address 0x28c60 in the context space at 0x28000. */
+    ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_BASE, (0x28c60u - 0x28000u) / 4u);
     ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_BASE_GFX10, 0x318u);
     ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_BASE_EXT, 0x390u);
     ASSERT_EQ(OOPS_AGC_REG_CB_COLOR0_VIEW, 0x31bu);
@@ -178,10 +179,12 @@ static void test_gpu_pm4_constants(void) {
 
     /* Verify RDNA2 SH Registers */
     ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_PS, 0x008u);
-    ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_ES, 0x088u);
-    ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_VS, 0x0c8u);
+    /* The stage program addresses are gfx103.json's byte addresses in the SH space at
+     * 0xb000: VS 1670, GS 1927, ES 2140. */
+    ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_ES, (0xb320u - 0xb000u) / 4u);
+    ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_VS, (0xb120u - 0xb000u) / 4u);
     ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_HS, 0x108u);
-    ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_GS, 0x148u);
+    ASSERT_EQ(OOPS_AGC_REG_SPI_SHADER_PGM_LO_GS, (0xb220u - 0xb000u) / 4u);
     ASSERT_EQ(OOPS_AGC_REG_COMPUTE_PGM_LO, 0x20cu);
     ASSERT_EQ(OOPS_AGC_REG_COMPUTE_PGM_HI, 0x20du);
 

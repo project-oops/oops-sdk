@@ -38,7 +38,7 @@ extern "C" {
 /* Register offsets, relative to their register space. */
 #define OOPS_AGC_REG_CB_TARGET_MASK 0x08eu /* Context space */
 #define OOPS_AGC_REG_CB_SHADER_MASK 0x08fu
-#define OOPS_AGC_REG_CB_COLOR0_BASE 0x200u
+#define OOPS_AGC_REG_CB_COLOR0_BASE 0x318u /* gfx103.json:5430 */
 #define OOPS_AGC_REG_CB_COLOR0_BASE_GFX10 0x318u
 #define OOPS_AGC_REG_CB_COLOR0_BASE_EXT 0x390u
 #define OOPS_AGC_REG_CB_COLOR0_VIEW 0x31bu
@@ -157,12 +157,13 @@ extern "C" {
 #define OOPS_AGC_GE_CNTL_DEFAULT 0x00008040u     /* 64-prim / 64-vert group size */
 #define OOPS_AGC_GE_PC_ALLOC_DEFAULT 0x000003ffu /* Oversubscription + 511 lines */
 
-/* RDNA2 SH (Shader) Program Address and User Data Registers */
+/* RDNA2 SH (Shader) Program Address and User Data Registers. The stage addresses are
+ * gfx103.json's: VS line 1670, GS 1927, ES 2140. */
 #define OOPS_AGC_REG_SPI_SHADER_PGM_LO_PS 0x008u /* Pixel Shader */
-#define OOPS_AGC_REG_SPI_SHADER_PGM_LO_ES 0x088u /* Export Shader */
-#define OOPS_AGC_REG_SPI_SHADER_PGM_LO_VS 0x0c8u /* Vertex Shader */
+#define OOPS_AGC_REG_SPI_SHADER_PGM_LO_ES 0x0c8u /* Export Shader */
+#define OOPS_AGC_REG_SPI_SHADER_PGM_LO_VS 0x048u /* Vertex Shader */
 #define OOPS_AGC_REG_SPI_SHADER_PGM_LO_HS 0x108u /* Hull Shader */
-#define OOPS_AGC_REG_SPI_SHADER_PGM_LO_GS 0x148u /* Geometry Shader */
+#define OOPS_AGC_REG_SPI_SHADER_PGM_LO_GS 0x088u /* Geometry Shader */
 #define OOPS_AGC_REG_COMPUTE_PGM_LO 0x20cu       /* Compute Shader */
 #define OOPS_AGC_REG_COMPUTE_PGM_HI 0x20du
 #define OOPS_AGC_REG_COMPUTE_USER_DATA_0 0x240u
