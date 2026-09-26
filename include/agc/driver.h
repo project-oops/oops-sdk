@@ -39,19 +39,16 @@ extern "C" {
  * bytes, zero on the traced submit and not read by the driver on that path.
  */
 typedef struct oops_agc_dcb_desc {
-  uint64_t gpu_addr; /* +0x00  GPU virtual address of the DCB, in mapped Onion
-                        memory */
-  uint32_t size;     /* +0x08  length in DWORDs (32-bit words), never bytes */
-  uint16_t flags;    /* +0x0C  submission flags; 0 for a plain submit */
-  uint16_t pad;      /* +0x0E  reserved, zero */
+    uint64_t gpu_addr; /* +0x00  GPU virtual address of the DCB, in mapped Onion
+                          memory */
+    uint32_t size;     /* +0x08  length in DWORDs (32-bit words), never bytes */
+    uint16_t flags;    /* +0x0C  submission flags; 0 for a plain submit */
+    uint16_t pad;      /* +0x0E  reserved, zero */
 } oops_agc_dcb_desc;
 
-_Static_assert(sizeof(oops_agc_dcb_desc) == 16,
-               "AGC DCB descriptor is 16 bytes");
-_Static_assert(offsetof(oops_agc_dcb_desc, gpu_addr) == 0x00,
-               "gpu_addr at +0x00");
-_Static_assert(offsetof(oops_agc_dcb_desc, size) == 0x08,
-               "size (DWORDs) at +0x08");
+_Static_assert(sizeof(oops_agc_dcb_desc) == 16, "AGC DCB descriptor is 16 bytes");
+_Static_assert(offsetof(oops_agc_dcb_desc, gpu_addr) == 0x00, "gpu_addr at +0x00");
+_Static_assert(offsetof(oops_agc_dcb_desc, size) == 0x08, "size (DWORDs) at +0x08");
 
 /* libSceAgc - subsystem bring-up and shader creation.
  * sceAgcInit(state, version): version 0xd confirmed; writes a 16-byte state
@@ -63,15 +60,14 @@ __attribute__((weak)) int sceAgcGetIsTrinityMode(uint32_t *is_trinity);
 /* sceAgcCreateShader(shader_obj, header, gpu_payload, flags): builds a shader
  * object from a 304-byte RDNA2 container header and a 256-byte-aligned bytecode
  * payload; flags 0. NID $f3dg2CSgRKY. */
-__attribute__((weak)) int sceAgcCreateShader(void *shader_obj,
-                                             const void *header,
+__attribute__((weak)) int sceAgcCreateShader(void *shader_obj, const void *header,
                                              void *gpu_payload, uint32_t flags);
 
 /* libSceAgcDriver - queue lifecycle and DCB submission.
  * sceAgcDriverCreateQueue(type, queue_out, flags): type 3 = Direct Command
  * Buffer queue; flags 0. NID $zP4ZNlXLBVg. */
-__attribute__((weak)) int
-sceAgcDriverCreateQueue(uint32_t type, void *queue_out, uint32_t flags);
+__attribute__((weak)) int sceAgcDriverCreateQueue(uint32_t type, void *queue_out,
+                                                  uint32_t flags);
 /* sceAgcDriverDestroyQueue(queue). NID $XNbrdwCsZ9A. */
 __attribute__((weak)) int sceAgcDriverDestroyQueue(void *queue);
 /* sceAgcDriverSubmitDcb(desc): submit one DCB; the GPU executes it and retires

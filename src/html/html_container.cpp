@@ -9,7 +9,7 @@ oops_container::oops_container(int width, int height)
 }
 
 oops_container::~oops_container() {
-    for (auto& pair : m_image_cache) {
+    for (auto &pair : m_image_cache) {
         if (pair.second.pixels) {
             free(pair.second.pixels);
         }
@@ -18,9 +18,9 @@ oops_container::~oops_container() {
     oops_log_debug("HTML", "oops_container destroyed");
 }
 
-litehtml::uint_ptr oops_container::create_font(const litehtml::font_description& descr,
-                                               const litehtml::document* /*doc*/,
-                                               litehtml::font_metrics* fm) {
+litehtml::uint_ptr oops_container::create_font(const litehtml::font_description &descr,
+                                               const litehtml::document * /*doc*/,
+                                               litehtml::font_metrics *fm) {
     auto font = std::make_unique<oops_font_desc>();
     font->name = descr.family;
     int fsz = (int)descr.size;
@@ -45,9 +45,11 @@ void oops_container::delete_font(litehtml::uint_ptr /*hFont*/) {
     // Managed by m_fonts vector lifetime
 }
 
-litehtml::pixel_t oops_container::text_width(const char* text, litehtml::uint_ptr hFont) {
-    if (!text || !text[0]) return 0;
-    auto* font = reinterpret_cast<oops_font_desc*>(hFont);
+litehtml::pixel_t oops_container::text_width(const char *text,
+                                             litehtml::uint_ptr hFont) {
+    if (!text || !text[0])
+        return 0;
+    auto *font = reinterpret_cast<oops_font_desc *>(hFont);
     int size = font ? font->size : 16;
     // Proportional character width estimation
     size_t len = strlen(text);
@@ -55,14 +57,17 @@ litehtml::pixel_t oops_container::text_width(const char* text, litehtml::uint_pt
     return litehtml::pixel_t(static_cast<int>(len * (size_t)char_w));
 }
 
-void oops_container::draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont,
-                              litehtml::web_color color, const litehtml::position& pos) {
-    if (!hdc || !text || !text[0]) return;
-    auto* surf = reinterpret_cast<oops_surface_t*>(hdc);
-    auto* font = reinterpret_cast<oops_font_desc*>(hFont);
+void oops_container::draw_text(litehtml::uint_ptr hdc, const char *text,
+                               litehtml::uint_ptr hFont, litehtml::web_color color,
+                               const litehtml::position &pos) {
+    if (!hdc || !text || !text[0])
+        return;
+    auto *surf = reinterpret_cast<oops_surface_t *>(hdc);
+    auto *font = reinterpret_cast<oops_font_desc *>(hFont);
     int size = font ? font->size : 16;
     int scale = size / 8;
-    if (scale < 1) scale = 1;
+    if (scale < 1)
+        scale = 1;
 
     oops_color_t col = OOPS_RGBA(color.red, color.green, color.blue, color.alpha);
     oops_draw_text(surf, (int)pos.x, (int)pos.y, text, col, scale);
@@ -76,29 +81,37 @@ litehtml::pixel_t oops_container::get_default_font_size() const {
     return 16;
 }
 
-const char* oops_container::get_default_font_name() const {
+const char *oops_container::get_default_font_name() const {
     return "sans-serif";
 }
 
-void oops_container::draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) {
-    if (!hdc) return;
-    auto* surf = reinterpret_cast<oops_surface_t*>(hdc);
-    oops_color_t col = OOPS_RGBA(marker.color.red, marker.color.green, marker.color.blue, marker.color.alpha);
+void oops_container::draw_list_marker(litehtml::uint_ptr hdc,
+                                      const litehtml::list_marker &marker) {
+    if (!hdc)
+        return;
+    auto *surf = reinterpret_cast<oops_surface_t *>(hdc);
+    oops_color_t col = OOPS_RGBA(marker.color.red, marker.color.green,
+                                 marker.color.blue, marker.color.alpha);
     int cx = (int)marker.pos.x + (int)marker.pos.width / 2;
     int cy = (int)marker.pos.y + (int)marker.pos.height / 2;
     int r = std::max(2, (int)marker.pos.width / 4);
     oops_draw_circle_blend(surf, cx, cy, r, col, 1);
 }
 
-void oops_container::load_image(const char* src, const char* baseurl, bool /*redraw_on_ready*/) {
-    if (!src || !src[0]) return;
+void oops_container::load_image(const char *src, const char *baseurl,
+                                bool /*redraw_on_ready*/) {
+    if (!src || !src[0])
+        return;
     std::string key = src;
-    if (m_image_cache.find(key) != m_image_cache.end()) return;
+    if (m_image_cache.find(key) != m_image_cache.end())
+        return;
 
-    oops_log_debug("HTML", "load_image requested: %s (base: %s)", src, baseurl ? baseurl : "");
+    oops_log_debug("HTML", "load_image requested: %s (base: %s)", src,
+                   baseurl ? baseurl : "");
 }
 
-void oops_container::get_image_size(const char* src, const char* /*baseurl*/, litehtml::size& sz) {
+void oops_container::get_image_size(const char *src, const char * /*baseurl*/,
+                                    litehtml::size &sz) {
     if (!src) {
         sz.width = 0;
         sz.height = 0;
@@ -114,37 +127,47 @@ void oops_container::get_image_size(const char* src, const char* /*baseurl*/, li
     }
 }
 
-void oops_container::draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer,
-                               const std::string& url, const std::string& /*base_url*/) {
-    if (!hdc) return;
-    auto* dst = reinterpret_cast<oops_surface_t*>(hdc);
+void oops_container::draw_image(litehtml::uint_ptr hdc,
+                                const litehtml::background_layer &layer,
+                                const std::string &url,
+                                const std::string & /*base_url*/) {
+    if (!hdc)
+        return;
+    auto *dst = reinterpret_cast<oops_surface_t *>(hdc);
     auto it = m_image_cache.find(url);
     if (it != m_image_cache.end() && it->second.pixels) {
-        oops_surface_t* src = &it->second;
-        oops_draw_blit_scaled_blend(dst, (int)layer.border_box.x, (int)layer.border_box.y,
-                                    (int)layer.border_box.width, (int)layer.border_box.height,
-                                    src, 0, 0, (int)src->width, (int)src->height);
+        oops_surface_t *src = &it->second;
+        oops_draw_blit_scaled_blend(
+            dst, (int)layer.border_box.x, (int)layer.border_box.y,
+            (int)layer.border_box.width, (int)layer.border_box.height, src, 0, 0,
+            (int)src->width, (int)src->height);
     }
 }
 
-void oops_container::draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer,
-                                    const litehtml::web_color& color) {
-    if (!hdc || (int)layer.border_box.width <= 0 || (int)layer.border_box.height <= 0) return;
-    auto* surf = reinterpret_cast<oops_surface_t*>(hdc);
+void oops_container::draw_solid_fill(litehtml::uint_ptr hdc,
+                                     const litehtml::background_layer &layer,
+                                     const litehtml::web_color &color) {
+    if (!hdc || (int)layer.border_box.width <= 0 || (int)layer.border_box.height <= 0)
+        return;
+    auto *surf = reinterpret_cast<oops_surface_t *>(hdc);
     oops_color_t col = OOPS_RGBA(color.red, color.green, color.blue, color.alpha);
     oops_draw_rect_blend(surf, (int)layer.border_box.x, (int)layer.border_box.y,
-                         (int)layer.border_box.width, (int)layer.border_box.height, col);
+                         (int)layer.border_box.width, (int)layer.border_box.height,
+                         col);
 }
 
-void oops_container::draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer,
-                                         const litehtml::background_layer::linear_gradient& gradient) {
-    if (!hdc || (int)layer.border_box.width <= 0 || (int)layer.border_box.height <= 0) return;
-    auto* surf = reinterpret_cast<oops_surface_t*>(hdc);
+void oops_container::draw_linear_gradient(
+    litehtml::uint_ptr hdc, const litehtml::background_layer &layer,
+    const litehtml::background_layer::linear_gradient &gradient) {
+    if (!hdc || (int)layer.border_box.width <= 0 || (int)layer.border_box.height <= 0)
+        return;
+    auto *surf = reinterpret_cast<oops_surface_t *>(hdc);
 
-    if (gradient.color_points.empty()) return;
+    if (gradient.color_points.empty())
+        return;
 
-    const auto& c0 = gradient.color_points.front().color;
-    const auto& c1 = gradient.color_points.back().color;
+    const auto &c0 = gradient.color_points.front().color;
+    const auto &c1 = gradient.color_points.back().color;
     oops_color_t col_a = OOPS_RGBA(c0.red, c0.green, c0.blue, c0.alpha);
     oops_color_t col_b = OOPS_RGBA(c1.red, c1.green, c1.blue, c1.alpha);
 
@@ -153,35 +176,43 @@ void oops_container::draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml
                             col_a, col_b, 1);
 }
 
-void oops_container::draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer,
-                                         const litehtml::background_layer::radial_gradient& gradient) {
-    if (!hdc || gradient.color_points.empty()) return;
-    const auto& c = gradient.color_points.front().color;
+void oops_container::draw_radial_gradient(
+    litehtml::uint_ptr hdc, const litehtml::background_layer &layer,
+    const litehtml::background_layer::radial_gradient &gradient) {
+    if (!hdc || gradient.color_points.empty())
+        return;
+    const auto &c = gradient.color_points.front().color;
     draw_solid_fill(hdc, layer, c);
 }
 
-void oops_container::draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer,
-                                        const litehtml::background_layer::conic_gradient& gradient) {
-    if (!hdc || gradient.color_points.empty()) return;
-    const auto& c = gradient.color_points.front().color;
+void oops_container::draw_conic_gradient(
+    litehtml::uint_ptr hdc, const litehtml::background_layer &layer,
+    const litehtml::background_layer::conic_gradient &gradient) {
+    if (!hdc || gradient.color_points.empty())
+        return;
+    const auto &c = gradient.color_points.front().color;
     draw_solid_fill(hdc, layer, c);
 }
 
-void oops_container::draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders,
-                                 const litehtml::position& draw_pos, bool /*root*/) {
-    if (!hdc) return;
-    auto* surf = reinterpret_cast<oops_surface_t*>(hdc);
+void oops_container::draw_borders(litehtml::uint_ptr hdc,
+                                  const litehtml::borders &borders,
+                                  const litehtml::position &draw_pos, bool /*root*/) {
+    if (!hdc)
+        return;
+    auto *surf = reinterpret_cast<oops_surface_t *>(hdc);
 
     int top_w = (int)borders.top.width;
     if (top_w > 0 && borders.top.style > litehtml::border_style_hidden) {
         oops_color_t c = OOPS_RGBA(borders.top.color.red, borders.top.color.green,
                                    borders.top.color.blue, borders.top.color.alpha);
-        oops_draw_rect_blend(surf, (int)draw_pos.x, (int)draw_pos.y, (int)draw_pos.width, top_w, c);
+        oops_draw_rect_blend(surf, (int)draw_pos.x, (int)draw_pos.y,
+                             (int)draw_pos.width, top_w, c);
     }
     int bottom_w = (int)borders.bottom.width;
     if (bottom_w > 0 && borders.bottom.style > litehtml::border_style_hidden) {
-        oops_color_t c = OOPS_RGBA(borders.bottom.color.red, borders.bottom.color.green,
-                                   borders.bottom.color.blue, borders.bottom.color.alpha);
+        oops_color_t c =
+            OOPS_RGBA(borders.bottom.color.red, borders.bottom.color.green,
+                      borders.bottom.color.blue, borders.bottom.color.alpha);
         oops_draw_rect_blend(surf, (int)draw_pos.x, (int)draw_pos.bottom() - bottom_w,
                              (int)draw_pos.width, bottom_w, c);
     }
@@ -189,7 +220,8 @@ void oops_container::draw_borders(litehtml::uint_ptr hdc, const litehtml::border
     if (left_w > 0 && borders.left.style > litehtml::border_style_hidden) {
         oops_color_t c = OOPS_RGBA(borders.left.color.red, borders.left.color.green,
                                    borders.left.color.blue, borders.left.color.alpha);
-        oops_draw_rect_blend(surf, (int)draw_pos.x, (int)draw_pos.y, left_w, (int)draw_pos.height, c);
+        oops_draw_rect_blend(surf, (int)draw_pos.x, (int)draw_pos.y, left_w,
+                             (int)draw_pos.height, c);
     }
     int right_w = (int)borders.right.width;
     if (right_w > 0 && borders.right.style > litehtml::border_style_hidden) {
@@ -200,19 +232,20 @@ void oops_container::draw_borders(litehtml::uint_ptr hdc, const litehtml::border
     }
 }
 
-void oops_container::set_caption(const char* caption) {
+void oops_container::set_caption(const char *caption) {
     m_caption = caption ? caption : "";
     oops_log_debug("HTML", "Document title set to: %s", m_caption.c_str());
 }
 
-void oops_container::set_base_url(const char* base_url) {
+void oops_container::set_base_url(const char *base_url) {
     m_base_url = base_url ? base_url : "";
 }
 
-void oops_container::link(const std::shared_ptr<litehtml::document>& /*doc*/,
-                         const litehtml::element::ptr& el) {
-    if (!el) return;
-    const char* href = el->get_attr("href");
+void oops_container::link(const std::shared_ptr<litehtml::document> & /*doc*/,
+                          const litehtml::element::ptr &el) {
+    if (!el)
+        return;
+    const char *href = el->get_attr("href");
     if (href) {
         oops_anchor a;
         a.pos = el->get_placement();
@@ -222,24 +255,24 @@ void oops_container::link(const std::shared_ptr<litehtml::document>& /*doc*/,
     }
 }
 
-void oops_container::on_anchor_click(const char* url, const litehtml::element::ptr& /*el*/) {
+void oops_container::on_anchor_click(const char *url,
+                                     const litehtml::element::ptr & /*el*/) {
     oops_log_info("HTML", "Anchor clicked: %s", url ? url : "(null)");
 }
 
-void oops_container::on_mouse_event(const litehtml::element::ptr& /*el*/, litehtml::mouse_event /*event*/) {
-}
+void oops_container::on_mouse_event(const litehtml::element::ptr & /*el*/,
+                                    litehtml::mouse_event /*event*/) {}
 
-void oops_container::set_cursor(const char* /*cursor*/) {
-}
+void oops_container::set_cursor(const char * /*cursor*/) {}
 
-void oops_container::transform_text(std::string& text, litehtml::text_transform tt) {
+void oops_container::transform_text(std::string &text, litehtml::text_transform tt) {
     if (tt == litehtml::text_transform_uppercase) {
         std::transform(text.begin(), text.end(), text.begin(), ::toupper);
     } else if (tt == litehtml::text_transform_lowercase) {
         std::transform(text.begin(), text.end(), text.begin(), ::tolower);
     } else if (tt == litehtml::text_transform_capitalize) {
         bool cap = true;
-        for (char& ch : text) {
+        for (char &ch : text) {
             if (::isspace(static_cast<unsigned char>(ch))) {
                 cap = true;
             } else if (cap) {
@@ -250,11 +283,13 @@ void oops_container::transform_text(std::string& text, litehtml::text_transform 
     }
 }
 
-void oops_container::import_css(std::string& /*text*/, const std::string& url, std::string& /*baseurl*/) {
+void oops_container::import_css(std::string & /*text*/, const std::string &url,
+                                std::string & /*baseurl*/) {
     oops_log_debug("HTML", "import_css: %s", url.c_str());
 }
 
-void oops_container::set_clip(const litehtml::position& pos, const litehtml::border_radiuses& /*bdr_radius*/) {
+void oops_container::set_clip(const litehtml::position &pos,
+                              const litehtml::border_radiuses & /*bdr_radius*/) {
     m_clip_stack.push_back(pos);
 }
 
@@ -264,20 +299,21 @@ void oops_container::del_clip() {
     }
 }
 
-void oops_container::get_viewport(litehtml::position& viewport) const {
+void oops_container::get_viewport(litehtml::position &viewport) const {
     viewport.x = 0;
     viewport.y = 0;
     viewport.width = m_width;
     viewport.height = m_height;
 }
 
-litehtml::element::ptr oops_container::create_element(const char* /*tag_name*/,
-                                                     const litehtml::string_map& /*attributes*/,
-                                                     const std::shared_ptr<litehtml::document>& /*doc*/) {
+litehtml::element::ptr
+oops_container::create_element(const char * /*tag_name*/,
+                               const litehtml::string_map & /*attributes*/,
+                               const std::shared_ptr<litehtml::document> & /*doc*/) {
     return nullptr; // litehtml creates standard default elements
 }
 
-void oops_container::get_media_features(litehtml::media_features& media) const {
+void oops_container::get_media_features(litehtml::media_features &media) const {
     media.type = litehtml::media_type_screen;
     media.width = m_width;
     media.height = m_height;
@@ -289,30 +325,34 @@ void oops_container::get_media_features(litehtml::media_features& media) const {
     media.resolution = 96;
 }
 
-void oops_container::get_language(std::string& language, std::string& culture) const {
+void oops_container::get_language(std::string &language, std::string &culture) const {
     language = "en";
     culture = "US";
 }
 
 void oops_container::render(oops_surface_t *surf) {
-    if (!surf || !m_doc) return;
+    if (!surf || !m_doc)
+        return;
     litehtml::position clip(0, 0, m_width, m_height);
-    m_doc->draw(reinterpret_cast<litehtml::uint_ptr>(surf), -m_scroll_x, -m_scroll_y, &clip);
+    m_doc->draw(reinterpret_cast<litehtml::uint_ptr>(surf), -m_scroll_x, -m_scroll_y,
+                &clip);
 }
 
 void oops_container::scroll(int dx, int dy) {
     m_scroll_x += dx;
     m_scroll_y += dy;
     int max_y = std::max(0, get_content_height() - m_height);
-    if (m_scroll_y < 0) m_scroll_y = 0;
-    if (m_scroll_y > max_y) m_scroll_y = max_y;
+    if (m_scroll_y < 0)
+        m_scroll_y = 0;
+    if (m_scroll_y > max_y)
+        m_scroll_y = max_y;
 }
 
 int oops_container::hit_test(int x, int y, char *href_out, size_t href_len) {
     int doc_x = x + m_scroll_x;
     int doc_y = y + m_scroll_y;
     litehtml::position pt(doc_x, doc_y, 1, 1);
-    for (const auto& a : m_anchors) {
+    for (const auto &a : m_anchors) {
         if (a.pos.does_intersect(&pt)) {
             if (href_out && href_len > 0) {
                 strncpy(href_out, a.href.c_str(), href_len - 1);

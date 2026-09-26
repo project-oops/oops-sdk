@@ -10,11 +10,11 @@ extern "C" {
 #endif
 
 struct oops_gpu_queue {
-  void *agc_queue_handle;
-  uint8_t *dcb_mem;
-  size_t dcb_size;
-  volatile uint32_t *fence;
-  uint32_t last_fence;
+    void *agc_queue_handle;
+    uint8_t *dcb_mem;
+    size_t dcb_size;
+    volatile uint32_t *fence;
+    uint32_t last_fence;
 };
 
 #ifdef __cplusplus

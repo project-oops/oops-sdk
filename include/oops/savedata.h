@@ -10,9 +10,9 @@ extern "C" {
 #endif
 
 typedef enum oops_savedata_mode {
-  OOPS_SAVEDATA_MODE_READ_ONLY = 0x01,
-  OOPS_SAVEDATA_MODE_READ_WRITE = 0x02,
-  OOPS_SAVEDATA_MODE_CREATE = 0x04
+    OOPS_SAVEDATA_MODE_READ_ONLY = 0x01,
+    OOPS_SAVEDATA_MODE_READ_WRITE = 0x02,
+    OOPS_SAVEDATA_MODE_CREATE = 0x04
 } oops_savedata_mode_t;
 
 /**
@@ -33,7 +33,8 @@ int oops_savedata_init(void);
  *
  * If vendor libSceSaveData is available and authorized, mounts an encrypted container.
  * Otherwise, falls back transparently to a title-scoped persistent directory
- * (/data/savedata/<app_id>/<dir_name> on target, ./savedata/<app_id>/<dir_name> on host).
+ * (/data/savedata/<app_id>/<dir_name> on target, ./savedata/<app_id>/<dir_name> on
+ * host).
  *
  * Returns: 0 on success, or negative error code.
  */
@@ -64,8 +65,9 @@ int oops_savedata_load_file(const char *dir_name, const char *file_name,
 
 /**
  * Save a whole buffer to a file within a savedata slot.
- * Automatically mounts the slot with OOPS_SAVEDATA_MODE_CREATE | OOPS_SAVEDATA_MODE_READ_WRITE,
- * writes the data via oops_fs_write_all, and unmounts the slot with commit=true.
+ * Automatically mounts the slot with OOPS_SAVEDATA_MODE_CREATE |
+ * OOPS_SAVEDATA_MODE_READ_WRITE, writes the data via oops_fs_write_all, and unmounts
+ * the slot with commit=true.
  *
  * Returns: 0 on success, or negative error code.
  */

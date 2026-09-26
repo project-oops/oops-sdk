@@ -62,7 +62,8 @@ int oops_html_get_content_height(const oops_html_t *html);
  * attribute to `href_out` (up to href_len bytes) and returns 1.
  * Returns 0 if no link is hit.
  */
-int oops_html_hit_test(oops_html_t *html, int x, int y, char *href_out, size_t href_len);
+int oops_html_hit_test(oops_html_t *html, int x, int y, char *href_out,
+                       size_t href_len);
 
 /* Advanced / C++ bridge: retrieve underlying litehtml pointers */
 void *oops_html_get_document(oops_html_t *html);

@@ -23,7 +23,8 @@ struct webview_fetch_task {
     std::string body;
 };
 
-// Initializes console.*, setTimeout/clearTimeout, setInterval/clearInterval, and fetch()
+// Initializes console.*, setTimeout/clearTimeout, setInterval/clearInterval, and
+// fetch()
 int host_env_init(JSContext *ctx, oops_webview_t *wv);
 
 // Pumps active timers and dispatches callbacks

@@ -1,18 +1,21 @@
 /* installer.c - install a local package through the *ungated* path.
  *
- * shsrv's `pkg_install` calls `sceAppInstUtilInstallByPackage`, gated by a console's PlayGo
- * HTTP pre-flight (the `0x80b211c8` a correct fake package hits). `sceAppInstUtilAppInstallPkg`
- * takes a bare local path, parses no URI and runs no HTTP pre-flight, so it does not reach that
- * gate - the path Itemzflow and elf-arsenal install through.
+ * shsrv's `pkg_install` calls `sceAppInstUtilInstallByPackage`, gated by a console's
+ * PlayGo HTTP pre-flight (the `0x80b211c8` a correct fake package hits).
+ * `sceAppInstUtilAppInstallPkg` takes a bare local path, parses no URI and runs no HTTP
+ * pre-flight, so it does not reach that gate - the path Itemzflow and elf-arsenal
+ * install through.
  *
- * The library is loaded and its functions resolved **by hand** rather than declared as imports,
- * because obSCEne's crt0 auto-load of `libSceAppInstUtil.sprx` failed (rtld "loadability error
- * 13") before its three dependencies - `libSceLibcInternal`, `libSceRegMgr`, `libSceIpmi` - were
- * present. Loading those first, in dependency order, then the library itself, is what a proper
- * rtld does for a DT_NEEDED chain; done here explicitly.
+ * The library is loaded and its functions resolved **by hand** rather than declared as
+ * imports, because obSCEne's crt0 auto-load of `libSceAppInstUtil.sprx` failed (rtld
+ * "loadability error 13") before its three dependencies - `libSceLibcInternal`,
+ * `libSceRegMgr`, `libSceIpmi` - were present. Loading those first, in dependency
+ * order, then the library itself, is what a proper rtld does for a DT_NEEDED chain;
+ * done here explicitly.
  */
-extern int sceKernelLoadStartModule(const char *path, unsigned long argc, const void *argv,
-                                    unsigned int flags, const void *opt, int *res);
+extern int sceKernelLoadStartModule(const char *path, unsigned long argc,
+                                    const void *argv, unsigned int flags,
+                                    const void *opt, int *res);
 extern int sceKernelDlsym(int handle, const char *symbol, void **out);
 extern int sceKernelDebugOutText(int channel, const char *msg);
 
@@ -45,5 +48,3 @@ static int load_lib(const char *path) {
     say_hex("  -> handle=", (unsigned long)(unsigned int)handle);
     return handle;
 }
-
-

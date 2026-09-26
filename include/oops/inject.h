@@ -21,32 +21,32 @@ extern "C" {
  * FreeBSD x86_64 register layout (pinned to <machine/reg.h>).
  */
 struct reg {
-  uint64_t r_r15;
-  uint64_t r_r14;
-  uint64_t r_r13;
-  uint64_t r_r12;
-  uint64_t r_r11;
-  uint64_t r_r10;
-  uint64_t r_r9;
-  uint64_t r_r8;
-  uint64_t r_rdi;
-  uint64_t r_rsi;
-  uint64_t r_rbp;
-  uint64_t r_rbx;
-  uint64_t r_rdx;
-  uint64_t r_rcx;
-  uint64_t r_rax;
-  uint32_t r_trapno;
-  uint16_t r_fs;
-  uint16_t r_gs;
-  uint32_t r_err;
-  uint16_t r_es;
-  uint16_t r_ds;
-  uint64_t r_rip;
-  uint64_t r_cs;
-  uint64_t r_rflags;
-  uint64_t r_rsp;
-  uint64_t r_ss;
+    uint64_t r_r15;
+    uint64_t r_r14;
+    uint64_t r_r13;
+    uint64_t r_r12;
+    uint64_t r_r11;
+    uint64_t r_r10;
+    uint64_t r_r9;
+    uint64_t r_r8;
+    uint64_t r_rdi;
+    uint64_t r_rsi;
+    uint64_t r_rbp;
+    uint64_t r_rbx;
+    uint64_t r_rdx;
+    uint64_t r_rcx;
+    uint64_t r_rax;
+    uint32_t r_trapno;
+    uint16_t r_fs;
+    uint16_t r_gs;
+    uint32_t r_err;
+    uint16_t r_es;
+    uint16_t r_ds;
+    uint64_t r_rip;
+    uint64_t r_cs;
+    uint64_t r_rflags;
+    uint64_t r_rsp;
+    uint64_t r_ss;
 };
 
 /**
@@ -83,15 +83,14 @@ uintptr_t procctl_remote_mmap(pid_t pid, uintptr_t addr, size_t len, int prot,
 int procctl_remote_munmap(pid_t pid, uintptr_t addr, size_t len);
 int procctl_remote_mprotect(pid_t pid, uintptr_t addr, size_t len, int prot);
 
-long procctl_remote_syscall(pid_t pid, int sysno, uint64_t a1, uint64_t a2,
-                            uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6);
+long procctl_remote_syscall(pid_t pid, int sysno, uint64_t a1, uint64_t a2, uint64_t a3,
+                            uint64_t a4, uint64_t a5, uint64_t a6);
 uintptr_t procctl_find_syscall_gadget(pid_t pid, uintptr_t libkernel_base);
 void procctl_set_syscall_gadget(uintptr_t gadget);
 
 /* In-memory Remote ELF Loader */
 int loader_validate_elf(const uint8_t *elf_data, size_t elf_size);
-uintptr_t loader_load_into_proc(pid_t pid, const uint8_t *elf_data,
-                                size_t elf_size,
+uintptr_t loader_load_into_proc(pid_t pid, const uint8_t *elf_data, size_t elf_size,
                                 uintptr_t target_libkernel_base,
                                 const obs_kexport_table_t *kexport_table,
                                 uintptr_t *out_base, size_t *out_size);

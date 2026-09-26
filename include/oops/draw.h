@@ -22,13 +22,13 @@ typedef uint32_t oops_color_t;
 #define OOPS_COLOR_MAGENTA 0xFFFF00FFu
 #define OOPS_COLOR_GRAY 0xFF808080u
 
-#define OOPS_RGB(r, g, b)                                                      \
-  (((uint32_t)0xFF << 24) | (((uint32_t)(r) & 0xFF) << 16) |                   \
-   (((uint32_t)(g) & 0xFF) << 8) | ((uint32_t)(b) & 0xFF))
+#define OOPS_RGB(r, g, b)                                                              \
+    (((uint32_t)0xFF << 24) | (((uint32_t)(r) & 0xFF) << 16) |                         \
+     (((uint32_t)(g) & 0xFF) << 8) | ((uint32_t)(b) & 0xFF))
 
-#define OOPS_RGBA(r, g, b, a)                                                  \
-  ((((uint32_t)(a) & 0xFF) << 24) | (((uint32_t)(r) & 0xFF) << 16) |           \
-   (((uint32_t)(g) & 0xFF) << 8) | ((uint32_t)(b) & 0xFF))
+#define OOPS_RGBA(r, g, b, a)                                                          \
+    ((((uint32_t)(a) & 0xFF) << 24) | (((uint32_t)(r) & 0xFF) << 16) |                 \
+     (((uint32_t)(g) & 0xFF) << 8) | ((uint32_t)(b) & 0xFF))
 
 /*
  * How a surface's pixels are laid out. Every drawing call here takes either.
@@ -51,11 +51,11 @@ typedef uint32_t oops_color_t;
 #define OOPS_SURFACE_RX 1u
 
 typedef struct oops_surface {
-  uint32_t *pixels;
-  uint32_t width;
-  uint32_t height;
-  uint32_t pitch;  /* Row width in pixels; for RX, a row of blocks' width */
-  uint32_t layout; /* OOPS_SURFACE_LINEAR or OOPS_SURFACE_RX */
+    uint32_t *pixels;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;  /* Row width in pixels; for RX, a row of blocks' width */
+    uint32_t layout; /* OOPS_SURFACE_LINEAR or OOPS_SURFACE_RX */
 } oops_surface_t;
 
 /*
@@ -67,9 +67,9 @@ typedef struct oops_surface {
  * decoder: converting a PNG to this array is a build-time job for the app.
  */
 typedef struct oops_sprite {
-  uint32_t width;
-  uint32_t height;
-  const uint32_t *pixels;
+    uint32_t width;
+    uint32_t height;
+    const uint32_t *pixels;
 } oops_sprite_t;
 
 /*
@@ -110,8 +110,7 @@ void oops_draw_rect_blend(oops_surface_t *surf, int x, int y, int w, int h,
  * beneath.
  */
 void oops_draw_rect_gradient(oops_surface_t *surf, int x, int y, int w, int h,
-                             oops_color_t color_a, oops_color_t color_b,
-                             int vertical);
+                             oops_color_t color_a, oops_color_t color_b, int vertical);
 
 void oops_draw_line(oops_surface_t *surf, int x0, int y0, int x1, int y1,
                     oops_color_t color);
@@ -122,8 +121,7 @@ void oops_draw_circle(oops_surface_t *surf, int cx, int cy, int radius,
  * (source-over), for translucent overlays. A blended circle outline may
  * composite twice at its symmetry extremes (a few pixels); the filled blend
  * does not. */
-void oops_draw_pixel_blend(oops_surface_t *surf, int x, int y,
-                           oops_color_t color);
+void oops_draw_pixel_blend(oops_surface_t *surf, int x, int y, oops_color_t color);
 void oops_draw_line_blend(oops_surface_t *surf, int x0, int y0, int x1, int y1,
                           oops_color_t color);
 void oops_draw_circle_blend(oops_surface_t *surf, int cx, int cy, int radius,
@@ -148,14 +146,13 @@ int oops_draw_text_width(const char *text, int scale);
  * source-over), so a sprite with a transparent margin layers instead of
  * stamping an opaque rectangle. (sx, sy, sw, sh) is the sheet cell to draw.
  */
-void oops_draw_blit(oops_surface_t *dst, int dx, int dy,
-                    const oops_surface_t *src, int sx, int sy, int sw, int sh);
+void oops_draw_blit(oops_surface_t *dst, int dx, int dy, const oops_surface_t *src,
+                    int sx, int sy, int sw, int sh);
 void oops_draw_blit_blend(oops_surface_t *dst, int dx, int dy,
-                          const oops_surface_t *src, int sx, int sy, int sw,
-                          int sh);
-void oops_draw_blit_scaled_blend(oops_surface_t *dst, int dx, int dy, int dw,
-                                 int dh, const oops_surface_t *src, int sx,
-                                 int sy, int sw, int sh);
+                          const oops_surface_t *src, int sx, int sy, int sw, int sh);
+void oops_draw_blit_scaled_blend(oops_surface_t *dst, int dx, int dy, int dw, int dh,
+                                 const oops_surface_t *src, int sx, int sy, int sw,
+                                 int sh);
 
 /*
  * Decodes a PNG image from memory into 32bpp ARGB pixels.
@@ -165,9 +162,9 @@ void oops_draw_blit_scaled_blend(oops_surface_t *dst, int dx, int dy, int dw,
  * out_orig_w and out_orig_h (if non-NULL) receive original dimensions.
  * Returns 0 on success, negative error code on failure.
  */
-int oops_png_decode(const void *png_data, size_t png_size,
-                    uint32_t *out_pixels, uint32_t target_w, uint32_t target_h,
-                    uint32_t *out_orig_w, uint32_t *out_orig_h);
+int oops_png_decode(const void *png_data, size_t png_size, uint32_t *out_pixels,
+                    uint32_t target_w, uint32_t target_h, uint32_t *out_orig_w,
+                    uint32_t *out_orig_h);
 
 #ifdef __cplusplus
 }

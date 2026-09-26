@@ -35,7 +35,8 @@ typedef struct oops_js_value {
     uint64_t _raw; /* Internal JSValue tag & payload */
 } oops_js_value_t;
 
-typedef oops_js_value_t (*oops_js_native_fn)(oops_js_t *js, int argc, oops_js_value_t *argv, void *userdata);
+typedef oops_js_value_t (*oops_js_native_fn)(oops_js_t *js, int argc,
+                                             oops_js_value_t *argv, void *userdata);
 
 /*
  * Create an isolated JavaScript execution context backed by QuickJS.
@@ -51,16 +52,18 @@ void oops_js_destroy(oops_js_t *js);
 
 /*
  * Evaluate a JavaScript script string.
- * `name` is the filename displayed in stack traces and logs (e.g. "main.js" or "<eval>").
- * If `out` is non-NULL, it receives the evaluated value. Caller must free with oops_js_free_value.
- * Returns 0 on success, or -1 if an exception was thrown.
+ * `name` is the filename displayed in stack traces and logs (e.g. "main.js" or
+ * "<eval>"). If `out` is non-NULL, it receives the evaluated value. Caller must free
+ * with oops_js_free_value. Returns 0 on success, or -1 if an exception was thrown.
  */
-int oops_js_eval(oops_js_t *js, const char *src, const char *name, oops_js_value_t *out);
+int oops_js_eval(oops_js_t *js, const char *src, const char *name,
+                 oops_js_value_t *out);
 
 /*
  * Register a native C function into the global scope.
  */
-int oops_js_register_fn(oops_js_t *js, const char *name, oops_js_native_fn fn, void *userdata);
+int oops_js_register_fn(oops_js_t *js, const char *name, oops_js_native_fn fn,
+                        void *userdata);
 
 /*
  * Set a named property on the global object.

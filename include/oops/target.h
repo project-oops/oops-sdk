@@ -18,10 +18,10 @@
 #endif
 
 /* Target classification helpers (canonical codenames) */
-#define OOPS_TARGET_IS_ORBIS                                                   \
-  (OOPS_TARGET == OOPS_TARGET_ORBIS || OOPS_TARGET == OOPS_TARGET_NEO)
-#define OOPS_TARGET_IS_PROSPERO                                                \
-  (OOPS_TARGET == OOPS_TARGET_PROSPERO || OOPS_TARGET == OOPS_TARGET_TRINITY)
+#define OOPS_TARGET_IS_ORBIS                                                           \
+    (OOPS_TARGET == OOPS_TARGET_ORBIS || OOPS_TARGET == OOPS_TARGET_NEO)
+#define OOPS_TARGET_IS_PROSPERO                                                        \
+    (OOPS_TARGET == OOPS_TARGET_PROSPERO || OOPS_TARGET == OOPS_TARGET_TRINITY)
 
 /*
  * OOPS_TARGET is what a binary is COMPILED FOR, fixed at build time. It is not
@@ -39,33 +39,33 @@
  */
 
 typedef enum oops_target {
-  OOPS_ORBIS = OOPS_TARGET_ORBIS,
-  OOPS_NEO = OOPS_TARGET_NEO,
-  OOPS_PROSPERO = OOPS_TARGET_PROSPERO,
-  OOPS_TRINITY = OOPS_TARGET_TRINITY,
+    OOPS_ORBIS = OOPS_TARGET_ORBIS,
+    OOPS_NEO = OOPS_TARGET_NEO,
+    OOPS_PROSPERO = OOPS_TARGET_PROSPERO,
+    OOPS_TRINITY = OOPS_TARGET_TRINITY,
 } oops_target_t;
 
 /* Returns the target the current binary was COMPILED FOR - not the environment
  * it is running in, which is measured elsewhere (see the note above
  * OOPS_TARGET_IS_ORBIS). */
 static inline oops_target_t oops_get_target(void) {
-  return (oops_target_t)OOPS_TARGET;
+    return (oops_target_t)OOPS_TARGET;
 }
 
 /* Returns the human-readable target name. */
 static inline const char *oops_target_name(oops_target_t target) {
-  switch (target) {
-  case OOPS_ORBIS:
-    return "orbis";
-  case OOPS_NEO:
-    return "neo";
-  case OOPS_PROSPERO:
-    return "prospero";
-  case OOPS_TRINITY:
-    return "trinity";
-  default:
-    return "unknown";
-  }
+    switch (target) {
+    case OOPS_ORBIS:
+        return "orbis";
+    case OOPS_NEO:
+        return "neo";
+    case OOPS_PROSPERO:
+        return "prospero";
+    case OOPS_TRINITY:
+        return "trinity";
+    default:
+        return "unknown";
+    }
 }
 
 #endif /* OOPS_TARGET_H */

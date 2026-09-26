@@ -23,10 +23,10 @@ void *oops_realloc(void *ptr, size_t new_size);
 void *oops_aligned_alloc(size_t alignment, size_t size);
 
 typedef struct oops_heap_stats {
-  size_t current_allocated_bytes;
-  size_t peak_allocated_bytes;
-  size_t total_alloc_count;
-  size_t total_free_count;
+    size_t current_allocated_bytes;
+    size_t peak_allocated_bytes;
+    size_t total_alloc_count;
+    size_t total_free_count;
 } oops_heap_stats_t;
 
 int oops_heap_get_stats(oops_heap_stats_t *out_stats);
@@ -36,4 +36,3 @@ int oops_heap_get_stats(oops_heap_stats_t *out_stats);
 #endif
 
 #endif /* OOPS_HEAP_H */
-

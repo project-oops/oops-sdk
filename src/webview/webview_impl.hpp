@@ -23,9 +23,7 @@ struct oops_webview {
     std::vector<webview_fetch_task> pending_fetches;
     std::vector<dom_event_listener> window_listeners;
 
-    void mark_dirty() {
-        dirty_layout = true;
-    }
+    void mark_dirty() { dirty_layout = true; }
 };
 
 #endif // OOPS_WEBVIEW_IMPL_HPP

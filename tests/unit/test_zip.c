@@ -42,7 +42,8 @@ static void put_u32(uint8_t *p, uint32_t val) {
 }
 
 static void test_zip_extract_stored(void) {
-    /* Create a valid ZIP in memory with one STORED file: "test.txt" -> "Hello World!" */
+    /* Create a valid ZIP in memory with one STORED file: "test.txt" -> "Hello World!"
+     */
     const char *fname = "test.txt";
     uint16_t fname_len = (uint16_t)strlen(fname);
     const char *content = "Hello World!";
@@ -52,53 +53,92 @@ static void test_zip_extract_stored(void) {
     size_t pos = 0;
 
     /* Local File Header (offset 0) */
-    put_u32(zip + pos, 0x04034b50); pos += 4;
-    put_u16(zip + pos, 10); pos += 2; /* version needed */
-    put_u16(zip + pos, 0); pos += 2;  /* flags */
-    put_u16(zip + pos, 0); pos += 2;  /* method 0 = STORED */
-    put_u16(zip + pos, 0); pos += 2;  /* time */
-    put_u16(zip + pos, 0); pos += 2;  /* date */
-    put_u32(zip + pos, 0); pos += 4;  /* crc32 */
-    put_u32(zip + pos, content_len); pos += 4; /* comp size */
-    put_u32(zip + pos, content_len); pos += 4; /* uncomp size */
-    put_u16(zip + pos, fname_len); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;  /* extra len */
-    memcpy(zip + pos, fname, fname_len); pos += fname_len;
-    memcpy(zip + pos, content, content_len); pos += content_len;
+    put_u32(zip + pos, 0x04034b50);
+    pos += 4;
+    put_u16(zip + pos, 10);
+    pos += 2; /* version needed */
+    put_u16(zip + pos, 0);
+    pos += 2; /* flags */
+    put_u16(zip + pos, 0);
+    pos += 2; /* method 0 = STORED */
+    put_u16(zip + pos, 0);
+    pos += 2; /* time */
+    put_u16(zip + pos, 0);
+    pos += 2; /* date */
+    put_u32(zip + pos, 0);
+    pos += 4; /* crc32 */
+    put_u32(zip + pos, content_len);
+    pos += 4; /* comp size */
+    put_u32(zip + pos, content_len);
+    pos += 4; /* uncomp size */
+    put_u16(zip + pos, fname_len);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2; /* extra len */
+    memcpy(zip + pos, fname, fname_len);
+    pos += fname_len;
+    memcpy(zip + pos, content, content_len);
+    pos += content_len;
 
     size_t cd_offset = pos;
 
     /* Central Directory Header */
-    put_u32(zip + pos, 0x02014b50); pos += 4;
-    put_u16(zip + pos, 20); pos += 2; /* version made by */
-    put_u16(zip + pos, 10); pos += 2; /* version needed */
-    put_u16(zip + pos, 0); pos += 2;  /* flags */
-    put_u16(zip + pos, 0); pos += 2;  /* method 0 = STORED */
-    put_u16(zip + pos, 0); pos += 2;  /* time */
-    put_u16(zip + pos, 0); pos += 2;  /* date */
-    put_u32(zip + pos, 0); pos += 4;  /* crc32 */
-    put_u32(zip + pos, content_len); pos += 4;
-    put_u32(zip + pos, content_len); pos += 4;
-    put_u16(zip + pos, fname_len); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;  /* extra len */
-    put_u16(zip + pos, 0); pos += 2;  /* comment len */
-    put_u16(zip + pos, 0); pos += 2;  /* disk # */
-    put_u16(zip + pos, 0); pos += 2;  /* int attr */
-    put_u32(zip + pos, 0); pos += 4;  /* ext attr */
-    put_u32(zip + pos, 0); pos += 4;  /* local hdr offset = 0 */
-    memcpy(zip + pos, fname, fname_len); pos += fname_len;
+    put_u32(zip + pos, 0x02014b50);
+    pos += 4;
+    put_u16(zip + pos, 20);
+    pos += 2; /* version made by */
+    put_u16(zip + pos, 10);
+    pos += 2; /* version needed */
+    put_u16(zip + pos, 0);
+    pos += 2; /* flags */
+    put_u16(zip + pos, 0);
+    pos += 2; /* method 0 = STORED */
+    put_u16(zip + pos, 0);
+    pos += 2; /* time */
+    put_u16(zip + pos, 0);
+    pos += 2; /* date */
+    put_u32(zip + pos, 0);
+    pos += 4; /* crc32 */
+    put_u32(zip + pos, content_len);
+    pos += 4;
+    put_u32(zip + pos, content_len);
+    pos += 4;
+    put_u16(zip + pos, fname_len);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2; /* extra len */
+    put_u16(zip + pos, 0);
+    pos += 2; /* comment len */
+    put_u16(zip + pos, 0);
+    pos += 2; /* disk # */
+    put_u16(zip + pos, 0);
+    pos += 2; /* int attr */
+    put_u32(zip + pos, 0);
+    pos += 4; /* ext attr */
+    put_u32(zip + pos, 0);
+    pos += 4; /* local hdr offset = 0 */
+    memcpy(zip + pos, fname, fname_len);
+    pos += fname_len;
 
     size_t cd_size = pos - cd_offset;
 
     /* End of Central Directory */
-    put_u32(zip + pos, 0x06054b50); pos += 4;
-    put_u16(zip + pos, 0); pos += 2;  /* disk num */
-    put_u16(zip + pos, 0); pos += 2;  /* cd disk */
-    put_u16(zip + pos, 1); pos += 2;  /* entries on disk */
-    put_u16(zip + pos, 1); pos += 2;  /* total entries */
-    put_u32(zip + pos, (uint32_t)cd_size); pos += 4;
-    put_u32(zip + pos, (uint32_t)cd_offset); pos += 4;
-    put_u16(zip + pos, 0); pos += 2;  /* comment len */
+    put_u32(zip + pos, 0x06054b50);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2; /* disk num */
+    put_u16(zip + pos, 0);
+    pos += 2; /* cd disk */
+    put_u16(zip + pos, 1);
+    pos += 2; /* entries on disk */
+    put_u16(zip + pos, 1);
+    pos += 2; /* total entries */
+    put_u32(zip + pos, (uint32_t)cd_size);
+    pos += 4;
+    put_u32(zip + pos, (uint32_t)cd_offset);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2; /* comment len */
 
     /* Extract to test directory */
     const char *out_dir = "/tmp/test_oops_zip_out";
@@ -142,53 +182,92 @@ static void test_zip_extract_deflated(void) {
     size_t pos = 0;
 
     /* Local File Header */
-    put_u32(zip + pos, 0x04034b50); pos += 4;
-    put_u16(zip + pos, 20); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 8); pos += 2; /* method 8 = DEFLATE */
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u32(zip + pos, comp_len); pos += 4;
-    put_u32(zip + pos, uncomp_len); pos += 4;
-    put_u16(zip + pos, fname_len); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    memcpy(zip + pos, fname, fname_len); pos += fname_len;
-    memcpy(zip + pos, deflate_stream, comp_len); pos += comp_len;
+    put_u32(zip + pos, 0x04034b50);
+    pos += 4;
+    put_u16(zip + pos, 20);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 8);
+    pos += 2; /* method 8 = DEFLATE */
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, comp_len);
+    pos += 4;
+    put_u32(zip + pos, uncomp_len);
+    pos += 4;
+    put_u16(zip + pos, fname_len);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    memcpy(zip + pos, fname, fname_len);
+    pos += fname_len;
+    memcpy(zip + pos, deflate_stream, comp_len);
+    pos += comp_len;
 
     size_t cd_offset = pos;
 
     /* Central Directory Header */
-    put_u32(zip + pos, 0x02014b50); pos += 4;
-    put_u16(zip + pos, 20); pos += 2;
-    put_u16(zip + pos, 20); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 8); pos += 2; /* method 8 = DEFLATE */
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u32(zip + pos, comp_len); pos += 4;
-    put_u32(zip + pos, uncomp_len); pos += 4;
-    put_u16(zip + pos, fname_len); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u32(zip + pos, 0); pos += 4; /* offset of local header */
-    memcpy(zip + pos, fname, fname_len); pos += fname_len;
+    put_u32(zip + pos, 0x02014b50);
+    pos += 4;
+    put_u16(zip + pos, 20);
+    pos += 2;
+    put_u16(zip + pos, 20);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 8);
+    pos += 2; /* method 8 = DEFLATE */
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, comp_len);
+    pos += 4;
+    put_u32(zip + pos, uncomp_len);
+    pos += 4;
+    put_u16(zip + pos, fname_len);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, 0);
+    pos += 4; /* offset of local header */
+    memcpy(zip + pos, fname, fname_len);
+    pos += fname_len;
 
     size_t cd_size = pos - cd_offset;
 
     /* EOCD */
-    put_u32(zip + pos, 0x06054b50); pos += 4;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 1); pos += 2;
-    put_u16(zip + pos, 1); pos += 2;
-    put_u32(zip + pos, (uint32_t)cd_size); pos += 4;
-    put_u32(zip + pos, (uint32_t)cd_offset); pos += 4;
-    put_u16(zip + pos, 0); pos += 2;
+    put_u32(zip + pos, 0x06054b50);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 1);
+    pos += 2;
+    put_u16(zip + pos, 1);
+    pos += 2;
+    put_u32(zip + pos, (uint32_t)cd_size);
+    pos += 4;
+    put_u32(zip + pos, (uint32_t)cd_offset);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
 
     const char *out_dir = "/tmp/test_oops_zip_out";
     int rc = oops_zip_extract_mem(zip, pos, out_dir);
@@ -217,50 +296,88 @@ static void test_zip_path_traversal_rejection(void) {
     uint8_t zip[512];
     size_t pos = 0;
 
-    put_u32(zip + pos, 0x04034b50); pos += 4;
-    put_u16(zip + pos, 10); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u16(zip + pos, fname_len); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    memcpy(zip + pos, fname, fname_len); pos += fname_len;
+    put_u32(zip + pos, 0x04034b50);
+    pos += 4;
+    put_u16(zip + pos, 10);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u16(zip + pos, fname_len);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    memcpy(zip + pos, fname, fname_len);
+    pos += fname_len;
 
     size_t cd_offset = pos;
 
-    put_u32(zip + pos, 0x02014b50); pos += 4;
-    put_u16(zip + pos, 20); pos += 2;
-    put_u16(zip + pos, 10); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u16(zip + pos, fname_len); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u32(zip + pos, 0); pos += 4;
-    put_u32(zip + pos, 0); pos += 4;
-    memcpy(zip + pos, fname, fname_len); pos += fname_len;
+    put_u32(zip + pos, 0x02014b50);
+    pos += 4;
+    put_u16(zip + pos, 20);
+    pos += 2;
+    put_u16(zip + pos, 10);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u16(zip + pos, fname_len);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    memcpy(zip + pos, fname, fname_len);
+    pos += fname_len;
 
     size_t cd_size = pos - cd_offset;
 
-    put_u32(zip + pos, 0x06054b50); pos += 4;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 0); pos += 2;
-    put_u16(zip + pos, 1); pos += 2;
-    put_u16(zip + pos, 1); pos += 2;
-    put_u32(zip + pos, (uint32_t)cd_size); pos += 4;
-    put_u32(zip + pos, (uint32_t)cd_offset); pos += 4;
-    put_u16(zip + pos, 0); pos += 2;
+    put_u32(zip + pos, 0x06054b50);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 1);
+    pos += 2;
+    put_u16(zip + pos, 1);
+    pos += 2;
+    put_u32(zip + pos, (uint32_t)cd_size);
+    pos += 4;
+    put_u32(zip + pos, (uint32_t)cd_offset);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
 
     int rc = oops_zip_extract_mem(zip, pos, "/tmp/test_oops_zip_out");
     ASSERT_EQ(rc, OOPS_ZIP_ERR_PARAM);

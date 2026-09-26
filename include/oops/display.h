@@ -13,9 +13,9 @@ extern "C" {
 #define OOPS_DISPLAY_DEFAULT_HEIGHT 1080
 
 typedef enum oops_display_backend {
-  OOPS_DISPLAY_BACKEND_AUTO = 0,
-  OOPS_DISPLAY_BACKEND_GNM = 4, /* Orbis-generation / GCN */
-  OOPS_DISPLAY_BACKEND_AGC = 5  /* Prospero-generation / RDNA2 */
+    OOPS_DISPLAY_BACKEND_AUTO = 0,
+    OOPS_DISPLAY_BACKEND_GNM = 4, /* Orbis-generation / GCN */
+    OOPS_DISPLAY_BACKEND_AGC = 5  /* Prospero-generation / RDNA2 */
 } oops_display_backend_t;
 
 typedef struct oops_display oops_display_t;
@@ -26,8 +26,8 @@ typedef struct oops_display oops_display_t;
  * Orbis/Neo. Check oops_display_is_ready() - a backend that could not
  * open is returned, not hidden.
  */
-oops_display_t *oops_display_open(oops_display_backend_t backend,
-                                  unsigned int width, unsigned int height);
+oops_display_t *oops_display_open(oops_display_backend_t backend, unsigned int width,
+                                  unsigned int height);
 
 /* Query state */
 int oops_display_is_ready(const oops_display_t *disp);
@@ -45,20 +45,23 @@ int oops_display_get_video_handle(const oops_display_t *disp);
 /*
  * Move display tiling from the CPU to a compute shader, if the hardware agrees.
  *
- * Every flip converts the linear render target into the display-tiled scanout surface. On the
- * CPU that is a read of the whole frame out of write-combined video memory and a scattered write
- * back into it - 2,073,600 words each way at 1920x1080, with no caching on either side, and it
- * is the single largest cost in presenting a frame.
+ * Every flip converts the linear render target into the display-tiled scanout surface.
+ * On the CPU that is a read of the whole frame out of write-combined video memory and a
+ * scattered write back into it - 2,073,600 words each way at 1920x1080, with no caching
+ * on either side, and it is the single largest cost in presenting a frame.
  *
- * This runs the compute tiler once, compares its output against the CPU tiler's byte for byte,
- * and only then lets later flips use it; a mismatch, a queue that will not create or a dispatch
- * that stops retiring all fall back to the CPU path rather than presenting a wrong buffer.
+ * This runs the compute tiler once, compares its output against the CPU tiler's byte
+ * for byte, and only then lets later flips use it; a mismatch, a queue that will not
+ * create or a dispatch that stops retiring all fall back to the CPU path rather than
+ * presenting a wrong buffer.
  *
- * **Call it before the first flip.** It writes a test pattern through both scanout buffers, so
- * afterwards it refuses (returning 0) rather than disturb a buffer that is on screen or queued.
+ * **Call it before the first flip.** It writes a test pattern through both scanout
+ * buffers, so afterwards it refuses (returning 0) rather than disturb a buffer that is
+ * on screen or queued.
  *
- * Returns 1 if the compute tiler is now in use, 0 if the CPU tiler stays, -1 for no display.
- * Not calling it is what every caller did before this existed, and leaves the CPU tiler in place.
+ * Returns 1 if the compute tiler is now in use, 0 if the CPU tiler stays, -1 for no
+ * display. Not calling it is what every caller did before this existed, and leaves the
+ * CPU tiler in place.
  */
 int oops_display_try_gpu_tiler(oops_display_t *disp);
 
@@ -88,16 +91,15 @@ int oops_display_read_shown(oops_display_t *disp, uint32_t *pixels);
  * convert. The buffers are the display's two, in whatever layout VideoOut scans.
  */
 typedef enum oops_display_scanout_layout {
-  OOPS_DISPLAY_SCANOUT_NONE = 0,   /* no display, or no scanout buffers */
-  OOPS_DISPLAY_SCANOUT_LINEAR = 1, /* rows of 0xAARRGGBB words, the width a row */
-  /* The GPU's 64KB_R_X render-target swizzle at 32 bits a pixel: 64 KiB blocks
-   * of 128 x 128 pixels, row by row across the width padded to 128, each
-   * addressed as <agc/tiler.h>'s agc_tile_pixel says. */
-  OOPS_DISPLAY_SCANOUT_RX = 2
+    OOPS_DISPLAY_SCANOUT_NONE = 0,   /* no display, or no scanout buffers */
+    OOPS_DISPLAY_SCANOUT_LINEAR = 1, /* rows of 0xAARRGGBB words, the width a row */
+    /* The GPU's 64KB_R_X render-target swizzle at 32 bits a pixel: 64 KiB blocks
+     * of 128 x 128 pixels, row by row across the width padded to 128, each
+     * addressed as <agc/tiler.h>'s agc_tile_pixel says. */
+    OOPS_DISPLAY_SCANOUT_RX = 2
 } oops_display_scanout_layout_t;
 
-oops_display_scanout_layout_t
-oops_display_scanout_layout(const oops_display_t *disp);
+oops_display_scanout_layout_t oops_display_scanout_layout(const oops_display_t *disp);
 
 /* The scanout buffer the next flip shows (`which` 0), or the one on screen
  * now (1). NULL without one. */
@@ -146,10 +148,8 @@ oops_display_scanout_layout_t oops_display_use_scanout(oops_display_t *disp);
  * frame, say - has to force that allocation first.
  */
 oops_display_t *oops_display_open_adopting(oops_display_backend_t backend,
-                                           unsigned int width,
-                                           unsigned int height,
-                                           void *const *adopt,
-                                           int adopt_count);
+                                           unsigned int width, unsigned int height,
+                                           void *const *adopt, int adopt_count);
 
 /* The flip index the nth adopted buffer was given, or -1 if there is no such
  * buffer. `nth` indexes the array passed to oops_display_open_adopting. */

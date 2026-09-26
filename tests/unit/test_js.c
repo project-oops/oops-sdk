@@ -4,7 +4,8 @@
 #include <string.h>
 #include <assert.h>
 
-static oops_js_value_t native_add(oops_js_t *js, int argc, oops_js_value_t *argv, void *userdata) {
+static oops_js_value_t native_add(oops_js_t *js, int argc, oops_js_value_t *argv,
+                                  void *userdata) {
     intptr_t offset = (intptr_t)userdata;
     int sum = (int)offset;
     for (int i = 0; i < argc; i++) {
@@ -17,7 +18,8 @@ static oops_js_value_t native_add(oops_js_t *js, int argc, oops_js_value_t *argv
     return oops_js_make_int(sum);
 }
 
-static oops_js_value_t native_concat(oops_js_t *js, int argc, oops_js_value_t *argv, void *userdata) {
+static oops_js_value_t native_concat(oops_js_t *js, int argc, oops_js_value_t *argv,
+                                     void *userdata) {
     (void)userdata;
     char buf[256] = {0};
     for (int i = 0; i < argc; i++) {
@@ -60,7 +62,8 @@ void test_js_native_binding(void) {
     oops_js_t *js = oops_js_create();
     assert(js != NULL);
 
-    int rc = oops_js_register_fn(js, "add_with_offset", native_add, (void *)(intptr_t)10);
+    int rc =
+        oops_js_register_fn(js, "add_with_offset", native_add, (void *)(intptr_t)10);
     assert(rc == 0);
 
     oops_js_value_t res;
@@ -73,7 +76,8 @@ void test_js_native_binding(void) {
     rc = oops_js_register_fn(js, "concat_strings", native_concat, NULL);
     assert(rc == 0);
 
-    rc = oops_js_eval(js, "concat_strings('Hello, ', 'OOPS ', 'Web!')", "test.js", &res);
+    rc =
+        oops_js_eval(js, "concat_strings('Hello, ', 'OOPS ', 'Web!')", "test.js", &res);
     assert(rc == 0);
     assert(res.type == OOPS_JS_TYPE_STRING);
     assert(strcmp(res.u.string, "Hello, OOPS Web!") == 0);
@@ -97,7 +101,9 @@ void test_js_globals_and_microtasks(void) {
     oops_js_free_value(js, &out);
 
     /* Promise test */
-    rc = oops_js_eval(js, "var resolved = 0; Promise.resolve(99).then(v => { resolved = v; });", "promise.js", NULL);
+    rc = oops_js_eval(
+        js, "var resolved = 0; Promise.resolve(99).then(v => { resolved = v; });",
+        "promise.js", NULL);
     assert(rc == 0);
 
     /* Microtask not run yet */

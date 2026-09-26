@@ -29,21 +29,18 @@ extern "C" {
  */
 
 enum {
-  OOPS_AUDIO_OK = 0,
-  OOPS_AUDIO_EUNAVAIL =
-      -1001, /* the platform's audio output did not resolve here */
-  OOPS_AUDIO_EPARAM =
-      -1002, /* a caller argument was rejected before any platform call */
-  OOPS_AUDIO_EBUSY =
-      -1003, /* the port is already open; close it before reopening */
+    OOPS_AUDIO_OK = 0,
+    OOPS_AUDIO_EUNAVAIL = -1001, /* the platform's audio output did not resolve here */
+    OOPS_AUDIO_EPARAM =
+        -1002, /* a caller argument was rejected before any platform call */
+    OOPS_AUDIO_EBUSY = -1003, /* the port is already open; close it before reopening */
 };
 
 typedef struct oops_audio_port oops_audio_port_t;
 
 /* Open the output port. Returns NULL with the reason in
  * oops_audio_get_last_error(). */
-oops_audio_port_t *oops_audio_open(int sample_rate, int channels,
-                                   int buffer_frames);
+oops_audio_port_t *oops_audio_open(int sample_rate, int channels, int buffer_frames);
 int oops_audio_get_last_error(void);
 
 /* Frames per hardware chunk after rounding; writing multiples of it never

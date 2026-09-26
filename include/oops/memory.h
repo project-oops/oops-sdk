@@ -9,11 +9,10 @@ extern "C" {
 #endif
 
 typedef enum oops_mem_type {
-  OOPS_MEM_WB_ONION = 0, /* CPU cached, GPU coherent (system memory) */
-  OOPS_MEM_WC_GARLIC =
-      3, /* GPU write-combined (framebuffers, render targets, textures) */
-  OOPS_MEM_WB_GARLIC =
-      10 /* GPU write-back (scratch, compute scratch buffers) */
+    OOPS_MEM_WB_ONION = 0, /* CPU cached, GPU coherent (system memory) */
+    OOPS_MEM_WC_GARLIC =
+        3, /* GPU write-combined (framebuffers, render targets, textures) */
+    OOPS_MEM_WB_GARLIC = 10 /* GPU write-back (scratch, compute scratch buffers) */
 } oops_mem_type_t;
 
 /* Memory protection flags */
@@ -40,11 +39,11 @@ int oops_mem_unmap(void *vaddr, size_t size);
 /* Virtual address range reservation without physical backing.
  * Reserves a virtual address range suitable for later mapping (e.g. via
  * oops_mem_batch_map or oops_mem_map_direct).
- * Confirmed on hardware (sweep 20260909-204626, check 020-memory/reserve-virtual-range).
- * If *addr_inout is NULL, kernel selects base address and writes it back.
- * Alignment must be page-aligned (e.g. 0x4000 or 0x40000). */
-int oops_mem_reserve_va(void **addr_inout, size_t len, int flags,
-                        size_t alignment);
+ * Confirmed on hardware (sweep 20260909-204626, check
+ * 020-memory/reserve-virtual-range). If *addr_inout is NULL, kernel selects base
+ * address and writes it back. Alignment must be page-aligned (e.g. 0x4000 or 0x40000).
+ */
+int oops_mem_reserve_va(void **addr_inout, size_t len, int flags, size_t alignment);
 int oops_mem_release_va(void *vaddr, size_t len);
 
 /* High-level managed GPU/CPU allocations: direct memory, mapped CPU+GPU

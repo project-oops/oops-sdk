@@ -31,83 +31,84 @@ __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
 static int s_mouse_handle = -1;
 static int s_mouse_inited = 0;
-static int s_mouse_init_rc =
-    OOPS_MOUSE_EUNAVAIL; /* what the first init reported */
+static int s_mouse_init_rc = OOPS_MOUSE_EUNAVAIL; /* what the first init reported */
 
 int oops_mouse_available(void) {
-  (void)oops_sysmodule_load(OOPS_SYSMODULE_MOUSE);
-  int avail = (sceMouseOpen && sceMouseRead) ? 1 : 0;
-  oops_log_trace("MOUSE", "oops_mouse_available -> %d", avail);
-  return avail;
+    (void)oops_sysmodule_load(OOPS_SYSMODULE_MOUSE);
+    int avail = (sceMouseOpen && sceMouseRead) ? 1 : 0;
+    oops_log_trace("MOUSE", "oops_mouse_available -> %d", avail);
+    return avail;
 }
 
 int oops_mouse_init(void) {
-  if (s_mouse_inited) {
-    return s_mouse_init_rc;
-  }
-  s_mouse_inited = 1;
-  oops_log_debug("MOUSE", "initializing mouse subsystem");
-
-  if (!oops_mouse_available()) {
-    oops_log_warn("MOUSE", "mouse entry points unavailable");
-    s_mouse_init_rc = OOPS_MOUSE_EUNAVAIL;
-    return s_mouse_init_rc;
-  }
-  if (sceMouseInit) {
-    sceMouseInit();
-  }
-
-  /* The same user resolution the pad uses, including bringing the user service
-   * up. */
-  int32_t user = -1;
-  if (sceUserServiceGetInitialUser) {
-    if (sceUserServiceGetInitialUser(&user) != 0 && sceUserServiceInitialize) {
-      sceUserServiceInitialize(NULL);
-      (void)sceUserServiceGetInitialUser(&user);
+    if (s_mouse_inited) {
+        return s_mouse_init_rc;
     }
-  }
-  if (user < 0) {
-    oops_log_warn("MOUSE", "failed to resolve user for mouse");
-    s_mouse_init_rc = OOPS_MOUSE_EUNAVAIL;
-    return s_mouse_init_rc;
-  }
+    s_mouse_inited = 1;
+    oops_log_debug("MOUSE", "initializing mouse subsystem");
 
-  int rc = sceMouseOpen(user, 0, 0, NULL);
-  if (rc < 0) {
-    oops_log_warn("MOUSE", "sceMouseOpen(user=0x%x) failed: %d", (unsigned int)user, rc);
-    s_mouse_init_rc = rc; /* the platform's own code, passed through */
-    return rc;
-  }
-  s_mouse_handle = rc;
-  s_mouse_init_rc = OOPS_MOUSE_OK;
-  oops_log_info("MOUSE", "mouse opened successfully (user=0x%x, handle=%d)", (unsigned int)user, rc);
-  return OOPS_MOUSE_OK;
+    if (!oops_mouse_available()) {
+        oops_log_warn("MOUSE", "mouse entry points unavailable");
+        s_mouse_init_rc = OOPS_MOUSE_EUNAVAIL;
+        return s_mouse_init_rc;
+    }
+    if (sceMouseInit) {
+        sceMouseInit();
+    }
+
+    /* The same user resolution the pad uses, including bringing the user service
+     * up. */
+    int32_t user = -1;
+    if (sceUserServiceGetInitialUser) {
+        if (sceUserServiceGetInitialUser(&user) != 0 && sceUserServiceInitialize) {
+            sceUserServiceInitialize(NULL);
+            (void)sceUserServiceGetInitialUser(&user);
+        }
+    }
+    if (user < 0) {
+        oops_log_warn("MOUSE", "failed to resolve user for mouse");
+        s_mouse_init_rc = OOPS_MOUSE_EUNAVAIL;
+        return s_mouse_init_rc;
+    }
+
+    int rc = sceMouseOpen(user, 0, 0, NULL);
+    if (rc < 0) {
+        oops_log_warn("MOUSE", "sceMouseOpen(user=0x%x) failed: %d", (unsigned int)user,
+                      rc);
+        s_mouse_init_rc = rc; /* the platform's own code, passed through */
+        return rc;
+    }
+    s_mouse_handle = rc;
+    s_mouse_init_rc = OOPS_MOUSE_OK;
+    oops_log_info("MOUSE", "mouse opened successfully (user=0x%x, handle=%d)",
+                  (unsigned int)user, rc);
+    return OOPS_MOUSE_OK;
 }
 
 int oops_mouse_read(oops_mouse_state_t *out_samples, unsigned int max_samples) {
-  if (!out_samples || max_samples == 0) {
-    return OOPS_MOUSE_EPARAM;
-  }
-  /* Capture-gated: a distinct code rather than zero samples, so a caller can
-   * tell "no motion" from "no reader". Checked before the handle because it is
-   * true on every firmware. */
-  if (OOPS_MOUSE_RECORD_BYTES == 0) {
-    return OOPS_MOUSE_ELAYOUT;
-  }
-  if (s_mouse_handle < 0 || !sceMouseRead) {
-    return OOPS_MOUSE_EUNAVAIL;
-  }
-  oops_log_trace("MOUSE", "mouse read: max_samples=%u", max_samples);
-  /* The translation from the platform record lands here with the capture. */
-  return 0;
+    if (!out_samples || max_samples == 0) {
+        return OOPS_MOUSE_EPARAM;
+    }
+    /* Capture-gated: a distinct code rather than zero samples, so a caller can
+     * tell "no motion" from "no reader". Checked before the handle because it is
+     * true on every firmware. */
+    if (OOPS_MOUSE_RECORD_BYTES == 0) {
+        return OOPS_MOUSE_ELAYOUT;
+    }
+    if (s_mouse_handle < 0 || !sceMouseRead) {
+        return OOPS_MOUSE_EUNAVAIL;
+    }
+    oops_log_trace("MOUSE", "mouse read: max_samples=%u", max_samples);
+    /* The translation from the platform record lands here with the capture. */
+    return 0;
 }
 
 void oops_mouse_close(void) {
-  oops_log_debug("MOUSE", "closing mouse (handle=%d)", s_mouse_handle);
-  if (s_mouse_handle >= 0 && sceMouseClose) {
-    sceMouseClose(s_mouse_handle);
-  }
-  s_mouse_handle = -1;
-  s_mouse_inited = 0;
-  s_mouse_init_rc = OOPS_MOUSE_EUNAVAIL;
+    oops_log_debug("MOUSE", "closing mouse (handle=%d)", s_mouse_handle);
+    if (s_mouse_handle >= 0 && sceMouseClose) {
+        sceMouseClose(s_mouse_handle);
+    }
+    s_mouse_handle = -1;
+    s_mouse_inited = 0;
+    s_mouse_init_rc = OOPS_MOUSE_EUNAVAIL;
 }

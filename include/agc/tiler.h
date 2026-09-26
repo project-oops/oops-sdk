@@ -41,8 +41,7 @@ void agc_tile_init(void);
  * (kRenderTarget = 27). `dest` must hold agc_tile_surface_bytes(width, height);
  * the margin of a partial tile is left as it was.
  */
-void agc_tile_surface(void *dest, const void *src, uint32_t width,
-                      uint32_t height);
+void agc_tile_surface(void *dest, const void *src, uint32_t width, uint32_t height);
 
 /*
  * Computes 2D pixel coordinates (*out_x, *out_y) in [0..127] from a 32-bit
@@ -50,34 +49,34 @@ void agc_tile_surface(void *dest, const void *src, uint32_t width,
  * Exact closed-form algebraic inverse of the RDNA2 basis vectors over GF(2).
  */
 static inline void agc_detile_pixel(uint32_t offset_dwords, uint32_t *out_x,
-                                   uint32_t *out_y) {
-  uint32_t x0 = (offset_dwords >> 0) & 1u;
-  uint32_t x1 = (offset_dwords >> 1) & 1u;
-  uint32_t y0 = (offset_dwords >> 2) & 1u;
-  uint32_t y1 = (offset_dwords >> 3) & 1u;
-  uint32_t y2 = (offset_dwords >> 4) & 1u;
-  uint32_t x2 = (offset_dwords >> 5) & 1u;
+                                    uint32_t *out_y) {
+    uint32_t x0 = (offset_dwords >> 0) & 1u;
+    uint32_t x1 = (offset_dwords >> 1) & 1u;
+    uint32_t y0 = (offset_dwords >> 2) & 1u;
+    uint32_t y1 = (offset_dwords >> 3) & 1u;
+    uint32_t y2 = (offset_dwords >> 4) & 1u;
+    uint32_t x2 = (offset_dwords >> 5) & 1u;
 
-  uint32_t y3 = (offset_dwords >> 10) & 1u;
-  uint32_t x3 = ((offset_dwords >> 6) & 1u) ^ y3;
+    uint32_t y3 = (offset_dwords >> 10) & 1u;
+    uint32_t x3 = ((offset_dwords >> 6) & 1u) ^ y3;
 
-  uint32_t x4 = (offset_dwords >> 11) & 1u;
-  uint32_t y4 = ((offset_dwords >> 7) & 1u) ^ x4;
+    uint32_t x4 = (offset_dwords >> 11) & 1u;
+    uint32_t y4 = ((offset_dwords >> 7) & 1u) ^ x4;
 
-  uint32_t x6 = (offset_dwords >> 13) & 1u;
-  uint32_t y5 = ((offset_dwords >> 8) & 1u) ^ x6;
+    uint32_t x6 = (offset_dwords >> 13) & 1u;
+    uint32_t y5 = ((offset_dwords >> 8) & 1u) ^ x6;
 
-  uint32_t y6 = (offset_dwords >> 12) & 1u;
-  uint32_t x5 = ((offset_dwords >> 9) & 1u) ^ y6;
+    uint32_t y6 = (offset_dwords >> 12) & 1u;
+    uint32_t x5 = ((offset_dwords >> 9) & 1u) ^ y6;
 
-  if (out_x) {
-    *out_x = x0 | (x1 << 1) | (x2 << 2) | (x3 << 3) | (x4 << 4) | (x5 << 5) |
-             (x6 << 6);
-  }
-  if (out_y) {
-    *out_y = y0 | (y1 << 1) | (y2 << 2) | (y3 << 3) | (y4 << 4) | (y5 << 5) |
-             (y6 << 6);
-  }
+    if (out_x) {
+        *out_x =
+            x0 | (x1 << 1) | (x2 << 2) | (x3 << 3) | (x4 << 4) | (x5 << 5) | (x6 << 6);
+    }
+    if (out_y) {
+        *out_y =
+            y0 | (y1 << 1) | (y2 << 2) | (y3 << 3) | (y4 << 4) | (y5 << 5) | (y6 << 6);
+    }
 }
 
 /*
@@ -91,18 +90,18 @@ static inline void agc_detile_pixel(uint32_t offset_dwords, uint32_t *out_x,
  * surface.
  */
 static inline uint32_t agc_tile_pixel(uint32_t x, uint32_t y) {
-  static const uint32_t x_dw[7] = {0x0001u, 0x0002u, 0x0020u, 0x0040u,
-                                   0x0880u, 0x0200u, 0x2100u};
-  static const uint32_t y_dw[7] = {0x0004u, 0x0008u, 0x0010u, 0x0440u,
-                                   0x0080u, 0x0100u, 0x1200u};
-  uint32_t off = 0;
-  for (unsigned b = 0; b < 7u; b++) {
-    if ((x >> b) & 1u)
-      off ^= x_dw[b];
-    if ((y >> b) & 1u)
-      off ^= y_dw[b];
-  }
-  return off;
+    static const uint32_t x_dw[7] = {0x0001u, 0x0002u, 0x0020u, 0x0040u,
+                                     0x0880u, 0x0200u, 0x2100u};
+    static const uint32_t y_dw[7] = {0x0004u, 0x0008u, 0x0010u, 0x0440u,
+                                     0x0080u, 0x0100u, 0x1200u};
+    uint32_t off = 0;
+    for (unsigned b = 0; b < 7u; b++) {
+        if ((x >> b) & 1u)
+            off ^= x_dw[b];
+        if ((y >> b) & 1u)
+            off ^= y_dw[b];
+    }
+    return off;
 }
 
 /*
@@ -110,8 +109,7 @@ static inline uint32_t agc_tile_pixel(uint32_t x, uint32_t y) {
  * into a linear 32bpp RGBX buffer. `src` must hold at least
  * agc_tile_surface_bytes(width, height).
  */
-void agc_detile_surface(void *dest, const void *src, uint32_t width,
-                        uint32_t height);
+void agc_detile_surface(void *dest, const void *src, uint32_t width, uint32_t height);
 
 /* ---- buffer resource constants (V#) ----------------------------------------
  *
@@ -230,8 +228,7 @@ int agc_buffer_descriptor(uint32_t out[4], uint64_t base, uint32_t stride,
  */
 int agc_tiler_dispatch_params(uint32_t *user_data, uint32_t *groups_x,
                               uint32_t *groups_y, uint64_t linear_src,
-                              uint64_t tiled_dst, uint32_t width,
-                              uint32_t height);
+                              uint64_t tiled_dst, uint32_t width, uint32_t height);
 
 #ifdef __cplusplus
 }

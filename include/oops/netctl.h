@@ -9,16 +9,16 @@ extern "C" {
 #endif
 
 typedef struct oops_net_info {
-  char ip_address[16];
-  char netmask[16];
-  char default_gateway[16];
-  char primary_dns[16];
-  char secondary_dns[16];
-  char mac_address[18];
-  int device_type; /* 1 = Wired, 2 = Wireless, 0 = Unknown */
-  int link_status; /* 1 = Connected, 0 = Disconnected */
-  char ssid[33];
-  int rssi_percentage;
+    char ip_address[16];
+    char netmask[16];
+    char default_gateway[16];
+    char primary_dns[16];
+    char secondary_dns[16];
+    char mac_address[18];
+    int device_type; /* 1 = Wired, 2 = Wireless, 0 = Unknown */
+    int link_status; /* 1 = Connected, 0 = Disconnected */
+    char ssid[33];
+    int rssi_percentage;
 } oops_net_info_t;
 
 /**

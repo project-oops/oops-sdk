@@ -39,20 +39,20 @@ extern "C" {
 /* Codec selection. OOPS's own values; the mapping to the platform's codec
  * constant lives in the (layout-gated) decode path, not here. */
 enum {
-  OOPS_VIDEODEC_H264 = 1,
-  OOPS_VIDEODEC_HEVC = 2,
-  OOPS_VIDEODEC_VP9 = 3,
+    OOPS_VIDEODEC_H264 = 1,
+    OOPS_VIDEODEC_HEVC = 2,
+    OOPS_VIDEODEC_VP9 = 3,
 };
 
 /* Return / error codes. */
 enum {
-  OOPS_VIDEODEC_OK = 0,
-  OOPS_VIDEODEC_EUNAVAIL =
-      -1, /* the library or its entry points did not resolve here */
-  OOPS_VIDEODEC_ELAYOUT =
-      -2, /* the call is real but its struct layout is unconfirmed */
-  OOPS_VIDEODEC_EPARAM =
-      -3, /* a caller argument was rejected before any platform call */
+    OOPS_VIDEODEC_OK = 0,
+    OOPS_VIDEODEC_EUNAVAIL =
+        -1, /* the library or its entry points did not resolve here */
+    OOPS_VIDEODEC_ELAYOUT =
+        -2, /* the call is real but its struct layout is unconfirmed */
+    OOPS_VIDEODEC_EPARAM =
+        -3, /* a caller argument was rejected before any platform call */
 };
 
 typedef struct oops_videodec oops_videodec_t;
@@ -65,11 +65,11 @@ typedef struct oops_videodec oops_videodec_t;
  * display path directly. Populated by a successful `oops_videodec_decode`.
  */
 typedef struct oops_videodec_frame {
-  void *luma;   /* Y plane */
-  void *chroma; /* interleaved UV plane (NV12-style) */
-  uint32_t width;
-  uint32_t height;
-  uint32_t pitch; /* row stride in bytes */
+    void *luma;   /* Y plane */
+    void *chroma; /* interleaved UV plane (NV12-style) */
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch; /* row stride in bytes */
 } oops_videodec_frame_t;
 
 /*

@@ -25,9 +25,9 @@
 #define SYS_munmap 73
 #define SYS_mprotect 74
 #define SYS_mkdir 136
-#define SYS_socket                                                             \
-  97 /* hardware-confirmed: sys_call(97, AF_INET, SOCK_STREAM, IPPROTO_TCP)    \
-        returns a descriptor (obSCEne, 12.40) */
+#define SYS_socket                                                                     \
+    97 /* hardware-confirmed: sys_call(97, AF_INET, SOCK_STREAM, IPPROTO_TCP)          \
+          returns a descriptor (obSCEne, 12.40) */
 #define SYS_connect 98
 #define SYS_bind 104
 #define SYS_listen 106
@@ -35,13 +35,15 @@
 #define SYS_setsockopt 105
 #define SYS_getdents 272
 /*
- * `rename` and the wall clock (2026-09-22). FreeBSD's numbers, like every other entry in this
- * table - 128 and 232 are `rename` and `clock_gettime` in `sys/kern/syscalls.master`, and the
- * kernel here is FreeBSD-derived, which is the same reason `SYS_open` is 5 and `SYS_mkdir` 136.
+ * `rename` and the wall clock (2026-09-22). FreeBSD's numbers, like every other entry
+ * in this table - 128 and 232 are `rename` and `clock_gettime` in
+ * `sys/kern/syscalls.master`, and the kernel here is FreeBSD-derived, which is the same
+ * reason `SYS_open` is 5 and `SYS_mkdir` 136.
  *
- * `clock_gettime` is what makes a *calendar* possible. Everything in `<libc/time.h>` until now
- * was built on `sceKernelGetProcessTimeCounter`, which counts from process start - fine for
- * frame timing, useless for a date, and the reason that header used to say a port should not try.
+ * `clock_gettime` is what makes a *calendar* possible. Everything in `<libc/time.h>`
+ * until now was built on `sceKernelGetProcessTimeCounter`, which counts from process
+ * start - fine for frame timing, useless for a date, and the reason that header used to
+ * say a port should not try.
  */
 #define SYS_rename 128
 #define SYS_clock_gettime 232

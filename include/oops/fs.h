@@ -11,9 +11,9 @@ extern "C" {
 /* File open flags (matching standard FreeBSD / POSIX flags) */
 #define OOPS_O_RDONLY 0x0000
 #define OOPS_O_WRONLY 0x0001
-#define OOPS_O_RDWR   0x0002
-#define OOPS_O_CREAT  0x0200
-#define OOPS_O_TRUNC  0x0400
+#define OOPS_O_RDWR 0x0002
+#define OOPS_O_CREAT 0x0200
+#define OOPS_O_TRUNC 0x0400
 #define OOPS_O_APPEND 0x0008
 
 /* Seek origins */
@@ -23,8 +23,8 @@ extern "C" {
 
 /* File and directory info */
 typedef struct oops_file_info {
-  int64_t size;
-  int is_directory;
+    int64_t size;
+    int is_directory;
 } oops_file_info_t;
 
 /* Low-level file descriptor operations */
@@ -52,25 +52,26 @@ int oops_fs_rename(const char *from, const char *to);
 /*
  * **Walking a directory** (2026-09-22).
  *
- * This was absent for no better reason than that nothing had asked for it - `SYS_getdents` has
- * been in `<oops/syscall.h>` the whole time, next to the `SYS_mkdir` that `oops_fs_mkdir`
- * already uses. Neverball asked: `share/dir.c` lists levels, sets and replays, which is what a
- * game with user content does.
+ * This was absent for no better reason than that nothing had asked for it -
+ * `SYS_getdents` has been in `<oops/syscall.h>` the whole time, next to the `SYS_mkdir`
+ * that `oops_fs_mkdir` already uses. Neverball asked: `share/dir.c` lists levels, sets
+ * and replays, which is what a game with user content does.
  *
- * The shape is the POSIX one because that is what a port expects and what the kernel gives:
- * open a directory, read entries until there are none, close it. `oops_fs_opendir` returns a
- * handle or NULL; `oops_fs_readdir` fills `out` and returns 1 for an entry, 0 at the end and
- * -1 on error, so a caller can tell "finished" from "failed" - which a NULL-or-not API cannot.
+ * The shape is the POSIX one because that is what a port expects and what the kernel
+ * gives: open a directory, read entries until there are none, close it.
+ * `oops_fs_opendir` returns a handle or NULL; `oops_fs_readdir` fills `out` and returns
+ * 1 for an entry, 0 at the end and -1 on error, so a caller can tell "finished" from
+ * "failed" - which a NULL-or-not API cannot.
  *
- * `.` and `..` are **returned**, not filtered. They are directory entries and a caller that
- * wants them gone says so; hiding them here would be this SDK deciding what a port's file list
- * means.
+ * `.` and `..` are **returned**, not filtered. They are directory entries and a caller
+ * that wants them gone says so; hiding them here would be this SDK deciding what a
+ * port's file list means.
  */
 typedef struct oops_dir oops_dir_t;
 
 typedef struct oops_dirent {
-  char name[256];   /* NUL-terminated; the kernel's own limit is 255 */
-  int is_directory; /* 1 when the entry is itself a directory */
+    char name[256];   /* NUL-terminated; the kernel's own limit is 255 */
+    int is_directory; /* 1 when the entry is itself a directory */
 } oops_dirent_t;
 
 oops_dir_t *oops_fs_opendir(const char *path);
@@ -79,9 +80,11 @@ int oops_fs_closedir(oops_dir_t *dir);
 
 /* Storage locations for application persistence & data */
 typedef enum oops_storage_location {
-  OOPS_STORAGE_APP_DATA,   /* Internal persistent storage: /data/<app_id> (escaped) or ./data/<app_id> */
-  OOPS_STORAGE_USB,        /* External USB storage: /mnt/usb0/<app_id> or /mnt/usb1/<app_id> */
-  OOPS_STORAGE_PREFER_USB, /* USB storage if mounted, else internal /data/<app_id> */
+    OOPS_STORAGE_APP_DATA, /* Internal persistent storage: /data/<app_id> (escaped) or
+                              ./data/<app_id> */
+    OOPS_STORAGE_USB, /* External USB storage: /mnt/usb0/<app_id> or /mnt/usb1/<app_id>
+                       */
+    OOPS_STORAGE_PREFER_USB, /* USB storage if mounted, else internal /data/<app_id> */
 } oops_storage_location_t;
 
 /**
@@ -95,7 +98,8 @@ typedef enum oops_storage_location {
  *
  * Returns: 0 on success, or negative error code.
  */
-int oops_fs_get_storage_dir(oops_storage_location_t loc, char *out_path, size_t max_len);
+int oops_fs_get_storage_dir(oops_storage_location_t loc, char *out_path,
+                            size_t max_len);
 
 /**
  * Format a full path to a file inside the resolved application storage directory.
@@ -115,4 +119,3 @@ int oops_fs_storage_path(oops_storage_location_t loc, const char *rel_path,
 #endif
 
 #endif /* OOPS_FS_H */
-

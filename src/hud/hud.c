@@ -1,14 +1,16 @@
 /*
  * hud.c - the GPU 2D overlay declared in <oops/hud.h>.
  *
- * Fixed-function OpenGL 1.1, immediate mode, one texture. The design and the reason it is drawn on
- * the GPU rather than with `oops_draw_text` are in the header. The short version: a Mesa title
- * scans out a tiled buffer the CPU cannot write into, so text has to be drawn the way the scene is.
+ * Fixed-function OpenGL 1.1, immediate mode, one texture. The design and the reason it
+ * is drawn on the GPU rather than with `oops_draw_text` are in the header. The short
+ * version: a Mesa title scans out a tiled buffer the CPU cannot write into, so text has
+ * to be drawn the way the scene is.
  *
- * The glyphs are the collection's one 8x8 font (`../draw/font8x8.h`), baked once into a texture
- * atlas of 16 columns by 6 rows of 8x8 cells - 96 cells for the 95 printable characters, the last
- * unused. Each texel is white with the glyph bit in its alpha, so `GL_MODULATE` against the current
- * colour tints the text and blends its edges against the scene.
+ * The glyphs are the collection's one 8x8 font (`../draw/font8x8.h`), baked once into a
+ * texture atlas of 16 columns by 6 rows of 8x8 cells - 96 cells for the 95 printable
+ * characters, the last unused. Each texel is white with the glyph bit in its alpha, so
+ * `GL_MODULATE` against the current colour tints the text and blends its edges against
+ * the scene.
  */
 
 #include "oops/hud.h"
@@ -23,39 +25,39 @@
 #include <stdint.h>
 
 /* The atlas geometry. 16 x 6 cells of 8 x 8 -> 128 x 48 texels. */
-#define HUD_ATLAS_COLS  16
-#define HUD_ATLAS_ROWS  6
-#define HUD_CELL        OOPS_FONT8X8_WIDTH            /* 8; width == height */
-#define HUD_ATLAS_W     (HUD_ATLAS_COLS * HUD_CELL)   /* 128 */
-#define HUD_ATLAS_H     (HUD_ATLAS_ROWS * HUD_CELL)   /* 48 */
+#define HUD_ATLAS_COLS 16
+#define HUD_ATLAS_ROWS 6
+#define HUD_CELL OOPS_FONT8X8_WIDTH             /* 8; width == height */
+#define HUD_ATLAS_W (HUD_ATLAS_COLS * HUD_CELL) /* 128 */
+#define HUD_ATLAS_H (HUD_ATLAS_ROWS * HUD_CELL) /* 48 */
 
 struct oops_hud {
     GLuint tex;
-    int    fb_w;
-    int    fb_h;
+    int fb_w;
+    int fb_h;
 
-    /* State saved across begin/end, so a title (a shader pipeline included) is left as it was. */
-    GLint     saved_program;
-    GLint     saved_tex_bind;
+    /* State saved across begin/end, so a title (a shader pipeline included) is left as
+     * it was. */
+    GLint saved_program;
+    GLint saved_tex_bind;
     GLboolean saved_depth;
     GLboolean saved_cull;
     GLboolean saved_blend;
     GLboolean saved_tex2d;
-    GLfloat   saved_color[4];
+    GLfloat saved_color[4];
 };
 
-static void hud_log(const char *msg)
-{
+static void hud_log(const char *msg) {
     oops_log_warn("HUD", "%s", msg);
 }
 
 /*
- * Fill one 8x8 cell of the atlas from a glyph. `gr` is the glyph row with 0 at the top and `gc`
- * the column with 0 at the left (bit 7 of the row byte); the cell is placed top-down and
- * left-to-right, so a texture coordinate that runs with screen y and x draws the glyph upright.
+ * Fill one 8x8 cell of the atlas from a glyph. `gr` is the glyph row with 0 at the top
+ * and `gc` the column with 0 at the left (bit 7 of the row byte); the cell is placed
+ * top-down and left-to-right, so a texture coordinate that runs with screen y and x
+ * draws the glyph upright.
  */
-static void bake_glyph(uint8_t *px, int cell_col, int cell_row, const uint8_t *glyph)
-{
+static void bake_glyph(uint8_t *px, int cell_col, int cell_row, const uint8_t *glyph) {
     for (int gr = 0; gr < HUD_CELL; gr++) {
         const uint8_t bits = glyph[gr];
         for (int gc = 0; gc < HUD_CELL; gc++) {
@@ -72,8 +74,7 @@ static void bake_glyph(uint8_t *px, int cell_col, int cell_row, const uint8_t *g
     }
 }
 
-oops_hud_t *oops_hud_create(int fb_width, int fb_height)
-{
+oops_hud_t *oops_hud_create(int fb_width, int fb_height) {
     oops_log_debug("HUD", "create %dx%d", fb_width, fb_height);
     oops_hud_t *hud = (oops_hud_t *)oops_calloc(1, sizeof(*hud));
     if (hud == NULL) {
@@ -82,7 +83,8 @@ oops_hud_t *oops_hud_create(int fb_width, int fb_height)
     hud->fb_w = fb_width;
     hud->fb_h = fb_height;
 
-    uint8_t *atlas = (uint8_t *)oops_malloc((size_t)HUD_ATLAS_W * (size_t)HUD_ATLAS_H * 4u);
+    uint8_t *atlas =
+        (uint8_t *)oops_malloc((size_t)HUD_ATLAS_W * (size_t)HUD_ATLAS_H * 4u);
     if (atlas == NULL) {
         oops_free(hud);
         return NULL;
@@ -100,24 +102,26 @@ oops_hud_t *oops_hud_create(int fb_width, int fb_height)
     }
 
     /* What the caller had bound, so it can be put back. Building the atlas has to bind
-     * something, and this function used to end with `glBindTexture(GL_TEXTURE_2D, 0)` - leaving
-     * the caller's active unit empty rather than as it was found. `oops_hud_begin`/`_end` below
-     * already save and restore exactly this for the drawing pass, so the contract was stated
-     * and then broken a hundred lines above it.
+     * something, and this function used to end with `glBindTexture(GL_TEXTURE_2D, 0)` -
+     * leaving the caller's active unit empty rather than as it was found.
+     * `oops_hud_begin`/`_end` below already save and restore exactly this for the
+     * drawing pass, so the contract was stated and then broken a hundred lines above
+     * it.
      *
-     * It cost a hardware session to find, which is the reason for the length of this comment.
-     * `mesa-cube` binds its texture once at setup, points its sampler at unit 0 and then creates
-     * the overlay; from the first frame it sampled an empty unit, `texture()` returned zero, and
-     * the cube drew as a solid black silhouette - with the geometry, the spin, the depth test,
-     * the direct scanout and the 59.94 fps pacing all exactly right, and the overlay itself
-     * drawing perfectly on top of it. It read as a driver or compiler fault rather than a state
-     * leak, and was nearly filed as a clang 21 regression. (REQ-20260922T0040Z-c93d) */
+     * It cost a hardware session to find, which is the reason for the length of this
+     * comment. `mesa-cube` binds its texture once at setup, points its sampler at unit
+     * 0 and then creates the overlay; from the first frame it sampled an empty unit,
+     * `texture()` returned zero, and the cube drew as a solid black silhouette - with
+     * the geometry, the spin, the depth test, the direct scanout and the 59.94 fps
+     * pacing all exactly right, and the overlay itself drawing perfectly on top of it.
+     * It read as a driver or compiler fault rather than a state leak, and was nearly
+     * filed as a clang 21 regression. (REQ-20260922T0040Z-c93d) */
     GLint prev_tex = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
 
     glBindTexture(GL_TEXTURE_2D, hud->tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, HUD_ATLAS_W, HUD_ATLAS_H, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                 atlas);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, HUD_ATLAS_W, HUD_ATLAS_H, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, atlas);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -128,8 +132,7 @@ oops_hud_t *oops_hud_create(int fb_width, int fb_height)
     return hud;
 }
 
-void oops_hud_destroy(oops_hud_t *hud)
-{
+void oops_hud_destroy(oops_hud_t *hud) {
     if (hud == NULL) {
         return;
     }
@@ -140,14 +143,13 @@ void oops_hud_destroy(oops_hud_t *hud)
     oops_free(hud);
 }
 
-void oops_hud_begin(oops_hud_t *hud)
-{
+void oops_hud_begin(oops_hud_t *hud) {
     if (hud == NULL) {
         return;
     }
 
-    /* Save what this pass changes. The program is saved and cleared so fixed-function draws take
-     * effect over a title running its own shaders, then restored in end. */
+    /* Save what this pass changes. The program is saved and cleared so fixed-function
+     * draws take effect over a title running its own shaders, then restored in end. */
     hud->saved_program = 0;
     glGetIntegerv(GL_CURRENT_PROGRAM, &hud->saved_program);
     glUseProgram(0);
@@ -165,7 +167,8 @@ void oops_hud_begin(oops_hud_t *hud)
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    /* Pixel coordinates, origin at the top-left - the same convention oops_draw_text uses. */
+    /* Pixel coordinates, origin at the top-left - the same convention oops_draw_text
+     * uses. */
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
@@ -178,16 +181,13 @@ void oops_hud_begin(oops_hud_t *hud)
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 }
 
-static void set_color(uint32_t c)
-{
+static void set_color(uint32_t c) {
     glColor4f((GLfloat)((c >> 16) & 0xffu) / 255.0f,
-              (GLfloat)((c >> 8) & 0xffu) / 255.0f,
-              (GLfloat)(c & 0xffu) / 255.0f,
+              (GLfloat)((c >> 8) & 0xffu) / 255.0f, (GLfloat)(c & 0xffu) / 255.0f,
               (GLfloat)((c >> 24) & 0xffu) / 255.0f);
 }
 
-void oops_hud_rect(oops_hud_t *hud, int x, int y, int w, int h, uint32_t color)
-{
+void oops_hud_rect(oops_hud_t *hud, int x, int y, int w, int h, uint32_t color) {
     if (hud == NULL) {
         return;
     }
@@ -208,8 +208,8 @@ void oops_hud_rect(oops_hud_t *hud, int x, int y, int w, int h, uint32_t color)
     glEnd();
 }
 
-void oops_hud_text(oops_hud_t *hud, int x, int y, int scale, uint32_t color, const char *str)
-{
+void oops_hud_text(oops_hud_t *hud, int x, int y, int scale, uint32_t color,
+                   const char *str) {
     if (hud == NULL || str == NULL) {
         return;
     }
@@ -244,21 +244,28 @@ void oops_hud_text(oops_hud_t *hud, int x, int y, int scale, uint32_t color, con
             const GLfloat qx1 = pen_x + cell;
             const GLfloat qy1 = pen_y + cell;
 
-            /* Screen top-left samples the cell's top-left (v0), so the glyph draws upright. */
-            glTexCoord2f(u0, v0); glVertex2f(qx0, qy0);
-            glTexCoord2f(u1, v0); glVertex2f(qx1, qy0);
-            glTexCoord2f(u1, v1); glVertex2f(qx1, qy1);
-            glTexCoord2f(u0, v0); glVertex2f(qx0, qy0);
-            glTexCoord2f(u1, v1); glVertex2f(qx1, qy1);
-            glTexCoord2f(u0, v1); glVertex2f(qx0, qy1);
+            /* Screen top-left samples the cell's top-left (v0), so the glyph draws
+             * upright. */
+            glTexCoord2f(u0, v0);
+            glVertex2f(qx0, qy0);
+            glTexCoord2f(u1, v0);
+            glVertex2f(qx1, qy0);
+            glTexCoord2f(u1, v1);
+            glVertex2f(qx1, qy1);
+            glTexCoord2f(u0, v0);
+            glVertex2f(qx0, qy0);
+            glTexCoord2f(u1, v1);
+            glVertex2f(qx1, qy1);
+            glTexCoord2f(u0, v1);
+            glVertex2f(qx0, qy1);
         }
-        pen_x += cell; /* a blank (space, or an out-of-range char) still advances the pen */
+        pen_x +=
+            cell; /* a blank (space, or an out-of-range char) still advances the pen */
     }
     glEnd();
 }
 
-int oops_hud_text_width(int scale, const char *str)
-{
+int oops_hud_text_width(int scale, const char *str) {
     if (str == NULL) {
         return 0;
     }
@@ -272,8 +279,7 @@ int oops_hud_text_width(int scale, const char *str)
     return n * HUD_CELL * scale;
 }
 
-void oops_hud_end(oops_hud_t *hud)
-{
+void oops_hud_end(oops_hud_t *hud) {
     if (hud == NULL) {
         return;
     }
@@ -283,12 +289,30 @@ void oops_hud_end(oops_hud_t *hud)
     glMatrixMode(GL_MODELVIEW);
     glPopMatrix();
 
-    /* Restore exactly what begin saved, to the enable/disable each capability was in. */
+    /* Restore exactly what begin saved, to the enable/disable each capability was in.
+     */
     glBindTexture(GL_TEXTURE_2D, (GLuint)hud->saved_tex_bind);
-    if (hud->saved_tex2d) { glEnable(GL_TEXTURE_2D); } else { glDisable(GL_TEXTURE_2D); }
-    if (hud->saved_blend) { glEnable(GL_BLEND); } else { glDisable(GL_BLEND); }
-    if (hud->saved_cull) { glEnable(GL_CULL_FACE); } else { glDisable(GL_CULL_FACE); }
-    if (hud->saved_depth) { glEnable(GL_DEPTH_TEST); } else { glDisable(GL_DEPTH_TEST); }
-    glColor4f(hud->saved_color[0], hud->saved_color[1], hud->saved_color[2], hud->saved_color[3]);
+    if (hud->saved_tex2d) {
+        glEnable(GL_TEXTURE_2D);
+    } else {
+        glDisable(GL_TEXTURE_2D);
+    }
+    if (hud->saved_blend) {
+        glEnable(GL_BLEND);
+    } else {
+        glDisable(GL_BLEND);
+    }
+    if (hud->saved_cull) {
+        glEnable(GL_CULL_FACE);
+    } else {
+        glDisable(GL_CULL_FACE);
+    }
+    if (hud->saved_depth) {
+        glEnable(GL_DEPTH_TEST);
+    } else {
+        glDisable(GL_DEPTH_TEST);
+    }
+    glColor4f(hud->saved_color[0], hud->saved_color[1], hud->saved_color[2],
+              hud->saved_color[3]);
     glUseProgram((GLuint)hud->saved_program);
 }

@@ -27,30 +27,35 @@ extern "C" {
 /*
  * **Bit 16, and it has one name here because it is one bit.**
  *
- * It is not in the public ScePad button layout, and which physical button it carries is open.
- * This SDK held it as Create; Prosperous (`pros-link/src/pad.rs`) maps it to Home and its enum
- * claims the bit was confirmed empirically on a target. obSCEne has not settled it - its
- * button-bits probe needs a controller attached, and resolved not-possible on the test rig.
+ * It is not in the public ScePad button layout, and which physical button it carries is
+ * open. This SDK held it as Create; Prosperous (`pros-link/src/pad.rs`) maps it to Home
+ * and its enum claims the bit was confirmed empirically on a target. obSCEne has not
+ * settled it - its button-bits probe needs a controller attached, and resolved
+ * not-possible on the test rig.
  *
- * Until 2026-09-22 this header carried the question and the answer three lines apart: a warning
- * saying *"do not bind it as a shell or system button"*, immediately followed by
- * `OOPS_BUTTON_PS` and `OOPS_BUTTON_HOME` defined as exactly that bit with no caveat, and
- * `src/input/keyboard.c` returning a bare `(1u << 16)` that cited an application's private
- * constant. Five spellings, one of which forbade what the other four did
+ * Until 2026-09-22 this header carried the question and the answer three lines apart: a
+ * warning saying *"do not bind it as a shell or system button"*, immediately followed
+ * by `OOPS_BUTTON_PS` and `OOPS_BUTTON_HOME` defined as exactly that bit with no
+ * caveat, and `src/input/keyboard.c` returning a bare `(1u << 16)` that cited an
+ * application's private constant. Five spellings, one of which forbade what the other
+ * four did
  * (`REQ-20260922T2015Z-b4d7`).
  *
- * So: **`OOPS_BUTTON_BIT16` is the name**, deliberately describing the bit rather than a button,
- * because the bit is what is known. The two aliases below are kept so existing callers still
- * build, and they carry the same caveat rather than contradicting it. When a sweep settles this,
- * one of them becomes the name and the others go.
+ * So: **`OOPS_BUTTON_BIT16` is the name**, deliberately describing the bit rather than
+ * a button, because the bit is what is known. The two aliases below are kept so
+ * existing callers still build, and they carry the same caveat rather than
+ * contradicting it. When a sweep settles this, one of them becomes the name and the
+ * others go.
  *
- * Binding it is not forbidden - SeaShell binds it to the Control Centre overlay and that is a
- * reasonable bet - but it is a bet, and a caller should be able to see that from the name.
+ * Binding it is not forbidden - SeaShell binds it to the Control Centre overlay and
+ * that is a reasonable bet - but it is a bet, and a caller should be able to see that
+ * from the name.
  */
 #define OOPS_BUTTON_BIT16 (1u << 16)
 /* Prospero Create / Orbis Share - one reading of OOPS_BUTTON_BIT16, not confirmed. */
 #define OOPS_BUTTON_CREATE OOPS_BUTTON_BIT16
-/* PlayStation / Home - the other reading of OOPS_BUTTON_BIT16, equally not confirmed. */
+/* PlayStation / Home - the other reading of OOPS_BUTTON_BIT16, equally not confirmed.
+ */
 #define OOPS_BUTTON_PS OOPS_BUTTON_BIT16
 #define OOPS_BUTTON_HOME OOPS_BUTTON_BIT16 /* Alias for OOPS_BUTTON_PS. */
 #define OOPS_BUTTON_TOUCHPAD (1u << 20)
@@ -63,26 +68,26 @@ extern "C" {
 #define OOPS_MAX_PAD_SAMPLES 64
 
 typedef struct oops_touch_point {
-  uint16_t x;     /* 0 to 1919 */
-  uint16_t y;     /* 0 to 941 */
-  uint8_t id;     /* Finger tracking ID */
-  uint8_t active; /* 1 if touched, 0 otherwise */
+    uint16_t x;     /* 0 to 1919 */
+    uint16_t y;     /* 0 to 941 */
+    uint8_t id;     /* Finger tracking ID */
+    uint8_t active; /* 1 if touched, 0 otherwise */
 } oops_touch_point_t;
 
 typedef struct oops_pad_state {
-  uint32_t buttons;
-  int8_t left_stick_x;  /* -128 to 127 */
-  int8_t left_stick_y;  /* -128 to 127 */
-  int8_t right_stick_x; /* -128 to 127 */
-  int8_t right_stick_y; /* -128 to 127 */
-  uint8_t l2_trigger;   /* 0 to 255 */
-  uint8_t r2_trigger;   /* 0 to 255 */
-  int connected;
-  oops_touch_point_t touch[2];
-  /* 6-Axis Motion & Orientation IMU Telemetry (DualShock 4 & DualSense) */
-  float orientation[4];      /* Quaternion [x, y, z, w] */
-  float acceleration[3];     /* Accelerometer [x, y, z] in G's */
-  float angular_velocity[3]; /* Gyroscope [x, y, z] in rad/s */
+    uint32_t buttons;
+    int8_t left_stick_x;  /* -128 to 127 */
+    int8_t left_stick_y;  /* -128 to 127 */
+    int8_t right_stick_x; /* -128 to 127 */
+    int8_t right_stick_y; /* -128 to 127 */
+    uint8_t l2_trigger;   /* 0 to 255 */
+    uint8_t r2_trigger;   /* 0 to 255 */
+    int connected;
+    oops_touch_point_t touch[2];
+    /* 6-Axis Motion & Orientation IMU Telemetry (DualShock 4 & DualSense) */
+    float orientation[4];      /* Quaternion [x, y, z, w] */
+    float acceleration[3];     /* Accelerometer [x, y, z] in G's */
+    float angular_velocity[3]; /* Gyroscope [x, y, z] in rad/s */
 } oops_pad_state_t;
 
 /*
@@ -91,19 +96,18 @@ typedef struct oops_pad_state {
  * which is capture-gated.
  */
 enum {
-  OOPS_TRIGGER_OFF = 0, /* release any effect - the resistance-free default */
-  OOPS_TRIGGER_FEEDBACK =
-      1, /* constant resistance from `position`, at `strength` */
-  OOPS_TRIGGER_WEAPON =
-      2, /* a resistance wall between `position` and `position_end` */
-  OOPS_TRIGGER_VIBRATION =
-      3, /* vibration from `position`, at `strength` and `frequency` */
+    OOPS_TRIGGER_OFF = 0,      /* release any effect - the resistance-free default */
+    OOPS_TRIGGER_FEEDBACK = 1, /* constant resistance from `position`, at `strength` */
+    OOPS_TRIGGER_WEAPON =
+        2, /* a resistance wall between `position` and `position_end` */
+    OOPS_TRIGGER_VIBRATION =
+        3, /* vibration from `position`, at `strength` and `frequency` */
 };
 
 /* Which trigger an effect targets. */
 enum {
-  OOPS_TRIGGER_L2 = 1u << 0,
-  OOPS_TRIGGER_R2 = 1u << 1,
+    OOPS_TRIGGER_L2 = 1u << 0,
+    OOPS_TRIGGER_R2 = 1u << 1,
 };
 
 /*
@@ -131,26 +135,27 @@ int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
                           unsigned int max_samples);
 
 /*
- * Whether `oops_input_poll` folds a keyboard's keys in as pad buttons on port 0. Default **on**.
+ * Whether `oops_input_poll` folds a keyboard's keys in as pad buttons on port 0.
+ * Default **on**.
  *
- * Keyboard-as-pad is a *fallback for an application that only understands a pad*: arrows and
- * WASD become the D-pad, Enter becomes Cross, Escape becomes Circle, and a console with no
- * controller is still usable. `oops_keyboard_poll_buttons` has always done this and SeaShell has
- * always relied on it.
+ * Keyboard-as-pad is a *fallback for an application that only understands a pad*:
+ * arrows and WASD become the D-pad, Enter becomes Cross, Escape becomes Circle, and a
+ * console with no controller is still usable. `oops_keyboard_poll_buttons` has always
+ * done this and SeaShell has always relied on it.
  *
- * **An application that reads real characters should turn it off**, because the same key arrives
- * twice with two different meanings: press `a` in a GLUT program and it is both the letter `a`
- * and `GLUT_KEY_LEFT`. Measured on hardware 2026-09-22, where `fbotexture` got both; it has no
- * special-key handler so nothing came of it, and the next program will not be so lucky.
+ * **An application that reads real characters should turn it off**, because the same
+ * key arrives twice with two different meanings: press `a` in a GLUT program and it is
+ * both the letter `a` and `GLUT_KEY_LEFT`. Measured on hardware 2026-09-22, where
+ * `fbotexture` got both; it has no special-key handler so nothing came of it, and the
+ * next program will not be so lucky.
  *
- * oops-sdk's own GLUT calls this with 0 from `glutKeyboardFunc`, so a GLUT program that wants
- * characters gets characters and one that does not keeps the fallback. Nothing else in the SDK
- * changes it.
+ * oops-sdk's own GLUT calls this with 0 from `glutKeyboardFunc`, so a GLUT program that
+ * wants characters gets characters and one that does not keeps the fallback. Nothing
+ * else in the SDK changes it.
  */
 void oops_input_set_keyboard_as_pad(int enable);
 
-int oops_input_set_rumble(unsigned int port, uint8_t small_motor,
-                          uint8_t large_motor);
+int oops_input_set_rumble(unsigned int port, uint8_t small_motor, uint8_t large_motor);
 int oops_input_set_lightbar(unsigned int port, uint8_t r, uint8_t g, uint8_t b);
 int oops_input_reset_orientation(unsigned int port);
 
@@ -172,10 +177,9 @@ int oops_input_adaptive_triggers_available(unsigned int port);
  * not, so this returns a negative code rather than pass a guessed struct. A
  * write-extent capture of the parameter is what completes it.
  */
-int oops_input_set_trigger_effect(unsigned int port, unsigned int triggers,
-                                  int mode, uint8_t position,
-                                  uint8_t position_end, uint8_t strength,
-                                  uint8_t frequency);
+int oops_input_set_trigger_effect(unsigned int port, unsigned int triggers, int mode,
+                                  uint8_t position, uint8_t position_end,
+                                  uint8_t strength, uint8_t frequency);
 
 void oops_input_close(void);
 

@@ -71,41 +71,43 @@ static oops_js_value_t js_val_to_oops(JSContext *ctx, JSValueConst v) {
 
 static JSValue oops_val_to_js(JSContext *ctx, oops_js_value_t val) {
     switch (val.type) {
-        case OOPS_JS_TYPE_INT:
-            return JS_NewInt32(ctx, val.u.integer);
-        case OOPS_JS_TYPE_BOOL:
-            return JS_NewBool(ctx, val.u.boolean);
-        case OOPS_JS_TYPE_FLOAT:
-            return JS_NewFloat64(ctx, val.u.number);
-        case OOPS_JS_TYPE_STRING:
-            return val.u.string ? JS_NewString(ctx, val.u.string) : JS_NULL;
-        case OOPS_JS_TYPE_NULL:
-            return JS_NULL;
-        case OOPS_JS_TYPE_UNDEFINED:
-        default:
-            return JS_UNDEFINED;
+    case OOPS_JS_TYPE_INT:
+        return JS_NewInt32(ctx, val.u.integer);
+    case OOPS_JS_TYPE_BOOL:
+        return JS_NewBool(ctx, val.u.boolean);
+    case OOPS_JS_TYPE_FLOAT:
+        return JS_NewFloat64(ctx, val.u.number);
+    case OOPS_JS_TYPE_STRING:
+        return val.u.string ? JS_NewString(ctx, val.u.string) : JS_NULL;
+    case OOPS_JS_TYPE_NULL:
+        return JS_NULL;
+    case OOPS_JS_TYPE_UNDEFINED:
+    default:
+        return JS_UNDEFINED;
     }
 }
 
-static JSValue native_thunk(JSContext *ctx, JSValueConst this_val,
-                            int argc, JSValueConst *argv, int magic) {
+static JSValue native_thunk(JSContext *ctx, JSValueConst this_val, int argc,
+                            JSValueConst *argv, int magic) {
     (void)this_val;
-    /* The oops_js_t is found via the *runtime* opaque, not the context opaque. The context opaque
-     * is a single slot an embedder may need for its own back-pointer - the webview sets it to its
-     * oops_webview_t so its fetch/console/DOM callbacks can find it - and if this thunk read it as
-     * an oops_js_t it would dereference that unrelated struct (the crash oopsy-daisy hit: the
-     * webview's 1280x720 dims sat where the callback pointer was expected). Each oops_js_t owns its
-     * runtime, so the runtime opaque is a private, collision-free home for it. */
+    /* The oops_js_t is found via the *runtime* opaque, not the context opaque. The
+     * context opaque is a single slot an embedder may need for its own back-pointer -
+     * the webview sets it to its oops_webview_t so its fetch/console/DOM callbacks can
+     * find it - and if this thunk read it as an oops_js_t it would dereference that
+     * unrelated struct (the crash oopsy-daisy hit: the webview's 1280x720 dims sat
+     * where the callback pointer was expected). Each oops_js_t owns its runtime, so the
+     * runtime opaque is a private, collision-free home for it. */
     oops_js_t *js = (oops_js_t *)JS_GetRuntimeOpaque(JS_GetRuntime(ctx));
-    oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG thunk entered magic=%d js=%lx", magic,
-                       (unsigned long)(uintptr_t)js);
+    oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG thunk entered magic=%d js=%lx",
+                       magic, (unsigned long)(uintptr_t)js);
     if (!js || magic < 0 || magic >= js->binding_count) {
         return JS_UNDEFINED;
     }
 
     oops_js_fn_binding_t *b = &js->bindings[magic];
-    oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG thunk count=%d fn=%lx ud=%lx", js->binding_count,
-                       (unsigned long)(uintptr_t)b->fn, (unsigned long)(uintptr_t)b->userdata);
+    oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG thunk count=%d fn=%lx ud=%lx",
+                       js->binding_count, (unsigned long)(uintptr_t)b->fn,
+                       (unsigned long)(uintptr_t)b->userdata);
     oops_js_value_t *arg_vals = NULL;
     if (argc > 0) {
         arg_vals = (oops_js_value_t *)malloc(sizeof(oops_js_value_t) * (size_t)argc);
@@ -150,9 +152,10 @@ oops_js_t *oops_js_create(void) {
         return NULL;
     }
 
-    /* The runtime opaque is this instance's authoritative back-pointer, used by native_thunk - see
-     * the note there. The context opaque is also set for callers that expect it, but an embedder
-     * (e.g. the webview) may repurpose the context opaque, so nothing internal relies on it. */
+    /* The runtime opaque is this instance's authoritative back-pointer, used by
+     * native_thunk - see the note there. The context opaque is also set for callers
+     * that expect it, but an embedder (e.g. the webview) may repurpose the context
+     * opaque, so nothing internal relies on it. */
     JS_SetRuntimeOpaque(js->rt, js);
     JS_SetContextOpaque(js->ctx, js);
     oops_log_debug("JS", "QuickJS runtime and context initialized");
@@ -160,7 +163,8 @@ oops_js_t *oops_js_create(void) {
 }
 
 void oops_js_destroy(oops_js_t *js) {
-    if (!js) return;
+    if (!js)
+        return;
 
     if (js->ctx) {
         JS_FreeContext(js->ctx);
@@ -174,13 +178,15 @@ void oops_js_destroy(oops_js_t *js) {
     oops_log_debug("JS", "QuickJS context destroyed");
 }
 
-int oops_js_eval(oops_js_t *js, const char *src, const char *name, oops_js_value_t *out) {
+int oops_js_eval(oops_js_t *js, const char *src, const char *name,
+                 oops_js_value_t *out) {
     if (!js || !js->ctx || !src) {
         oops_log_error("JS", "eval called with invalid parameters");
         return -1;
     }
 
-    if (!name) name = "<eval>";
+    if (!name)
+        name = "<eval>";
 
     oops_log_debug("JS", "Evaluating script: %s", name);
     JSValue result = JS_Eval(js->ctx, src, strlen(src), name, JS_EVAL_TYPE_GLOBAL);
@@ -188,12 +194,17 @@ int oops_js_eval(oops_js_t *js, const char *src, const char *name, oops_js_value
     if (JS_IsException(result)) {
         JSValue exception_val = JS_GetException(js->ctx);
         const char *err = JS_ToCString(js->ctx, exception_val);
-        oops_log_error("JS", "Eval exception in '%s': %s", name, err ? err : "unknown error");
-        if (err) JS_FreeCString(js->ctx, err);
+        oops_log_error("JS", "Eval exception in '%s': %s", name,
+                       err ? err : "unknown error");
+        if (err)
+            JS_FreeCString(js->ctx, err);
         JSValue stk = JS_GetPropertyStr(js->ctx, exception_val, "stack");
         if (!JS_IsUndefined(stk)) {
             const char *s = JS_ToCString(js->ctx, stk);
-            if (s) { oops_log_error("JS", "  stack: %s", s); JS_FreeCString(js->ctx, s); }
+            if (s) {
+                oops_log_error("JS", "  stack: %s", s);
+                JS_FreeCString(js->ctx, s);
+            }
         }
         JS_FreeValue(js->ctx, stk);
         JS_FreeValue(js->ctx, exception_val);
@@ -208,10 +219,13 @@ int oops_js_eval(oops_js_t *js, const char *src, const char *name, oops_js_value
     return 0;
 }
 
-int oops_js_register_fn(oops_js_t *js, const char *name, oops_js_native_fn fn, void *userdata) {
-    if (!js || !js->ctx || !name || !fn) return -1;
+int oops_js_register_fn(oops_js_t *js, const char *name, oops_js_native_fn fn,
+                        void *userdata) {
+    if (!js || !js->ctx || !name || !fn)
+        return -1;
     if (js->binding_count >= MAX_BINDINGS) {
-        oops_log_error("JS", "Cannot register function '%s': max bindings reached", name);
+        oops_log_error("JS", "Cannot register function '%s': max bindings reached",
+                       name);
         return -1;
     }
 
@@ -220,10 +234,11 @@ int oops_js_register_fn(oops_js_t *js, const char *name, oops_js_native_fn fn, v
     js->bindings[id].userdata = userdata;
 
     JSValue global_obj = JS_GetGlobalObject(js->ctx);
-    JSValue func_obj = JS_NewCFunctionMagic(js->ctx, (JSCFunctionMagic *)native_thunk, name, 0,
-                                            JS_CFUNC_generic_magic, id);
-    oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG reg '%s' id=%d thunk=%lx obj=%lx", name, id,
-                       (unsigned long)(uintptr_t)&native_thunk, (unsigned long)(uintptr_t)JS_VALUE_GET_PTR(func_obj));
+    JSValue func_obj = JS_NewCFunctionMagic(js->ctx, (JSCFunctionMagic *)native_thunk,
+                                            name, 0, JS_CFUNC_generic_magic, id);
+    oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG reg '%s' id=%d thunk=%lx obj=%lx",
+                       name, id, (unsigned long)(uintptr_t)&native_thunk,
+                       (unsigned long)(uintptr_t)JS_VALUE_GET_PTR(func_obj));
     JS_SetPropertyStr(js->ctx, global_obj, name, func_obj);
     JS_FreeValue(js->ctx, global_obj);
 
@@ -232,7 +247,8 @@ int oops_js_register_fn(oops_js_t *js, const char *name, oops_js_native_fn fn, v
 }
 
 int oops_js_set_global(oops_js_t *js, const char *name, oops_js_value_t val) {
-    if (!js || !js->ctx || !name) return -1;
+    if (!js || !js->ctx || !name)
+        return -1;
 
     JSValue global_obj = JS_GetGlobalObject(js->ctx);
     JSValue jv = oops_val_to_js(js->ctx, val);
@@ -242,7 +258,8 @@ int oops_js_set_global(oops_js_t *js, const char *name, oops_js_value_t val) {
 }
 
 oops_js_value_t oops_js_get_global(oops_js_t *js, const char *name) {
-    if (!js || !js->ctx || !name) return oops_js_make_undefined();
+    if (!js || !js->ctx || !name)
+        return oops_js_make_undefined();
 
     JSValue global_obj = JS_GetGlobalObject(js->ctx);
     JSValue jv = JS_GetPropertyStr(js->ctx, global_obj, name);
@@ -254,7 +271,8 @@ oops_js_value_t oops_js_get_global(oops_js_t *js, const char *name) {
 }
 
 int oops_js_execute_pending_jobs(oops_js_t *js) {
-    if (!js || !js->rt) return 0;
+    if (!js || !js->rt)
+        return 0;
 
     int count = 0;
     JSContext *pctx;
@@ -318,7 +336,8 @@ oops_js_value_t oops_js_make_string(oops_js_t *js, const char *str) {
 
 void oops_js_free_value(oops_js_t *js, oops_js_value_t *val) {
     (void)js;
-    if (!val) return;
+    if (!val)
+        return;
     if (val->type == OOPS_JS_TYPE_STRING && val->u.string) {
         free(val->u.string);
         val->u.string = NULL;

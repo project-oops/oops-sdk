@@ -15,12 +15,11 @@ __attribute__((weak)) int sceAppInstUtilTerminate(void);
 __attribute__((weak)) int sceAppInstUtilAppExists(const char *titleId, int32_t *exists);
 
 typedef struct oops_pkg_progress_info {
-  uint32_t
-      state; /* 0 = Not installing, 1 = In progress, 2 = Completed, 3 = Error */
-  uint32_t progress_pct;      /* 0 - 100 */
-  uint64_t progress_bytes;    /* Bytes installed so far */
-  uint64_t total_bytes;       /* Total package payload size in bytes */
-  uint32_t remaining_seconds; /* Estimated rest seconds */
+    uint32_t state; /* 0 = Not installing, 1 = In progress, 2 = Completed, 3 = Error */
+    uint32_t progress_pct;      /* 0 - 100 */
+    uint64_t progress_bytes;    /* Bytes installed so far */
+    uint64_t total_bytes;       /* Total package payload size in bytes */
+    uint32_t remaining_seconds; /* Estimated rest seconds */
 } oops_pkg_progress_info_t;
 
 /**

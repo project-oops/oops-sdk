@@ -27,18 +27,18 @@ typedef struct oops_webview_event {
     oops_webview_event_type_t type;
     union {
         struct {
-            uint32_t buttons;      /* Pad button bitmask */
-            float lx, ly;          /* Left analog stick [-1.0, 1.0] */
-            float rx, ry;          /* Right analog stick [-1.0, 1.0] */
+            uint32_t buttons; /* Pad button bitmask */
+            float lx, ly;     /* Left analog stick [-1.0, 1.0] */
+            float rx, ry;     /* Right analog stick [-1.0, 1.0] */
         } pad;
         struct {
-            uint32_t keycode;      /* Keycode / ASCII value */
-            uint32_t modifiers;    /* Modifiers (shift/ctrl/alt) */
+            uint32_t keycode;   /* Keycode / ASCII value */
+            uint32_t modifiers; /* Modifiers (shift/ctrl/alt) */
         } key;
         struct {
-            int32_t x, y;          /* Coordinates */
-            int32_t dx, dy;        /* Relative delta */
-            uint32_t button;       /* 1=Left, 2=Right, 3=Middle */
+            int32_t x, y;    /* Coordinates */
+            int32_t dx, dy;  /* Relative delta */
+            uint32_t button; /* 1=Left, 2=Right, 3=Middle */
         } mouse;
     } u;
 } oops_webview_event_t;

@@ -14,11 +14,11 @@
 #ifndef OOPS_HOST_BUILD
 #include "oops/heap.h"
 #define zip_alloc(sz) oops_malloc(sz)
-#define zip_free(p)   oops_free(p)
+#define zip_free(p) oops_free(p)
 #else
 #include <stdlib.h>
 #define zip_alloc(sz) malloc(sz)
-#define zip_free(p)   free(p)
+#define zip_free(p) free(p)
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -51,7 +51,8 @@ typedef struct {
 static int puff_bits(puff_state_t *s, int need) {
     int val = s->bitbuf;
     while (s->bitcnt < need) {
-        if (s->incnt >= s->inlen) return -1; /* Out of input */
+        if (s->incnt >= s->inlen)
+            return -1; /* Out of input */
         val |= (int)(s->in[s->incnt++]) << s->bitcnt;
         s->bitcnt += 8;
     }
@@ -68,7 +69,8 @@ static int puff_decode(puff_state_t *s, const puff_huffman_t *h) {
 
     for (len = 1; len <= PUFF_MAXBITS; len++) {
         int b = puff_bits(s, 1);
-        if (b < 0) return -1;
+        if (b < 0)
+            return -1;
         code |= b;
         int count = h->count[len];
         if (code - count < first) {
@@ -87,18 +89,22 @@ static int puff_build_huffman(puff_huffman_t *h, const short *lengths, int n) {
     int symbol;
     short offsets[PUFF_MAXBITS + 1];
 
-    for (len = 0; len <= PUFF_MAXBITS; len++) h->count[len] = 0;
+    for (len = 0; len <= PUFF_MAXBITS; len++)
+        h->count[len] = 0;
     for (symbol = 0; symbol < n; symbol++) {
-        if (lengths[symbol] < 0 || lengths[symbol] > PUFF_MAXBITS) return -1;
+        if (lengths[symbol] < 0 || lengths[symbol] > PUFF_MAXBITS)
+            return -1;
         h->count[lengths[symbol]]++;
     }
-    if (h->count[0] == n) return 0; /* Complete empty table */
+    if (h->count[0] == n)
+        return 0; /* Complete empty table */
 
     int left = 1;
     for (len = 1; len <= PUFF_MAXBITS; len++) {
         left <<= 1;
         left -= h->count[len];
-        if (left < 0) return -10; /* Over-subscribed */
+        if (left < 0)
+            return -10; /* Over-subscribed */
     }
 
     offsets[1] = 0;
@@ -118,15 +124,21 @@ static int puff_stored(puff_state_t *s) {
     s->bitbuf = 0;
     s->bitcnt = 0;
 
-    if (s->incnt + 4 > s->inlen) return -2;
-    unsigned int len = (unsigned int)s->in[s->incnt] | ((unsigned int)s->in[s->incnt + 1] << 8);
+    if (s->incnt + 4 > s->inlen)
+        return -2;
+    unsigned int len =
+        (unsigned int)s->in[s->incnt] | ((unsigned int)s->in[s->incnt + 1] << 8);
     s->incnt += 2;
-    unsigned int nlen = (unsigned int)s->in[s->incnt] | ((unsigned int)s->in[s->incnt + 1] << 8);
+    unsigned int nlen =
+        (unsigned int)s->in[s->incnt] | ((unsigned int)s->in[s->incnt + 1] << 8);
     s->incnt += 2;
 
-    if (len != (unsigned int)(~nlen & 0xffff)) return -2;
-    if (s->incnt + len > s->inlen) return -2;
-    if (s->outcnt + len > s->outlen) return -1;
+    if (len != (unsigned int)(~nlen & 0xffff))
+        return -2;
+    if (s->incnt + len > s->inlen)
+        return -2;
+    if (s->outcnt + len > s->outlen)
+        return -1;
 
     for (unsigned int i = 0; i < len; i++) {
         s->out[s->outcnt++] = s->in[s->incnt++];
@@ -134,53 +146,57 @@ static int puff_stored(puff_state_t *s) {
     return 0;
 }
 
-static int puff_codes(puff_state_t *s, const puff_huffman_t *lencode, const puff_huffman_t *distcode) {
-    static const short lens[29] = {
-        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
-        35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258
-    };
-    static const short lext[29] = {
-        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
-        3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0
-    };
-    static const short dists[30] = {
-        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
-        257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,
-        8193, 12289, 16385, 24577
-    };
-    static const short dext[30] = {
-        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
-        7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13
-    };
+static int puff_codes(puff_state_t *s, const puff_huffman_t *lencode,
+                      const puff_huffman_t *distcode) {
+    static const short lens[29] = {3,  4,  5,  6,   7,   8,   9,   10,  11, 13,
+                                   15, 17, 19, 23,  27,  31,  35,  43,  51, 59,
+                                   67, 83, 99, 115, 131, 163, 195, 227, 258};
+    static const short lext[29] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2,
+                                   2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+    static const short dists[30] = {1,    2,    3,    4,     5,     7,    9,    13,
+                                    17,   25,   33,   49,    65,    97,   129,  193,
+                                    257,  385,  513,  769,   1025,  1537, 2049, 3073,
+                                    4097, 6145, 8193, 12289, 16385, 24577};
+    static const short dext[30] = {0, 0, 0, 0, 1, 1, 2, 2,  3,  3,  4,  4,  5,  5,  6,
+                                   6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
 
     for (;;) {
         int symbol = puff_decode(s, lencode);
-        if (symbol < 0) return symbol;
+        if (symbol < 0)
+            return symbol;
         if (symbol < 256) {
-            if (s->outcnt >= s->outlen) return -1;
+            if (s->outcnt >= s->outlen)
+                return -1;
             s->out[s->outcnt++] = (unsigned char)symbol;
         } else if (symbol == 256) {
             break; /* End of block */
         } else {
             symbol -= 257;
-            if (symbol >= 29) return -10;
+            if (symbol >= 29)
+                return -10;
             int len = lens[symbol];
             if (lext[symbol]) {
                 int extra = puff_bits(s, lext[symbol]);
-                if (extra < 0) return extra;
+                if (extra < 0)
+                    return extra;
                 len += extra;
             }
             int dsym = puff_decode(s, distcode);
-            if (dsym < 0) return dsym;
-            if (dsym >= 30) return -10;
+            if (dsym < 0)
+                return dsym;
+            if (dsym >= 30)
+                return -10;
             int dist = dists[dsym];
             if (dext[dsym]) {
                 int extra = puff_bits(s, dext[dsym]);
-                if (extra < 0) return extra;
+                if (extra < 0)
+                    return extra;
                 dist += extra;
             }
-            if ((unsigned long)dist > s->outcnt) return -11; /* Distance too far back */
-            if (s->outcnt + (unsigned long)len > s->outlen) return -1;
+            if ((unsigned long)dist > s->outcnt)
+                return -11; /* Distance too far back */
+            if (s->outcnt + (unsigned long)len > s->outlen)
+                return -1;
             while (len--) {
                 s->out[s->outcnt] = s->out[s->outcnt - (unsigned long)dist];
                 s->outcnt++;
@@ -197,13 +213,18 @@ static int puff_fixed(puff_state_t *s) {
     if (virgin) {
         short lengths[PUFF_FIXLCODES];
         int symbol;
-        for (symbol = 0; symbol < 144; symbol++) lengths[symbol] = 8;
-        for (; symbol < 256; symbol++) lengths[symbol] = 9;
-        for (; symbol < 280; symbol++) lengths[symbol] = 7;
-        for (; symbol < PUFF_FIXLCODES; symbol++) lengths[symbol] = 8;
+        for (symbol = 0; symbol < 144; symbol++)
+            lengths[symbol] = 8;
+        for (; symbol < 256; symbol++)
+            lengths[symbol] = 9;
+        for (; symbol < 280; symbol++)
+            lengths[symbol] = 7;
+        for (; symbol < PUFF_FIXLCODES; symbol++)
+            lengths[symbol] = 8;
         puff_build_huffman(&lencode, lengths, PUFF_FIXLCODES);
 
-        for (symbol = 0; symbol < PUFF_MAXDCODES; symbol++) lengths[symbol] = 5;
+        for (symbol = 0; symbol < PUFF_MAXDCODES; symbol++)
+            lengths[symbol] = 5;
         puff_build_huffman(&distcode, lengths, PUFF_MAXDCODES);
         virgin = 0;
     }
@@ -211,62 +232,74 @@ static int puff_fixed(puff_state_t *s) {
 }
 
 static int puff_dynamic(puff_state_t *s) {
-    static const short order[19] = {
-        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
-    };
+    static const short order[19] = {16, 17, 18, 0, 8,  7, 9,  6, 10, 5,
+                                    11, 4,  12, 3, 13, 2, 14, 1, 15};
     int nlen = puff_bits(s, 5);
     int ndist = puff_bits(s, 5);
     int ncode = puff_bits(s, 4);
-    if (nlen < 0 || ndist < 0 || ncode < 0) return -1;
+    if (nlen < 0 || ndist < 0 || ncode < 0)
+        return -1;
     nlen += 257;
     ndist += 1;
     ncode += 4;
-    if (nlen > PUFF_MAXLCODES || ndist > PUFF_MAXDCODES) return -10;
+    if (nlen > PUFF_MAXLCODES || ndist > PUFF_MAXDCODES)
+        return -10;
 
     short lengths[PUFF_MAXCODES];
-    for (int index = 0; index < 19; index++) lengths[index] = 0;
+    for (int index = 0; index < 19; index++)
+        lengths[index] = 0;
     for (int index = 0; index < ncode; index++) {
         int b = puff_bits(s, 3);
-        if (b < 0) return b;
+        if (b < 0)
+            return b;
         lengths[order[index]] = (short)b;
     }
 
     puff_huffman_t codec;
     int err = puff_build_huffman(&codec, lengths, 19);
-    if (err) return err;
+    if (err)
+        return err;
 
     int index = 0;
     while (index < nlen + ndist) {
         int symbol = puff_decode(s, &codec);
-        if (symbol < 0) return symbol;
+        if (symbol < 0)
+            return symbol;
         if (symbol < 16) {
             lengths[index++] = (short)symbol;
         } else {
             int len = 0;
             if (symbol == 16) {
-                if (index == 0) return -10;
+                if (index == 0)
+                    return -10;
                 len = lengths[index - 1];
                 int count = puff_bits(s, 2);
-                if (count < 0) return count;
+                if (count < 0)
+                    return count;
                 count += 3;
                 while (count--) {
-                    if (index >= nlen + ndist) return -10;
+                    if (index >= nlen + ndist)
+                        return -10;
                     lengths[index++] = (short)len;
                 }
             } else if (symbol == 17) {
                 int count = puff_bits(s, 3);
-                if (count < 0) return count;
+                if (count < 0)
+                    return count;
                 count += 3;
                 while (count--) {
-                    if (index >= nlen + ndist) return -10;
+                    if (index >= nlen + ndist)
+                        return -10;
                     lengths[index++] = 0;
                 }
             } else {
                 int count = puff_bits(s, 7);
-                if (count < 0) return count;
+                if (count < 0)
+                    return count;
                 count += 11;
                 while (count--) {
-                    if (index >= nlen + ndist) return -10;
+                    if (index >= nlen + ndist)
+                        return -10;
                     lengths[index++] = 0;
                 }
             }
@@ -275,9 +308,11 @@ static int puff_dynamic(puff_state_t *s) {
 
     puff_huffman_t lencode, distcode;
     err = puff_build_huffman(&lencode, lengths, nlen);
-    if (err) return err;
+    if (err)
+        return err;
     err = puff_build_huffman(&distcode, lengths + nlen, ndist);
-    if (err) return err;
+    if (err)
+        return err;
 
     return puff_codes(s, &lencode, &distcode);
 }
@@ -299,14 +334,26 @@ static int oops_inflate(unsigned char *dest, unsigned long *destlen,
     do {
         last = puff_bits(&s, 1);
         int type = puff_bits(&s, 2);
-        if (last < 0 || type < 0) { err = -1; break; }
-        switch (type) {
-            case 0: err = puff_stored(&s); break;
-            case 1: err = puff_fixed(&s); break;
-            case 2: err = puff_dynamic(&s); break;
-            default: err = -10; break;
+        if (last < 0 || type < 0) {
+            err = -1;
+            break;
         }
-        if (err != 0) break;
+        switch (type) {
+        case 0:
+            err = puff_stored(&s);
+            break;
+        case 1:
+            err = puff_fixed(&s);
+            break;
+        case 2:
+            err = puff_dynamic(&s);
+            break;
+        default:
+            err = -10;
+            break;
+        }
+        if (err != 0)
+            break;
     } while (!last);
 
     *destlen = s.outcnt;
@@ -323,18 +370,18 @@ static uint16_t read_u16_le(const uint8_t *p) {
 }
 
 static uint32_t read_u32_le(const uint8_t *p) {
-    return (uint32_t)((uint32_t)p[0] |
-                     ((uint32_t)p[1] << 8) |
-                     ((uint32_t)p[2] << 16) |
-                     ((uint32_t)p[3] << 24));
+    return (uint32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+                      ((uint32_t)p[3] << 24));
 }
 
 /* Recursive directory creator */
 static int mkdir_recursive(const char *dir_path) {
-    if (!dir_path || !*dir_path) return 0;
+    if (!dir_path || !*dir_path)
+        return 0;
     char path[512];
     size_t len = obs_strlen(dir_path);
-    if (len >= sizeof(path)) return -1;
+    if (len >= sizeof(path))
+        return -1;
     obs_strncpy(path, dir_path, sizeof(path) - 1);
     path[sizeof(path) - 1] = '\0';
 
@@ -391,7 +438,8 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
 
     /* Ensure base destination directory exists */
     mkdir_recursive(dest_dir);
-    oops_log_info("ZIP", "extracting archive (%zu bytes) with %u entries to '%s'", zip_size, total_entries, dest_dir);
+    oops_log_info("ZIP", "extracting archive (%zu bytes) with %u entries to '%s'",
+                  zip_size, total_entries, dest_dir);
 
     const uint8_t *cd_ptr = data + cd_offset;
 
@@ -401,7 +449,8 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
             return OOPS_ZIP_ERR_BAD_HEADER;
         }
         if (read_u32_le(cd_ptr) != 0x02014b50) {
-            oops_log_warn("ZIP", "entry %u bad magic: 0x%08x", entry, read_u32_le(cd_ptr));
+            oops_log_warn("ZIP", "entry %u bad magic: 0x%08x", entry,
+                          read_u32_le(cd_ptr));
             return OOPS_ZIP_ERR_BAD_HEADER;
         }
 
@@ -425,11 +474,12 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
             fname[i] = (char)cd_ptr[46 + i];
         }
         fname[fname_len] = '\0';
-        oops_log_debug("ZIP", "entry %u/%u: '%s' (method=%u, comp=%u, uncomp=%u)", entry + 1, total_entries, fname, method, comp_size, uncomp_size);
+        oops_log_debug("ZIP", "entry %u/%u: '%s' (method=%u, comp=%u, uncomp=%u)",
+                       entry + 1, total_entries, fname, method, comp_size, uncomp_size);
 
         /* Sanitize filename: reject path traversal */
-        if (fname[0] == '/' || fname[0] == '\\' ||
-            obs_strstr(fname, "../") || obs_strstr(fname, "..\\")) {
+        if (fname[0] == '/' || fname[0] == '\\' || obs_strstr(fname, "../") ||
+            obs_strstr(fname, "..\\")) {
             return OOPS_ZIP_ERR_PARAM;
         }
 
@@ -458,7 +508,8 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
             parent[sizeof(parent) - 1] = '\0';
             char *last_slash = (char *)0;
             for (char *c = parent; *c; c++) {
-                if (*c == '/' || *c == '\\') last_slash = c;
+                if (*c == '/' || *c == '\\')
+                    last_slash = c;
             }
             if (last_slash) {
                 *last_slash = '\0';
@@ -486,12 +537,15 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
                 if (comp_size != uncomp_size) {
                     return OOPS_ZIP_ERR_BAD_HEADER;
                 }
-                int fd = oops_fs_open(target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0644);
-                if (fd < 0) return OOPS_ZIP_ERR_WRITE;
+                int fd = oops_fs_open(
+                    target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0644);
+                if (fd < 0)
+                    return OOPS_ZIP_ERR_WRITE;
                 if (comp_size > 0) {
                     int64_t w = oops_fs_write(fd, payload, comp_size);
                     oops_fs_close(fd);
-                    if (w != (int64_t)comp_size) return OOPS_ZIP_ERR_WRITE;
+                    if (w != (int64_t)comp_size)
+                        return OOPS_ZIP_ERR_WRITE;
                 } else {
                     oops_fs_close(fd);
                 }
@@ -500,27 +554,32 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
                 uint8_t *uncomp_buf = NULL;
                 if (uncomp_size > 0) {
                     uncomp_buf = (uint8_t *)zip_alloc(uncomp_size);
-                    if (!uncomp_buf) return OOPS_ZIP_ERR_NOMEM;
+                    if (!uncomp_buf)
+                        return OOPS_ZIP_ERR_NOMEM;
                 }
 
                 unsigned long dest_len = uncomp_size;
                 unsigned long src_len = comp_size;
                 int ret = oops_inflate(uncomp_buf, &dest_len, payload, &src_len);
                 if (ret != 0 || dest_len != uncomp_size) {
-                    if (uncomp_buf) zip_free(uncomp_buf);
+                    if (uncomp_buf)
+                        zip_free(uncomp_buf);
                     return OOPS_ZIP_ERR_DECOMPRESS;
                 }
 
-                int fd = oops_fs_open(target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0644);
+                int fd = oops_fs_open(
+                    target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0644);
                 if (fd < 0) {
-                    if (uncomp_buf) zip_free(uncomp_buf);
+                    if (uncomp_buf)
+                        zip_free(uncomp_buf);
                     return OOPS_ZIP_ERR_WRITE;
                 }
                 if (uncomp_size > 0) {
                     int64_t w = oops_fs_write(fd, uncomp_buf, uncomp_size);
                     oops_fs_close(fd);
                     zip_free(uncomp_buf);
-                    if (w != (int64_t)uncomp_size) return OOPS_ZIP_ERR_WRITE;
+                    if (w != (int64_t)uncomp_size)
+                        return OOPS_ZIP_ERR_WRITE;
                 } else {
                     oops_fs_close(fd);
                 }
@@ -557,4 +616,3 @@ int oops_zip_extract(const char *zip_path, const char *dest_dir) {
     }
     return rc;
 }
-

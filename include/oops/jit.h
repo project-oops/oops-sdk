@@ -12,10 +12,12 @@ extern "C" {
  * Strategy used to establish executable dynamic memory.
  */
 typedef enum oops_jit_method {
-  OOPS_JIT_METHOD_NONE = 0,       /* Dynamic executable memory is unavailable */
-  OOPS_JIT_METHOD_SHARED_MEM = 1, /* Sony sceKernelJitCreateSharedMemory dual-mapping */
-  OOPS_JIT_METHOD_MPROTECT = 2,   /* mprotect / mmap execution (unlocked under kstuff-lite) */
-  OOPS_JIT_METHOD_HOST = 3        /* Host test environment (POSIX mprotect / mmap) */
+    OOPS_JIT_METHOD_NONE = 0, /* Dynamic executable memory is unavailable */
+    OOPS_JIT_METHOD_SHARED_MEM =
+        1, /* Sony sceKernelJitCreateSharedMemory dual-mapping */
+    OOPS_JIT_METHOD_MPROTECT =
+        2, /* mprotect / mmap execution (unlocked under kstuff-lite) */
+    OOPS_JIT_METHOD_HOST = 3 /* Host test environment (POSIX mprotect / mmap) */
 } oops_jit_method_t;
 
 /**
@@ -31,11 +33,11 @@ typedef enum oops_jit_method {
  * may point to the same virtual address.
  */
 typedef struct oops_jit_memory {
-  void *rx_addr;  /* Executable view (read-exec) */
-  void *rw_addr;  /* Writable view (read-write) */
-  size_t size;    /* Allocated size in bytes (page-aligned) */
-  int handle;     /* Shared memory handle descriptor, or -1 */
-  int method;     /* Method used (oops_jit_method_t) */
+    void *rx_addr; /* Executable view (read-exec) */
+    void *rw_addr; /* Writable view (read-write) */
+    size_t size;   /* Allocated size in bytes (page-aligned) */
+    int handle;    /* Shared memory handle descriptor, or -1 */
+    int method;    /* Method used (oops_jit_method_t) */
 } oops_jit_memory_t;
 
 /**
@@ -91,4 +93,3 @@ int oops_jit_flush_icache(const void *addr, size_t size);
 #endif
 
 #endif /* OOPS_JIT_H */
-

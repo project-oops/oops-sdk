@@ -27,12 +27,12 @@ typedef struct oops_gpu_shader oops_gpu_shader_t;
  * - grid_x, grid_y, grid_z: Threadgroup dimensions for DISPATCH_DIRECT.
  */
 typedef struct oops_gpu_dispatch {
-  const oops_gpu_shader_t *shader;
-  const uint32_t *user_data;
-  uint32_t user_data_count;
-  uint32_t grid_x;
-  uint32_t grid_y;
-  uint32_t grid_z;
+    const oops_gpu_shader_t *shader;
+    const uint32_t *user_data;
+    uint32_t user_data_count;
+    uint32_t grid_x;
+    uint32_t grid_y;
+    uint32_t grid_z;
 } oops_gpu_dispatch_t;
 
 /*
@@ -65,9 +65,8 @@ void oops_gpu_destroy_queue(oops_gpu_queue_t *queue);
  * Instantiate an RDNA2 GFX10.3 compute shader from its container header and
  * bytecode payload via sceAgcCreateShader.
  */
-oops_gpu_shader_t *oops_gpu_create_shader(const void *container_hdr,
-                                          size_t hdr_size, const void *payload,
-                                          size_t payload_size);
+oops_gpu_shader_t *oops_gpu_create_shader(const void *container_hdr, size_t hdr_size,
+                                          const void *payload, size_t payload_size);
 
 /*
  * Destroy and release memory associated with a compute shader object.
@@ -84,8 +83,7 @@ void oops_gpu_destroy_shader(oops_gpu_shader_t *shader);
  * - Submits DCB to libSceAgcDriver and waits on fence retirement.
  * Returns 0 on success, negative on error.
  */
-int oops_gpu_dispatch(oops_gpu_queue_t *queue,
-                      const oops_gpu_dispatch_t *dispatch);
+int oops_gpu_dispatch(oops_gpu_queue_t *queue, const oops_gpu_dispatch_t *dispatch);
 
 /*
  * Query the latest retired fence value from the queue.

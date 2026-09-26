@@ -1,26 +1,27 @@
 /*
  * font8x8.h - the collection's one 8x8 bitmap font, ASCII 0x20 ' ' through 0x7E '~'.
  *
- * One table, two readers. The CPU rasteriser (`src/draw/draw.c`, `oops_draw_text`) walks it a
- * pixel at a time into a surface; the GL overlay (`src/hud/hud.c`, `oops_hud_text`) bakes it once
- * into a texture atlas. They were separate copies until the HUD needed the same glyphs the CPU
- * path draws - a shared header keeps them from drifting, the same reason `gl1_cube_scene.h` is
- * shared between a payload and its host self-test.
+ * One table, two readers. The CPU rasteriser (`src/draw/draw.c`, `oops_draw_text`)
+ * walks it a pixel at a time into a surface; the GL overlay (`src/hud/hud.c`,
+ * `oops_hud_text`) bakes it once into a texture atlas. They were separate copies until
+ * the HUD needed the same glyphs the CPU path draws - a shared header keeps them from
+ * drifting, the same reason `gl1_cube_scene.h` is shared between a payload and its host
+ * self-test.
  *
- * Each glyph is 8 rows of 8 bits, MSB the leftmost column: `(row >> (7 - col)) & 1` is the pixel.
- * A `static const` in a header is one small copy per translation unit (760 bytes); that is the
- * price of one source of truth here, and it is cheap.
+ * Each glyph is 8 rows of 8 bits, MSB the leftmost column: `(row >> (7 - col)) & 1` is
+ * the pixel. A `static const` in a header is one small copy per translation unit (760
+ * bytes); that is the price of one source of truth here, and it is cheap.
  */
 #ifndef OOPS_FONT8X8_H
 #define OOPS_FONT8X8_H
 
 #include <stdint.h>
 
-#define OOPS_FONT8X8_FIRST  0x20
-#define OOPS_FONT8X8_LAST   0x7E
-#define OOPS_FONT8X8_WIDTH  8
+#define OOPS_FONT8X8_FIRST 0x20
+#define OOPS_FONT8X8_LAST 0x7E
+#define OOPS_FONT8X8_WIDTH 8
 #define OOPS_FONT8X8_HEIGHT 8
-#define OOPS_FONT8X8_COUNT  95
+#define OOPS_FONT8X8_COUNT 95
 
 static const uint8_t oops_font8x8[OOPS_FONT8X8_COUNT][8] = {
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, /* ' ' */

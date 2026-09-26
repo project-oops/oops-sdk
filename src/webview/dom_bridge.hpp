@@ -29,9 +29,11 @@ struct dom_element_data {
 int dom_bridge_init(JSContext *ctx, oops_webview_t *wv, oops_container *container);
 
 // Wraps a litehtml::element into a QuickJS Element object
-JSValue dom_bridge_wrap_element(JSContext *ctx, oops_webview_t *wv, const litehtml::element::ptr& el);
+JSValue dom_bridge_wrap_element(JSContext *ctx, oops_webview_t *wv,
+                                const litehtml::element::ptr &el);
 
 // Dispatch DOM event to an element
-void dom_bridge_dispatch_event(JSContext *ctx, JSValue elem_obj, const char *event_type, JSValue event_obj);
+void dom_bridge_dispatch_event(JSContext *ctx, JSValue elem_obj, const char *event_type,
+                               JSValue event_obj);
 
 #endif // OOPS_DOM_BRIDGE_HPP

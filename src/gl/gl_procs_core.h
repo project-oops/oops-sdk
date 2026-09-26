@@ -1,44 +1,49 @@
 /*
- * The **core** entry points a title can resolve by name, as opposed to the extensions in
- * `gl_procs.h`.
+ * The **core** entry points a title can resolve by name, as opposed to the extensions
+ * in `gl_procs.h`.
  *
  * # Why core GL is in a lookup table at all
  *
- * `gl_procs.h` says the list holds extensions because "core GL 1.1 is linked directly, by symbol,
- * and never goes through here". That is true of Neverball, which calls `glBegin` and looks up only
- * what it might not get. **It is not true of an engine that resolves everything by string**, and
- * ioquake3 is one: `sdl_glimp.c:269` fills every `qgl*` pointer through `SDL_GL_GetProcAddress`,
- * core names included, and a single NULL makes `GLimp_GetProcAddresses` return false and the
- * renderer refuse to start:
+ * `gl_procs.h` says the list holds extensions because "core GL 1.1 is linked directly,
+ * by symbol, and never goes through here". That is true of Neverball, which calls
+ * `glBegin` and looks up only what it might not get. **It is not true of an engine that
+ * resolves everything by string**, and ioquake3 is one: `sdl_glimp.c:269` fills every
+ * `qgl*` pointer through `SDL_GL_GetProcAddress`, core names included, and a single
+ * NULL makes `GLimp_GetProcAddresses` return false and the renderer refuse to start:
  *
- *     #define GLE( ret, name, ... ) qgl##name = (name##proc *) SDL_GL_GetProcAddress("gl" #name); \
- *         if ( qgl##name == NULL ) { ...ERROR: Missing OpenGL function...; success = qfalse; }
+ *     #define GLE( ret, name, ... ) qgl##name = (name##proc *)
+ * SDL_GL_GetProcAddress("gl" #name); \ if ( qgl##name == NULL ) { ...ERROR: Missing
+ * OpenGL function...; success = qfalse; }
  *
- * Measured on q3rally before this file existed: it links with nothing undefined - every one of
- * those functions *is* in the payload - and asks for 66 of them by name, of which the table
- * answered **none**. A title in exactly that state boots, opens the display, prints 66 "Missing
- * OpenGL function" lines and stops. `oops-apps/src/oops-titles/q3rally/scripts/gl-surface.sh` is
- * the measurement, and it is worth running for any port that binds GL through a pointer table.
+ * Measured on q3rally before this file existed: it links with nothing undefined - every
+ * one of those functions *is* in the payload - and asks for 66 of them by name, of
+ * which the table answered **none**. A title in exactly that state boots, opens the
+ * display, prints 66 "Missing OpenGL function" lines and stops.
+ * `oops-apps/src/oops-titles/q3rally/scripts/gl-surface.sh` is the measurement, and it
+ * is worth running for any port that binds GL through a pointer table.
  *
  * # What is in here
  *
- * **Every entry point `GL/gl.h` declares that the always-linked GL objects define** - the set
- * `common/app.mk` calls `OOPS_GL_SRCS`, so not `glut.c` or `gl_glu.c`, whose names would be
- * undefined for a title that does not take those features and would fail its link. 485 of them,
- * derived rather than chosen; `gl_procs.h` keeps the extensions and their suffixed spellings.
+ * **Every entry point `GL/gl.h` declares that the always-linked GL objects define** -
+ * the set `common/app.mk` calls `OOPS_GL_SRCS`, so not `glut.c` or `gl_glu.c`, whose
+ * names would be undefined for a title that does not take those features and would fail
+ * its link. 485 of them, derived rather than chosen; `gl_procs.h` keeps the extensions
+ * and their suffixed spellings.
  *
- * oops-gl's own entry points are here too - `glContextSetVersion`, `glGetFrameReadback`,
- * `glGetHardwareStatus` and the rest. They are declared in the same header and they resolve, so a
- * program that asks for one by name should get it.
+ * oops-gl's own entry points are here too - `glContextSetVersion`,
+ * `glGetFrameReadback`, `glGetHardwareStatus` and the rest. They are declared in the
+ * same header and they resolve, so a program that asks for one by name should get it.
  *
- * **A name here that does not exist is a compile error**, because each appears as an identifier as
- * well as a string. That is what keeps the list from rotting, and it is the same property
- * `gl_procs.h` relies on.
+ * **A name here that does not exist is a compile error**, because each appears as an
+ * identifier as well as a string. That is what keeps the list from rotting, and it is
+ * the same property `gl_procs.h` relies on.
  */
 #ifndef OOPS_GL_PROCS_CORE_H
 #define OOPS_GL_PROCS_CORE_H
 
-/* X(name) for each. No suffixed spellings: those are extensions and live in `gl_procs.h`. */
+/* X(name) for each. No suffixed spellings: those are extensions and live in
+ * `gl_procs.h`. */
+// clang-format off
 #define OOPS_GL_PROC_LIST_CORE(X) \
 X(glAccum) X(glAlphaFunc) X(glAreTexturesResident) X(glArrayElement) X(glAttachShader) \
     X(glBegin) X(glBindAttribLocation) X(glBindFramebuffer) X(glBindRenderbuffer) X(glBindTexture) \
@@ -138,5 +143,6 @@ X(glAccum) X(glAlphaFunc) X(glAreTexturesResident) X(glArrayElement) X(glAttachS
     X(glVertexAttrib4fv) X(glVertexAttrib4iv) X(glVertexAttrib4s) X(glVertexAttrib4sv) X(glVertexAttrib4ubv) \
     X(glVertexAttrib4uiv) X(glVertexAttrib4usv) X(glVertexAttribPointer) X(glVertexPointer) X(glViewport) \
     /* end of the list - a line with no continuation, so the macro stops here */
+// clang-format on
 
 #endif /* OOPS_GL_PROCS_CORE_H */

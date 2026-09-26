@@ -1,47 +1,53 @@
 /*
  * The entry points a title resolves by name, in one list.
  *
- * `oops_gl_get_proc_address` answers `SDL_GL_GetProcAddress`, which is `glXGetProcAddress` on a
- * desktop: a program written against post-1.1 GL holds function pointers and fills them from
- * **strings**, because on a desktop the driver is behind a loader. The linker never sees those
- * names, so being linked in is not enough - the name has to be looked up.
+ * `oops_gl_get_proc_address` answers `SDL_GL_GetProcAddress`, which is
+ * `glXGetProcAddress` on a desktop: a program written against post-1.1 GL holds
+ * function pointers and fills them from
+ * **strings**, because on a desktop the driver is behind a loader. The linker never
+ * sees those names, so being linked in is not enough - the name has to be looked up.
  *
  * # Why a list and not the symbol table
  *
- * The first version of this walked the payload's own dynamic symbol table, on the reasoning that
- * the linker has already written down every name and a hand-kept list would drift. That is true
- * of an ordinary ELF and false of this platform, which is the only place it had to hold.
+ * The first version of this walked the payload's own dynamic symbol table, on the
+ * reasoning that the linker has already written down every name and a hand-kept list
+ * would drift. That is true of an ordinary ELF and false of this platform, which is the
+ * only place it had to hold.
  *
- * `make title` converts the payload into the console's own module format: `e_type` 0xFE10, and
- * the dynamic tags renumbered into Sony's range - `DT_SCE_SYMTAB` 0x61000039, `DT_SCE_STRTAB`
- * 0x61000035, `DT_SCE_HASH` 0x61000025. Those point into a `PT_SCE_DYNLIBDATA` segment
- * (0x61000000) whose **`p_memsz` is zero**: it is data the loader reads out of the file, and it
- * is never mapped. At run time there is no symbol table in the address space to search, so the
- * lookup answered NULL for everything and Neverball faulted at `rip = 0` exactly as before.
+ * `make title` converts the payload into the console's own module format: `e_type`
+ * 0xFE10, and the dynamic tags renumbered into Sony's range - `DT_SCE_SYMTAB`
+ * 0x61000039, `DT_SCE_STRTAB` 0x61000035, `DT_SCE_HASH` 0x61000025. Those point into a
+ * `PT_SCE_DYNLIBDATA` segment (0x61000000) whose **`p_memsz` is zero**: it is data the
+ * loader reads out of the file, and it is never mapped. At run time there is no symbol
+ * table in the address space to search, so the lookup answered NULL for everything and
+ * Neverball faulted at `rip = 0` exactly as before.
  *
- * The plain `.elf` that `make elf` produces *does* have an ordinary `.dynsym`, which is what
- * made the first version look verified. It is an intermediate; the console never sees it.
+ * The plain `.elf` that `make elf` produces *does* have an ordinary `.dynsym`, which is
+ * what made the first version look verified. It is an intermediate; the console never
+ * sees it.
  *
  * # What is in the list, and what is not
  *
- * **The extension entry points, under every spelling oops-gl publishes.** Those are what a title
- * asks for by string: core GL 1.1 is linked directly, by symbol, and never goes through here.
- * Each line is one function, with the suffixed spellings a program of that era uses beside the
- * core name a later program asks for - `glGenBuffersARB` and `glGenBuffers` are separate
- * definitions in `gl_state.c`, not aliases, so both are listed and both are right.
+ * **The extension entry points, under every spelling oops-gl publishes.** Those are
+ * what a title asks for by string: core GL 1.1 is linked directly, by symbol, and never
+ * goes through here. Each line is one function, with the suffixed spellings a program
+ * of that era uses beside the core name a later program asks for - `glGenBuffersARB`
+ * and `glGenBuffers` are separate definitions in `gl_state.c`, not aliases, so both are
+ * listed and both are right.
  *
- * The set is derived from `GL/gl.h`'s own declarations: every ARB/EXT-suffixed entry point it
- * declares, and the core spelling of each. It matches the extensions `glGetString(GL_EXTENSIONS)`
- * advertises, which is the other half of the same promise - a program reads that string to decide
- * what to ask for here.
+ * The set is derived from `GL/gl.h`'s own declarations: every ARB/EXT-suffixed entry
+ * point it declares, and the core spelling of each. It matches the extensions
+ * `glGetString(GL_EXTENSIONS)` advertises, which is the other half of the same promise
+ * - a program reads that string to decide what to ask for here.
  *
- * **A name written here that does not exist is a compile error**, because each one appears as an
- * identifier as well as a string. That is the whole reason for the macro: the list cannot rot
- * into naming something that is gone, and `test_gl_proc_address_resolves_entry_points_by_name`
- * walks this same list to check each one resolves to the function it names.
+ * **A name written here that does not exist is a compile error**, because each one
+ * appears as an identifier as well as a string. That is the whole reason for the macro:
+ * the list cannot rot into naming something that is gone, and
+ * `test_gl_proc_address_resolves_entry_points_by_name` walks this same list to check
+ * each one resolves to the function it names.
  *
- * Adding an extension to `gl.h` means adding it here. That is the same discipline a new source
- * file has, and the test below is where forgetting shows up.
+ * Adding an extension to `gl.h` means adding it here. That is the same discipline a new
+ * source file has, and the test below is where forgetting shows up.
  */
 #ifndef OOPS_GL_PROCS_H
 #define OOPS_GL_PROCS_H
@@ -49,15 +55,17 @@
 /*
  * **The core entry points are in `gl_procs_core.h`, and they are not optional.**
  *
- * The note above says core GL is linked by symbol and never looked up. That holds for a program
- * that calls `glBegin`; it does not hold for one that fills every pointer from a string, and
- * ioquake3 is one - it asked for 66 core names and this table answered none of them, which is a
- * renderer that refuses to start rather than anything the linker could have told us. The core list
- * is separate only because it is long and derived; it is part of the same table.
+ * The note above says core GL is linked by symbol and never looked up. That holds for a
+ * program that calls `glBegin`; it does not hold for one that fills every pointer from
+ * a string, and ioquake3 is one - it asked for 66 core names and this table answered
+ * none of them, which is a renderer that refuses to start rather than anything the
+ * linker could have told us. The core list is separate only because it is long and
+ * derived; it is part of the same table.
  */
 #include "gl_procs_core.h"
 
 /* X(core name)  -  XS(core name, suffix) for each published suffixed spelling. */
+// clang-format off
 #define OOPS_GL_PROC_LIST(X, XS) \
     OOPS_GL_PROC_LIST_CORE(X) \
     X(glActiveTexture) XS(glActiveTexture, ARB) \
@@ -164,5 +172,6 @@
     X(glWindowPos3iv) XS(glWindowPos3iv, ARB) \
     X(glWindowPos3s) XS(glWindowPos3s, ARB) \
     X(glWindowPos3sv) XS(glWindowPos3sv, ARB)
+// clang-format on
 
 #endif /* OOPS_GL_PROCS_H */

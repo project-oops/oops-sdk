@@ -20,20 +20,19 @@ void test_webview_dom_mutation() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);
 
-    const char *html =
-        "<!DOCTYPE html>"
-        "<html><body>"
-        "<h1 id=\"title\">Before JS</h1>"
-        "<div id=\"container\"></div>"
-        "<script>"
-        "  const t = document.getElementById('title');"
-        "  t.textContent = 'After JS';"
-        "  const c = document.getElementById('container');"
-        "  const p = document.createElement('p');"
-        "  p.textContent = 'Created Child';"
-        "  c.appendChild(p);"
-        "</script>"
-        "</body></html>";
+    const char *html = "<!DOCTYPE html>"
+                       "<html><body>"
+                       "<h1 id=\"title\">Before JS</h1>"
+                       "<div id=\"container\"></div>"
+                       "<script>"
+                       "  const t = document.getElementById('title');"
+                       "  t.textContent = 'After JS';"
+                       "  const c = document.getElementById('container');"
+                       "  const p = document.createElement('p');"
+                       "  p.textContent = 'Created Child';"
+                       "  c.appendChild(p);"
+                       "</script>"
+                       "</body></html>";
 
     int rc = oops_webview_load_html(wv, html, "https://example.com/");
     assert(rc == 0);
@@ -42,14 +41,16 @@ void test_webview_dom_mutation() {
     assert(js != nullptr);
 
     oops_js_value_t title_val;
-    int eval_rc = oops_js_eval(js, "document.getElementById('title').textContent", "<test>", &title_val);
+    int eval_rc = oops_js_eval(js, "document.getElementById('title').textContent",
+                               "<test>", &title_val);
     assert(eval_rc == 0);
     assert(title_val.type == OOPS_JS_TYPE_STRING);
     assert(strcmp(title_val.u.string, "After JS") == 0);
     oops_js_free_value(js, &title_val);
 
     oops_js_value_t child_val;
-    eval_rc = oops_js_eval(js, "document.getElementById('container').textContent", "<test>", &child_val);
+    eval_rc = oops_js_eval(js, "document.getElementById('container').textContent",
+                           "<test>", &child_val);
     assert(eval_rc == 0);
     assert(child_val.type == OOPS_JS_TYPE_STRING);
     assert(strcmp(child_val.u.string, "Created Child") == 0);
@@ -63,16 +64,15 @@ void test_webview_events_and_input() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);
 
-    const char *html =
-        "<!DOCTYPE html>"
-        "<html><body>"
-        "<script>"
-        "  var clickCount = 0;"
-        "  window.addEventListener('click', () => { clickCount++; });"
-        "  var keyCount = 0;"
-        "  window.addEventListener('keydown', (e) => { keyCount++; });"
-        "</script>"
-        "</body></html>";
+    const char *html = "<!DOCTYPE html>"
+                       "<html><body>"
+                       "<script>"
+                       "  var clickCount = 0;"
+                       "  window.addEventListener('click', () => { clickCount++; });"
+                       "  var keyCount = 0;"
+                       "  window.addEventListener('keydown', (e) => { keyCount++; });"
+                       "</script>"
+                       "</body></html>";
 
     int rc = oops_webview_load_html(wv, html, "https://example.com/");
     assert(rc == 0);
@@ -116,14 +116,13 @@ void test_webview_timers_and_pump() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);
 
-    const char *html =
-        "<!DOCTYPE html>"
-        "<html><body>"
-        "<script>"
-        "  var timerFired = false;"
-        "  setTimeout(() => { timerFired = true; }, 10);"
-        "</script>"
-        "</body></html>";
+    const char *html = "<!DOCTYPE html>"
+                       "<html><body>"
+                       "<script>"
+                       "  var timerFired = false;"
+                       "  setTimeout(() => { timerFired = true; }, 10);"
+                       "</script>"
+                       "</body></html>";
 
     int rc = oops_webview_load_html(wv, html, "https://example.com/");
     assert(rc == 0);
@@ -152,14 +151,13 @@ void test_webview_render() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);
 
-    const char *html =
-        "<!DOCTYPE html>"
-        "<html><head><style>"
-        "body { margin: 0; background-color: #ffaa00; }"
-        "h1 { color: #0000ff; }"
-        "</style></head><body>"
-        "<h1>Hello Webview</h1>"
-        "</body></html>";
+    const char *html = "<!DOCTYPE html>"
+                       "<html><head><style>"
+                       "body { margin: 0; background-color: #ffaa00; }"
+                       "h1 { color: #0000ff; }"
+                       "</style></head><body>"
+                       "<h1>Hello Webview</h1>"
+                       "</body></html>";
 
     int rc = oops_webview_load_html(wv, html, "https://example.com/");
     assert(rc == 0);

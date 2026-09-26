@@ -43,18 +43,18 @@ extern "C" {
 /* Codec selection. OOPS's own values; the mapping to the platform codec
  * constant lives in the (layout-gated) decode path. */
 enum {
-  OOPS_AUDIODEC_AAC = 1,
-  OOPS_AUDIODEC_MP3 = 2,
+    OOPS_AUDIODEC_AAC = 1,
+    OOPS_AUDIODEC_MP3 = 2,
 };
 
 enum {
-  OOPS_AUDIODEC_OK = 0,
-  OOPS_AUDIODEC_EUNAVAIL =
-      -1, /* the library or its entry points did not resolve here */
-  OOPS_AUDIODEC_ELAYOUT =
-      -2, /* the call is real but its struct layout is unconfirmed */
-  OOPS_AUDIODEC_EPARAM =
-      -3, /* a caller argument was rejected before any platform call */
+    OOPS_AUDIODEC_OK = 0,
+    OOPS_AUDIODEC_EUNAVAIL =
+        -1, /* the library or its entry points did not resolve here */
+    OOPS_AUDIODEC_ELAYOUT =
+        -2, /* the call is real but its struct layout is unconfirmed */
+    OOPS_AUDIODEC_EPARAM =
+        -3, /* a caller argument was rejected before any platform call */
 };
 
 typedef struct oops_audiodec oops_audiodec_t;

@@ -28,32 +28,32 @@ extern "C" {
  */
 
 enum {
-  OOPS_MOUSE_OK = 0,
-  OOPS_MOUSE_EUNAVAIL = -1, /* the library, its entry points or a signed-in user
-                               did not resolve */
-  OOPS_MOUSE_ELAYOUT =
-      -2, /* the read is real but the platform record layout is unconfirmed */
-  OOPS_MOUSE_EPARAM =
-      -3, /* a caller argument was rejected before any platform call */
+    OOPS_MOUSE_OK = 0,
+    OOPS_MOUSE_EUNAVAIL = -1, /* the library, its entry points or a signed-in user
+                                 did not resolve */
+    OOPS_MOUSE_ELAYOUT =
+        -2, /* the read is real but the platform record layout is unconfirmed */
+    OOPS_MOUSE_EPARAM =
+        -3, /* a caller argument was rejected before any platform call */
 };
 
 /* Mouse button bits, OOPS's own values. */
 enum {
-  OOPS_MOUSE_LEFT = 1u << 0,
-  OOPS_MOUSE_RIGHT = 1u << 1,
-  OOPS_MOUSE_MIDDLE = 1u << 2,
+    OOPS_MOUSE_LEFT = 1u << 0,
+    OOPS_MOUSE_RIGHT = 1u << 1,
+    OOPS_MOUSE_MIDDLE = 1u << 2,
 };
 
 /* One mouse sample in OOPS's shape - not the platform record. Motion is
  * relative. */
 typedef struct oops_mouse_state {
-  int32_t dx;         /* relative X since last sample */
-  int32_t dy;         /* relative Y since last sample */
-  int32_t wheel;      /* vertical wheel delta */
-  int32_t tilt;       /* horizontal tilt delta */
-  uint8_t buttons;    /* OOPS_MOUSE_* mask */
-  uint8_t connected;  /* 1 if a mouse is present */
-  uint64_t timestamp; /* platform sample time, 0 if unavailable */
+    int32_t dx;         /* relative X since last sample */
+    int32_t dy;         /* relative Y since last sample */
+    int32_t wheel;      /* vertical wheel delta */
+    int32_t tilt;       /* horizontal tilt delta */
+    uint8_t buttons;    /* OOPS_MOUSE_* mask */
+    uint8_t connected;  /* 1 if a mouse is present */
+    uint64_t timestamp; /* platform sample time, 0 if unavailable */
 } oops_mouse_state_t;
 
 #define OOPS_MAX_MOUSE_SAMPLES 32
