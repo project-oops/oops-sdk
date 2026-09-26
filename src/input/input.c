@@ -279,7 +279,12 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
                     fg_user != s_user_id) {
                     s_user_id = fg_user;
                     if (scePadGetHandle) {
-                        s_pad_handles[port] = scePadGetHandle(s_user_id, 0, (int)port);
+                        /* The old user's handle is closed, not dropped, unless the
+                         * new user's is the same one. */
+                        const int fresh = scePadGetHandle(s_user_id, 0, (int)port);
+                        if (fresh != handle && scePadClose)
+                            (void)scePadClose(handle);
+                        s_pad_handles[port] = fresh;
                     }
                 }
             }
