@@ -47,6 +47,33 @@ static inline uint32_t oops_htonl(uint32_t val) {
 }
 static inline uint32_t oops_ntohl(uint32_t val) { return oops_htonl(val); }
 
+/*
+ * # Telling the SDK which bare BSD names a port layer has taken
+ *
+ * `src/net/net.c` reaches the platform's sockets through weak references to the exported names -
+ * both the plain spelling and the leading-underscore one. **The plain spellings are also what a
+ * POSIX shim defines**, and a weak reference is satisfied by any strong definition in the same
+ * link, so in a title that has both, `oops_bind` would call the shim's `bind`, which calls
+ * `oops_bind`. That is an unbounded recursion, and a stack overflow on the first packet does not
+ * name itself.
+ *
+ * A port layer that defines any of these names says so by defining this function and returning the
+ * bits for the ones it took. It is a **weak** symbol in the SDK: a title without a POSIX shim
+ * defines nothing, the reference stays null, and the bare names remain available exactly as before.
+ *
+ * `oops-apps/common/posix/posix.c` is the implementation to copy if you write another port layer.
+ */
+#define OOPS_NET_SHIMMED_BIND       0x0001u
+#define OOPS_NET_SHIMMED_LISTEN     0x0002u
+#define OOPS_NET_SHIMMED_ACCEPT     0x0004u
+#define OOPS_NET_SHIMMED_CONNECT    0x0008u
+#define OOPS_NET_SHIMMED_RECV       0x0010u
+#define OOPS_NET_SHIMMED_RECVFROM   0x0020u
+#define OOPS_NET_SHIMMED_SENDTO     0x0040u
+#define OOPS_NET_SHIMMED_SETSOCKOPT 0x0080u
+#define OOPS_NET_SHIMMED_CLOSE      0x0100u
+unsigned oops_net_bare_names_are_shimmed(void);
+
 /* Network stack lifecycle */
 int oops_net_init(void);
 void oops_net_term(void);
@@ -66,6 +93,13 @@ long oops_send(int sock, const void *buf, size_t len, int flags);
 long oops_recv(int sock, void *buf, size_t len, int flags);
 long oops_sendto(int sock, const void *buf, size_t len, int flags,
                  const char *to_ip, uint16_t to_port);
+/* The byte count, or negative. **`from_ip` is set to the empty string when the
+ * sender could not be determined**, which happens when the platform binds no
+ * `recvfrom` export - the data arrives and the peer does not. That is not the
+ * same as 0.0.0.0, and a caller that identifies peers by address (a game
+ * protocol, say) has to check for it: reading a zeroed address instead makes
+ * every datagram look as though it came from one wrong host. `*from_port` is 0
+ * in the same case. */
 long oops_recvfrom(int sock, void *buf, size_t len, int flags, char *from_ip,
                    size_t ip_len, uint16_t *from_port);
 int oops_setsockopt(int sock, int level, int optname, const void *optval,

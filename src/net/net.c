@@ -245,6 +245,18 @@ __attribute__((weak)) int connect(int s, const void *addr, socklen_t_ addrlen);
 __attribute__((weak)) int _connect(int s, const void *addr, socklen_t_ addrlen);
 __attribute__((weak)) ssize_t_ recv(int s, void *buf, size_t len, int flags);
 __attribute__((weak)) ssize_t_ _recv(int s, void *buf, size_t len, int flags);
+/* The peer-reporting receive. Declared the same way as everything else here and
+ * for the same reason: a weak reference the loader either binds or leaves null,
+ * so asking costs nothing. It was previously absent because it did not appear in
+ * the export census - but `sendto`, `bind` and `accept` all did, and `accept`
+ * already takes an address out-parameter of exactly this shape, so the census
+ * missing one name is a thinner reason than it looked. `p_recvfrom` below falls
+ * back to `p_recv` if neither spelling binds, which is precisely the behaviour
+ * this file had before. */
+__attribute__((weak)) ssize_t_ recvfrom(int s, void *buf, size_t len, int flags,
+                                        void *from, socklen_t_ *fromlen);
+__attribute__((weak)) ssize_t_ _recvfrom(int s, void *buf, size_t len, int flags,
+                                         void *from, socklen_t_ *fromlen);
 __attribute__((weak)) ssize_t_ _sendto(int s, const void *buf, size_t len,
                                        int flags, const void *to,
                                        socklen_t_ tolen);
@@ -274,63 +286,114 @@ struct fbsd_sockaddr_in {
   uint8_t sin_zero[8];
 };
 
+/*
+ * # The bare names in this link may not be the platform's
+ *
+ * **Every plain spelling above - `bind`, `connect`, `recv`, `close` - is also the name a POSIX
+ * shim defines.** `oops-apps/common/posix/posix.c` defines all four, because a port calls `bind`
+ * and something has to answer. A weak *reference* like the ones above is satisfied by any strong
+ * definition in the same link, and the static linker gets there long before the loader looks at
+ * the platform's export table. So in a title that links both this file and that shim:
+ *
+ *     port calls bind()  ->  shim's bind()  ->  oops_bind()  ->  p_bind()  ->  shim's bind()
+ *
+ * which is an unbounded recursion, and on this target that is a stack overflow on the first packet
+ * rather than anything that names itself. `close` is the quieter version of the same thing: it
+ * would reach the shim's descriptor `close`, which routes to the *filesystem* layer, and a socket
+ * closed through `oops_fs_close` is a leak that looks like a working call.
+ *
+ * `_sendto`, `_setsockopt` and `_recvfrom` already preferred the underscore spelling for this
+ * reason, one function at a time. The rule is now uniform: **the underscore spelling first, always,
+ * and the bare one only when nothing in this link has taken it.**
+ *
+ * A title tells us which ones it has taken through `oops_net_bare_names_are_shimmed`, whose bits
+ * `oops/net.h` defines. It is a weak reference, so a title with no POSIX shim leaves it null and
+ * every bare name stays available - the arrangement that was working before, unchanged. The answer
+ * is per name rather than all-or-nothing, because the shim defines `bind` and `connect` and does
+ * *not* define `listen` or `accept`, and a blanket refusal would take a working path away from the
+ * latter two for the sake of the former.
+ */
+__attribute__((weak)) unsigned oops_net_bare_names_are_shimmed(void);
+static int bare_ok(unsigned which) {
+  if (!oops_net_bare_names_are_shimmed)
+    return 1;
+  return (oops_net_bare_names_are_shimmed() & which) ? 0 : 1;
+}
+
 static int p_bind(int s, const void *a, socklen_t_ l) {
-  if (bind)
-    return bind(s, a, l);
   if (_bind)
     return _bind(s, a, l);
+  if (bind && bare_ok(OOPS_NET_SHIMMED_BIND))
+    return bind(s, a, l);
   return -1;
 }
 static int p_listen(int s, int b) {
-  if (listen)
-    return listen(s, b);
   if (_listen)
     return _listen(s, b);
+  if (listen && bare_ok(OOPS_NET_SHIMMED_LISTEN))
+    return listen(s, b);
   return -1;
 }
 static int p_accept(int s, void *a, socklen_t_ *l) {
-  if (accept)
-    return accept(s, a, l);
   if (_accept)
     return _accept(s, a, l);
+  if (accept && bare_ok(OOPS_NET_SHIMMED_ACCEPT))
+    return accept(s, a, l);
   return -1;
 }
 static int p_connect(int s, const void *a, socklen_t_ l) {
-  if (connect)
-    return connect(s, a, l);
   if (_connect)
     return _connect(s, a, l);
+  if (connect && bare_ok(OOPS_NET_SHIMMED_CONNECT))
+    return connect(s, a, l);
   return -1;
 }
 static ssize_t_ p_recv(int s, void *b, size_t n, int f) {
-  if (recv)
-    return recv(s, b, n, f);
   if (_recv)
     return _recv(s, b, n, f);
+  if (recv && bare_ok(OOPS_NET_SHIMMED_RECV))
+    return recv(s, b, n, f);
+  return -1;
+}
+/* Whether the platform can report a datagram's sender at all. `oops_recvfrom`
+ * below leaves the peer empty when this is 0, and its callers have to be able to
+ * tell that apart from "the peer really is 0.0.0.0" - a POSIX `recvfrom` shim
+ * reporting the wrong sender for every packet is the kind of wrong that looks
+ * like a protocol bug in the game. */
+static int p_have_recvfrom(void) {
+  return (_recvfrom || (recvfrom && bare_ok(OOPS_NET_SHIMMED_RECVFROM))) ? 1 : 0;
+}
+
+static ssize_t_ p_recvfrom(int s, void *b, size_t n, int f, void *from,
+                           socklen_t_ *fromlen) {
+  if (_recvfrom)
+    return _recvfrom(s, b, n, f, from, fromlen);
+  if (recvfrom && bare_ok(OOPS_NET_SHIMMED_RECVFROM))
+    return recvfrom(s, b, n, f, from, fromlen);
   return -1;
 }
 static ssize_t_ p_sendto(int s, const void *b, size_t n, int f, const void *to,
                          socklen_t_ tl) {
   if (_sendto)
     return _sendto(s, b, n, f, to, tl);
-  if (sendto)
+  if (sendto && bare_ok(OOPS_NET_SHIMMED_SENDTO))
     return sendto(s, b, n, f, to, tl);
   return -1;
 }
 static int p_setsockopt(int s, int lv, int nm, const void *v, socklen_t_ l) {
   if (_setsockopt)
     return _setsockopt(s, lv, nm, v, l);
-  if (setsockopt)
+  if (setsockopt && bare_ok(OOPS_NET_SHIMMED_SETSOCKOPT))
     return setsockopt(s, lv, nm, v, l);
   return -1;
 }
 static void p_close(int fd) {
-  if (close) {
-    close(fd);
-    return;
-  }
   if (_close) {
     _close(fd);
+    return;
+  }
+  if (close && bare_ok(OOPS_NET_SHIMMED_CLOSE)) {
+    close(fd);
   }
 }
 static int *p_errno(void) {
@@ -489,18 +552,36 @@ long oops_recvfrom(int sock, void *buf, size_t len, int flags, char *from_ip,
   if (from_ip && ip_len > 0)
     from_ip[0] = '\0';
 
+  if (from_port)
+    *from_port = 0;
+
+  /* No `recvfrom` export bound: the data still arrives, the sender does not.
+   * `from_ip` stays the empty string it was set to above, which is this call's
+   * documented way of saying "unknown" - a caller that needs the peer must check
+   * for it rather than read 0.0.0.0 out of a zeroed address. */
+  if (!p_have_recvfrom())
+    return (long)p_recv(sock, buf, len, flags);
+
   struct fbsd_sockaddr_in addr;
   for (size_t i = 0; i < sizeof(addr); i++)
     ((uint8_t *)&addr)[i] = 0;
   socklen_t_ addrlen = (socklen_t_)sizeof(addr);
 
-  /* No exported recvfrom in the census; recv fills the buffer, the peer address
-   * is left empty. A datagram consumer that needs the peer should say so and it
-   * will be added when the export is confirmed. */
-  (void)addrlen;
-  long rc = (long)p_recv(sock, buf, len, flags);
-  if (rc >= 0 && from_port)
-    *from_port = 0;
+  long rc = (long)p_recvfrom(sock, buf, len, flags, &addr, &addrlen);
+  if (rc < 0)
+    return rc;
+
+  /* Only an IPv4 address of the full size is transcribed. A short write means
+   * the platform reported something this struct does not describe, and a partly
+   * filled address is worse than none - so it is left unknown. */
+  if (addrlen >= (socklen_t_)sizeof(addr) && addr.sin_family == OOPS_AF_INET) {
+    if (from_port)
+      *from_port = oops_ntohs(addr.sin_port);
+    if (from_ip && ip_len > 0) {
+      if (oops_net_inet_ntop(addr.sin_addr, from_ip, ip_len) != 0)
+        from_ip[0] = '\0';
+    }
+  }
   return rc;
 }
 

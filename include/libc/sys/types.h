@@ -77,4 +77,24 @@ typedef unsigned int useconds_t;
 #define _USECONDS_T_DECLARED
 #endif
 
+/*
+ * **FreeBSD's `<sys/types.h>` pulls in `<sys/select.h>`, and so does this one when there is one to
+ * pull in.**
+ *
+ * `fd_set` is reached through this header far more often than through `<sys/select.h>` directly -
+ * ioquake3's `net_ip.c` and `sys_unix.c` both declare one having included only `<sys/types.h>`,
+ * which is correct on every BSD and on Linux. A port that compiles everywhere else and fails here
+ * on an undeclared `fd_set` is this omission, not the port.
+ *
+ * `__has_include` rather than an unconditional include, because `fd_set` and `select` are POSIX
+ * rather than C: they belong to a port layer - `oops-apps/common/posix` provides them - and this
+ * file is the freestanding C library, which titles without that layer include on its own. So the
+ * include appears exactly when something can satisfy it.
+ */
+#if defined(__has_include)
+#if __has_include(<sys/select.h>)
+#include <sys/select.h>
+#endif
+#endif
+
 #endif /* _SYS_TYPES_H */
