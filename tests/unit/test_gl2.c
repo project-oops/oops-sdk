@@ -3191,6 +3191,10 @@ static void sim_set_mask(sim_t *s, uint32_t reg, GLboolean value) {
  * write is a few thousand trips of a few dozen instructions. */
 #define SIM_MAX_STEPS 2000000
 
+/* The depth a comparing sample compares against, less-or-equal. A test moves it to
+ * make a reference's exact value decide the result. */
+static float s_sim_shadow_depth = 0.5f;
+
 static void sim_run(sim_t *s, const uint32_t *w, uint32_t count,
                     const float attr[4][4]) {
     const double PI = 3.14159265358979323846;
@@ -3244,12 +3248,12 @@ static void sim_run(sim_t *s, const uint32_t *w, uint32_t count,
             ASSERT_TRUE(set < 2u);
             /* A texture whose texel is its own coordinate plus the set it came through,
              * which shows the right coordinate reached the right descriptor set. */
-            /* A comparing sample returns the comparison in one register. The stored
-             * depth is 0.5 and the function less-or-equal. The reference is the first
-             * address register, so putting it last would compare against `s`. */
+            /* A comparing sample returns the comparison in one register, against
+             * `s_sim_shadow_depth`. The reference is the first address register, so
+             * putting it last would compare against `s`. */
             if (mimg_op == 40u) {
                 if (s->exec)
-                    s->v[vdata] = (s->v[vaddr] <= 0.5f) ? 1.0f : 0.0f;
+                    s->v[vdata] = (s->v[vaddr] <= s_sim_shadow_depth) ? 1.0f : 0.0f;
                 for (int k = 0; k < 1; k++)
                     s->vpending[vdata + (uint32_t)k] = GL_TRUE;
                 continue;
@@ -8203,27 +8207,31 @@ static void test_gl2_compiled_texture_lookups_reach_the_right_set(void) {
     ASSERT_NEAR(o[0], 0.0f, tol); /* 0.75 > 0.5, and `s` is 0.25: the order test */
     ASSERT_NEAR(o[3], 1.0f, tol);
 
-    /* The reference is clamped to [0, 1] before the compare (GL 1.4); -1 passes either
-     * way. */
+    /* The reference is clamped to [0, 1] before the compare (GL 1.4). Against a stored
+     * 1.0, a clamped 2.0 passes and an unclamped one fails. Less-or-equal cannot show
+     * the low end: a negative reference passes clamped or not. */
+    s_sim_shadow_depth = 1.0f;
     compile_and_run(ctx, VS_ONE_VARYING,
                     "uniform sampler2DShadow depth;\n"
                     "varying vec4 vin;\n"
                     "void main() {\n"
-                    "  gl_FragColor = shadow2D(depth, vec3(vin.x, vin.y, -1.0));\n"
+                    "  gl_FragColor = shadow2D(depth, vec3(vin.x, vin.y, 2.0));\n"
                     "}\n",
                     attr, o);
+    s_sim_shadow_depth = 0.5f;
     ASSERT_NEAR(o[0], 1.0f, tol);
 
-    /* The projective form divides the reference by `q` along with s and t. */
+    /* The projective form divides the reference by `q` along with s and t: 1/4 passes
+     * against 0.5 where an undivided 1.0 fails. */
     compile_and_run(
         ctx, VS_ONE_VARYING,
         "uniform sampler2DShadow depth;\n"
         "varying vec4 vin;\n"
         "void main() {\n"
-        "  gl_FragColor = shadow2DProj(depth, vec4(vin.x, vin.y, 3.0, 4.0));\n"
+        "  gl_FragColor = shadow2DProj(depth, vec4(vin.x, vin.y, 1.0, 4.0));\n"
         "}\n",
         attr, o);
-    ASSERT_NEAR(o[0], 0.0f, tol); /* 3/4 = 0.75 > 0.5 */
+    ASSERT_NEAR(o[0], 1.0f, tol);
 
     /* A zero divisor answers zero, as the reference does, not the `inf` an unguarded
      * reciprocal gives. */
