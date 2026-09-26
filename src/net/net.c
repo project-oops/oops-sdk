@@ -236,6 +236,14 @@ __attribute__((weak)) int __sys_socketex(const char *name, int domain, int type,
 __attribute__((weak)) long sys_call(long num, long a1, long a2, long a3, long a4,
                                     long a5, long a6);
 #define OOPS_SYS_SOCKET 97
+#define OOPS_SYS_CLOSE 6
+#define OOPS_SYS_RECVFROM 29
+#define OOPS_SYS_ACCEPT 30
+#define OOPS_SYS_CONNECT 98
+#define OOPS_SYS_BIND 104
+#define OOPS_SYS_SETSOCKOPT 105
+#define OOPS_SYS_LISTEN 106
+#define OOPS_SYS_SENDTO 133
 
 __attribute__((weak)) int bind(int s, const void *addr, socklen_t_ addrlen);
 __attribute__((weak)) int _bind(int s, const void *addr, socklen_t_ addrlen);
@@ -313,22 +321,16 @@ struct fbsd_sockaddr_in {
  * A title tells us which ones it has taken through `oops_net_bare_names_are_shimmed`,
  * whose bits `oops/net.h` defines. The answer is per name rather than all-or-nothing,
  * because the shim defines `bind` and `connect` and does *not* define `listen` or
- * `accept`, and a blanket refusal would take a working path away from the latter two for
- * the sake of the former.
+ * `accept`, and a blanket refusal would take a working path away from the latter two
+ * for the sake of the former.
  *
- * **The default is defined here, weak, rather than left as a weak reference.** A weak
- * *reference* resolves to null in a title with no POSIX shim, which is the right answer
- * and reads correctly at run time - but it leaves the symbol *undefined* in the payload,
- * and `oops-apps/common/app.mk`'s guard reports every undefined name whether or not it
- * is weak. OOPSy-daisy links `net` and not the shim, so it stopped linking. Its
- * `UNDEF_ALLOW` is the list of imports *the loader* resolves, and an optional hook
- * between two files in this tree does not belong in it, so the symbol is given a real
- * definition instead: 0, nothing shimmed, every bare name available. A title that does
- * link the shim overrides it, because a strong definition beats a weak one.
+ * The default is defined here, weak, rather than left as a weak reference: a weak
+ * reference leaves the symbol undefined in the payload, and oops-apps' link guard
+ * reports every undefined name whether it is weak or not. 0 means nothing is shimmed and
+ * every bare name is available; a title linking the POSIX shim overrides this, a strong
+ * definition beating a weak one.
  *
- * The null test below stays even though nothing can null it now. It costs one compare
- * and it is the only thing standing between a future link that somehow drops both
- * definitions and a call through address zero.
+ * The null test below costs one compare and covers a link that has neither definition.
  */
 __attribute__((weak)) unsigned oops_net_bare_names_are_shimmed(void) {
     return 0u;
@@ -344,6 +346,8 @@ static int p_bind(int s, const void *a, socklen_t_ l) {
         return _bind(s, a, l);
     if (bind && bare_ok(OOPS_NET_SHIMMED_BIND))
         return bind(s, a, l);
+    if (sys_call)
+        return (int)sys_call(OOPS_SYS_BIND, (long)s, (long)a, (long)l, 0, 0, 0);
     return -1;
 }
 static int p_listen(int s, int b) {
@@ -351,6 +355,8 @@ static int p_listen(int s, int b) {
         return _listen(s, b);
     if (listen && bare_ok(OOPS_NET_SHIMMED_LISTEN))
         return listen(s, b);
+    if (sys_call)
+        return (int)sys_call(OOPS_SYS_LISTEN, (long)s, (long)b, 0, 0, 0, 0);
     return -1;
 }
 static int p_accept(int s, void *a, socklen_t_ *l) {
@@ -358,6 +364,8 @@ static int p_accept(int s, void *a, socklen_t_ *l) {
         return _accept(s, a, l);
     if (accept && bare_ok(OOPS_NET_SHIMMED_ACCEPT))
         return accept(s, a, l);
+    if (sys_call)
+        return (int)sys_call(OOPS_SYS_ACCEPT, (long)s, (long)a, (long)l, 0, 0, 0);
     return -1;
 }
 static int p_connect(int s, const void *a, socklen_t_ l) {
@@ -365,6 +373,8 @@ static int p_connect(int s, const void *a, socklen_t_ l) {
         return _connect(s, a, l);
     if (connect && bare_ok(OOPS_NET_SHIMMED_CONNECT))
         return connect(s, a, l);
+    if (sys_call)
+        return (int)sys_call(OOPS_SYS_CONNECT, (long)s, (long)a, (long)l, 0, 0, 0);
     return -1;
 }
 static ssize_t_ p_recv(int s, void *b, size_t n, int f) {
@@ -372,6 +382,8 @@ static ssize_t_ p_recv(int s, void *b, size_t n, int f) {
         return _recv(s, b, n, f);
     if (recv && bare_ok(OOPS_NET_SHIMMED_RECV))
         return recv(s, b, n, f);
+    if (sys_call)
+        return (ssize_t_)sys_call(OOPS_SYS_RECVFROM, (long)s, (long)b, (long)n, (long)f, 0, 0);
     return -1;
 }
 /* Whether the platform can report a datagram's sender at all. `oops_recvfrom`
@@ -380,7 +392,7 @@ static ssize_t_ p_recv(int s, void *b, size_t n, int f) {
  * reporting the wrong sender for every packet is the kind of wrong that looks
  * like a protocol bug in the game. */
 static int p_have_recvfrom(void) {
-    return (_recvfrom || (recvfrom && bare_ok(OOPS_NET_SHIMMED_RECVFROM))) ? 1 : 0;
+    return (_recvfrom || (recvfrom && bare_ok(OOPS_NET_SHIMMED_RECVFROM)) || sys_call) ? 1 : 0;
 }
 
 static ssize_t_ p_recvfrom(int s, void *b, size_t n, int f, void *from,
@@ -389,6 +401,8 @@ static ssize_t_ p_recvfrom(int s, void *b, size_t n, int f, void *from,
         return _recvfrom(s, b, n, f, from, fromlen);
     if (recvfrom && bare_ok(OOPS_NET_SHIMMED_RECVFROM))
         return recvfrom(s, b, n, f, from, fromlen);
+    if (sys_call)
+        return (ssize_t_)sys_call(OOPS_SYS_RECVFROM, (long)s, (long)b, (long)n, (long)f, (long)from, (long)fromlen);
     return -1;
 }
 static ssize_t_ p_sendto(int s, const void *b, size_t n, int f, const void *to,
@@ -397,6 +411,8 @@ static ssize_t_ p_sendto(int s, const void *b, size_t n, int f, const void *to,
         return _sendto(s, b, n, f, to, tl);
     if (sendto && bare_ok(OOPS_NET_SHIMMED_SENDTO))
         return sendto(s, b, n, f, to, tl);
+    if (sys_call)
+        return (ssize_t_)sys_call(OOPS_SYS_SENDTO, (long)s, (long)b, (long)n, (long)f, (long)to, (long)tl);
     return -1;
 }
 static int p_setsockopt(int s, int lv, int nm, const void *v, socklen_t_ l) {
@@ -404,6 +420,8 @@ static int p_setsockopt(int s, int lv, int nm, const void *v, socklen_t_ l) {
         return _setsockopt(s, lv, nm, v, l);
     if (setsockopt && bare_ok(OOPS_NET_SHIMMED_SETSOCKOPT))
         return setsockopt(s, lv, nm, v, l);
+    if (sys_call)
+        return (int)sys_call(OOPS_SYS_SETSOCKOPT, (long)s, (long)lv, (long)nm, (long)v, (long)l, 0);
     return -1;
 }
 static void p_close(int fd) {
@@ -413,6 +431,10 @@ static void p_close(int fd) {
     }
     if (close && bare_ok(OOPS_NET_SHIMMED_CLOSE)) {
         close(fd);
+        return;
+    }
+    if (sys_call) {
+        (void)sys_call(OOPS_SYS_CLOSE, (long)fd, 0, 0, 0, 0, 0);
     }
 }
 static int *p_errno(void) {
