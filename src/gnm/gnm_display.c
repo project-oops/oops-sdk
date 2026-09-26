@@ -185,6 +185,8 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
         disp->last_error = rrc;
         (void)sceKernelMunmap(mapped, disp->total_bytes);
         (void)sceKernelReleaseDirectMemory(physical, disp->total_bytes);
+        disp->mapped_base = 0;
+        disp->has_memory = 0;
         (void)sceVideoOutClose(disp->handle);
         disp->handle = -1;
         return disp;
@@ -195,9 +197,12 @@ gnm_display_t *gnm_display_open(unsigned int width, unsigned int height) {
     if (sceKernelCreateEqueue && sceVideoOutAddFlipEvent) {
         sce_equeue_t eq = -1;
         if (sceKernelCreateEqueue(&eq, "gnmFlipQueue") == 0 && eq >= 0) {
-            disp->flip_queue = eq;
             if (sceVideoOutAddFlipEvent(eq, disp->handle, 0) == 0) {
+                disp->flip_queue = eq;
                 disp->has_flip_queue = 1;
+            } else if (sceKernelDeleteEqueue) {
+                /* A queue with no flip event is never waited on; it goes now. */
+                (void)sceKernelDeleteEqueue(eq);
             }
         }
     }
@@ -356,7 +361,8 @@ void gnm_display_close(gnm_display_t *disp) {
         disp->flip_queue = -1;
         disp->has_flip_queue = 0;
     }
-    if (disp->handle > 0 && sceVideoOutClose) {
+    /* Open counts any non-negative handle a success, so close does too. */
+    if (disp->handle >= 0 && sceVideoOutClose) {
         (void)sceVideoOutClose(disp->handle);
         disp->handle = -1;
     }
