@@ -327,6 +327,35 @@ static int32_t find_main(const glsl_unit_t *u) {
     return GLSL_NO_NODE;
 }
 
+/* The stages of gl_program_compile_fragment, in the order it runs them. Each returns
+ * GL_FALSE with the reason in `log`. */
+static GLboolean ps_declare_samplers(const gl_program_object_t *p,
+                                     const glsl_unit_t *fs, glsl_gen_t *gen, char *log,
+                                     size_t log_size);
+static GLboolean ps_emit_prologue(const glsl_unit_t *fs, glsl_gen_t *gen,
+                                  glsl_code_t *code, int tex_sets,
+                                  GLboolean takes_block, GLboolean wants_fragcoord,
+                                  uint32_t user_sgprs);
+static GLboolean ps_load_uniforms(const gl_program_object_t *p, const glsl_unit_t *fs,
+                                  glsl_gen_t *gen, glsl_code_t *code, char *log,
+                                  size_t log_size);
+static GLboolean ps_declare_window_inputs(glsl_gen_t *gen, glsl_code_t *code,
+                                          GLboolean wants_fragcoord,
+                                          GLboolean wants_frontfacing,
+                                          uint32_t frontface_vgpr, char *log,
+                                          size_t log_size);
+static GLboolean ps_interpolate_inputs(const gl_program_object_t *p, glsl_gen_t *gen,
+                                       glsl_code_t *code, char *log, size_t log_size);
+static GLboolean ps_declare_globals_outputs(const glsl_unit_t *fs, glsl_gen_t *gen,
+                                            glsl_code_t *code, GLboolean wants_fragdata,
+                                            GLboolean wants_fragdepth, char *log,
+                                            size_t log_size);
+static GLboolean ps_gen_main(const glsl_unit_t *fs, glsl_gen_t *gen, char *log,
+                             size_t log_size);
+static GLboolean ps_emit_epilogue(glsl_gen_t *gen, glsl_code_t *code,
+                                  GLboolean wants_fragdata, GLboolean wants_fragdepth,
+                                  char *log, size_t log_size);
+
 GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *words,
                                       uint32_t capacity, uint32_t *out_count,
                                       uint32_t *out_vgprs, uint32_t *out_user_sgprs,
@@ -374,8 +403,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         return GL_FALSE;
     }
 
-    glsl_code_t code;
-    glsl_code_init(&code, words, capacity);
+    glsl_code_t code_buf;
+    glsl_code_t *const code = &code_buf;
+    glsl_code_init(code, words, capacity);
 
     /* The semantic stage is rebuilt rather than kept from the compile: it is scoped, so
      * what survived `glsl_check_unit` is the globals, and the generator asks it for the
@@ -418,9 +448,104 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         }
     }
 
-    glsl_gen_init(gen, (glsl_ast_t *)&fs->ast, sema, &code);
+    glsl_gen_init(gen, (glsl_ast_t *)&fs->ast, sema, code);
     glsl_gen_reserve(gen, GL_PS_FIRST_FREE_VGPR);
 
+    if (ok)
+        ok = ps_declare_samplers(p, fs, gen, log, log_size);
+
+    /* **Whether this shader is handed the block at all**, which decides two things
+     * together and so is decided once: the scalar loads below, and how many user SGPRs
+     * the draw configures - which in turn is where the SPI puts the primitive mask. The
+     * draw path reads the answer back off the program (`hw_ps_user_sgprs`) rather than
+     * working it out a second time, so the shader and the register that feeds it cannot
+     * come to different conclusions. */
+    /* **`gl_FragCoord` needs the block too**, for the viewport height that flips its y
+     * - so it joins the two things that already decide whether this shader is handed
+     * one. */
+    const int tex_sets = p->hw_tex_sets;
+    const GLboolean wants_fragcoord = glsl_unit_mentions(fs, "gl_FragCoord", 12u);
+    /* `gl_FrontFacing` needs no block - the SPI hands it over in a register of its own.
+     */
+    const GLboolean wants_frontfacing = glsl_unit_mentions(fs, "gl_FrontFacing", 14u);
+    /* **`gl_FragDepth` needs the window position too**, for the interpolated z it
+     * starts at - so it asks for the same registers `gl_FragCoord` does, and a shader
+     * naming either gets them. */
+    const GLboolean wants_fragdepth = glsl_unit_mentions(fs, "gl_FragDepth", 12u);
+    const GLboolean wants_fragdata = glsl_unit_mentions(fs, "gl_FragData", 11u);
+    const GLboolean takes_block =
+        (GLboolean)(tex_sets > 0 || p->value_floats > 0 || wants_fragcoord);
+    const uint32_t user_sgprs = takes_block ? 2u : 0u;
+    const uint32_t input_ena =
+        GL_PS_INPUT_PERSP_CENTER |
+        ((wants_fragcoord || wants_fragdepth) ? GL_PS_INPUT_POS_XYZW : 0u) |
+        (wants_frontfacing ? GL_PS_INPUT_FRONT_FACE : 0u);
+    /* **Where the front-face register lands, which depends on what else was asked
+     * for.** The SPI packs the enabled inputs in the order Mesa enumerates them, so the
+     * face follows the position when the position is there and sits straight after the
+     * barycentrics when it is not. Computed rather than fixed, because pinning it would
+     * mean asking for four registers of window position that the shader never reads
+     * just to keep this one in place. */
+    const uint32_t frontface_vgpr =
+        GL_PS_FRAGPOS_VGPR + ((wants_fragcoord || wants_fragdepth) ? 4u : 0u);
+
+    if (ok)
+        ok = ps_emit_prologue(fs, gen, code, tex_sets, takes_block, wants_fragcoord,
+                              user_sgprs);
+    if (ok)
+        ok = ps_load_uniforms(p, fs, gen, code, log, log_size);
+    if (ok)
+        ok = ps_declare_window_inputs(gen, code, wants_fragcoord, wants_frontfacing,
+                                      frontface_vgpr, log, log_size);
+    if (ok)
+        ok = ps_interpolate_inputs(p, gen, code, log, log_size);
+    if (ok)
+        ok = ps_declare_globals_outputs(fs, gen, code, wants_fragdata, wants_fragdepth,
+                                        log, log_size);
+    if (ok)
+        ok = ps_gen_main(fs, gen, log, log_size);
+    if (ok)
+        ok =
+            ps_emit_epilogue(gen, code, wants_fragdata, wants_fragdepth, log, log_size);
+
+    if (ok && code->overflow) {
+        oops_snprintf(log, log_size, "this shader needs more than %u instructions",
+                      capacity);
+        ok = GL_FALSE;
+    }
+
+    if (ok && gen->high_water > GL_PS_MAX_VGPRS) {
+        oops_snprintf(
+            log, log_size,
+            "this shader needs %u registers and the pixel stage is allocated %u",
+            gen->high_water, GL_PS_MAX_VGPRS);
+        ok = GL_FALSE;
+    }
+
+    if (ok) {
+        if (out_count)
+            *out_count = code->count;
+        /* What the shader's resource register has to reserve. The high-water mark is
+         * what the allocator ever held live, and the export registers sit below it - so
+         * it is the whole of the file this shader touches. */
+        if (out_vgprs)
+            *out_vgprs = gen->high_water;
+        if (out_user_sgprs)
+            *out_user_sgprs = user_sgprs;
+        if (out_input_ena)
+            *out_input_ena = input_ena;
+    }
+    gl_heap_free(sema);
+    gl_heap_free(gen);
+    return ok;
+}
+
+/* The samplers, each declared against its descriptor set, and the refusals for a
+ * sampler or a uniform pool the draw does not carry. */
+static GLboolean ps_declare_samplers(const gl_program_object_t *p,
+                                     const glsl_unit_t *fs, glsl_gen_t *gen, char *log,
+                                     size_t log_size) {
+    GLboolean ok = GL_TRUE;
     /* ---------------------------------------------------------------------
      * The block, before anything else touches a register.
      *
@@ -496,46 +621,22 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                       p->value_floats, OOPS_GL_GL2_UNIFORM_FLOATS);
         ok = GL_FALSE;
     }
+    return ok;
+}
 
-    /* **Whether this shader is handed the block at all**, which decides two things
-     * together and so is decided once: the scalar loads below, and how many user SGPRs
-     * the draw configures - which in turn is where the SPI puts the primitive mask. The
-     * draw path reads the answer back off the program (`hw_ps_user_sgprs`) rather than
-     * working it out a second time, so the shader and the register that feeds it cannot
-     * come to different conclusions. */
-    /* **`gl_FragCoord` needs the block too**, for the viewport height that flips its y
-     * - so it joins the two things that already decide whether this shader is handed
-     * one. */
-    const GLboolean wants_fragcoord = glsl_unit_mentions(fs, "gl_FragCoord", 12u);
-    /* `gl_FrontFacing` needs no block - the SPI hands it over in a register of its own.
-     */
-    const GLboolean wants_frontfacing = glsl_unit_mentions(fs, "gl_FrontFacing", 14u);
-    /* **`gl_FragDepth` needs the window position too**, for the interpolated z it
-     * starts at - so it asks for the same registers `gl_FragCoord` does, and a shader
-     * naming either gets them. */
-    const GLboolean wants_fragdepth = glsl_unit_mentions(fs, "gl_FragDepth", 12u);
-    const GLboolean takes_block =
-        (GLboolean)(tex_sets > 0 || p->value_floats > 0 || wants_fragcoord);
-    const uint32_t user_sgprs = takes_block ? 2u : 0u;
-    const uint32_t input_ena =
-        GL_PS_INPUT_PERSP_CENTER |
-        ((wants_fragcoord || wants_fragdepth) ? GL_PS_INPUT_POS_XYZW : 0u) |
-        (wants_frontfacing ? GL_PS_INPUT_FRONT_FACE : 0u);
-    /* **Where the front-face register lands, which depends on what else was asked
-     * for.** The SPI packs the enabled inputs in the order Mesa enumerates them, so the
-     * face follows the position when the position is there and sits straight after the
-     * barycentrics when it is not. Computed rather than fixed, because pinning it would
-     * mean asking for four registers of window position that the shader never reads
-     * just to keep this one in place. */
-    const uint32_t frontface_vgpr =
-        GL_PS_FRAGPOS_VGPR + ((wants_fragcoord || wants_fragdepth) ? 4u : 0u);
-
+/* The prologue: the mask `m0` holds, the block's scalar loads, whole-quad mode and the
+ * saved live mask. */
+static GLboolean ps_emit_prologue(const glsl_unit_t *fs, glsl_gen_t *gen,
+                                  glsl_code_t *code, int tex_sets,
+                                  GLboolean takes_block, GLboolean wants_fragcoord,
+                                  uint32_t user_sgprs) {
+    GLboolean ok = GL_TRUE;
     /* **`m0` first, because every interpolation reads it** - and because a shader that
      * skips it still runs, still exports, and draws a surface speckled with another
      * primitive's parameters. See `glsl_emit_s_mov_m0`. The mask sits just past the
      * user data: s2 with the block, s0 without. */
     if (ok)
-        glsl_emit_s_mov_m0(&code, user_sgprs);
+        glsl_emit_s_mov_m0(code, user_sgprs);
 
     /* **One wait covers every load below**, because `lgkmcnt(0)` waits for all of them
      * and not for one. Leaving it out is not a slower shader but a wrong one: obSCEne's
@@ -545,8 +646,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             const uint32_t base =
                 GLSL_GEN_TEX_SGPR_BASE + (uint32_t)s * GLSL_GEN_TEX_SGPR_STRIDE;
             const uint32_t at = (uint32_t)s * OOPS_GL_DESC_UNIT_STRIDE;
-            glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX8, base, 0u, at);
-            glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX4, base + 8u, 0u, at + 32u);
+            glsl_emit_s_load(code, GLSL_SMEM_LOAD_DWORDX8, base, 0u, at);
+            glsl_emit_s_load(code, GLSL_SMEM_LOAD_DWORDX4, base + 8u, 0u, at + 32u);
         }
         /* The uniforms are **not** loaded here. They go in below, a window at a time,
          * beside the moves that read them - see the pass loop. The descriptors have to
@@ -554,10 +655,10 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
          * is; a uniform does not, because it is in a VGPR from the top. */
         /* The draw's constants, under the one wait below with everything else. */
         if (wants_fragcoord) {
-            glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX4, GL_PS_DRAWCONST_SGPR_BASE,
+            glsl_emit_s_load(code, GLSL_SMEM_LOAD_DWORDX4, GL_PS_DRAWCONST_SGPR_BASE,
                              0u, OOPS_GL_GL2_DRAWCONST_AT);
         }
-        glsl_emit_s_waitcnt_lgkm(&code);
+        glsl_emit_s_waitcnt_lgkm(code);
     }
 
     /* **Whole-quad mode, if this shader samples**, and from here rather than from just
@@ -594,11 +695,19 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
      * was only there for shaders that happened to sample.
      */
     if (ok) {
-        glsl_emit_exec_save(&code, GLSL_GEN_LIVE_SGPR);
+        glsl_emit_exec_save(code, GLSL_GEN_LIVE_SGPR);
         if (gen->wqm)
-            glsl_emit_wqm(&code);
+            glsl_emit_wqm(code);
     }
+    return ok;
+}
 
+/* Every uniform the shader names, given VGPRs and loaded from the block a scalar
+ * window at a time. */
+static GLboolean ps_load_uniforms(const gl_program_object_t *p, const glsl_unit_t *fs,
+                                  glsl_gen_t *gen, glsl_code_t *code, char *log,
+                                  size_t log_size) {
+    GLboolean ok = GL_TRUE;
     /*
      * **The uniforms, a window at a time.**
      *
@@ -706,11 +815,11 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
              * end, so a chunk left out is one no move below reads. */
             if (base + off >= OOPS_GL_GL2_UNIFORM_FLOATS)
                 break;
-            glsl_emit_s_load(&code, GLSL_SMEM_LOAD_DWORDX16,
+            glsl_emit_s_load(code, GLSL_SMEM_LOAD_DWORDX16,
                              GL_PS_UNIFORM_SGPR_BASE + (uint32_t)off, 0u,
                              OOPS_GL_GL2_UNIFORM_AT + (uint32_t)(base + off) * 4u);
         }
-        glsl_emit_s_waitcnt_lgkm(&code);
+        glsl_emit_s_waitcnt_lgkm(code);
 
         /* **Relative to this pass's base**, because `s72` holds float `base` of the
          * block and not float 0. Reading the pool's absolute offset here is what would
@@ -722,12 +831,21 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                 if (at < base || at >= base + GL_PS_UNIFORM_WINDOW_FLOATS)
                     continue;
                 glsl_emit_vop1(
-                    &code, GLSL_VOP1_MOV_B32, resident[r].home + (uint32_t)c,
+                    code, GLSL_VOP1_MOV_B32, resident[r].home + (uint32_t)c,
                     glsl_sgpr(GL_PS_UNIFORM_SGPR_BASE + (uint32_t)(at - base)));
             }
         }
     }
+    return ok;
+}
 
+/* `gl_FragCoord` and `gl_FrontFacing`, from the registers the SPI fills. */
+static GLboolean ps_declare_window_inputs(glsl_gen_t *gen, glsl_code_t *code,
+                                          GLboolean wants_fragcoord,
+                                          GLboolean wants_frontfacing,
+                                          uint32_t frontface_vgpr, char *log,
+                                          size_t log_size) {
+    GLboolean ok = GL_TRUE;
     /* **`gl_FragCoord`, copied out of the registers the SPI filled and into the
      * allocator's.**
      *
@@ -750,18 +868,18 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                            0);
             ok = GL_FALSE;
         } else {
-            glsl_emit_mov(&code, fc.base + 0u, GL_PS_FRAGPOS_VGPR + 0u);
+            glsl_emit_mov(code, fc.base + 0u, GL_PS_FRAGPOS_VGPR + 0u);
             /* **`v_sub_f32` straight**, not through `glsl_emit_sub_f32`: that helper
              * puts its first operand through `glsl_vgpr`, and this one is a scalar
              * register. VOP2's `src0` is the nine-bit operand field that takes either,
              * while `vsrc1` is a VGPR number and nothing else - so the height has to be
              * the first operand, which is also the order the subtraction wants. */
             glsl_emit_vop2(
-                &code, GLSL_VOP2_SUB_F32, fc.base + 1u,
+                code, GLSL_VOP2_SUB_F32, fc.base + 1u,
                 glsl_sgpr(GL_PS_DRAWCONST_SGPR_BASE + OOPS_GL_GL2_DC_TARGET_H),
                 GL_PS_FRAGPOS_VGPR + 1u);
-            glsl_emit_mov(&code, fc.base + 2u, GL_PS_FRAGPOS_VGPR + 2u);
-            glsl_emit_mov(&code, fc.base + 3u, GL_PS_FRAGPOS_VGPR + 3u);
+            glsl_emit_mov(code, fc.base + 2u, GL_PS_FRAGPOS_VGPR + 2u);
+            glsl_emit_mov(code, fc.base + 3u, GL_PS_FRAGPOS_VGPR + 3u);
         }
     }
 
@@ -789,14 +907,21 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                 glsl_log_write(log, log_size, gen->error, 0, 0);
                 ok = GL_FALSE;
             } else {
-                glsl_emit_mov_imm(&code, zero, 0x00000000u);
-                glsl_emit_mov_imm(&code, one, 0x3f800000u); /* 1.0f */
-                glsl_emit_cmp(&code, GLSL_VOPC_GT_F32, frontface_vgpr, zero);
-                glsl_emit_cndmask(&code, ff.base, zero, one);
+                glsl_emit_mov_imm(code, zero, 0x00000000u);
+                glsl_emit_mov_imm(code, one, 0x3f800000u); /* 1.0f */
+                glsl_emit_cmp(code, GLSL_VOPC_GT_F32, frontface_vgpr, zero);
+                glsl_emit_cndmask(code, ff.base, zero, one);
             }
         }
     }
+    return ok;
+}
 
+/* The varyings, `gl_Color`, `gl_TexCoord[]` and `gl_PointCoord`, each interpolated into
+ * registers of its own. */
+static GLboolean ps_interpolate_inputs(const gl_program_object_t *p, glsl_gen_t *gen,
+                                       glsl_code_t *code, char *log, size_t log_size) {
+    GLboolean ok = GL_TRUE;
     /* ---------------------------------------------------------------------
      * The prologue: every varying interpolated into registers of its own.
      *
@@ -832,7 +957,7 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
              * component `n % 4` of parameter `n / 4`, and the two layouts are the same
              * thing counted differently. */
             const int slot = v->offset + c;
-            glsl_emit_interp_pair(&code, home.base + (uint32_t)c, (uint32_t)(slot / 4),
+            glsl_emit_interp_pair(code, home.base + (uint32_t)c, (uint32_t)(slot / 4),
                                   (uint32_t)(slot % 4));
         }
     }
@@ -854,7 +979,7 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             ok = GL_FALSE;
         } else {
             for (int c = 0; c < 4; c++) {
-                glsl_emit_interp_pair(&code, home.base + (uint32_t)c,
+                glsl_emit_interp_pair(code, home.base + (uint32_t)c,
                                       (uint32_t)p->hw_color_param, (uint32_t)c);
             }
         }
@@ -877,7 +1002,7 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         } else {
             for (int u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
                 for (int c = 0; c < 4; c++) {
-                    glsl_emit_interp_pair(&code, home.base + (uint32_t)(u * 4 + c),
+                    glsl_emit_interp_pair(code, home.base + (uint32_t)(u * 4 + c),
                                           (uint32_t)(p->hw_texcoord_param + u),
                                           (uint32_t)c);
                 }
@@ -916,11 +1041,19 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             ok = GL_FALSE;
         } else {
             for (int c = 0; c < 2; c++) {
-                glsl_emit_interp_pair(&code, home.base + (uint32_t)c, 1u, (uint32_t)c);
+                glsl_emit_interp_pair(code, home.base + (uint32_t)c, 1u, (uint32_t)c);
             }
         }
     }
+    return ok;
+}
 
+/* The shader's own globals, then the outputs it writes. */
+static GLboolean ps_declare_globals_outputs(const glsl_unit_t *fs, glsl_gen_t *gen,
+                                            glsl_code_t *code, GLboolean wants_fragdata,
+                                            GLboolean wants_fragdepth, char *log,
+                                            size_t log_size) {
+    GLboolean ok = GL_TRUE;
     /* ---------------------------------------------------------------------
      * The shader's own globals - `const float pi = 3.14159;` and the rest.
      *
@@ -973,7 +1106,6 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
      * One element because there is one draw buffer, which is what makes
      * `gl_FragData[1]` a front-end refusal about the array's length rather than
      * something to check here. */
-    const GLboolean wants_fragdata = glsl_unit_mentions(fs, "gl_FragData", 11u);
     if (ok) {
         const glsl_value_t colour =
             glsl_gen_declare_input(gen, "gl_FragColor", 12u, GLSL_TYPE_VEC4);
@@ -1013,14 +1145,17 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                            0);
             ok = GL_FALSE;
         } else {
-            glsl_emit_mov(&code, depth.base,
+            glsl_emit_mov(code, depth.base,
                           GL_PS_FRAGPOS_VGPR + 2u); /* the interpolated z */
         }
     }
+    return ok;
+}
 
-    /* ---------------------------------------------------------------------
-     * The body
-     * --------------------------------------------------------------------- */
+/* The body of `main`. */
+static GLboolean ps_gen_main(const glsl_unit_t *fs, glsl_gen_t *gen, char *log,
+                             size_t log_size) {
+    GLboolean ok = GL_TRUE;
     if (ok) {
         const int32_t main_fn = find_main(fs);
         if (main_fn == GLSL_NO_NODE) {
@@ -1042,10 +1177,15 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             }
         }
     }
+    return ok;
+}
 
-    /* ---------------------------------------------------------------------
-     * The epilogue
-     * --------------------------------------------------------------------- */
+/* The epilogue: the live mask back, the exports, and room for a second colour export.
+ */
+static GLboolean ps_emit_epilogue(glsl_gen_t *gen, glsl_code_t *code,
+                                  GLboolean wants_fragdata, GLboolean wants_fragdepth,
+                                  char *log, size_t log_size) {
+    GLboolean ok = GL_TRUE;
     if (ok) {
         /* **Whichever name this shader wrote.** They are the same buffer, so exporting
          * from `gl_FragData[0]` where the shader used it is the whole of the difference
@@ -1066,13 +1206,13 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
              * it keeps a discarded lane out, because `discard` took it out of this
              * mask; and it brings back a lane that returned early from `main`, which is
              * still supposed to export what it had. */
-            glsl_emit_exec_restore(&code, GLSL_GEN_LIVE_SGPR);
+            glsl_emit_exec_restore(code, GLSL_GEN_LIVE_SGPR);
             for (uint32_t i = 0; i < 4u; i++) {
                 /* A move onto itself would be a wasted instruction rather than a wrong
                  * one, and the export registers are below everything the allocator
                  * hands out - so this never is one, and the check is left out rather
                  * than written and never taken. */
-                glsl_emit_mov(&code, GL_PS_EXPORT_BASE + i, colour.base + i);
+                glsl_emit_mov(code, GL_PS_EXPORT_BASE + i, colour.base + i);
             }
             /* **The depth goes first, because the colour export is the one that says
              * `done`.** Two exports both claiming to be the last is a shader that does
@@ -1081,15 +1221,15 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                 glsl_value_t depth;
                 if (glsl_gen_lookup(gen, "gl_FragDepth", 12u, &depth) &&
                     depth.count == 1) {
-                    glsl_emit_export_mrtz(&code, depth.base);
+                    glsl_emit_export_mrtz(code, depth.base);
                 } else {
                     glsl_log_write(log, log_size,
                                    "gl_FragDepth did not survive to the export", 0, 0);
                     ok = GL_FALSE;
                 }
             }
-            glsl_emit_export_mrt0(&code, GL_PS_EXPORT_BASE);
-            glsl_emit_endpgm(&code);
+            glsl_emit_export_mrt0(code, GL_PS_EXPORT_BASE);
+            glsl_emit_endpgm(code);
             /*
              * **Room for a second export, so a draw into two colour buffers can have
              * one.**
@@ -1110,39 +1250,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
              * Nothing runs after `s_endpgm`, so on a one-target draw these are never
              * reached.
              */
-            glsl_emit_nop(&code);
-            glsl_emit_nop(&code);
+            glsl_emit_nop(code);
+            glsl_emit_nop(code);
         }
     }
-
-    if (ok && code.overflow) {
-        oops_snprintf(log, log_size, "this shader needs more than %u instructions",
-                      capacity);
-        ok = GL_FALSE;
-    }
-
-    if (ok && gen->high_water > GL_PS_MAX_VGPRS) {
-        oops_snprintf(
-            log, log_size,
-            "this shader needs %u registers and the pixel stage is allocated %u",
-            gen->high_water, GL_PS_MAX_VGPRS);
-        ok = GL_FALSE;
-    }
-
-    if (ok) {
-        if (out_count)
-            *out_count = code.count;
-        /* What the shader's resource register has to reserve. The high-water mark is
-         * what the allocator ever held live, and the export registers sit below it - so
-         * it is the whole of the file this shader touches. */
-        if (out_vgprs)
-            *out_vgprs = gen->high_water;
-        if (out_user_sgprs)
-            *out_user_sgprs = user_sgprs;
-        if (out_input_ena)
-            *out_input_ena = input_ena;
-    }
-    gl_heap_free(sema);
-    gl_heap_free(gen);
     return ok;
 }
