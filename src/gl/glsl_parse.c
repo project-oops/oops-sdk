@@ -1126,15 +1126,14 @@ static int32_t parse_parameter_list(glsl_parser_t *p) {
     if (check(p, GLSL_TOK_RPAREN))
         return GLSL_NO_NODE;
 
-    /* `void` alone means no parameters, and is not a parameter named nothing. */
+    /* `void` alone means no parameters. Anything after it is a parameter of type
+     * `void`, which GLSL has no use for, so it is refused rather than rewound. */
     if (check(p, GLSL_TOK_KW_VOID)) {
-        glsl_lexer_t save_lx = p->lx;
-        glsl_token_t save_tok = p->tok;
         bump(p);
         if (check(p, GLSL_TOK_RPAREN))
             return GLSL_NO_NODE;
-        p->lx = save_lx;
-        p->tok = save_tok;
+        fail(p, "a parameter may not be void");
+        return GLSL_NO_NODE;
     }
 
     for (;;) {

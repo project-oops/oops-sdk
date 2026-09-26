@@ -189,6 +189,27 @@ static void test_gl2_compile_reports_status_and_a_log(void) {
     glContextDestroy(ctx);
 }
 
+/* `void` followed by anything but `)` in a parameter list is refused as a void
+ * parameter, with every later token still where it was. */
+static void test_gl2_a_void_parameter_is_refused(void) {
+    void *ctx = gl2_context();
+    GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+    source_of(sh, "float f(void x) { return 1.0; }\n"
+                  "void main() { gl_FragColor = vec4(f()); }\n");
+    glCompileShader(sh);
+    GLint status = -1;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &status);
+    ASSERT_EQ(status, GL_FALSE);
+    char log[256] = {0};
+    glGetShaderInfoLog(sh, (GLsizei)sizeof(log), NULL, log);
+    ASSERT_TRUE(strstr(log, "void") != NULL);
+    /* `(void)` alone is still an empty list. */
+    ASSERT_TRUE(compiles(GL_FRAGMENT_SHADER,
+                         "float f(void) { return 1.0; }\n"
+                         "void main() { gl_FragColor = vec4(f()); }\n"));
+    glContextDestroy(ctx);
+}
+
 /* A compile or link refusal fails with a log that names the line or the reason. */
 static void test_gl2_compile_refuses_and_explains(void) {
     void *ctx = gl2_context();
@@ -8374,6 +8395,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_a_name_is_never_reused);
     RUN_TEST(test_gl2_compile_reports_status_and_a_log);
     RUN_TEST(test_gl2_compile_refuses_and_explains);
+    RUN_TEST(test_gl2_a_void_parameter_is_refused);
     RUN_TEST(test_gl2_builtins_are_known_to_the_compiler);
     RUN_TEST(test_gl2_arrays_are_typed_and_bounded);
     RUN_TEST(test_gl2_glsl_120_converts_int_to_float);
