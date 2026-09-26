@@ -21,12 +21,6 @@ struct oops_font_desc {
     int style;
 };
 
-struct oops_anchor {
-    litehtml::position pos;
-    std::string href;
-    litehtml::element::ptr el;
-};
-
 class oops_container : public litehtml::document_container {
   public:
     int m_width;
@@ -39,7 +33,6 @@ class oops_container : public litehtml::document_container {
     std::vector<litehtml::position> m_clip_stack;
     std::vector<std::unique_ptr<oops_font_desc>> m_fonts;
     std::map<std::string, oops_surface_t> m_image_cache;
-    std::vector<oops_anchor> m_anchors;
 
     litehtml::document::ptr m_doc;
 

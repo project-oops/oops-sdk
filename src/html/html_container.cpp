@@ -251,19 +251,10 @@ void oops_container::set_base_url(const char *base_url) {
     m_base_url = base_url ? base_url : "";
 }
 
+// Called for a `<link>` element, which has no box to hit; links are `<a>` elements,
+// found after layout by `hit_test`.
 void oops_container::link(const std::shared_ptr<litehtml::document> & /*doc*/,
-                          const litehtml::element::ptr &el) {
-    if (!el)
-        return;
-    const char *href = el->get_attr("href");
-    if (href) {
-        oops_anchor a;
-        a.pos = el->get_placement();
-        a.href = href;
-        a.el = el;
-        m_anchors.push_back(a);
-    }
-}
+                          const litehtml::element::ptr & /*el*/) {}
 
 void oops_container::on_anchor_click(const char *url,
                                      const litehtml::element::ptr & /*el*/) {
@@ -362,14 +353,18 @@ int oops_container::hit_test(int x, int y, char *href_out, size_t href_len) {
     int doc_x = x + m_scroll_x;
     int doc_y = y + m_scroll_y;
     litehtml::position pt(doc_x, doc_y, 1, 1);
-    for (const auto &a : m_anchors) {
-        if (a.pos.does_intersect(&pt)) {
-            if (href_out && href_len > 0) {
-                strncpy(href_out, a.href.c_str(), href_len - 1);
-                href_out[href_len - 1] = '\0';
-            }
-            return 1;
+    if (!m_doc || !m_doc->root())
+        return 0;
+    // Placements are read now, so they are the current layout's.
+    for (const auto &el : m_doc->root()->select_all("a[href]")) {
+        const litehtml::position pos = el->get_placement();
+        if (!pos.does_intersect(&pt))
+            continue;
+        if (href_out && href_len > 0) {
+            strncpy(href_out, el->get_attr("href", ""), href_len - 1);
+            href_out[href_len - 1] = '\0';
         }
+        return 1;
     }
     return 0;
 }

@@ -65,11 +65,6 @@ void test_html_load_and_render() {
     }
     assert(has_rendered_pixels);
 
-    // Hit testing is only called: the link's position depends on the font height.
-    char href[128] = {0};
-    int hit = oops_html_hit_test(html, 20, 150, href, sizeof(href));
-    (void)hit;
-
     assert(oops_html_get_scroll_y(html) == 0);
     oops_html_scroll(html, 0, 50);
     int sy = oops_html_get_scroll_y(html);
@@ -80,10 +75,42 @@ void test_html_load_and_render() {
     printf("PASS: test_html_load_and_render\n");
 }
 
+// A link's box answers a hit test with its href, and a point outside every link does
+// not. The link is a sized block so its position does not depend on the font.
+void test_html_hit_test_finds_the_link() {
+    oops_html_t *html = oops_html_create(800, 600);
+    assert(html != nullptr);
+    const char *source = "<html><head><style>"
+                         "body { margin: 0; }"
+                         "a { display: block; width: 200px; height: 50px; }"
+                         "</style></head><body>"
+                         "<div style=\"height: 100px\"></div>"
+                         "<a href=\"https://oops.org/catalogue\"></a>"
+                         "</body></html>";
+    int rc = oops_html_load(html, source, "https://oops.org/");
+    assert(rc == 0);
+
+    char href[128] = {0};
+    int hit = oops_html_hit_test(html, 20, 120, href, sizeof(href));
+    if (hit != 1 || strcmp(href, "https://oops.org/catalogue") != 0) {
+        printf("FAIL: test_html_hit_test_finds_the_link (hit=%d href=\"%s\")\n", hit,
+               href);
+        exit(1);
+    }
+    char none[128] = {0};
+    if (oops_html_hit_test(html, 20, 20, none, sizeof(none)) != 0) {
+        printf("FAIL: test_html_hit_test_finds_the_link (hit above the link)\n");
+        exit(1);
+    }
+    oops_html_destroy(html);
+    printf("PASS: test_html_hit_test_finds_the_link\n");
+}
+
 int main() {
     printf("=== RUNNING HTML UNIT TESTS ===\n");
     test_html_lifecycle();
     test_html_load_and_render();
+    test_html_hit_test_finds_the_link();
     printf("ALL HTML UNIT TESTS PASSED!\n");
     return 0;
 }

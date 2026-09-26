@@ -55,7 +55,6 @@ int oops_html_load(oops_html_t *html, const char *html_source, const char *base_
     }
 
     html->container->set_base_url(base_url);
-    html->container->m_anchors.clear();
 
     oops_log_debug("HTML", "Parsing HTML document (length: %zu bytes)",
                    strlen(html_source));
