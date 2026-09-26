@@ -53,6 +53,12 @@ int oops_fs_mkdir(const char *path, int mode);
 int oops_fs_unlink(const char *path);
 int oops_fs_rename(const char *from, const char *to);
 int oops_fs_chmod(const char *path, int mode);
+int oops_fs_rmdir(const char *path);
+
+/* Recursively delete a directory and everything under it. Returns 0 when the tree is
+ * gone (including when it never existed), non-zero if something could not be removed.
+ */
+int oops_fs_rmtree(const char *path);
 
 /*
  * Walking a directory, in the POSIX shape over `SYS_getdents`: open, read entries until

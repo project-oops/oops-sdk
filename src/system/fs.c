@@ -307,6 +307,58 @@ int oops_fs_chmod(const char *path, int mode) {
   return rc;
 }
 
+int oops_fs_rmdir(const char *path) {
+  if (path == NULL) {
+    return -1;
+  }
+#ifndef OOPS_HOST_BUILD
+  int rc = (int)sys_call(SYS_rmdir, (long)path, 0, 0, 0, 0, 0);
+#else
+  int rc = rmdir(path);
+#endif
+  oops_log_debug("FS", "rmdir path=%s rc=%d", path, rc);
+  return rc;
+}
+
+int oops_fs_rmtree(const char *path) {
+  if (path == NULL) {
+    return -1;
+  }
+  oops_dir_t *dir = oops_fs_opendir(path);
+  if (dir != NULL) {
+    oops_dirent_t ent;
+    while (oops_fs_readdir(dir, &ent) == 1) {
+      if (ent.name[0] == '.' &&
+          (ent.name[1] == '\0' || (ent.name[1] == '.' && ent.name[2] == '\0'))) {
+        continue; /* skip "." and ".." */
+      }
+      char child[1024];
+      int n = 0;
+      for (const char *p = path; *p != '\0' && n < (int)sizeof(child) - 1; p++) {
+        child[n++] = *p;
+      }
+      if (n > 0 && child[n - 1] != '/' && n < (int)sizeof(child) - 1) {
+        child[n++] = '/';
+      }
+      for (const char *p = ent.name; *p != '\0' && n < (int)sizeof(child) - 1; p++) {
+        child[n++] = *p;
+      }
+      child[n] = '\0';
+      if (ent.is_directory) {
+        oops_fs_rmtree(child);
+      } else {
+        oops_fs_unlink(child);
+      }
+    }
+    oops_fs_closedir(dir);
+  }
+  int rc = oops_fs_rmdir(path);
+  if (rc != 0 && !oops_fs_exists(path)) {
+    rc = 0; /* a tree that is already gone is the desired end state */
+  }
+  return rc;
+}
+
 /* ---------------------------------------------------------------------------
  * Walking a directory
  *

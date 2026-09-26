@@ -843,6 +843,8 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_fs_read_all`
 - `oops_fs_readdir`
 - `oops_fs_rename`
+- `oops_fs_rmdir`
+- `oops_fs_rmtree`
 - `oops_fs_seek`
 - `oops_fs_storage_path`
 - `oops_fs_tell`

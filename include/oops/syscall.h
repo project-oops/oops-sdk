@@ -25,6 +25,7 @@
 #define SYS_munmap 73
 #define SYS_mprotect 74
 #define SYS_mkdir 136
+#define SYS_rmdir 137
 #define SYS_socket                                                                     \
     97 /* hardware-confirmed: sys_call(97, AF_INET, SOCK_STREAM, IPPROTO_TCP)          \
           returns a descriptor (obSCEne, 12.40) */
