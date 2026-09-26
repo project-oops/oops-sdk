@@ -829,6 +829,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 ## oops/fs.h
 
 - `oops_dir_t`
+- `oops_fs_chmod`
 - `oops_fs_close`
 - `oops_fs_closedir`
 - `oops_fs_exists`
@@ -1131,6 +1132,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_log_set_level`
 - `oops_run_init_array`
 - `oops_symbol_is_resolved`
+- `oops_system_allow_sandbox_escape`
 - `oops_system_check_pltauth`
 - `oops_system_close_requested`
 - `oops_system_escape_sandbox`
@@ -1155,6 +1157,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_system_power_tick`
 - `oops_system_prepare_for_suspend`
 - `oops_system_pump_events`
+- `oops_system_sandbox_escape_allowed`
 - `oops_system_set_suspend_drain`
 - `oops_test_get_last_klog`
 - `oops_user_get_initial_user_id`
@@ -1231,6 +1234,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_js_t`
 - `oops_webview_create`
 - `oops_webview_destroy`
+- `oops_webview_ensure_visible`
 - `oops_webview_get_html`
 - `oops_webview_get_js`
 - `oops_webview_load_html`
