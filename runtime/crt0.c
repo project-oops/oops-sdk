@@ -4,7 +4,7 @@
  * elfldr maps a plain ET_DYN payload, applies only R_X86_64_RELATIVE, and jumps to the
  * entry with a `payload_args` pointer in rdi. It resolves no imports, so this walks the
  * payload's own relocation tables, fills every import from the target's libraries, and
- * then calls the real entry (obscene#D211).
+ * then calls the real entry.
  *
  * The format facts (the args layout, the 16 KB pages, that only RELATIVE is applied)
  * belong to selfish; the per-firmware vaddrs arrive in the resolution table the caller
