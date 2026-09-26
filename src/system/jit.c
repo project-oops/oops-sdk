@@ -53,17 +53,16 @@ int oops_jit_alloc(size_t size, oops_jit_memory_t *out_mem) {
         return -1; /* Overflow */
     }
 
+    /* One view that is both, or nothing: a read-write mapping handed out as `rx_addr`
+     * would fault on the first call into it. */
     void *ptr = mmap(NULL, aligned, PROT_READ | PROT_WRITE | PROT_EXEC,
                      MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (ptr == MAP_FAILED || !ptr) {
-        /* Some strict host kernels forbid simultaneous RWX; attempt RW then fallback */
-        ptr = mmap(NULL, aligned, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE,
-                   -1, 0);
-        if (ptr == MAP_FAILED || !ptr) {
-            oops_log_warn("JIT", "alloc mmap failed size=%zu aligned=%zu", size,
-                          aligned);
-            return -1;
-        }
+        oops_log_warn("JIT",
+                      "alloc: the host refused a writable, executable mapping "
+                      "of %zu bytes",
+                      aligned);
+        return -1;
     }
 
     out_mem->rx_addr = ptr;
