@@ -1188,12 +1188,14 @@ void gl_capture_swap_tick(gl_context_t *ctx) {
             msg[n] = '\0';
             oops_log_info("GL", "%s", msg);
         }
-        if (data && bytes && g_capture_path) {
-            /* Reported above. */
-        } else {
-            /* Overflowed, so `oops_gl_capture_data` handed back nothing. */
+        /* Each reason for writing nothing from the state that decided it. */
+        if (g_capture_overflow) {
             oops_log_info("GL",
                           "capture overflowed and was discarded - nothing written");
+        } else if (!g_capture_path) {
+            oops_log_info("GL", "capture had no path armed - nothing written");
+        } else if (!data || !bytes) {
+            oops_log_info("GL", "capture recorded nothing - nothing written");
         }
         g_capture_arm_frame = 0u;
         g_capture_path = (const char *)0;
