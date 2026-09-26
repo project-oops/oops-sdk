@@ -3414,19 +3414,24 @@ void gl_ps_patch_alpha_test(gl_context_t *ctx) {
         }
     }
 
-    uint32_t *ps_untex =
+    uint32_t *const ps_untex =
         (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_UNTEX_OFFSET);
-    uint32_t *ps_tex = (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
-
-    /* A built frame still points at these four words - see gl_ps_sync_payload_edit. */
-    gl_ps_sync_payload_edit(ctx, ps_untex + GL_PS_ALPHA_SLOT_UNTEX, words, 4);
-    gl_ps_sync_payload_edit(ctx, ps_tex + GL_PS_ALPHA_SLOT_TEX, words, 4);
-
-    for (size_t i = 0; i < 4; i++) {
-        ps_untex[GL_PS_ALPHA_SLOT_UNTEX + i] = words[i];
-        ps_tex[GL_PS_ALPHA_SLOT_TEX + i] = words[i];
+    uint32_t *const ps_tex =
+        (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
+    uint32_t *const slots[2] = {ps_untex + GL_PS_ALPHA_SLOT_UNTEX,
+                                ps_tex + GL_PS_ALPHA_SLOT_TEX};
+    GLboolean wrote = GL_FALSE;
+    for (int s = 0; s < 2; s++) {
+        if (gl_ps_slot_same(ctx, slots[s], words, 4))
+            continue;
+        /* A built frame still points at these words - see gl_ps_sync_payload_edit. */
+        gl_ps_sync_payload_edit(ctx, slots[s], words, 4);
+        memcpy(slots[s], words, sizeof(words));
+        gl_ps_slot_wrote(ctx, slots[s], words, 4);
+        wrote = GL_TRUE;
     }
-    gl_ps_flush_shaders(ctx);
+    if (wrote)
+        gl_ps_flush_shaders(ctx);
 }
 
 GLboolean glIsHardwareAccelerated(void) {

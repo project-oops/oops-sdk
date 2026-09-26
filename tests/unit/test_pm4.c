@@ -1987,6 +1987,39 @@ static void test_pm4_gl_alpha_test_sets_kill_enable(void) {
     oops_display_close(disp);
 }
 
+/* The alpha-test slot's mirror follows every write to the payload, so disabling the
+ * test is seen as a change and reaches draws already built. */
+static void test_pm4_gl_alpha_test_slot_mirror_follows_the_payload(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
+    void *ctx_handle = glContextCreate(disp);
+    gl_context_t *ctx = (gl_context_t *)ctx_handle;
+
+    static _Alignas(256) uint8_t payload[0x4000];
+    memset(payload, 0, sizeof(payload));
+    ctx->gpu_payload = payload;
+    const uint32_t *const untex =
+        (const uint32_t *)(payload + OOPS_GL_PS_UNTEX_OFFSET) + GL_PS_ALPHA_SLOT_UNTEX;
+    const uint32_t *const tex =
+        (const uint32_t *)(payload + OOPS_GL_PS_TEX_OFFSET) + GL_PS_ALPHA_SLOT_TEX;
+    const uint32_t *const untex_sh = ctx->hw_ps_untex_shadow + GL_PS_ALPHA_SLOT_UNTEX;
+    const uint32_t *const tex_sh = ctx->hw_ps_tex_shadow + GL_PS_ALPHA_SLOT_TEX;
+
+    glEnable(GL_ALPHA_TEST);
+    glAlphaFunc(GL_GREATER, 0.5f);
+    ASSERT_EQ(untex[2], 0x7c081907u); /* v_cmp_gt_f32: the test is in the payload */
+    ASSERT_EQ(memcmp(untex_sh, untex, 16), 0);
+    ASSERT_EQ(memcmp(tex_sh, tex, 16), 0);
+
+    glDisable(GL_ALPHA_TEST);
+    ASSERT_EQ(untex[2], 0xbf800000u); /* s_nop: the test is gone */
+    ASSERT_EQ(memcmp(untex_sh, untex, 16), 0);
+    ASSERT_EQ(memcmp(tex_sh, tex, 16), 0);
+
+    ctx->gpu_payload = NULL;
+    glContextDestroy(ctx_handle);
+    oops_display_close(disp);
+}
+
 /* A mipmapped texture reaches the hardware as a chain laid out as addrlib lays out a
  * linear GFX10 surface: smallest level first, base level last, each level's rows padded
  * to 64 texels (gfx10addrlib.cpp:5082-5104). A 4x4 texture puts level 2 at byte 0,
@@ -5718,6 +5751,7 @@ void run_unit_tests_pm4(void) {
     RUN_TEST(test_pm4_gl_baryc_cntl_delivers_a_float_face);
     RUN_TEST(test_pm4_gl_a_discarding_shader_sets_kill_enable);
     RUN_TEST(test_pm4_gl_alpha_test_sets_kill_enable);
+    RUN_TEST(test_pm4_gl_alpha_test_slot_mirror_follows_the_payload);
     RUN_TEST(test_pm4_gl_mip_chain_reaches_the_descriptor);
     RUN_TEST(test_pm4_gl_scissored_clear_is_drawn);
     RUN_TEST(test_pm4_gl_volume_and_cube_sample_on_hardware);
