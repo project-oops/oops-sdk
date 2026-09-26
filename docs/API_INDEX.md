@@ -709,7 +709,6 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_gl_capture_replay`
 - `oops_gl_get_log_level`
 - `oops_gl_get_proc_address`
-- `oops_gl_set_linear_target`
 - `oops_gl_set_log_level`
 
 ## libc/assert.h
@@ -780,6 +779,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_display_present`
 - `oops_display_read_shown`
 - `oops_display_scanout`
+- `oops_display_scanout_layout`
 - `oops_display_scanout_layout_t`
 - `oops_display_t`
 - `oops_display_try_gpu_tiler`

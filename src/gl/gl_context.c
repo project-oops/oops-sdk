@@ -49,38 +49,6 @@ int oops_gl_get_log_level(void) {
     return gl_log_level;
 }
 
-/* **Keep the colour target linear instead of drawing the scanout buffers in place.**
- *
- * The scanout path is faster - it is the whole reason it exists, a frame drawn where it
- * will be shown rather than drawn and then tiled into place - and it is the path every
- * hardware run since 2026-09-20 has used. It is also 64KB_R_X, a swizzled surface,
- * where the linear path is a plain one; and the blending fault documented at
- * `CB_COLOR0_INFO` in gl_draw.c is a fault in the *placement* of a blended result, not
- * in its value. A swizzle the write path agrees with and the read-modify-write path
- * does not would produce exactly that, and would produce it on the scanout path only.
- *
- * So this exists to answer one question: does a blend land correctly on a linear
- * target? It has to be settable rather than compiled in, because the answer is only
- * worth anything next to the scanout run it is compared against, and
- * `OOPS_GL_RX_MEASURED` is a record of a measurement that was made and should not be
- * edited to run an experiment. Set it before the context is created; afterwards the
- * target is already chosen and this does nothing.
- *
- * It was added on 2026-09-23 to ask whether blending landed correctly on an unswizzled
- * surface. It did not - the two paths were wrong identically, which is what said the
- * swizzle was not involved and sent the search to the export format instead. Kept
- * because a runtime choice between the two targets is worth having on its own:
- * `OOPS_GL_RX_MEASURED` is a record of a measurement and should not be edited to run an
- * experiment. */
-GLboolean gl_force_linear_target = GL_FALSE;
-
-void oops_gl_set_linear_target(GLboolean on) {
-    gl_force_linear_target = on;
-    oops_log_info("GL",
-                  on ? "the colour target will stay linear: the scanout path is skipped"
-                     : "the scanout path is allowed");
-}
-
 void gl_hw_fail(gl_context_t *ctx, const char *reason) {
     if (!ctx || ctx->hw_failed)
         return;
@@ -1784,10 +1752,9 @@ void *glContextCreate(struct oops_display *disp) {
             gl_ps_shadow_seed(ctx);
             ctx->zs_tiled =
                 GL_TRUE; /* the DB draws depth and stencil 64KB_Z_X from here on */
-            /* The scanout path, once REQ-20260919T1927Z-7e21 has measured it (gl_rx.h)
-             * - before the self-test, so that the test clears the buffer frames will be
-             * drawn into. */
-            if (!gl_force_linear_target && OOPS_GL_RX_MEASURED &&
+            /* The scanout path where its layout is measured (gl_rx.h), before the
+             * self-test so that the test clears the buffer frames are drawn into. */
+            if (OOPS_GL_RX_MEASURED &&
                 oops_display_scanout_layout(disp) == OOPS_DISPLAY_SCANOUT_RX) {
                 gl_scanout_begin(ctx);
             }
