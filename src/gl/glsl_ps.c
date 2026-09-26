@@ -156,20 +156,6 @@ static size_t lit_len(const char *s) {
     return n;
 }
 
-static void log_say(char *log, size_t cap, const char *why, int line, int column) {
-    if (!log || cap == 0u)
-        return;
-    if (!why) {
-        log[0] = '\0';
-        return;
-    }
-    if (line > 0) {
-        oops_snprintf(log, cap, "%d:%d: %s", line, column, why);
-    } else {
-        oops_snprintf(log, cap, "%s", why);
-    }
-}
-
 /* The front-end type a GL enumerant names, for the varying table - which holds the
  * enumerant because that is what `glGetActiveUniform` reports, and the generator wants
  * the other one. */
@@ -359,7 +345,7 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     if (out_input_ena)
         *out_input_ena = GL_PS_INPUT_PERSP_CENTER;
     if (!p || !p->linked || !words) {
-        log_say(log, log_size, "no linked fragment stage to compile", 0, 0);
+        glsl_log_write(log, log_size, "no linked fragment stage to compile", 0, 0);
         return GL_FALSE;
     }
     const glsl_unit_t *fs = p->fs;
@@ -384,7 +370,7 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     if (!sema || !gen) {
         gl_heap_free(sema);
         gl_heap_free(gen);
-        log_say(log, log_size, "out of memory", 0, 0);
+        glsl_log_write(log, log_size, "out of memory", 0, 0);
         return GL_FALSE;
     }
 
@@ -423,9 +409,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             if (fs->ast.nodes[d].kind != GLSL_NODE_FUNCTION)
                 continue;
             if (!glsl_declare_function(sema, d)) {
-                log_say(log, log_size,
-                        sema->error ? sema->error : "a function has no signature", 0,
-                        0);
+                glsl_log_write(
+                    log, log_size,
+                    sema->error ? sema->error : "a function has no signature", 0, 0);
                 ok = GL_FALSE;
                 break;
             }
@@ -463,8 +449,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             (GLboolean)(u->type == GL_SAMPLER_1D || u->type == GL_SAMPLER_1D_SHADOW);
         if (!glsl_gen_declare_sampler(gen, u->name, lit_len(u->name), (uint32_t)s, dim,
                                       shadow, oned)) {
-            log_say(log, log_size, gen->error ? gen->error : "a sampler has no set", 0,
-                    0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "a sampler has no set", 0, 0);
             ok = GL_FALSE;
         }
     }
@@ -688,13 +674,13 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
             (size > 1) ? glsl_gen_declare_input_array(gen, u->name, ulen, t, size)
                        : glsl_gen_declare_input(gen, u->name, ulen, t);
         if (home.count == 0) {
-            log_say(log, log_size,
-                    gen->error ? gen->error : "a uniform has no register", 0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "a uniform has no register", 0, 0);
             ok = GL_FALSE;
             break;
         }
         if (resident_count >= OOPS_GL_MAX_PROGRAM_UNIFORMS) {
-            log_say(log, log_size, "too many uniforms in one shader", 0, 0);
+            glsl_log_write(log, log_size, "too many uniforms in one shader", 0, 0);
             ok = GL_FALSE;
             break;
         }
@@ -759,8 +745,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const glsl_value_t fc =
             glsl_gen_declare_input(gen, "gl_FragCoord", 12u, GLSL_TYPE_VEC4);
         if (fc.count != 4) {
-            log_say(log, log_size,
-                    gen->error ? gen->error : "gl_FragCoord has no register", 0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "gl_FragCoord has no register", 0,
+                           0);
             ok = GL_FALSE;
         } else {
             glsl_emit_mov(&code, fc.base + 0u, GL_PS_FRAGPOS_VGPR + 0u);
@@ -791,14 +778,15 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const glsl_value_t ff =
             glsl_gen_declare_input(gen, "gl_FrontFacing", 14u, GLSL_TYPE_BOOL);
         if (ff.count != 1) {
-            log_say(log, log_size,
-                    gen->error ? gen->error : "gl_FrontFacing has no register", 0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "gl_FrontFacing has no register",
+                           0, 0);
             ok = GL_FALSE;
         } else {
             const uint32_t zero = glsl_gen_scratch(gen);
             const uint32_t one = glsl_gen_scratch(gen);
             if (gen->error) {
-                log_say(log, log_size, gen->error, 0, 0);
+                glsl_log_write(log, log_size, gen->error, 0, 0);
                 ok = GL_FALSE;
             } else {
                 glsl_emit_mov_imm(&code, zero, 0x00000000u);
@@ -833,8 +821,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const glsl_value_t home =
             glsl_gen_declare_input(gen, v->name, lit_len(v->name), t);
         if (home.count == 0) {
-            log_say(log, log_size,
-                    gen->error ? gen->error : "a varying has no register", 0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "a varying has no register", 0, 0);
             ok = GL_FALSE;
             break;
         }
@@ -861,8 +849,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const glsl_value_t home =
             glsl_gen_declare_input(gen, "gl_Color", 8u, GLSL_TYPE_VEC4);
         if (home.count != 4) {
-            log_say(log, log_size, gen->error ? gen->error : "gl_Color has no register",
-                    0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "gl_Color has no register", 0, 0);
             ok = GL_FALSE;
         } else {
             for (int c = 0; c < 4; c++) {
@@ -882,8 +870,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const glsl_value_t home = glsl_gen_declare_input_array(
             gen, "gl_TexCoord", 11u, GLSL_TYPE_VEC4, OOPS_GL_MAX_TEXTURE_UNITS);
         if (home.count != 4 * OOPS_GL_MAX_TEXTURE_UNITS) {
-            log_say(log, log_size,
-                    gen->error ? gen->error : "gl_TexCoord has no registers", 0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "gl_TexCoord has no registers", 0,
+                           0);
             ok = GL_FALSE;
         } else {
             for (int u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
@@ -921,8 +910,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const glsl_value_t home =
             glsl_gen_declare_input(gen, "gl_PointCoord", 13u, GLSL_TYPE_VEC2);
         if (home.count != 2) {
-            log_say(log, log_size,
-                    gen->error ? gen->error : "gl_PointCoord has no register", 0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "gl_PointCoord has no register", 0,
+                           0);
             ok = GL_FALSE;
         } else {
             for (int c = 0; c < 2; c++) {
@@ -960,10 +950,10 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                 continue;
             }
             if (!glsl_gen_stmt(gen, d)) {
-                log_say(log, log_size,
-                        gen->error ? gen->error
-                                   : "this global has no instruction selection",
-                        gen->error_line, gen->error_column);
+                glsl_log_write(log, log_size,
+                               gen->error ? gen->error
+                                          : "this global has no instruction selection",
+                               gen->error_line, gen->error_column);
                 ok = GL_FALSE;
             }
         }
@@ -988,8 +978,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const glsl_value_t colour =
             glsl_gen_declare_input(gen, "gl_FragColor", 12u, GLSL_TYPE_VEC4);
         if (colour.count == 0) {
-            log_say(log, log_size,
-                    gen->error ? gen->error : "gl_FragColor has no register", 0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "gl_FragColor has no register", 0,
+                           0);
             ok = GL_FALSE;
         }
     }
@@ -997,8 +988,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const glsl_value_t data =
             glsl_gen_declare_input_array(gen, "gl_FragData", 11u, GLSL_TYPE_VEC4, 1);
         if (data.count != 4) {
-            log_say(log, log_size,
-                    gen->error ? gen->error : "gl_FragData has no register", 0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "gl_FragData has no register", 0,
+                           0);
             ok = GL_FALSE;
         }
     }
@@ -1016,8 +1008,9 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const glsl_value_t depth =
             glsl_gen_declare_input(gen, "gl_FragDepth", 12u, GLSL_TYPE_FLOAT);
         if (depth.count != 1) {
-            log_say(log, log_size,
-                    gen->error ? gen->error : "gl_FragDepth has no register", 0, 0);
+            glsl_log_write(log, log_size,
+                           gen->error ? gen->error : "gl_FragDepth has no register", 0,
+                           0);
             ok = GL_FALSE;
         } else {
             glsl_emit_mov(&code, depth.base,
@@ -1031,17 +1024,18 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     if (ok) {
         const int32_t main_fn = find_main(fs);
         if (main_fn == GLSL_NO_NODE) {
-            log_say(log, log_size, "the fragment shader has no main", 0, 0);
+            glsl_log_write(log, log_size, "the fragment shader has no main", 0, 0);
             ok = GL_FALSE;
         } else {
             const int32_t body = fs->ast.nodes[main_fn].c;
             for (int32_t st = fs->ast.nodes[body].a; st != GLSL_NO_NODE;
                  st = fs->ast.nodes[st].sibling) {
                 if (!glsl_gen_stmt(gen, st)) {
-                    log_say(log, log_size,
-                            gen->error ? gen->error
+                    glsl_log_write(log, log_size,
+                                   gen->error
+                                       ? gen->error
                                        : "this shader has no instruction selection",
-                            gen->error_line, gen->error_column);
+                                   gen->error_line, gen->error_column);
                     ok = GL_FALSE;
                     break;
                 }
@@ -1062,8 +1056,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         const size_t out_len = wants_fragdata ? 11u : 12u;
         glsl_value_t colour;
         if (!glsl_gen_lookup(gen, out_name, out_len, &colour) || colour.count != 4) {
-            log_say(log, log_size, "the fragment colour did not survive to the export",
-                    0, 0);
+            glsl_log_write(log, log_size,
+                           "the fragment colour did not survive to the export", 0, 0);
             ok = GL_FALSE;
         } else {
             /* **Back to the lanes that should export**, which does three things at
@@ -1089,8 +1083,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
                     depth.count == 1) {
                     glsl_emit_export_mrtz(&code, depth.base);
                 } else {
-                    log_say(log, log_size, "gl_FragDepth did not survive to the export",
-                            0, 0);
+                    glsl_log_write(log, log_size,
+                                   "gl_FragDepth did not survive to the export", 0, 0);
                     ok = GL_FALSE;
                 }
             }

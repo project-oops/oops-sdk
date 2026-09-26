@@ -10,6 +10,7 @@
 #include "oops/freestd.h"
 #include "oops/display.h"
 #include "oops/agc.h"
+#include "oops/system.h"
 
 #ifndef OOPS_HOST_BUILD
 #include "oops/memory.h"
@@ -2333,9 +2334,6 @@ static inline gl_context_t *gl_get_ctx(void) {
  * the only thing an error code is for.
  *
  * glGetError() itself still assigns, because clearing the flag is its job. */
-/* Declared again here, ahead of its first use: the definition lives in `gl_context.c`
-   and the header's own declaration is further down, beside the rest of the logging. */
-void gl_log_line(const char *msg);
 
 /* Appends "0x" and `v` in hex to `buf` at `n`, and returns the new length. */
 static inline size_t gl_msg_hex(char *buf, size_t cap, size_t n, uint32_t v) {
@@ -2421,7 +2419,7 @@ static inline void gl_record_error_val_at(gl_context_t *ctx, GLenum error, uint3
             n = gl_msg_hex(msg, sizeof(msg), n, val);
         }
         msg[n] = '\0';
-        gl_log_line(msg);
+        oops_log_info("GL", "%s", msg);
     }
     if (ctx->last_error == GL_NO_ERROR) {
         ctx->last_error = error;
@@ -4936,8 +4934,6 @@ extern uint32_t gl_vbo_ring_bytes;
  * one. */
 #define OOPS_GL_DCB_CAPACITY_DW 0x80000u /* 512 Ki dwords, 2 MiB */
 void gl_hw_fail(gl_context_t *ctx, const char *reason);
-/* One line in the kernel log ("[OOPS-GL] ..."); nothing on a host build. */
-void gl_log_line(const char *msg);
 void gl_hw_emit_dma_fill(uint32_t **dw_ptr, uint64_t dst, uint32_t value,
                          uint32_t bytes);
 void gl_hw_emit_dma_copy(uint32_t **dw_ptr, uint64_t src, uint64_t dst, uint32_t bytes);

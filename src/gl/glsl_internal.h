@@ -521,6 +521,23 @@ static inline glsl_type_t glsl_struct_type(int index) {
     return (glsl_type_t)((int)GLSL_TYPE_STRUCT_BASE + index);
 }
 
+/* Writes `why` into a GL info log as "line:column: why", or bare when `line` is 0. A
+ * NULL `why` leaves the log empty. */
+static inline void glsl_log_write(char *log, size_t cap, const char *why, int line,
+                                  int column) {
+    if (!log || cap == 0u)
+        return;
+    if (!why) {
+        log[0] = '\0';
+        return;
+    }
+    if (line > 0) {
+        oops_snprintf(log, cap, "%d:%d: %s", line, column, why);
+    } else {
+        oops_snprintf(log, cap, "%s", why);
+    }
+}
+
 /* One member of a struct. `array_size` is 0 for a plain member, mirroring
  * `glsl_symbol_t`. */
 typedef struct {

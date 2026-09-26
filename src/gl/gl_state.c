@@ -2364,8 +2364,8 @@ GLboolean glContextSetVersion(GLuint major, GLuint minor) {
     ctx->version_major = major;
     ctx->version_minor = minor;
     gl_version_string(ctx);
-    gl_log_line(
-        "the program set the reported GL version; behaviour is unchanged by it");
+    oops_log_info(
+        "GL", "the program set the reported GL version; behaviour is unchanged by it");
     return GL_TRUE;
 }
 
@@ -4496,7 +4496,7 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
                asked for 256. */
             n = gl_msg_hex(m, sizeof(m), n, (uint32_t)(va & 0xffu));
             m[n] = 0;
-            gl_log_line(m);
+            oops_log_info("GL", "%s", m);
 
             /* **The first four texels of row 0, and the first of row 1.** This is the
                one measurement that splits the problem in half whichever theory is
@@ -4524,7 +4524,7 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
                    would otherwise read one texel past the end. */
                 k = gl_msg_hex(t, sizeof(t), k, h > 1u ? t0[pitch] : 0u);
                 t[k] = 0;
-                gl_log_line(t);
+                oops_log_info("GL", "%s", t);
             }
         }
     }
@@ -4867,7 +4867,8 @@ void glGenTextures(GLsizei n, GLuint *textures) {
             textures[i] = 0;
             ctx->hw_tex_failed++;
             if (ctx->hw_tex_failed == 1u) {
-                gl_log_line(
+                oops_log_info(
+                    "GL",
                     "glGenTextures has no names left: this GL has a fixed pool where a "
                     "desktop driver has 2^32, and a name of 0 is what a caller past "
                     "the "
@@ -6325,7 +6326,8 @@ void glEndQuery(GLenum target) {
         if (counted) {
             q->result = gpu;
         } else if (!ctx->hw_query_logged) {
-            gl_log_line(
+            oops_log_info(
+                "GL",
                 "an occlusion query whose draws never test depth is not counted on "
                 "this "
                 "path: there is no depth surface for the counters to run against");
@@ -8883,9 +8885,10 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint
      * alone. */
     if ((mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0u &&
         !ctx->hw_blit_ds_logged) {
-        gl_log_line("glBlitFramebuffer copies colour only: the depth and stencil bits "
-                    "were asked "
-                    "for and are not applied");
+        oops_log_info(
+            "GL", "glBlitFramebuffer copies colour only: the depth and stencil bits "
+                  "were asked "
+                  "for and are not applied");
         ctx->hw_blit_ds_logged = GL_TRUE;
     }
     if ((mask & GL_COLOR_BUFFER_BIT) == 0u)
@@ -8941,7 +8944,8 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint
     if (filter == GL_LINEAR &&
         (dnx != (sw > 0 ? sw : -sw) || dny != (sh > 0 ? sh : -sh)) &&
         !ctx->hw_blit_linear_logged) {
-        gl_log_line("glBlitFramebuffer scaled with GL_LINEAR: filtered as GL_NEAREST");
+        oops_log_info(
+            "GL", "glBlitFramebuffer scaled with GL_LINEAR: filtered as GL_NEAREST");
         ctx->hw_blit_linear_logged = GL_TRUE;
     }
 }

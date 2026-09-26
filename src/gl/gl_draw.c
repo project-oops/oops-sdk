@@ -1994,7 +1994,8 @@ static GLboolean gl_smoothing(gl_context_t *ctx, GLboolean enabled, GLenum kind)
         return GL_TRUE;
     }
     if (!ctx->hw_smooth_logged) {
-        gl_log_line(
+        oops_log_info(
+            "GL",
             "a smooth primitive is aliased on this path when it uses two texture "
             "units: "
             "the coverage needs the interpolant the second unit's coordinate is in");
@@ -3058,7 +3059,8 @@ gl_gl2_sampler_texture(gl_context_t *ctx, const gl_program_object_t *prog, int s
          * nobody can account for. */
         if (st == GL_SAMPLER_2D_SHADOW && probe->depth_mode != GL_LUMINANCE &&
             !ctx->hw_depth_mode_logged) {
-            gl_log_line(
+            oops_log_info(
+                "GL",
                 "a compiled shadow lookup spreads its comparison as GL_LUMINANCE: "
                 "GL_DEPTH_TEXTURE_MODE is a per-texture choice and the shader is "
                 "compiled once");
@@ -4884,9 +4886,11 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
              * end does not generate yet. */
             if (!prog->hw_ps_logged) {
                 prog->hw_ps_logged = GL_TRUE;
-                gl_log_line(prog->hw_ps_log[0]
-                                ? prog->hw_ps_log
-                                : "this program's fragment shader has no console code");
+                oops_log_info(
+                    "GL", "%s",
+                    prog->hw_ps_log[0]
+                        ? prog->hw_ps_log
+                        : "this program's fragment shader has no console code");
             }
             gl_record_error(ctx, GL_INVALID_OPERATION);
             return;
@@ -5113,7 +5117,7 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                         msg[n++] = none[k];
                 }
                 msg[n] = '\0';
-                gl_log_line(msg);
+                oops_log_info("GL", "%s", msg);
             }
         }
         /*
@@ -5148,9 +5152,10 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                 continue;
             if (tu == 1u && unit1_applied)
                 continue;
-            gl_log_line("a texture unit this path does not apply is bound: it is "
-                        "applied by the "
-                        "software rasteriser only and is left out of the draw");
+            oops_log_info("GL",
+                          "a texture unit this path does not apply is bound: it is "
+                          "applied by the "
+                          "software rasteriser only and is left out of the draw");
             ctx->hw_unit_logged = GL_TRUE;
         }
         /* **Two colour targets** (since 2026-09-20). A draw under GL_FRONT_AND_BACK or
@@ -5181,7 +5186,8 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
              * `gl_tex_chain_levels`. Said once, and only by a draw whose filter would
              * have used the chain. */
             if (!ctx->hw_3d_logged && gl_filter_uses_mipmaps(eff_obj->min_filter)) {
-                gl_log_line(
+                oops_log_info(
+                    "GL",
                     "a 3D texture's mip chain is not built on this path: minification "
                     "samples the base level");
                 ctx->hw_3d_logged = GL_TRUE;
@@ -5203,9 +5209,10 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                 cube = GL_TRUE;
             } else {
                 if (!ctx->hw_cube_logged) {
-                    gl_log_line("a cube map with no complete set of faces is not "
-                                "sampled on this "
-                                "path: the draw is untextured");
+                    oops_log_info("GL",
+                                  "a cube map with no complete set of faces is not "
+                                  "sampled on this "
+                                  "path: the draw is untextured");
                     ctx->hw_cube_logged = GL_TRUE;
                 }
                 eff_tex = 0u;
@@ -5280,8 +5287,9 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
              * program in the longer slot; the log line is for a program that did not
              * fit, which GL's argument counts rule out. */
             if (!gl_ps_patch_tex_env(ctx) && !ctx->hw_env_logged) {
-                gl_log_line("a texture combine outgrew the pixel shader's slot: "
-                            "this draw modulates on this path");
+                oops_log_info("GL",
+                              "a texture combine outgrew the pixel shader's slot: "
+                              "this draw modulates on this path");
                 ctx->hw_env_logged = GL_TRUE;
             }
             if (!ctx->hw_frame_active)
@@ -5632,7 +5640,7 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                        the only kind that can be. */
                     n = gl_msg_hex(m, sizeof(m), n, ctx->cap_blend ? 1u : 0u);
                     m[n] = 0;
-                    gl_log_line(m);
+                    oops_log_info("GL", "%s", m);
 
                     /* **And what GL_COMBINE was actually asked for**, which is the
                        whole of what happens to the texel once it has been correctly
@@ -5663,7 +5671,7 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                         k = gl_msg_hex(m, sizeof(m), k,
                                        (uint32_t)(cb->scale_rgb * 16.0f));
                         m[k] = 0;
-                        gl_log_line(m);
+                        oops_log_info("GL", "%s", m);
                     }
                 }
             }

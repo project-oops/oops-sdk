@@ -39,10 +39,6 @@ struct oops_gfx {
  */
 static struct oops_gfx s_gfx;
 
-static void gfx_log(const char *msg) {
-    oops_klog("OOPS-GFX", msg);
-}
-
 oops_gfx_t *oops_gfx_create(const oops_gfx_desc_t *desc) {
     const uint32_t want_w =
         (desc != NULL && desc->width != 0u) ? desc->width : OOPS_DISPLAY_DEFAULT_WIDTH;
@@ -51,20 +47,21 @@ oops_gfx_t *oops_gfx_create(const oops_gfx_desc_t *desc) {
                                 : OOPS_DISPLAY_DEFAULT_HEIGHT;
 
     if (s_gfx.in_use) {
-        gfx_log(
+        oops_log_warn(
+            "OOPS-GFX",
             "a renderer is already up; this platform has one display and one context");
         return NULL;
     }
 
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, want_w, want_h);
     if (disp == NULL) {
-        gfx_log("the display did not open");
+        oops_log_warn("OOPS-GFX", "the display did not open");
         return NULL;
     }
 
     void *ctx = glContextCreate(disp);
     if (ctx == NULL) {
-        gfx_log("the GL context would not be created");
+        oops_log_warn("OOPS-GFX", "the GL context would not be created");
         oops_display_close(disp);
         return NULL;
     }

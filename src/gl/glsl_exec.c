@@ -2538,8 +2538,8 @@ GLboolean gl_shader_run_vertex(gl_context_t *ctx, gl_program_object_t *p,
                 out->vary[p->varyings[i].offset + k] = v->store[k];
             }
         }
-    } else {
-        gl_log_line(e->error);
+    } else if (e->error) {
+        oops_log_info("GL", "%s", e->error);
     }
     gl_heap_free(e);
     return ok;
@@ -2679,8 +2679,8 @@ GLboolean gl_shader_run_fragment(gl_context_t *ctx, gl_program_object_t *p,
             out->depth = depth[0];
             out->wrote_depth = (GLboolean)(depth[0] != in->frag_coord[2]);
         }
-    } else {
-        gl_log_line(e->error);
+    } else if (e->error) {
+        oops_log_info("GL", "%s", e->error);
     }
     gl_heap_free(e);
     return ok;

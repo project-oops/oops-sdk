@@ -162,20 +162,6 @@ int glsl_type_floats(glsl_type_t t) {
  * Compiling one shader
  * ------------------------------------------------------------------------- */
 
-static void log_write(char *log, size_t cap, const char *why, int line, int column) {
-    if (!log || cap == 0u)
-        return;
-    if (!why) {
-        log[0] = '\0';
-        return;
-    }
-    if (line > 0) {
-        oops_snprintf(log, cap, "%d:%d: %s", line, column, why);
-    } else {
-        oops_snprintf(log, cap, "%s", why);
-    }
-}
-
 void gl_glsl_unit_retain(glsl_unit_t *u) {
     if (u)
         u->refs++;
@@ -195,7 +181,7 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
     if (log && log_size)
         log[0] = '\0';
     if (!src) {
-        log_write(log, log_size, "no source", 0, 0);
+        glsl_log_write(log, log_size, "no source", 0, 0);
         return (glsl_unit_t *)0;
     }
 
@@ -204,7 +190,7 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
      * arena - which is why it is on the heap and not a local. */
     glsl_unit_t *u = (glsl_unit_t *)gl_heap_alloc(sizeof(glsl_unit_t));
     if (!u) {
-        log_write(log, log_size, "out of memory", 0, 0);
+        glsl_log_write(log, log_size, "out of memory", 0, 0);
         return (glsl_unit_t *)0;
     }
     u->refs = 1;
@@ -218,7 +204,7 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
     u->source = (char *)gl_heap_alloc(len + 1u);
     if (!u->source) {
         gl_heap_free(u);
-        log_write(log, log_size, "out of memory", 0, 0);
+        glsl_log_write(log, log_size, "out of memory", 0, 0);
         return (glsl_unit_t *)0;
     }
     for (size_t i = 0; i < len; i++)
@@ -239,7 +225,7 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
     if (!pp || !p) {
         gl_heap_free(pp);
         gl_heap_free(p);
-        log_write(log, log_size, "out of memory", 0, 0);
+        glsl_log_write(log, log_size, "out of memory", 0, 0);
         gl_glsl_unit_release(u);
         return (glsl_unit_t *)0;
     }
@@ -273,10 +259,11 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
         u->version = 110;
 
     if (u->version != 0 && u->version != 110 && u->version != 120) {
-        log_write(log, log_size,
-                  "only GLSL 1.10, 1.20 and ES 1.00 are implemented; this shader asks "
-                  "for another",
-                  1, 1);
+        glsl_log_write(
+            log, log_size,
+            "only GLSL 1.10, 1.20 and ES 1.00 are implemented; this shader asks "
+            "for another",
+            1, 1);
         gl_heap_free(pp);
         gl_heap_free(p);
         gl_glsl_unit_release(u);
@@ -290,10 +277,10 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
          * column. The preprocessor's is preferred when both are set, because a
          * directive that went wrong is what made the grammar see nonsense. */
         if (pp->error) {
-            log_write(log, log_size, pp->error, pp->error_line, 1);
+            glsl_log_write(log, log_size, pp->error, pp->error_line, 1);
         } else {
-            log_write(log, log_size, p->error ? p->error : "parse failed",
-                      p->error_line, p->error_column);
+            glsl_log_write(log, log_size, p->error ? p->error : "parse failed",
+                           p->error_line, p->error_column);
         }
         gl_heap_free(pp);
         gl_heap_free(p);
@@ -310,7 +297,7 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
      * top-level declarations - is in the tree. */
     glsl_sema_t *sema = (glsl_sema_t *)gl_heap_alloc(sizeof(glsl_sema_t));
     if (!sema) {
-        log_write(log, log_size, "out of memory", 0, 0);
+        glsl_log_write(log, log_size, "out of memory", 0, 0);
         gl_glsl_unit_release(u);
         return (glsl_unit_t *)0;
     }
@@ -323,8 +310,9 @@ glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *
     if (ok)
         ok = glsl_check_unit(sema, root);
     if (!ok) {
-        log_write(log, log_size, sema->error ? sema->error : "semantic check failed",
-                  sema->error_line, sema->error_column);
+        glsl_log_write(log, log_size,
+                       sema->error ? sema->error : "semantic check failed",
+                       sema->error_line, sema->error_column);
         gl_heap_free(sema);
         gl_glsl_unit_release(u);
         return (glsl_unit_t *)0;

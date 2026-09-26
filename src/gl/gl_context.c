@@ -17,29 +17,17 @@ static gl_context_t s_host_ctx;
 static float s_host_depth[1920 * 1080];
 static uint8_t s_host_stencil[1920 * 1080];
 static uint32_t s_host_front[1920 * 1080];
-static inline void gl_klog_line(const char *msg) {
-    if (msg)
-        oops_log_info("GL", "%s", msg);
-}
-static inline void gl_klog_val(const char *tag, uint64_t val) {
-    oops_log_debug("GL", "%s: 0x%llx", tag, (unsigned long long)val);
-}
-int gl_log_level = (int)OOPS_LOG_INFO; /* host build keeps the setter honest */
 #else
 #include "oops/syscall.h"
 #include "oops/time.h" /* the submit is timed - see hw_flush_ns */
+#endif
 
 int gl_log_level = (int)OOPS_LOG_INFO;
 
-static void gl_klog_line(const char *msg) {
-    if (msg)
-        oops_log_info("GL", "%s", msg);
-}
-
+/* A named value in the debug log. */
 static void gl_klog_val(const char *tag, uint64_t val) {
     oops_log_debug("GL", "%s: 0x%llx", tag, (unsigned long long)val);
 }
-#endif
 
 __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
 __attribute__((weak)) int sceAgcDriverSubmitCommandBuffer(void *queue, const void *dcb);
@@ -88,13 +76,9 @@ GLboolean gl_force_linear_target = GL_FALSE;
 
 void oops_gl_set_linear_target(GLboolean on) {
     gl_force_linear_target = on;
-    gl_log_line(on ? "the colour target will stay linear: the scanout path is skipped"
-                   : "the scanout path is allowed");
-}
-
-void gl_log_line(const char *msg) {
-    if (msg)
-        gl_klog_line(msg);
+    oops_log_info("GL",
+                  on ? "the colour target will stay linear: the scanout path is skipped"
+                     : "the scanout path is allowed");
 }
 
 void gl_hw_fail(gl_context_t *ctx, const char *reason) {
@@ -136,7 +120,7 @@ static void gl_klog_words(const char *tag, const uint32_t *w, uint32_t n) {
  * clock follow after the wait, and the caller logs the pixel hash of the result. */
 static void gl_hw_dump_stream(const gl_context_t *ctx, uint32_t total_words) {
     const uint32_t *payload = (const uint32_t *)ctx->gpu_payload;
-    gl_klog_line("oracle-begin");
+    oops_log_info("GL", "oracle-begin");
     gl_klog_val("oracle-frame", ctx->frame_count);
     gl_klog_val("oracle-dcb-words", (uint64_t)total_words);
     gl_klog_val("oracle-payload-va", (uint64_t)(uintptr_t)ctx->gpu_payload);
@@ -224,7 +208,7 @@ static void gl_scanout_begin(gl_context_t *ctx) {
      * flips. */
     (void)oops_display_use_scanout(ctx->disp);
     gl_draw_targets(ctx);
-    gl_klog_line("drawing straight into the scanout buffers (64KB_R_X)");
+    oops_log_info("GL", "drawing straight into the scanout buffers (64KB_R_X)");
 }
 #else
 static inline __attribute__((unused)) void gl_hw_dump_stream(const gl_context_t *ctx,
@@ -587,7 +571,7 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
                     msg[n++] = ctx->hw_gl_error_fn[m++];
                 }
                 msg[n] = '\0';
-                gl_log_line(msg);
+                oops_log_info("GL", "%s", msg);
             }
             ctx->hw_gl_errors_said = ctx->hw_gl_errors;
         }
@@ -602,7 +586,7 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
         gl_klog_val("oracle-submit-rc", (uint64_t)(uint32_t)rc);
         gl_klog_val("oracle-fence", (uint64_t)fence_val);
         gl_klog_val("oracle-timestamp", ts);
-        gl_klog_line("oracle-end");
+        oops_log_info("GL", "oracle-end");
         ctx->hw_dump_pending = GL_FALSE;
     }
 
@@ -1541,7 +1525,7 @@ void *glContextCreate(struct oops_display *disp) {
     /* Initialize AGC Universal Graphics Queue if available */
     void *queue = NULL;
     int rc_q = -1;
-    gl_klog_line("creating AGC universal queue...");
+    oops_log_info("GL", "creating AGC universal queue...");
     if (sceAgcDriverCreateQueue) {
         rc_q = sceAgcDriverCreateQueue(0u, &queue, 0u);
     }
@@ -1824,7 +1808,7 @@ void *glContextCreate(struct oops_display *disp) {
              * the mistake this project keeps a bus to avoid.
              */
             gl_klog_val("payload-va", (uint64_t)(uintptr_t)ctx->gpu_payload);
-            gl_klog_line("hardware AGC RDNA2 pipeline initialized successfully");
+            oops_log_info("GL", "hardware AGC RDNA2 pipeline initialized successfully");
             gl_hw_self_test(ctx);
         }
     }
@@ -1986,7 +1970,7 @@ void glSwapBuffers(void) {
                         m[n++] = *q;
                     n = gl_msg_hex(m, sizeof(m), n, ctx->hw_patch_writes[s]);
                     m[n] = 0;
-                    gl_log_line(m);
+                    oops_log_info("GL", "%s", m);
                 }
             }
             gl_klog_val("ps-flush-calls", (uint64_t)ctx->hw_ps_flush_calls);
@@ -2017,7 +2001,7 @@ void glSwapBuffers(void) {
                 n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->hw_tex_census[ci].blend);
                 n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->hw_tex_census[ci].base);
                 m[n] = 0;
-                gl_log_line(m);
+                oops_log_info("GL", "%s", m);
 
                 /* **And what the sampler was handed for it**, beside what the library
                  * believes - see `hw_tex_census[].desc`. The width and height are
@@ -2058,7 +2042,7 @@ void glSwapBuffers(void) {
                      * chain. */
                     k = gl_msg_hex(q, sizeof(q), k, ctx->hw_tex_census[ci].garlic);
                     q[k] = 0;
-                    gl_log_line(q);
+                    oops_log_info("GL", "%s", q);
 
                     /* The sampler half - `s[12:15]` beside the image half's `s[4:11]`.
                      */
@@ -2075,7 +2059,7 @@ void glSwapBuffers(void) {
                                            ctx->hw_tex_census[ci].samp[sw]);
                         }
                         t[j] = 0;
-                        gl_log_line(t);
+                        oops_log_info("GL", "%s", t);
                     }
                 }
             }
@@ -2109,7 +2093,7 @@ void glSwapBuffers(void) {
                 n = gl_msg_hex(m, sizeof(m), n, ctx->hw_slot_first_had);
                 n = gl_msg_hex(m, sizeof(m), n, ctx->hw_slot_first_got);
                 m[n] = 0;
-                gl_log_line(m);
+                oops_log_info("GL", "%s", m);
             }
         }
         ctx->hw_slot_collisions = 0u;
@@ -2164,7 +2148,7 @@ void glSwapBuffers(void) {
             }
             msg[n] = '\0';
             if (gl_verbose)
-                gl_log_line(msg);
+                oops_log_info("GL", "%s", msg);
             ctx->hw_flush_site_n[i] = 0u;
         }
         if (ctx->hw_flush_unnamed) {

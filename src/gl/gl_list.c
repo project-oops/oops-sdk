@@ -1287,14 +1287,15 @@ void gl_capture_swap_tick(gl_context_t *ctx) {
                 n = gl_msg_hex(msg, sizeof(msg), n, (uint32_t)rc);
             }
             msg[n] = '\0';
-            gl_log_line(msg);
+            oops_log_info("GL", "%s", msg);
         }
         if (data && bytes && g_capture_path) {
             /* Reported above. */
         } else {
             /* Overflowed, so `oops_gl_capture_data` handed back nothing. Said plainly:
                a missing file with a reason beats a short file without one. */
-            gl_log_line("capture overflowed and was discarded - nothing written");
+            oops_log_info("GL",
+                          "capture overflowed and was discarded - nothing written");
         }
         g_capture_arm_frame = 0u;
         g_capture_path = (const char *)0;

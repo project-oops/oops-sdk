@@ -47,10 +47,6 @@ struct oops_hud {
     GLfloat saved_color[4];
 };
 
-static void hud_log(const char *msg) {
-    oops_log_warn("HUD", "%s", msg);
-}
-
 /*
  * Fill one 8x8 cell of the atlas from a glyph. `gr` is the glyph row with 0 at the top
  * and `gc` the column with 0 at the left (bit 7 of the row byte); the cell is placed
@@ -95,7 +91,8 @@ oops_hud_t *oops_hud_create(int fb_width, int fb_height) {
 
     glGenTextures(1, &hud->tex);
     if (hud->tex == 0) {
-        hud_log("no texture name for the font atlas; the overlay will not draw");
+        oops_log_warn("HUD",
+                      "no texture name for the font atlas; the overlay will not draw");
         oops_free(atlas);
         oops_free(hud);
         return NULL;
