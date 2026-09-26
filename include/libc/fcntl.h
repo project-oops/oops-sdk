@@ -22,6 +22,11 @@ extern "C" {
 #define O_CREAT    OOPS_O_CREAT
 #define O_TRUNC    OOPS_O_TRUNC
 #define O_APPEND   OOPS_O_APPEND
+/* FreeBSD's value. **Not honoured**: `oops_fs_open` has no exclusive-create, so `O_CREAT|O_EXCL`
+ * creates the file whether or not it was already there rather than failing. It is defined because
+ * code names it - `ghc::filesystem`'s `copy_file` passes it for the "do not overwrite" case - and
+ * a missing macro is a compile error where this is a race nobody here can lose: one process. */
+#define O_EXCL     0x0800
 /* FreeBSD's value. Not in `oops/fs.h` because the SDK's own filesystem calls have no use for it -
  * a descriptor there is always blocking - but `fcntl` below takes it, and a port that asks for a
  * non-blocking socket asks for it by this name. */

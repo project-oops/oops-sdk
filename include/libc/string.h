@@ -78,4 +78,27 @@ int strerror_r(int errnum, char *buf, size_t buflen);
 }
 #endif
 
+/*
+ * **FreeBSD's `<string.h>` includes `<strings.h>`, and so does this one when there is one.**
+ *
+ * `strcasecmp`, `strncasecmp` and `ffs` are POSIX's, and POSIX puts them in `<strings.h>`. FreeBSD
+ * then includes that header from this one under `__BSD_VISIBLE`, which is the default - so on the
+ * system this target is derived from, `#include <string.h>` really does declare `strcasecmp`, and
+ * a great deal of portable code relies on it. macOS and glibc do the same.
+ *
+ * Without this, that code fails on an undeclared `strcasecmp` while looking at a header that on
+ * every machine its author has ever used would have declared it. Bugdom's `Bones.c` says
+ * `#include <string.h> // strcasecmp` in as many words, and Pomme's bundled `ghc::filesystem`
+ * calls `::strcasecmp` having included no such header at all.
+ *
+ * `__has_include`, for the reason `sys/types.h` gives where it reaches for `<sys/select.h>`: these
+ * are POSIX rather than C, they come from a port layer - `oops-apps/common/posix` - and this file
+ * is the freestanding C library, which titles without that layer include on its own.
+ */
+#if defined(__has_include)
+#if __has_include(<strings.h>)
+#include <strings.h>
+#endif
+#endif
+
 #endif /* OOPS_LIBC_STRING_H */

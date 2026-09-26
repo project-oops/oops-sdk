@@ -58,6 +58,26 @@ typedef uint32_t mode_t;
 #define _MODE_T_DECLARED
 #endif
 
+/* **A file's identity, as FreeBSD sizes it: all three are 64-bit.** Nothing on this platform
+ * *produces* these - `oops-apps/common/posix`'s `struct stat` leaves them zero and says why - but
+ * the types are C library types and a port declaring a variable of one has to be able to. Getting
+ * the width wrong would be worse than not having them: a 32-bit `ino_t` against a kernel that
+ * reports 64 truncates silently. */
+#ifndef _DEV_T_DECLARED
+typedef uint64_t dev_t;
+#define _DEV_T_DECLARED
+#endif
+
+#ifndef _INO_T_DECLARED
+typedef uint64_t ino_t;
+#define _INO_T_DECLARED
+#endif
+
+#ifndef _NLINK_T_DECLARED
+typedef uint64_t nlink_t;
+#define _NLINK_T_DECLARED
+#endif
+
 #ifndef _TIME_T_DECLARED
 typedef int64_t time_t;
 #define _TIME_T_DECLARED
