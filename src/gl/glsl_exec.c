@@ -293,7 +293,8 @@ static void scope_pop(exec_t *e) {
         /* Only storage came out of the arena. A bump allocator winds back only its
          * most recent allocations, which is what a scope's declarations are. */
         if (v->kind == VAR_STORE && v->store) {
-            const int n = comps_of(v->type) * ((v->array > 0) ? v->array : 1);
+            /* Sized as `declare` sized it, so a struct gives all of it back. */
+            const int n = exec_comps(e, v->type) * ((v->array > 0) ? v->array : 1);
             if (v->store + n == &e->arena[e->arena_used])
                 e->arena_used -= n;
         }

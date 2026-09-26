@@ -1185,6 +1185,29 @@ static void draw_quad(GLint loc, float z) {
     glEnd();
 }
 
+/* A struct local in a loop body gives its storage back each iteration, so 300
+ * iterations of an 8-float struct fit in an invocation's arena. */
+static void test_gl2_struct_locals_are_freed_at_scope_end(void) {
+    gl2_target_t t = gl2_target();
+    const GLuint prog = linked_program(
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+        "struct S { vec4 a; vec4 b; };\n"
+        "void main() {\n"
+        "  float c = 0.0;\n"
+        "  for (int i = 0; i < 300; i++) { S s; s.a = vec4(0.001); c += s.a.x; }\n"
+        "  gl_FragColor = vec4(c, 0.0, 0.0, 1.0);\n"
+        "}\n");
+    ASSERT_TRUE(prog != 0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(prog);
+    draw_quad(glGetAttribLocation(prog, "pos"), 0.0f);
+    const uint32_t p = px(&t, GL2_W / 2, GL2_H / 2);
+    ASSERT_TRUE(px_r(p) > 70 && px_r(p) < 84); /* 0.3 */
+    glUseProgram(0);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 /*
  * Struct members run from where sema placed them; a misplaced member gives a colour,
  * not an error. Each shader puts a different member into a different channel, so a
@@ -8365,6 +8388,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_limits_and_version_are_answered);
     RUN_TEST(test_gl2_a_program_draws);
     RUN_TEST(test_gl2_structs_run);
+    RUN_TEST(test_gl2_struct_locals_are_freed_at_scope_end);
     RUN_TEST(test_gl2_function_overloading);
     RUN_TEST(test_gl2_array_length_constant_expressions);
     RUN_TEST(test_gl2_es_100_shaders);
