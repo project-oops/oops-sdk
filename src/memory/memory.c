@@ -183,8 +183,9 @@ int oops_mem_unmap(void *vaddr, size_t size) {
 }
 
 /* Allocation tracking for high-level allocator. Not thread-safe: a caller that
- * allocates from more than one thread serialises these calls itself. */
-#define OOPS_MAX_ALLOCS 512
+ * allocates from more than one thread serialises these calls itself. oops-gl makes one
+ * allocation per texture image, and SuperTux loads well over 512. */
+#define OOPS_MAX_ALLOCS 4096
 
 struct oops_alloc_slot {
     void *vaddr;
