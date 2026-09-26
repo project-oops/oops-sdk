@@ -3730,7 +3730,34 @@ void glLightfv(GLenum light, GLenum pname, const GLfloat *params) {
     }
 }
 
+/* Whether a lighting pname names a single value. The non-vector forms accept only
+ * these; any other pname is GL_INVALID_ENUM (GL 2.1, 2.14.2, p. 64). */
+static GLboolean gl_light_pname_scalar(GLenum pname) {
+    return (GLboolean)(pname == GL_SPOT_EXPONENT || pname == GL_SPOT_CUTOFF ||
+                       pname == GL_CONSTANT_ATTENUATION ||
+                       pname == GL_LINEAR_ATTENUATION ||
+                       pname == GL_QUADRATIC_ATTENUATION);
+}
+
+static GLboolean gl_light_model_pname_scalar(GLenum pname) {
+    return (GLboolean)(pname == GL_LIGHT_MODEL_LOCAL_VIEWER ||
+                       pname == GL_LIGHT_MODEL_TWO_SIDE ||
+                       pname == GL_LIGHT_MODEL_COLOR_CONTROL);
+}
+
+/* GL_INVALID_ENUM for a scalar form given a pname that is not single-valued. */
+static GLboolean gl_scalar_form_refused(GLboolean scalar) {
+    if (scalar)
+        return GL_FALSE;
+    gl_context_t *ctx = gl_get_ctx();
+    if (ctx)
+        gl_record_error(ctx, GL_INVALID_ENUM);
+    return GL_TRUE;
+}
+
 void glLightf(GLenum light, GLenum pname, GLfloat param) {
+    if (gl_scalar_form_refused(gl_light_pname_scalar(pname)))
+        return;
     glLightfv(light, pname, &param);
 }
 
@@ -3844,6 +3871,8 @@ void glMaterialfv(GLenum face, GLenum pname, const GLfloat *params) {
 }
 
 void glMaterialf(GLenum face, GLenum pname, GLfloat param) {
+    if (gl_scalar_form_refused((GLboolean)(pname == GL_SHININESS)))
+        return;
     glMaterialfv(face, pname, &param);
 }
 
@@ -3887,6 +3916,8 @@ void glLightModelfv(GLenum pname, const GLfloat *params) {
 }
 
 void glLightModelf(GLenum pname, GLfloat param) {
+    if (gl_scalar_form_refused(gl_light_model_pname_scalar(pname)))
+        return;
     glLightModelfv(pname, &param);
 }
 
@@ -3930,6 +3961,8 @@ void glLightiv(GLenum light, GLenum pname, const GLint *params) {
 }
 
 void glLighti(GLenum light, GLenum pname, GLint param) {
+    if (gl_scalar_form_refused(gl_light_pname_scalar(pname)))
+        return;
     glLightiv(light, pname, &param);
 }
 
@@ -3954,6 +3987,8 @@ void glMaterialiv(GLenum face, GLenum pname, const GLint *params) {
 }
 
 void glMateriali(GLenum face, GLenum pname, GLint param) {
+    if (gl_scalar_form_refused((GLboolean)(pname == GL_SHININESS)))
+        return;
     glMaterialiv(face, pname, &param);
 }
 
@@ -3971,6 +4006,8 @@ void glLightModeliv(GLenum pname, const GLint *params) {
 }
 
 void glLightModeli(GLenum pname, GLint param) {
+    if (gl_scalar_form_refused(gl_light_model_pname_scalar(pname)))
+        return;
     glLightModeliv(pname, &param);
 }
 

@@ -332,6 +332,49 @@ static void test_gl_texture_rendering(void) {
     oops_display_close(disp);
 }
 
+/* The scalar lighting forms refuse a multi-valued pname with GL_INVALID_ENUM and leave
+ * the state alone (GL 2.1, 2.14.2), and still accept the single-valued ones. */
+static void test_gl_scalar_lighting_forms_refuse_vector_pnames(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx = glContextCreate(disp);
+    GLfloat fv[4];
+    const GLfloat amb[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+    glLightfv(GL_LIGHT0, GL_AMBIENT, amb);
+    glMaterialfv(GL_FRONT, GL_DIFFUSE, amb);
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
+    (void)glGetError();
+
+    glLightf(GL_LIGHT0, GL_AMBIENT, 0.0f);
+    ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+    glLighti(GL_LIGHT0, GL_POSITION, 0);
+    ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+    glMaterialf(GL_FRONT, GL_DIFFUSE, 0.0f);
+    ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+    glMateriali(GL_FRONT, GL_EMISSION, 0);
+    ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+    glLightModelf(GL_LIGHT_MODEL_AMBIENT, 0.0f);
+    ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+    glLightModeli(GL_LIGHT_MODEL_AMBIENT, 0);
+    ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+    glGetLightfv(GL_LIGHT0, GL_AMBIENT, fv);
+    ASSERT_TRUE(fv[0] == 0.25f && fv[3] == 1.0f);
+    glGetMaterialfv(GL_FRONT, GL_DIFFUSE, fv);
+    ASSERT_TRUE(fv[0] == 0.25f && fv[3] == 1.0f);
+
+    glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 2.0f);
+    glLighti(GL_LIGHT0, GL_LINEAR_ATTENUATION, 3);
+    glMaterialf(GL_FRONT, GL_SHININESS, 5.0f);
+    glMateriali(GL_BACK, GL_SHININESS, 6);
+    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 1);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glGetLightfv(GL_LIGHT0, GL_LINEAR_ATTENUATION, fv);
+    ASSERT_TRUE(fv[0] == 3.0f);
+
+    glContextDestroy(ctx);
+    oops_display_close(disp);
+}
+
 /* Lighting enables, light, material and light-model state read back as set. */
 static void test_gl_lighting_state(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
@@ -15190,6 +15233,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_texture_lifecycle);
     RUN_TEST(test_gl_texture_rendering);
     RUN_TEST(test_gl_lighting_state);
+    RUN_TEST(test_gl_scalar_lighting_forms_refuse_vector_pnames);
     RUN_TEST(test_gl_lighting_rendering);
     RUN_TEST(test_gl_blending_modes);
     RUN_TEST(test_gl_texture_env_modes);
