@@ -5702,6 +5702,23 @@ static void test_pm4_gl_unit1_is_the_base_when_unit0_has_no_texture(void) {
     ASSERT_EQ(ctx->hw_unit_logged, GL_FALSE); /* nothing was left out */
     ASSERT_NE(ctx->hw_frame_tex, 0u);         /* the draw sampled unit 1's texture */
 
+    /* The base texture's level-of-detail bias is its own unit's, unit 1's 2.0 (0x200)
+     * here, and a change to it takes a new descriptor slot. */
+    glActiveTexture(GL_TEXTURE1);
+    glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, 2.0f);
+    glActiveTexture(GL_TEXTURE0);
+    const uint32_t slot_before = ctx->hw_desc_slot;
+    ctx->hw_failed = GL_FALSE;
+    glBegin(GL_TRIANGLES);
+    glVertex3f(-0.5f, -0.5f, 0.5f);
+    glVertex3f(0.5f, -0.5f, 0.5f);
+    glVertex3f(0.0f, 0.5f, 0.5f);
+    glEnd();
+    ASSERT_NE(ctx->hw_desc_slot, slot_before);
+    const uint32_t *const slot =
+        (const uint32_t *)(payload + gl_hw_desc_slot_offset(ctx->hw_desc_slot));
+    ASSERT_EQ(slot[10] & 0x3fffu, 0x200u);
+
     glDeleteTextures(1, &t);
     glContextDestroy(ctx_handle);
     oops_display_close(disp);

@@ -3912,7 +3912,7 @@ static void gl_hw_tri_census(gl_context_t *ctx, GLuint base_unit, GLuint eff_tex
 static void gl_hw_tri_sampling(gl_context_t *ctx, gl_hw_draw_t *hw);
 static void gl_hw_tri_patch(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_t *hw);
 static void gl_hw_tri_sample_slots(gl_context_t *ctx, gl_hw_draw_t *hw);
-static void gl_hw_tri_desc_slot(gl_context_t *ctx, GLuint eff_tex,
+static void gl_hw_tri_desc_slot(gl_context_t *ctx, GLuint base_unit, GLuint eff_tex,
                                 gl_texture_object_t *eff_obj,
                                 gl_texture_object_t *unit1_obj);
 static void gl_hw_note_slot(gl_context_t *ctx, GLuint eff_tex,
@@ -4474,7 +4474,8 @@ static void gl_draw_triangle_hw(gl_context_t *ctx, const gl_tri_t *tri) {
     gl_hw_tri_patch(ctx, tri, hw);
     gl_hw_tri_sample_slots(ctx, hw);
     if (hw->eff_obj && ctx->hw_frame_tex != 0u)
-        gl_hw_tri_desc_slot(ctx, hw->eff_tex, hw->eff_obj, hw->unit1_obj);
+        gl_hw_tri_desc_slot(ctx, hw->base_unit, hw->eff_tex, hw->eff_obj,
+                            hw->unit1_obj);
     gl_hw_tri_ring(ctx, tri, hw);
     gl_hw_tri_payload(ctx, tri, hw);
     gl_hw_tri_vertices(ctx, tri, hw);
@@ -4926,7 +4927,7 @@ static void gl_hw_tri_sample_slots(gl_context_t *ctx, gl_hw_draw_t *hw) {
 /* Chooses this draw's descriptor slot. Compared by content, not by texture name, so
  * a wrap or filter change mid-frame takes a new slot instead of rewriting one that
  * earlier draws will read at the flush. */
-static void gl_hw_tri_desc_slot(gl_context_t *ctx, GLuint eff_tex,
+static void gl_hw_tri_desc_slot(gl_context_t *ctx, GLuint base_unit, GLuint eff_tex,
                                 gl_texture_object_t *eff_obj,
                                 gl_texture_object_t *unit1_obj) {
     /* Compared against the CPU's shadow of the slot, not the slot: the payload is
@@ -4936,7 +4937,8 @@ static void gl_hw_tri_desc_slot(gl_context_t *ctx, GLuint eff_tex,
     const void *border = (const char *)ctx->gpu_payload + OOPS_GL_BORDER_TABLE_OFFSET;
     uint32_t samp[4];
     memcpy(samp, eff_obj->samp_desc, 16);
-    samp[2] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[0], eff_obj));
+    /* The base texture's unit, which is 1 when unit 0 has no texture. */
+    samp[2] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[base_unit], eff_obj));
     GLboolean moved = (GLboolean)((ctx->hw_desc_shadow_valid & 1u) == 0u ||
                                   memcmp(slot, eff_obj->img_desc, 32) != 0 ||
                                   memcmp(slot + 8, samp, 16) != 0);
@@ -5437,7 +5439,7 @@ static void gl_hw_tri_shader(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_
                  * here rather than in the texture's own descriptor, since half of
                  * it is context state. */
                 dt[10] |= gl_hw_lod_bias_bits(
-                    gl_tex_lod_bias(&ctx->tex_unit[0], &ctx->textures[ti]));
+                    gl_tex_lod_bias(&ctx->tex_unit[hw->base_unit], &ctx->textures[ti]));
                 /* And into the shadow, copied from `dt` so the two always agree;
                  * see `hw_desc_shadow`. */
                 memcpy(ctx->hw_desc_shadow, dt, 48);
