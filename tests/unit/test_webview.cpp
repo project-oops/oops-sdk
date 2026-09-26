@@ -118,7 +118,8 @@ void test_webview_events_and_input() {
     printf("PASS: test_webview_events_and_input\n");
 }
 
-// A `setTimeout` callback fires from a pump after its delay has passed.
+// A `setTimeout` callback fires from a pump after its delay has passed, and not from
+// one before it.
 void test_webview_timers_and_pump() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);
@@ -127,7 +128,7 @@ void test_webview_timers_and_pump() {
                        "<html><body>"
                        "<script>"
                        "  var timerFired = false;"
-                       "  setTimeout(() => { timerFired = true; }, 10);"
+                       "  setTimeout(() => { timerFired = true; }, 200);"
                        "</script>"
                        "</body></html>";
 
@@ -136,10 +137,16 @@ void test_webview_timers_and_pump() {
 
     oops_js_t *js = oops_webview_get_js(wv);
 
-    // One pump before the 10ms delay has passed, one after.
+    // One pump before the 200ms delay has passed, one after.
     oops_webview_pump(wv);
+    oops_js_value_t early_val;
+    int early_rc = oops_js_eval(js, "timerFired", "<test>", &early_val);
+    assert(early_rc == 0);
+    assert(early_val.type == OOPS_JS_TYPE_BOOL);
+    assert(early_val.u.boolean == 0);
+    oops_js_free_value(js, &early_val);
 
-    usleep(25000);
+    usleep(250000);
     oops_webview_pump(wv);
 
     oops_js_value_t timer_val;
