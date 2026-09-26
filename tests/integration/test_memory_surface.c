@@ -1,11 +1,11 @@
 #define _POSIX_C_SOURCE 200112L
 #include "oops/draw.h"
-#include "oops/memory.h"
 #include "tests/test_common.h"
 #include <stdlib.h>
 
 /* Integration test: drawing and blitting into a surface bound over a 64 KiB aligned
- * block. */
+ * block. The block comes from posix_memalign because oops_mem_alloc needs the
+ * platform's direct memory, which a host build does not have (test_memory.c). */
 
 /* Rectangles and blits land at the right pixels of an externally allocated surface. */
 static void test_memory_surface_integration(void) {
@@ -16,11 +16,7 @@ static void test_memory_surface_integration(void) {
     ASSERT_TRUE(mem != NULL);
 
     /* 128 x 128 at 32 bits fills the 64 KiB exactly. */
-    oops_surface_t surf;
-    surf.pixels = (uint32_t *)mem;
-    surf.width = 128;
-    surf.height = 128;
-    surf.pitch = 128;
+    oops_surface_t surf = {(uint32_t *)mem, 128, 128, 128, OOPS_SURFACE_LINEAR};
 
     oops_draw_clear(&surf, OOPS_COLOR_BLACK);
     oops_draw_rect(&surf, 10, 10, 50, 50, OOPS_COLOR_CYAN);
