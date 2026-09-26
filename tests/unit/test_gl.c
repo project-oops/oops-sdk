@@ -333,6 +333,26 @@ static void test_gl_texture_rendering(void) {
     oops_display_close(disp);
 }
 
+/* An integer query of float fog state rounds to the nearest integer (GL 2.1, 6.1.2);
+ * a truncating cast would give 2, 1 and 0. */
+static void test_gl_fog_integer_queries_round(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx = glContextCreate(disp);
+    glFogf(GL_FOG_START, 2.7f);
+    glFogf(GL_FOG_END, 1.6f);
+    glFogf(GL_FOG_DENSITY, 0.6f);
+    GLint v = -1;
+    glGetIntegerv(GL_FOG_START, &v);
+    ASSERT_EQ(v, 3);
+    glGetIntegerv(GL_FOG_END, &v);
+    ASSERT_EQ(v, 2);
+    glGetIntegerv(GL_FOG_DENSITY, &v);
+    ASSERT_EQ(v, 1);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glContextDestroy(ctx);
+    oops_display_close(disp);
+}
+
 /* A HUD pass leaves the title's blend factors, texture environment and matrix mode as
  * it found them. */
 static void test_gl_hud_pass_restores_blend_and_tex_env(void) {
@@ -15286,6 +15306,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_lighting_state);
     RUN_TEST(test_gl_scalar_lighting_forms_refuse_vector_pnames);
     RUN_TEST(test_gl_hud_pass_restores_blend_and_tex_env);
+    RUN_TEST(test_gl_fog_integer_queries_round);
     RUN_TEST(test_gl_lighting_rendering);
     RUN_TEST(test_gl_blending_modes);
     RUN_TEST(test_gl_texture_env_modes);

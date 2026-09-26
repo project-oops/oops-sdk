@@ -2724,13 +2724,13 @@ static GLboolean gl_get_integer_program_fog(gl_context_t *ctx, GLenum pname,
         break;
     /* The distances as plain integers, as glFogiv takes them. */
     case GL_FOG_START:
-        params[0] = (GLint)ctx->fog_start;
+        params[0] = gl_round_to_int(ctx->fog_start);
         break;
     case GL_FOG_END:
-        params[0] = (GLint)ctx->fog_end;
+        params[0] = gl_round_to_int(ctx->fog_end);
         break;
     case GL_FOG_DENSITY:
-        params[0] = (GLint)ctx->fog_density;
+        params[0] = gl_round_to_int(ctx->fog_density);
         break;
     default:
         return GL_FALSE;
@@ -4262,63 +4262,6 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     tex->img_desc[5] = 4u << 20;
     tex->img_desc[6] = 0u;
     tex->img_desc[7] = 0u;
-    /* What a texture got, for the first packs in a run: the row pitch, the chain level
-     * count and WORD4 are decided here and are not visible from outside. */
-#ifndef OOPS_HOST_BUILD
-    {
-        /* Every real image, keyed on its size: the default texture is repacked on every
-           bind, and a 1x1 placeholder is often re-specified at its true size at once.
-         */
-        static uint32_t told;
-        if (told < 128u && tex->id > 1u && (w > 1u || h > 1u)) {
-            told++;
-            /* Two lines: the descriptor as packed, and the texels as they are in GPU
-               memory. `gl_klog_val` belongs to gl_context.c, so this builds its own
-               from the hex helper. */
-            char m[200];
-            size_t n = 0;
-            const char *lead = "tex id/w/h/pitch/levels/word4/valo";
-            while (lead[n] && n < 48u) {
-                m[n] = lead[n];
-                n++;
-            }
-            n = gl_msg_hex(m, sizeof(m), n, tex->id);
-            n = gl_msg_hex(m, sizeof(m), n, w);
-            n = gl_msg_hex(m, sizeof(m), n, h);
-            n = gl_msg_hex(m, sizeof(m), n, pitch);
-            n = gl_msg_hex(m, sizeof(m), n, (uint32_t)tex->chain_levels);
-            n = gl_msg_hex(m, sizeof(m), n, tex->img_desc[4]);
-            /* The low byte of the address, which `img_desc[0]` in 256-byte units cannot
-               carry. Zero, since `oops_mem_alloc` is asked for 256-byte alignment. */
-            n = gl_msg_hex(m, sizeof(m), n, (uint32_t)(va & 0xffu));
-            m[n] = 0;
-            oops_log_info("GL", "%s", m);
-
-            /* The first four texels of row 0, and the first of row 1: they separate an
-               upload fault from a descriptor fault, and row 1 shows a wrong pitch. */
-            const uint32_t *t0 = (const uint32_t *)tex->garlic_data;
-            if (t0) {
-                char t[200];
-                size_t k = 0;
-                const char *tl = "tex texels id/r0x4/r1";
-                while (tl[k] && k < 32u) {
-                    t[k] = tl[k];
-                    k++;
-                }
-                k = gl_msg_hex(t, sizeof(t), k, tex->id);
-                k = gl_msg_hex(t, sizeof(t), k, t0[0]);
-                k = gl_msg_hex(t, sizeof(t), k, t0[1]);
-                k = gl_msg_hex(t, sizeof(t), k, t0[2]);
-                k = gl_msg_hex(t, sizeof(t), k, t0[3]);
-                /* The allocation is `pitch * height` texels, so row 1 exists only when
-                   the height is above one. */
-                k = gl_msg_hex(t, sizeof(t), k, h > 1u ? t0[pitch] : 0u);
-                t[k] = 0;
-                oops_log_info("GL", "%s", t);
-            }
-        }
-    }
-#endif
     if (chain) {
         /* WORD3 LAST_LEVEL [16,19] and WORD5 MAX_MIP [4,7] (gfx10-rsrc.json,
          * SQ_IMG_RSRC_WORD3 and _WORD5) both the chain's last level, BASE_LEVEL [12,15]
