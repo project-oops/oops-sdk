@@ -35,6 +35,7 @@ struct oops_hud {
 
     /* State saved across begin/end, so a title (a shader pipeline included) is left as
      * it was. */
+    GLboolean has_programs; /* a GL 2.0 context, where a program can be current */
     GLint saved_program;
     GLint saved_tex_bind;
     GLboolean saved_depth;
@@ -42,6 +43,10 @@ struct oops_hud {
     GLboolean saved_blend;
     GLboolean saved_tex2d;
     GLfloat saved_color[4];
+    /* Source RGB, destination RGB, source alpha, destination alpha. */
+    GLint saved_blend_func[4];
+    GLint saved_tex_env_mode;
+    GLint saved_matrix_mode;
 };
 
 /*
@@ -132,10 +137,15 @@ void oops_hud_begin(oops_hud_t *hud) {
     }
 
     /* Save what this pass changes. The program is saved and cleared so fixed-function
-     * draws take effect over a title running its own shaders, then restored in end. */
+     * draws take effect over a title running its own shaders, then restored in end.
+     * Before GL 2.0 there are no programs, and asking would leave an error behind. */
+    const GLubyte *version = glGetString(GL_VERSION);
+    hud->has_programs = (GLboolean)(version && version[0] >= '2');
     hud->saved_program = 0;
-    glGetIntegerv(GL_CURRENT_PROGRAM, &hud->saved_program);
-    glUseProgram(0);
+    if (hud->has_programs) {
+        glGetIntegerv(GL_CURRENT_PROGRAM, &hud->saved_program);
+        glUseProgram(0);
+    }
 
     hud->saved_depth = glIsEnabled(GL_DEPTH_TEST);
     hud->saved_cull = glIsEnabled(GL_CULL_FACE);
@@ -144,6 +154,12 @@ void oops_hud_begin(oops_hud_t *hud) {
     hud->saved_tex_bind = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &hud->saved_tex_bind);
     glGetFloatv(GL_CURRENT_COLOR, hud->saved_color);
+    glGetIntegerv(GL_BLEND_SRC_RGB, &hud->saved_blend_func[0]);
+    glGetIntegerv(GL_BLEND_DST_RGB, &hud->saved_blend_func[1]);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &hud->saved_blend_func[2]);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &hud->saved_blend_func[3]);
+    glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &hud->saved_tex_env_mode);
+    glGetIntegerv(GL_MATRIX_MODE, &hud->saved_matrix_mode);
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -297,5 +313,11 @@ void oops_hud_end(oops_hud_t *hud) {
     }
     glColor4f(hud->saved_color[0], hud->saved_color[1], hud->saved_color[2],
               hud->saved_color[3]);
-    glUseProgram((GLuint)hud->saved_program);
+    glBlendFuncSeparate(
+        (GLenum)hud->saved_blend_func[0], (GLenum)hud->saved_blend_func[1],
+        (GLenum)hud->saved_blend_func[2], (GLenum)hud->saved_blend_func[3]);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, hud->saved_tex_env_mode);
+    glMatrixMode((GLenum)hud->saved_matrix_mode);
+    if (hud->has_programs)
+        glUseProgram((GLuint)hud->saved_program);
 }

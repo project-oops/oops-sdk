@@ -48,6 +48,7 @@ _Static_assert(GL_TEXTURE7_ARB == GL_TEXTURE7, "alias value");
 _Static_assert(GL_TEXTURE31_ARB == GL_TEXTURE31, "alias value");
 _Static_assert(GL_TEXTURE31 - GL_TEXTURE0 == 31, "the selectors are consecutive");
 #include "oops/display.h"
+#include "oops/hud.h"
 /* The texture tests read a texture's own storage rather than a sampled result, so the
  * bytes say which texels moved. `test_pm4.c` reaches into `agc_internal.h` likewise. */
 #include "src/gl/gl_internal.h"
@@ -328,6 +329,40 @@ static void test_gl_texture_rendering(void) {
     ASSERT_TRUE(cg < 50);
 
     glDeleteTextures(1, &tex_id);
+    glContextDestroy(ctx);
+    oops_display_close(disp);
+}
+
+/* A HUD pass leaves the title's blend factors, texture environment and matrix mode as
+ * it found them. */
+static void test_gl_hud_pass_restores_blend_and_tex_env(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx = glContextCreate(disp);
+    oops_hud_t *hud = oops_hud_create(64, 64);
+    ASSERT_TRUE(hud != NULL);
+    glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_DST_ALPHA, GL_ONE);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glMatrixMode(GL_PROJECTION);
+
+    oops_hud_begin(hud);
+    oops_hud_end(hud);
+
+    GLint v = 0;
+    glGetIntegerv(GL_MATRIX_MODE, &v);
+    ASSERT_EQ(v, GL_PROJECTION);
+    glGetIntegerv(GL_BLEND_SRC_RGB, &v);
+    ASSERT_EQ(v, GL_ONE);
+    glGetIntegerv(GL_BLEND_DST_RGB, &v);
+    ASSERT_EQ(v, GL_ZERO);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &v);
+    ASSERT_EQ(v, GL_DST_ALPHA);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &v);
+    ASSERT_EQ(v, GL_ONE);
+    glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &v);
+    ASSERT_EQ(v, GL_REPLACE);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    oops_hud_destroy(hud);
     glContextDestroy(ctx);
     oops_display_close(disp);
 }
@@ -15250,6 +15285,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_texture_rendering);
     RUN_TEST(test_gl_lighting_state);
     RUN_TEST(test_gl_scalar_lighting_forms_refuse_vector_pnames);
+    RUN_TEST(test_gl_hud_pass_restores_blend_and_tex_env);
     RUN_TEST(test_gl_lighting_rendering);
     RUN_TEST(test_gl_blending_modes);
     RUN_TEST(test_gl_texture_env_modes);
