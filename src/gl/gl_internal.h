@@ -886,13 +886,17 @@ typedef struct {
     GLuint buffer;
 } gl_client_array_t;
 
-/* One buffer object. The storage is ordinary process memory: everything that reads it
- * here is the CPU-side array reader, and the hardware path copies the vertices it
- * builds into its own GPU allocation afterwards regardless of where they came from. */
+/* One buffer object. The storage is GPU-mapped where it can be, because the resident
+ * draw path points the vertex stage's attribute fetch straight at it - a heap pointer
+ * there is a GPU page fault, not a slow draw. The CPU-side array reader works either
+ * way, so a GPU allocation that fails falls back to the heap and only costs the
+ * resident path: `gpu_visible` is what `gl_hw_can_resident_draw` asks, and it decides
+ * which allocator frees the store. */
 typedef struct {
     GLuint id;
     GLboolean used;
     void *data;
+    GLboolean gpu_visible;
     GLsizeiptr size;
     GLenum usage;
     /* GL 1.5's mapping: whether glMapBuffer has handed the store out, and with what

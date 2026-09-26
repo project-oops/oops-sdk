@@ -7936,6 +7936,11 @@ static GLboolean gl_hw_can_resident_draw(gl_context_t *ctx, GLenum mode,
         const gl_buffer_object_t *buf = gl_find_buffer(ctx, ca->buffer);
         if (!buf || !buf->data)
             return GL_FALSE;
+        /* The vertex stage fetches from this address itself, so a store the GPU has
+         * not mapped is a page fault rather than a slow draw. A buffer whose GPU
+         * allocation failed takes the path below, which reads it on the CPU. */
+        if (!buf->gpu_visible)
+            return GL_FALSE;
         if (ca->type != GL_FLOAT)
             return GL_FALSE;
     }

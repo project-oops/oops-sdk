@@ -5341,6 +5341,43 @@ static void gl_buffer_release(void *p) {
     gl_heap_free(p);
 }
 
+/*
+ * A buffer object's store, which differs from `gl_buffer_alloc` in one way that
+ * matters: the resident draw path gives its address to the vertex stage, which fetches
+ * from it directly, so on a console it has to be memory the GPU has mapped. Onion
+ * rather than Garlic because the CPU reads and writes this store too - glBufferSubData,
+ * glMapBuffer and the array reader all touch it - and Garlic is write-combined.
+ *
+ * `*gpu` says whether the GPU can see what came back, because a failed GPU allocation
+ * falls back to the heap rather than failing the buffer: every CPU path still works and
+ * only the resident draw declines it.
+ */
+static void *gl_vbo_store_alloc(size_t bytes, GLboolean *gpu) {
+    *gpu = GL_FALSE;
+#ifndef OOPS_HOST_BUILD
+    void *p = oops_mem_alloc(bytes, 256, OOPS_MEM_WB_ONION);
+    if (p) {
+        *gpu = GL_TRUE;
+        return p;
+    }
+#endif
+    return gl_heap_alloc(bytes);
+}
+
+static void gl_vbo_store_free(void *p, GLboolean gpu) {
+    if (!p)
+        return;
+#ifndef OOPS_HOST_BUILD
+    if (gpu) {
+        oops_mem_free(p);
+        return;
+    }
+#else
+    (void)gpu;
+#endif
+    gl_heap_free(p);
+}
+
 gl_buffer_object_t *gl_find_buffer(gl_context_t *ctx, GLuint name) {
     if (!ctx || name == 0u)
         return NULL;
@@ -5356,8 +5393,9 @@ void gl_free_all_buffers(gl_context_t *ctx) {
     if (!ctx)
         return;
     for (int i = 0; i < OOPS_GL_MAX_BUFFER_OBJECTS; i++) {
-        gl_buffer_release(ctx->buffers[i].data);
+        gl_vbo_store_free(ctx->buffers[i].data, ctx->buffers[i].gpu_visible);
         ctx->buffers[i].data = NULL;
+        ctx->buffers[i].gpu_visible = GL_FALSE;
         ctx->buffers[i].size = 0;
         ctx->buffers[i].used = GL_FALSE;
     }
@@ -5454,8 +5492,9 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
         gl_buffer_object_t *buf = gl_find_buffer(ctx, buffers[i]);
         if (!buf)
             continue; /* name 0 and unknown names are silently ignored, as GL says */
-        gl_buffer_release(buf->data);
+        gl_vbo_store_free(buf->data, buf->gpu_visible);
         buf->data = NULL;
+        buf->gpu_visible = GL_FALSE;
         buf->size = 0;
         buf->used = GL_FALSE;
         buf->id = 0u;
@@ -5530,8 +5569,9 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     /* Replaced, not resized: glBufferData respecifies the whole store, so the old one
      * goes even when the size is unchanged. Arrays find the new storage because they
      * keep the name, not an address. */
-    gl_buffer_release(buf->data);
+    gl_vbo_store_free(buf->data, buf->gpu_visible);
     buf->data = NULL;
+    buf->gpu_visible = GL_FALSE;
     buf->size = 0;
     buf->usage = usage;
     /* A new store unmaps the old one; the pointer it handed out is gone with it. */
@@ -5540,7 +5580,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     if (size == 0)
         return;
 
-    buf->data = gl_buffer_alloc((size_t)size);
+    buf->data = gl_vbo_store_alloc((size_t)size, &buf->gpu_visible);
     if (!buf->data) {
         gl_record_error(ctx, GL_OUT_OF_MEMORY);
         return;
