@@ -2621,11 +2621,10 @@ static GLboolean gl_get_normalised(GLenum pname) {
  * recursing. */
 static int s_get_float_fallback;
 
-void glGetIntegerv(GLenum pname, GLint *params) {
-    gl_context_t *ctx = gl_get_ctx();
-    if (!ctx || !params)
-        return;
-
+/* glGetIntegerv's answers, one topic per function; each returns GL_FALSE for a pname it
+ * does not hold. The viewport, the bindings and the pixel-store state. */
+static GLboolean gl_get_integer_bindings(gl_context_t *ctx, GLenum pname,
+                                         GLint *params) {
     switch (pname) {
     case GL_VIEWPORT:
         params[0] = ctx->vp_x;
@@ -2729,6 +2728,16 @@ void glGetIntegerv(GLenum pname, GLint *params) {
     case GL_PACK_LSB_FIRST:
         params[0] = ctx->pack_lsb_first ? 1 : 0;
         break;
+    default:
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* Blending, the colours, and the fixed-function limits. */
+static GLboolean gl_get_integer_colour_limits(gl_context_t *ctx, GLenum pname,
+                                              GLint *params) {
+    switch (pname) {
     case GL_BLEND_SRC:
     case GL_BLEND_SRC_RGB:
         params[0] = (GLint)ctx->blend_src;
@@ -2814,7 +2823,16 @@ void glGetIntegerv(GLenum pname, GLint *params) {
     case GL_MAX_CLIP_PLANES:
         params[0] = OOPS_GL_CLIP_PLANE_COUNT;
         break;
+    default:
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
 
+/* GL 2.0's limits and program state, and fog. */
+static GLboolean gl_get_integer_program_fog(gl_context_t *ctx, GLenum pname,
+                                            GLint *params) {
+    switch (pname) {
     /* -----------------------------------------------------------------
      * GL 2.0's limits
      *
@@ -2927,6 +2945,16 @@ void glGetIntegerv(GLenum pname, GLint *params) {
     case GL_FOG_DENSITY:
         params[0] = (GLint)ctx->fog_density;
         break;
+    default:
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* Stencil, the active units, the stack depths and the display-list state. */
+static GLboolean gl_get_integer_stencil_stacks(gl_context_t *ctx, GLenum pname,
+                                               GLint *params) {
+    switch (pname) {
     case GL_STENCIL_BITS:
         params[0] = 8;
         break;
@@ -3069,7 +3097,16 @@ void glGetIntegerv(GLenum pname, GLint *params) {
     case GL_MAX_ELEMENTS_INDICES:
         params[0] = OOPS_GL_MAX_IMMEDIATE_VERTS;
         break;
+    default:
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
 
+/* Depth, culling, the light model, and the hints. */
+static GLboolean gl_get_integer_raster_hints(gl_context_t *ctx, GLenum pname,
+                                             GLint *params) {
+    switch (pname) {
     case GL_DEPTH_FUNC:
         params[0] = (GLint)ctx->depth_func;
         break;
@@ -3145,6 +3182,16 @@ void glGetIntegerv(GLenum pname, GLint *params) {
     case GL_GENERATE_MIPMAP_HINT:
         params[0] = (GLint)ctx->hint_generate_mipmap;
         break;
+    default:
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* Points, lines, colour-index state, multisampling and the polygon mode. */
+static GLboolean gl_get_integer_points_lines(gl_context_t *ctx, GLenum pname,
+                                             GLint *params) {
+    switch (pname) {
     /* GL 1.4's bias limit, a float asked for as an integer. */
     case GL_MAX_TEXTURE_LOD_BIAS:
         params[0] = (GLint)OOPS_GL_MAX_TEXTURE_LOD_BIAS;
@@ -3231,7 +3278,16 @@ void glGetIntegerv(GLenum pname, GLint *params) {
     case GL_EDGE_FLAG:
         params[0] = ctx->cur_edge_flag ? 1 : 0;
         break;
+    default:
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
 
+/* The vertex arrays, the buffer sizes and the line stipple. */
+static GLboolean gl_get_integer_arrays_bits(gl_context_t *ctx, GLenum pname,
+                                            GLint *params) {
+    switch (pname) {
     /* **Each array's description.** None of these was answered until 2026-09-19 - they
      * were refused as unknown - though every one is state glVertexPointer and its
      * siblings set, and a program that saves and restores arrays by hand reads them. */
@@ -3329,7 +3385,16 @@ void glGetIntegerv(GLenum pname, GLint *params) {
     case GL_LINE_STIPPLE_REPEAT:
         params[0] = ctx->line_stipple_factor;
         break;
+    default:
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
 
+/* Pixel transfer, selection and feedback, and the evaluators. */
+static GLboolean gl_get_integer_pixel_eval(gl_context_t *ctx, GLenum pname,
+                                           GLint *params) {
+    switch (pname) {
     /* Pixel transfer. The scales and biases are floats, rounded here. */
     case GL_MAP_COLOR:
         params[0] = ctx->map_color ? 1 : 0;
@@ -3429,52 +3494,71 @@ void glGetIntegerv(GLenum pname, GLint *params) {
         params[2] = gl_round_to_int(ctx->grid2_v1);
         params[3] = gl_round_to_int(ctx->grid2_v2);
         break;
+    default:
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
 
-    default: {
-        /* **An enable is a query too.** GL answers every capability glIsEnabled knows
-         * through each glGet as well - glGetIntegerv(GL_DEPTH_TEST) is 1 or 0 - and
-         * until 2026-09-19 only glGetBooleanv did; the integer, float and double forms
-         * refused them all. */
-        const GLenum before = ctx->last_error;
+/* A pname no topic holds: an enable, then a float-valued state, then refused. */
+static void gl_get_integer_fallback(gl_context_t *ctx, GLenum pname, GLint *params) {
+    /* **An enable is a query too.** GL answers every capability glIsEnabled knows
+     * through each glGet as well - glGetIntegerv(GL_DEPTH_TEST) is 1 or 0 - and
+     * until 2026-09-19 only glGetBooleanv did; the integer, float and double forms
+     * refused them all. */
+    const GLenum before = ctx->last_error;
+    ctx->last_error = GL_NO_ERROR;
+    const GLboolean enabled = glIsEnabled(pname);
+    if (ctx->last_error == GL_NO_ERROR) {
+        ctx->last_error = before;
+        params[0] = enabled ? 1 : 0;
+        return;
+    }
+    ctx->last_error = before;
+    /* **So is a float-valued state** (GL 1.5, 6.1.2). The raster position, colour
+     * and distance, the alpha reference, the current normal, the depth clear value,
+     * the light model's ambient colour, the polygon offset and the pixel zoom -
+     * eleven - answered glGetFloatv and refused this until 2026-09-19, found by
+     * querying every name in the specification's state tables through every getter.
+     * Rounded, or mapped linearly for the normalised ones. */
+    if (s_get_float_fallback == 0) {
+        GLfloat fv[16];
+        s_get_float_fallback++;
         ctx->last_error = GL_NO_ERROR;
-        const GLboolean enabled = glIsEnabled(pname);
+        glGetFloatv(pname, fv);
+        s_get_float_fallback--;
         if (ctx->last_error == GL_NO_ERROR) {
             ctx->last_error = before;
-            params[0] = enabled ? 1 : 0;
-            break;
+            const int n = gl_query_element_count(pname);
+            const GLboolean norm = gl_get_normalised(pname);
+            for (int i = 0; i < n; i++) {
+                params[i] =
+                    norm ? gl_float_to_int_color(fv[i]) : gl_round_to_int(fv[i]);
+            }
+            return;
         }
         ctx->last_error = before;
-        /* **So is a float-valued state** (GL 1.5, 6.1.2). The raster position, colour
-         * and distance, the alpha reference, the current normal, the depth clear value,
-         * the light model's ambient colour, the polygon offset and the pixel zoom -
-         * eleven - answered glGetFloatv and refused this until 2026-09-19, found by
-         * querying every name in the specification's state tables through every getter.
-         * Rounded, or mapped linearly for the normalised ones. */
-        if (s_get_float_fallback == 0) {
-            GLfloat fv[16];
-            s_get_float_fallback++;
-            ctx->last_error = GL_NO_ERROR;
-            glGetFloatv(pname, fv);
-            s_get_float_fallback--;
-            if (ctx->last_error == GL_NO_ERROR) {
-                ctx->last_error = before;
-                const int n = gl_query_element_count(pname);
-                const GLboolean norm = gl_get_normalised(pname);
-                for (int i = 0; i < n; i++) {
-                    params[i] =
-                        norm ? gl_float_to_int_color(fv[i]) : gl_round_to_int(fv[i]);
-                }
-                break;
-            }
-            ctx->last_error = before;
-        }
-        /* **Refused, not ignored.** An ignored query leaves the caller's buffer holding
-         * whatever it held before and raises nothing, so the program reads stack
-         * garbage that looks like an answer. */
-        gl_record_error(ctx, GL_INVALID_ENUM);
-        break;
     }
-    }
+    /* **Refused, not ignored.** An ignored query leaves the caller's buffer holding
+     * whatever it held before and raises nothing, so the program reads stack
+     * garbage that looks like an answer. */
+    gl_record_error(ctx, GL_INVALID_ENUM);
+}
+
+void glGetIntegerv(GLenum pname, GLint *params) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx || !params)
+        return;
+    if (gl_get_integer_bindings(ctx, pname, params) ||
+        gl_get_integer_colour_limits(ctx, pname, params) ||
+        gl_get_integer_program_fog(ctx, pname, params) ||
+        gl_get_integer_stencil_stacks(ctx, pname, params) ||
+        gl_get_integer_raster_hints(ctx, pname, params) ||
+        gl_get_integer_points_lines(ctx, pname, params) ||
+        gl_get_integer_arrays_bits(ctx, pname, params) ||
+        gl_get_integer_pixel_eval(ctx, pname, params))
+        return;
+    gl_get_integer_fallback(ctx, pname, params);
 }
 
 void glGetFloatv(GLenum pname, GLfloat *params) {
