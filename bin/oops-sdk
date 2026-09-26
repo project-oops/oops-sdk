@@ -4,6 +4,7 @@
 #   ./bin/oops-sdk build          # build the static archive
 #   ./bin/oops-sdk check          # what CI checks, in CI's order
 #   ./bin/oops-sdk test           # the host unit and integration suite
+#   ./bin/oops-sdk fmt [--check]  # clang-format first-party C and C++ in place
 #   ./bin/oops-sdk api-index      # regenerate docs/API_INDEX.md
 #   ./bin/oops-sdk clean          # remove build output
 #
@@ -16,17 +17,64 @@ build() { make all; }
 clean() { make clean; }
 test() { make test; }
 
-# The committed index against a fresh generation, a clean build at -Werror, then the host
-# suite.
+# The committed index against a fresh generation, the formatter, a clean build at -Werror,
+# then the host suite.
 check() {
     tools/api-index.sh --check
+    format --check
     make clean
     make all
     make test
 }
 
+# clang-format over first-party C and C++, at the pinned clang major (toolchain.mk). A
+# clang-format of that major on PATH runs directly; otherwise silkeh/clang:<major> runs it.
+# Files are rewritten by redirection, not `clang-format -i`, because -i renames and a Windows
+# bind mount refuses the rename.
+format() {
+    local major image files run
+    major=$(sed -n 's/^OOPS_CLANG_MAJOR *:= *//p' toolchain.mk)
+    image="silkeh/clang:$major"
+    # Vendored upstream code is not ours to format.
+    local not_ours=(-e '^src/js/quickjs/' -e '^src/html/litehtml/'
+        -e '^src/gl/glut_teapot_data\.h$')
+    # Temporary: uncommitted work in progress in these; the next formatting commit drops it.
+    local held=(-e '^include/libc/inttypes\.h$' -e '^include/libc/math\.h$'
+        -e '^include/libc/time\.h$' -e '^include/oops/system\.h$'
+        -e '^include/libc/fenv\.h$' -e '^include/libc/locale\.h$'
+        -e '^include/libc/malloc_np\.h$' -e '^include/libc/pthread\.h$'
+        -e '^include/libc/strings\.h$' -e '^src/agc/agc_display\.c$' -e '^src/math/math\.c$'
+        -e '^src/system/freestd\.c$' -e '^src/system/fs\.c$' -e '^src/system/libc\.c$'
+        -e '^src/system/system\.c$' -e '^src/time/time\.c$' -e '^tests/unit/test_system\.c$'
+        -e '^tools/libc-check/libc_check\.c$')
+    mapfile -t files < <(git ls-files '*.c' '*.h' '*.cpp' '*.hpp' '*.cc' |
+        grep -v "${not_ours[@]}" "${held[@]}")
+
+    if clang-format --version 2>/dev/null | grep -q "version $major\."; then
+        run=()
+    elif command -v docker >/dev/null 2>&1; then
+        # Git Bash rewrites Unix-looking arguments; `pwd -W` gives the path the daemon mounts.
+        run=(env MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W 2>/dev/null || pwd):/w"
+            -w /w "$image")
+    else
+        echo "oops-sdk: needs clang-format $major on PATH, or docker to run $image" >&2
+        exit 1
+    fi
+
+    if [ "${1:-}" = "--check" ]; then
+        "${run[@]}" clang-format --dry-run --Werror "${files[@]}"
+        echo "oops-sdk: formatting clean (${#files[@]} files)"
+    else
+        # shellcheck disable=SC2016
+        "${run[@]}" sh -c \
+            'for f; do clang-format "$f" > /tmp/fmt.out && cat /tmp/fmt.out > "$f"; done' \
+            sh "${files[@]}"
+        echo "oops-sdk: formatted ${#files[@]} files"
+    fi
+}
+
 usage() {
-    sed -n '2,10p' "$0" | sed 's|^# \{0,1\}||'
+    sed -n '2,11p' "$0" | sed 's|^# \{0,1\}||'
     exit "${1:-0}"
 }
 
@@ -37,6 +85,7 @@ case "$cmd" in
     build) build ;;
     clean) clean ;;
     test) test ;;
+    fmt) format "$@" ;;
     api-index) tools/api-index.sh "$@" ;;
     -h | --help | help) usage ;;
     *)

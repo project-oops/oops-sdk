@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   check:
-    name: index, build at -Werror, host suite
+    name: index, formatting, build at -Werror, host suite
     runs-on: ubuntu-latest
     # The clang 21 pin from `toolchain.mk`; Ubuntu's own `clang` package is an older major.
     container: silkeh/clang:21
@@ -44,9 +44,13 @@ jobs:
           # Empty unless the org secret exists.
           OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
 
-      # First, so a stale index fails in seconds; `check` below runs it again.
+      # First, so a stale index or a layout diff fails in seconds; `check` below runs both
+      # again.
       - name: API index
         run: tools/api-index.sh --check
+        working-directory: OOPS/oops-sdk
+      - name: Formatting
+        run: ./bin/oops-sdk fmt --check
         working-directory: OOPS/oops-sdk
 
       - name: Build and host suite

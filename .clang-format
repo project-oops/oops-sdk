@@ -1,0 +1,10 @@
+# Matches what is already written: four spaces, 88 columns, braces on the same line.
+# The point is that formatting is never a review topic, not that this style is best.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 88
+PointerAlignment: Right
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+SortIncludes: false
