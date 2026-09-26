@@ -22,6 +22,7 @@
 #define OOPS_GL_PROC_LIST_CORE(X) \
 X(glAccum) X(glAlphaFunc) X(glAreTexturesResident) X(glArrayElement) X(glAttachShader) \
     X(glBegin) X(glBindAttribLocation) X(glBindFramebuffer) X(glBindRenderbuffer) X(glBindTexture) \
+    X(glBindVertexArray) \
     X(glBitmap) X(glBlendEquationSeparate) X(glBlendFunc) X(glBlendFuncSeparate) X(glBlitFramebuffer) \
     X(glCallList) X(glCallLists) X(glCheckFramebufferStatus) X(glClear) X(glClearAccum) \
     X(glClearColor) X(glClearDepth) X(glClearDepthf) X(glClearIndex) X(glClearStencil) \
@@ -37,7 +38,8 @@ X(glAccum) X(glAlphaFunc) X(glAreTexturesResident) X(glArrayElement) X(glAttachS
     X(glContextGetVersion) X(glContextMakeCurrent) X(glContextSetVersion) X(glCopyPixels) X(glCopyTexImage1D) \
     X(glCopyTexImage2D) X(glCopyTexSubImage1D) X(glCopyTexSubImage2D) X(glCopyTexSubImage3D) X(glCreateProgram) \
     X(glCreateShader) X(glCullFace) X(glDeleteFramebuffers) X(glDeleteLists) X(glDeleteProgram) \
-    X(glDeleteRenderbuffers) X(glDeleteShader) X(glDeleteTextures) X(glDepthFunc) X(glDepthMask) \
+    X(glDeleteRenderbuffers) X(glDeleteShader) X(glDeleteTextures) X(glDeleteVertexArrays) \
+    X(glDepthFunc) X(glDepthMask) \
     X(glDepthRange) X(glDepthRangef) X(glDetachShader) X(glDisable) X(glDisableClientState) \
     X(glDisableVertexAttribArray) X(glDrawArrays) X(glDrawBuffer) X(glDrawBuffers) X(glDrawElements) \
     X(glDrawPixels) X(glEdgeFlag) X(glEdgeFlagPointer) X(glEdgeFlagv) X(glEnable) \
@@ -47,7 +49,8 @@ X(glAccum) X(glAlphaFunc) X(glAreTexturesResident) X(glArrayElement) X(glAttachS
     X(glEvalPoint2) X(glFeedbackBuffer) X(glFinish) X(glFlush) X(glFogf) \
     X(glFogfv) X(glFogi) X(glFogiv) X(glFramebufferRenderbuffer) X(glFramebufferTexture2D) \
     X(glFrontFace) X(glFrustum) X(glGenFramebuffers) X(glGenLists) X(glGenRenderbuffers) \
-    X(glGenTextures) X(glGenerateMipmap) X(glGetActiveAttrib) X(glGetActiveUniform) X(glGetAttachedShaders) \
+    X(glGenTextures) X(glGenVertexArrays) X(glGenerateMipmap) X(glGetActiveAttrib) \
+    X(glGetActiveUniform) X(glGetAttachedShaders) \
     X(glGetAttribLocation) X(glGetBooleanv) X(glGetCanary) X(glGetCanaryEx) X(glGetClipPlane) \
     X(glGetCompressedTexImage) X(glGetCurrentContext) X(glGetDoublev) X(glGetError) X(glGetFloatv) \
     X(glGetFrameReadback) X(glGetFrameReadbackSampled) X(glGetFramebufferAttachmentParameteriv) X(glGetHardwareStatus) X(glGetIntegerv) \
@@ -55,7 +58,8 @@ X(glAccum) X(glAlphaFunc) X(glAreTexturesResident) X(glArrayElement) X(glAttachS
     X(glGetMaterialfv) X(glGetMaterialiv) X(glGetPixelMapfv) X(glGetPixelMapuiv) X(glGetPixelMapusv) \
     X(glGetPointerv) X(glGetPolygonStipple) X(glGetProgramHardwareLog) X(glGetProgramInfoLog) X(glGetProgramiv) \
     X(glGetRenderbufferParameteriv) X(glGetShaderInfoLog) X(glGetShaderPrecisionFormat) X(glGetShaderSource) X(glGetShaderiv) \
-    X(glGetString) X(glGetTexEnvfv) X(glGetTexEnviv) X(glGetTexGendv) X(glGetTexGenfv) \
+    X(glGetString) X(glGetStringi) X(glGetTexEnvfv) X(glGetTexEnviv) X(glGetTexGendv) \
+    X(glGetTexGenfv) \
     X(glGetTexGeniv) X(glGetTexImage) X(glGetTexLevelParameterfv) X(glGetTexLevelParameteriv) X(glGetTexParameterfv) \
     X(glGetTexParameteriv) X(glGetUniformLocation) X(glGetUniformfv) X(glGetUniformiv) X(glGetVertexAttribPointerv) \
     X(glGetVertexAttribdv) X(glGetVertexAttribfv) X(glGetVertexAttribiv) X(glHint) X(glIndexMask) \
@@ -63,7 +67,8 @@ X(glAccum) X(glAlphaFunc) X(glAreTexturesResident) X(glArrayElement) X(glAttachS
     X(glIndexi) X(glIndexiv) X(glIndexs) X(glIndexsv) X(glIndexub) \
     X(glIndexubv) X(glInitNames) X(glInterleavedArrays) X(glIsEnabled) X(glIsFramebuffer) \
     X(glIsHardwareAccelerated) X(glIsList) X(glIsProgram) X(glIsRenderbuffer) X(glIsShader) \
-    X(glIsTexture) X(glLightModelf) X(glLightModelfv) X(glLightModeli) X(glLightModeliv) \
+    X(glIsTexture) X(glIsVertexArray) X(glLightModelf) X(glLightModelfv) X(glLightModeli) \
+    X(glLightModeliv) \
     X(glLightf) X(glLightfv) X(glLighti) X(glLightiv) X(glLineStipple) \
     X(glLineWidth) X(glLinkProgram) X(glListBase) X(glLoadIdentity) X(glLoadMatrixd) \
     X(glLoadMatrixf) X(glLoadName) X(glLogicOp) X(glMap1d) X(glMap1f) \

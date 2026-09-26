@@ -139,6 +139,12 @@ enum {
  * asked for. Up here with the other capacities rather than beside the shader objects
  * because a vertex carries one value per slot - see gl_vertex_t. */
 #define OOPS_GL_MAX_VERTEX_ATTRIBS 16
+/* GL 3.0's vertex array object names. A renderer keeps one per vertex format rather
+ * than one per mesh - imgui's GL3 backend makes a single one and rebinds it every frame
+ * - so the count is small where the buffer-object count is not. A record is a kilobyte,
+ * most of it the sixteen generic attribute slots, so eight is 8 KB of context, and a
+ * program that wants a ninth gets GL_OUT_OF_MEMORY rather than a wrong object. */
+#define OOPS_GL_MAX_VERTEX_ARRAY_OBJECTS 8
 #define OOPS_GL_LIGHT_COUNT 8
 /* Six, which is the specification's minimum and exactly what the hardware clipper has:
  * PA_CL_CLIP_CNTL carries UCP_ENA_0..5 and there is no seventh bit. */
@@ -1182,6 +1188,35 @@ typedef struct {
     float current[4]; /* glVertexAttrib's value; (0, 0, 0, 1) at first */
 } gl_vertex_attrib_t;
 
+/* One vertex array object, holding the state `glBindVertexArray` swaps in and out.
+ *
+ * GL 3.0 (2.10) puts every array's enable, format, pointer and buffer name in the
+ * object, together with the GL_ELEMENT_ARRAY_BUFFER binding. It leaves
+ * GL_ARRAY_BUFFER's binding and a generic attribute's current value outside, as context
+ * state, so neither is copied here - which is why the generic slots are saved field by
+ * field rather than by structure assignment.
+ *
+ * The named arrays are in the object too: on a GL 2.1 implementation they are vertex
+ * array state by the same rule, and a program that mixes `glVertexPointer` with a bound
+ * object expects them back.
+ *
+ * The default object, name 0, has no record: its state is the context's own fields,
+ * which is where the live state always lives. Binding saves the live state into the
+ * object being left and loads the one being entered, so the draw path never has to know
+ * an object exists. */
+typedef struct {
+    GLuint name; /* 0 when the slot is free */
+    gl_client_array_t array_vertex;
+    gl_client_array_t array_color;
+    gl_client_array_t array_normal;
+    gl_client_array_t array_texcoord[OOPS_GL_MAX_TEXTURE_UNITS];
+    gl_client_array_t array_edge_flag;
+    gl_client_array_t array_secondary;
+    gl_client_array_t array_fog_coord;
+    gl_vertex_attrib_t generic[OOPS_GL_MAX_VERTEX_ATTRIBS];
+    GLuint bound_element_array_buffer;
+} gl_vao_t;
+
 /* One frame of the client attribute stack. Separate from gl_attrib_entry_t because
  * the specification keeps the two stacks separate: a push of client state must not pop
  * server state, and a program that brackets a helper with both is relying on that. */
@@ -1808,6 +1843,21 @@ typedef struct gl_context {
     GLboolean hw_query_logged;
     GLuint bound_array_buffer;
     GLuint bound_element_array_buffer;
+    /* GL 2.1's GL_PIXEL_UNPACK_BUFFER target. Tracked so that the binding can be
+     * queried and restored - which is all imgui's GL3 backend does with it - while the
+     * pixel paths read client memory. A non-zero binding at an upload is refused rather
+     * than read from the wrong place; see `gl_pixel_unpack_buffer_refuses` in
+     * gl_pixel.c. */
+    GLuint bound_pixel_unpack_buffer;
+    GLuint bound_pixel_pack_buffer;
+
+    /* GL 3.0's vertex array objects - gl_attrib.c. `vao_current` is what
+     * `glBindVertexArray` was last given, 0 for the default object. `vao_default` is
+     * where the default object's state waits while another is bound; the live state is
+     * always in the context's own array fields. */
+    gl_vao_t vaos[OOPS_GL_MAX_VERTEX_ARRAY_OBJECTS];
+    gl_vao_t vao_default;
+    GLuint vao_current;
 
     /* GL 2.0's programmable pipeline - gl_shader.c.
      *
@@ -1839,6 +1889,10 @@ typedef struct gl_context {
      * bytes with its terminator. */
     GLuint version_major, version_minor;
     char version_string[48];
+    /* `glGetStringi(GL_EXTENSIONS, i)` hands out a pointer that must outlive the call
+     * and the list is one space-separated literal, so the name asked for is copied
+     * here. The longest above is 34 bytes with its terminator. */
+    char ext_name[64];
 
     /* Hardware AGC backend handles (for Prospero/Trinity) */
     void *agc_queue;
@@ -2777,6 +2831,8 @@ gl_buffer_object_t *gl_find_buffer(gl_context_t *ctx, GLuint name);
  * beside the allocation in gl_state.c so the choice of allocator stays in one file. */
 void gl_free_all_buffers(gl_context_t *ctx);
 const uint8_t *gl_array_base(const gl_context_t *ctx, const gl_client_array_t *a);
+/* How many names `glGetString(GL_EXTENSIONS)` holds - GL_NUM_EXTENSIONS's answer. */
+int gl_extension_count(gl_context_t *ctx);
 
 /* Display lists.
  *

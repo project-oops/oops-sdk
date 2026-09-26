@@ -767,3 +767,200 @@ void glPopClientAttrib(void) {
         ctx->pack_lsb_first = e->pack_lsb_first;
     }
 }
+
+/* ---------------------------------------------------------------------------
+ * Vertex array objects (GL 3.0)
+ *
+ * The live state is the context's own array fields, as it was before these existed, and
+ * a bind saves it into the object being left and loads the one being entered. The draw
+ * path, the attribute stack and every `glGetIntegerv` therefore need no changes: they
+ * read the same fields whichever object is bound.
+ *
+ * imgui's GL3 backend makes one object and rebinds it each frame, which is the shape
+ * this is built for.
+ * -------------------------------------------------------------------------*/
+
+/* The object `name` refers to, or NULL for the default object and for a name never
+ * generated. */
+static gl_vao_t *gl_vao_find(gl_context_t *ctx, GLuint name) {
+    if (name == 0u)
+        return (gl_vao_t *)0;
+    for (int i = 0; i < OOPS_GL_MAX_VERTEX_ARRAY_OBJECTS; i++) {
+        if (ctx->vaos[i].name == name)
+            return &ctx->vaos[i];
+    }
+    return (gl_vao_t *)0;
+}
+
+/* The array half of a generic attribute. `current` is context state and stays where it
+ * is. */
+static void gl_vao_copy_generic(gl_vertex_attrib_t *dst,
+                                const gl_vertex_attrib_t *src) {
+    dst->size = src->size;
+    dst->type = src->type;
+    dst->stride = src->stride;
+    dst->pointer = src->pointer;
+    dst->buffer = src->buffer;
+    dst->enabled = src->enabled;
+    dst->normalized = src->normalized;
+}
+
+static void gl_vao_save(gl_context_t *ctx, gl_vao_t *v) {
+    int i;
+    v->array_vertex = ctx->array_vertex;
+    v->array_color = ctx->array_color;
+    v->array_normal = ctx->array_normal;
+    for (i = 0; i < OOPS_GL_MAX_TEXTURE_UNITS; i++)
+        v->array_texcoord[i] = ctx->array_texcoord[i];
+    v->array_edge_flag = ctx->array_edge_flag;
+    v->array_secondary = ctx->array_secondary;
+    v->array_fog_coord = ctx->array_fog_coord;
+    for (i = 0; i < OOPS_GL_MAX_VERTEX_ATTRIBS; i++)
+        gl_vao_copy_generic(&v->generic[i], &ctx->vertex_attribs[i]);
+    v->bound_element_array_buffer = ctx->bound_element_array_buffer;
+}
+
+static void gl_vao_load(gl_context_t *ctx, const gl_vao_t *v) {
+    int i;
+    ctx->array_vertex = v->array_vertex;
+    ctx->array_color = v->array_color;
+    ctx->array_normal = v->array_normal;
+    for (i = 0; i < OOPS_GL_MAX_TEXTURE_UNITS; i++)
+        ctx->array_texcoord[i] = v->array_texcoord[i];
+    ctx->array_edge_flag = v->array_edge_flag;
+    ctx->array_secondary = v->array_secondary;
+    ctx->array_fog_coord = v->array_fog_coord;
+    for (i = 0; i < OOPS_GL_MAX_VERTEX_ATTRIBS; i++)
+        gl_vao_copy_generic(&ctx->vertex_attribs[i], &v->generic[i]);
+    ctx->bound_element_array_buffer = v->bound_element_array_buffer;
+}
+
+/* The state a freshly generated object starts with: every array disabled, no formats,
+ * no bindings - which is what a context starts with too, so the default values are
+ * zeroed apart from the sizes and types GL gives an unspecified array. */
+static void gl_vao_reset(gl_vao_t *v, GLuint name) {
+    gl_client_array_t empty;
+    int i;
+
+    empty.size = 4;
+    empty.type = GL_FLOAT;
+    empty.stride = 0;
+    empty.pointer = (const void *)0;
+    empty.enabled = GL_FALSE;
+    empty.buffer = 0u;
+
+    v->name = name;
+    v->array_vertex = empty;
+    v->array_color = empty;
+    v->array_normal = empty;
+    for (i = 0; i < OOPS_GL_MAX_TEXTURE_UNITS; i++)
+        v->array_texcoord[i] = empty;
+    v->array_edge_flag = empty;
+    v->array_secondary = empty;
+    v->array_fog_coord = empty;
+    for (i = 0; i < OOPS_GL_MAX_VERTEX_ATTRIBS; i++) {
+        v->generic[i].size = 4;
+        v->generic[i].type = GL_FLOAT;
+        v->generic[i].stride = 0;
+        v->generic[i].pointer = (const void *)0;
+        v->generic[i].buffer = 0u;
+        v->generic[i].enabled = GL_FALSE;
+        v->generic[i].normalized = GL_FALSE;
+        v->generic[i].current[0] = 0.0f;
+        v->generic[i].current[1] = 0.0f;
+        v->generic[i].current[2] = 0.0f;
+        v->generic[i].current[3] = 1.0f;
+    }
+    v->bound_element_array_buffer = 0u;
+}
+
+void glGenVertexArrays(GLsizei n, GLuint *arrays) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx)
+        return;
+    if (n < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    if (!arrays || n == 0)
+        return;
+
+    GLsizei given = 0;
+    for (int i = 0; i < OOPS_GL_MAX_VERTEX_ARRAY_OBJECTS && given < n; i++) {
+        if (ctx->vaos[i].name != 0u)
+            continue;
+        /* The slot index names the object. A name is reused only after a delete, which
+           the specification allows, and never collides with a live one. */
+        gl_vao_reset(&ctx->vaos[i], (GLuint)(i + 1));
+        arrays[given++] = ctx->vaos[i].name;
+    }
+    /* Out of slots: the names not given stay zero, and a program that draws with one
+       gets GL_INVALID_OPERATION from the bind rather than a wrong object. */
+    for (GLsizei i = given; i < n; i++)
+        arrays[i] = 0u;
+    if (given < n)
+        gl_record_error(ctx, GL_OUT_OF_MEMORY);
+}
+
+void glBindVertexArray(GLuint array) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx)
+        return;
+    if (array == ctx->vao_current)
+        return;
+
+    gl_vao_t *next = (gl_vao_t *)0;
+    if (array != 0u) {
+        next = gl_vao_find(ctx, array);
+        if (!next) {
+            /* GL 3.0, 2.10: a name glGenVertexArrays did not return is an error, not an
+               implicit create. Nothing here depends on the compatibility-profile
+               behaviour. */
+            gl_record_error(ctx, GL_INVALID_OPERATION);
+            return;
+        }
+    }
+
+    gl_vao_t *prev = gl_vao_find(ctx, ctx->vao_current);
+    if (prev)
+        gl_vao_save(ctx, prev);
+    else
+        gl_vao_save(ctx, &ctx->vao_default);
+
+    gl_vao_load(ctx, next ? next : &ctx->vao_default);
+    ctx->vao_current = array;
+}
+
+void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx)
+        return;
+    if (n < 0) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return;
+    }
+    if (!arrays)
+        return;
+
+    for (GLsizei i = 0; i < n; i++) {
+        if (arrays[i] == 0u)
+            continue; /* 0 is silently ignored, as everywhere else in GL */
+        gl_vao_t *v = gl_vao_find(ctx, arrays[i]);
+        if (!v)
+            continue;
+        /* Deleting the bound object reverts to the default one, which is the
+           specification's wording and keeps the live state meaningful. */
+        if (ctx->vao_current == arrays[i]) {
+            gl_vao_load(ctx, &ctx->vao_default);
+            ctx->vao_current = 0u;
+        }
+        v->name = 0u;
+    }
+}
+
+GLboolean glIsVertexArray(GLuint array) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx)
+        return GL_FALSE;
+    return gl_vao_find(ctx, array) ? GL_TRUE : GL_FALSE;
+}

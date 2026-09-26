@@ -2340,6 +2340,78 @@ const GLubyte *glGetString(GLenum name) {
     }
 }
 
+/* How many space-separated names `glGetString(GL_EXTENSIONS)` holds, which is what
+ * GL_NUM_EXTENSIONS answers. Counted rather than kept as a number beside the list, so
+ * the two cannot disagree after an extension is added above. */
+int gl_extension_count(gl_context_t *ctx) {
+    const char *s = (const char *)glGetString(GL_EXTENSIONS);
+    int n = 0;
+
+    (void)ctx;
+    if (!s)
+        return 0;
+    while (*s) {
+        while (*s == ' ')
+            s++;
+        if (!*s)
+            break;
+        n++;
+        while (*s && *s != ' ')
+            s++;
+    }
+    return n;
+}
+
+/*
+ * GL 3.0's indexed form of the extension query.
+ *
+ * The list above is one string, so the name asked for is copied into the context, whose
+ * lifetime is what the returned pointer needs. No version gate: a caller reaches this
+ * only by having found the entry point, and refusing it on a context that reports 2.1
+ * would leave a program that prefers the indexed query with no way to read a list that
+ * is genuinely there.
+ */
+const GLubyte *glGetStringi(GLenum name, GLuint index) {
+    gl_context_t *ctx = gl_get_ctx();
+    const char *s;
+    GLuint seen = 0;
+
+    if (name != GL_EXTENSIONS) {
+        if (ctx)
+            gl_record_error(ctx, GL_INVALID_ENUM);
+        return (const GLubyte *)0;
+    }
+    if (!ctx)
+        return (const GLubyte *)0;
+
+    s = (const char *)glGetString(GL_EXTENSIONS);
+    if (!s) {
+        gl_record_error(ctx, GL_INVALID_VALUE);
+        return (const GLubyte *)0;
+    }
+    while (*s) {
+        while (*s == ' ')
+            s++;
+        if (!*s)
+            break;
+        if (seen == index) {
+            size_t i = 0;
+            while (s[i] && s[i] != ' ' && i + 1u < sizeof(ctx->ext_name)) {
+                ctx->ext_name[i] = s[i];
+                i++;
+            }
+            ctx->ext_name[i] = '\0';
+            return (const GLubyte *)ctx->ext_name;
+        }
+        seen++;
+        while (*s && *s != ' ')
+            s++;
+    }
+    /* Past the end of the list, which the specification makes GL_INVALID_VALUE. */
+    gl_record_error(ctx, GL_INVALID_VALUE);
+    return (const GLubyte *)0;
+}
+
 /* How many elements a query writes. The caller sizes its buffer from the pname, so a
  * wrong count here writes past it. Anything not named here writes one value. */
 static int gl_query_element_count(GLenum pname) {
@@ -2940,6 +3012,27 @@ static GLboolean gl_get_integer_raster_hints(gl_context_t *ctx, GLenum pname,
         break;
     case GL_ELEMENT_ARRAY_BUFFER_BINDING:
         params[0] = (GLint)ctx->bound_element_array_buffer;
+        break;
+    /* The pixel buffer targets are bindings only - see their note in `GL/gl.h`. */
+    case GL_PIXEL_UNPACK_BUFFER_BINDING:
+        params[0] = (GLint)ctx->bound_pixel_unpack_buffer;
+        break;
+    case GL_PIXEL_PACK_BUFFER_BINDING:
+        params[0] = (GLint)ctx->bound_pixel_pack_buffer;
+        break;
+    case GL_VERTEX_ARRAY_BINDING:
+        params[0] = (GLint)ctx->vao_current;
+        break;
+    /* The version as two integers rather than a string to parse. The same version
+     * `glContextSetVersion` set and `glGetString(GL_VERSION)` reports. */
+    case GL_MAJOR_VERSION:
+        params[0] = (GLint)ctx->version_major;
+        break;
+    case GL_MINOR_VERSION:
+        params[0] = (GLint)ctx->version_minor;
+        break;
+    case GL_NUM_EXTENSIONS:
+        params[0] = (GLint)gl_extension_count(ctx);
         break;
 
     /* The remaining hints, colour-index state and multisampling - state only, all of
@@ -5512,6 +5605,31 @@ void glBindBuffer(GLenum target, GLuint buffer) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
         return;
+    /*
+     * The pixel buffer targets, which are bindings and nothing more - the pixel paths
+     * read client memory. Unbinding is what a backend saving and restoring GL state
+     * around its own drawing does, and it is accepted; binding a real buffer would
+     * promise an upload out of it, so that is refused here rather than ignored in
+     * `glTexImage2D`. `gl_buffer_binding` leaves these targets out, so `glBufferData`
+     * on one is still GL_INVALID_ENUM.
+     */
+    if (target == GL_PIXEL_UNPACK_BUFFER || target == GL_PIXEL_PACK_BUFFER) {
+        if (buffer != 0u) {
+            gl_record_error(ctx, GL_INVALID_OPERATION);
+            oops_log_warn("GL",
+                          "pixel buffer objects are not implemented; "
+                          "glBindBuffer(%s, %u) refused",
+                          target == GL_PIXEL_UNPACK_BUFFER ? "GL_PIXEL_UNPACK_BUFFER"
+                                                           : "GL_PIXEL_PACK_BUFFER",
+                          buffer);
+            return;
+        }
+        if (target == GL_PIXEL_UNPACK_BUFFER)
+            ctx->bound_pixel_unpack_buffer = 0u;
+        else
+            ctx->bound_pixel_pack_buffer = 0u;
+        return;
+    }
     GLuint *binding = gl_buffer_binding(ctx, target);
     if (!binding) {
         gl_record_error(ctx, GL_INVALID_ENUM);

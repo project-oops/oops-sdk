@@ -449,6 +449,17 @@ void glShadeModel(GLenum mode);
 /* Information & Error Queries */
 GLenum glGetError(void);
 const GLubyte *glGetString(GLenum name);
+/*
+ * GL 3.0's indexed string query, for GL_EXTENSIONS: one name per call,
+ * `GL_NUM_EXTENSIONS` of them. The pointers are into the context's own extension
+ * string, so they live as long as the context. GL_MAJOR_VERSION and GL_MINOR_VERSION
+ * answer the same version `glGetString(GL_VERSION)` reports and `glContextSetVersion`
+ * set.
+ */
+#define GL_MAJOR_VERSION 0x821B
+#define GL_MINOR_VERSION 0x821C
+#define GL_NUM_EXTENSIONS 0x821D
+const GLubyte *glGetStringi(GLenum name, GLuint index);
 void glGetIntegerv(GLenum pname, GLint *params);
 void glGetFloatv(GLenum pname, GLfloat *params);
 void glGetBooleanv(GLenum pname, GLboolean *params);
@@ -570,6 +581,43 @@ GLboolean glUnmapBuffer(GLenum target);
 GLboolean glIsBuffer(GLuint buffer);
 void glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params);
 void glGetBufferPointerv(GLenum target, GLenum pname, GLvoid **params);
+
+/*
+ * GL 2.1's pixel buffer targets, as bindings only.
+ *
+ * `glBindBuffer` accepts them and `glGetIntegerv` answers them, because a backend that
+ * saves and restores GL state around its own drawing touches them for that reason alone
+ * - imgui's GL3 backend does exactly this and nothing more. The pixel paths read client
+ * memory: a texture upload or a `glReadPixels` with a non-zero binding is
+ * GL_INVALID_OPERATION rather than a read from the wrong place, and says so once in the
+ * log.
+ */
+#define GL_PIXEL_PACK_BUFFER 0x88EB
+#define GL_PIXEL_UNPACK_BUFFER 0x88EC
+#define GL_PIXEL_PACK_BUFFER_BINDING 0x88ED
+#define GL_PIXEL_UNPACK_BUFFER_BINDING 0x88EF
+
+/*
+ * GL 3.0's vertex array objects.
+ *
+ * An object holds every array's enable, format, pointer and buffer name, and the
+ * GL_ELEMENT_ARRAY_BUFFER binding; GL_ARRAY_BUFFER's binding and a generic attribute's
+ * current value stay context state. Binding one swaps that state, so a renderer sets
+ * its vertex format up once and a single call reinstates it.
+ *
+ * imgui's GL3 backend is what asks for them here: it saves and restores
+ * GL_VERTEX_ARRAY_BINDING around its own drawing on every desktop GL context, the only
+ * gate being GL ES 2. libultraship's Fast3D backend also makes one, behind `__APPLE__`
+ * or `USE_OPENGLES`, so not on this target.
+ *
+ * `glBindVertexArray` on a name `glGenVertexArrays` did not return is
+ * GL_INVALID_OPERATION, the core behaviour, rather than an implicit create.
+ */
+#define GL_VERTEX_ARRAY_BINDING 0x85B5
+void glGenVertexArrays(GLsizei n, GLuint *arrays);
+void glBindVertexArray(GLuint array);
+void glDeleteVertexArrays(GLsizei n, const GLuint *arrays);
+GLboolean glIsVertexArray(GLuint array);
 
 /* GL 1.5's occlusion queries: the samples that pass the depth test between glBeginQuery
  * and glEndQuery of GL_SAMPLES_PASSED. Counted exactly by the software rasteriser, and

@@ -135,6 +135,9 @@ int setvbuf(FILE *f, char *buf, int mode, size_t size);
  * `mode` string is ignored, since the descriptor already carries its access. `fclose`
  * on the result closes the descriptor, as POSIX specifies.
  */
+/* Reopens a path on a stream the caller already holds; see the definition for what a
+ * null `path` does. opusfile's `op_freopen` is why it exists. */
+FILE *freopen(const char *path, const char *mode, FILE *f);
 FILE *fdopen(int fd, const char *mode);
 /* The descriptor behind a stream, `fdopen`'s inverse. Defined in
  * `oops-apps/common/posix/posix.c`, beside `fstat`, so there is one copy per link. */

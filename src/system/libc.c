@@ -854,6 +854,42 @@ FILE *fopen(const char *path, const char *mode) {
     return f;
 }
 
+/*
+ * Reopens `path` on an existing stream. The caller keeps the `FILE *` it already has, which is the
+ * point of the call: a library hands the pointer out and reopening under it redirects every holder.
+ * A failed open closes the stream and returns null, as C requires, so the caller must not use the
+ * pointer afterwards.
+ *
+ * `path` null - the form that changes only the mode - is refused: the mode a descriptor was opened
+ * with is not recoverable here, so there is nothing to reopen it as.
+ */
+FILE *freopen(const char *path, const char *mode, FILE *f) {
+    if (!f) return (FILE *)0;
+    if (!path || !mode || f->is_log) {
+        fclose(f);
+        return (FILE *)0;
+    }
+    /* Whatever this stream has buffered belongs in the old file, not the new one. */
+    libc_wbuf_flush(f);
+    oops_fs_close(f->fd);
+    f->fd = -1;
+
+    FILE *n = fopen(path, mode);
+    if (!n) {
+        if (f->wbuf) oops_free(f->wbuf);
+        oops_free(f);
+        return (FILE *)0;
+    }
+    /* The new descriptor moves onto the caller's stream, and the temporary goes. */
+    f->fd = n->fd;
+    f->eof = 0;
+    f->err = 0;
+    f->pushback = -1;
+    f->wbuf_len = 0u;
+    oops_free(n);
+    return f;
+}
+
 /* Wraps a descriptor the caller already opened. See `<libc/stdio.h>` for why `mode` is ignored
  * rather than parsed. */
 FILE *fdopen(int fd, const char *mode) {

@@ -14763,6 +14763,163 @@ static void test_glsl_emit_mat4_is_column_major(void) {
  * `oops_gl_get_proc_address` resolves entry points by name. A title that fills function
  * pointers from strings such as `"glGenBuffersARB"` calls address zero on a NULL.
  */
+/* A vertex array object holds the array state and a bind swaps it: what is set while one
+ * object is bound is gone when another is, and comes back when the first is bound again.
+ * The default object, name 0, is one of the two sides of that. */
+static void test_gl_vertex_array_objects_swap_array_state(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx_handle = glContextCreate(disp);
+    gl_context_t *ctx = (gl_context_t *)ctx_handle;
+    static const GLfloat verts[6] = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+    GLuint vao[2] = {0u, 0u};
+    GLuint ebo = 0u;
+    GLint got = -1;
+
+    (void)glGetError();
+    glContextSetVersion(2, 0);
+
+    /* Nothing is bound at first, and 0 is not an object. */
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &got);
+    ASSERT_EQ(got, 0);
+    ASSERT_EQ(glIsVertexArray(0u), GL_FALSE);
+
+    glGenVertexArrays(2, vao);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_NE(vao[0], 0u);
+    ASSERT_NE(vao[1], 0u);
+    ASSERT_NE(vao[0], vao[1]);
+    ASSERT_EQ(glIsVertexArray(vao[0]), GL_TRUE);
+
+    /* A name nothing generated is refused rather than created, and the binding stays. */
+    glBindVertexArray(vao[1] + 1000u);
+    ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &got);
+    ASSERT_EQ(got, 0);
+
+    /* The default object's state: the vertex array on, pointing at `verts`. */
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(3, GL_FLOAT, 0, verts);
+    glGenBuffers(1, &ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+
+    /* Entering an object hides all of it. */
+    glBindVertexArray(vao[0]);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &got);
+    ASSERT_EQ(got, (GLint)vao[0]);
+    ASSERT_EQ(ctx->array_vertex.enabled, GL_FALSE);
+    ASSERT_EQ(ctx->array_vertex.pointer, (const void *)0);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &got);
+    ASSERT_EQ(got, 0);
+
+    /* State set inside this object stays inside it. */
+    glEnableVertexAttribArray(3u);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    ASSERT_EQ(ctx->vertex_attribs[3].enabled, GL_TRUE);
+
+    glBindVertexArray(vao[1]);
+    ASSERT_EQ(ctx->vertex_attribs[3].enabled, GL_FALSE);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &got);
+    ASSERT_EQ(got, 0);
+
+    glBindVertexArray(vao[0]);
+    ASSERT_EQ(ctx->vertex_attribs[3].enabled, GL_TRUE);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &got);
+    ASSERT_EQ(got, (GLint)ebo);
+
+    /* And the default object comes back untouched. */
+    glBindVertexArray(0u);
+    ASSERT_EQ(ctx->array_vertex.enabled, GL_TRUE);
+    ASSERT_EQ(ctx->array_vertex.pointer, (const void *)verts);
+    ASSERT_EQ(ctx->vertex_attribs[3].enabled, GL_FALSE);
+
+    /* GL_ARRAY_BUFFER's binding is context state, not the object's: a bind leaves it. */
+    GLuint vbo = 0u;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBindVertexArray(vao[1]);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &got);
+    ASSERT_EQ(got, (GLint)vbo);
+
+    /* Deleting the bound object reverts to the default one, and to its state. */
+    glDeleteVertexArrays(1, &vao[1]);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &got);
+    ASSERT_EQ(got, 0);
+    ASSERT_EQ(glIsVertexArray(vao[1]), GL_FALSE);
+    ASSERT_EQ(ctx->array_vertex.enabled, GL_TRUE);
+
+    /* Deleting 0, and a name already gone, are both silent. */
+    glDeleteVertexArrays(1, &vao[1]);
+    GLuint zero = 0u;
+    glDeleteVertexArrays(1, &zero);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    /* The table is finite and says so rather than handing out a name it has no room
+     * for. */
+    GLuint many[OOPS_GL_MAX_VERTEX_ARRAY_OBJECTS + 1];
+    glGenVertexArrays((GLsizei)(sizeof(many) / sizeof(many[0])), many);
+    ASSERT_EQ(glGetError(), GL_OUT_OF_MEMORY);
+    ASSERT_EQ(many[OOPS_GL_MAX_VERTEX_ARRAY_OBJECTS], 0u);
+
+    glContextDestroy(ctx_handle);
+    oops_display_close(disp);
+}
+
+/* GL 3.0's indexed extension query answers the same list the string does, and the integer
+ * version matches what `glContextSetVersion` was given. The pixel buffer targets accept an
+ * unbind, which is all a backend saving GL state around its own drawing needs, and refuse a
+ * real buffer. */
+static void test_gl_gl3_queries_answer_version_extensions_and_pixel_bindings(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx_handle = glContextCreate(disp);
+    GLint count = -1;
+    GLint got = -1;
+    GLuint buf = 0u;
+
+    (void)glGetError();
+    glContextSetVersion(2, 1);
+    glGetIntegerv(GL_MAJOR_VERSION, &got);
+    ASSERT_EQ(got, 2);
+    glGetIntegerv(GL_MINOR_VERSION, &got);
+    ASSERT_EQ(got, 1);
+
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    ASSERT_TRUE(count > 0);
+
+    /* Every index names an extension the string also holds, and one past the end is an
+     * error. */
+    for (GLint i = 0; i < count; i++) {
+        const GLubyte *one = glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        ASSERT_NE(one, NULL);
+        ASSERT_TRUE(strstr((const char *)glGetString(GL_EXTENSIONS), (const char *)one) !=
+                    NULL);
+        ASSERT_TRUE(strchr((const char *)one, ' ') == NULL);
+    }
+    ASSERT_EQ(glGetStringi(GL_EXTENSIONS, (GLuint)count), NULL);
+    ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+    ASSERT_EQ(glGetStringi(GL_VERSION, 0u), NULL);
+    ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &got);
+    ASSERT_EQ(got, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0u);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+
+    glGenBuffers(1, &buf);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buf);
+    ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &got);
+    ASSERT_EQ(got, 0);
+
+    /* A pixel target is a binding only, so there is no storage to give it. */
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, 16, NULL, GL_STATIC_DRAW);
+    ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
+
+    glContextDestroy(ctx_handle);
+    oops_display_close(disp);
+}
+
 static void test_gl_proc_address_resolves_entry_points_by_name(void) {
     /* Every name in `OOPS_GL_PROC_LIST` resolves to the function it names. The test
      * walks the list itself, so a row added is a row checked; an extension added to
@@ -15442,6 +15599,8 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_glsl_emit_matches_the_assembler);
     RUN_TEST(test_glsl_emit_mat4_is_column_major);
     RUN_TEST(test_gl_blend_control_carries_the_gl_state);
+    RUN_TEST(test_gl_vertex_array_objects_swap_array_state);
+    RUN_TEST(test_gl_gl3_queries_answer_version_extensions_and_pixel_bindings);
     RUN_TEST(test_gl_proc_address_resolves_entry_points_by_name);
     RUN_TEST(test_glsl_gen_selects_arithmetic);
     RUN_TEST(test_glsl_gen_selects_swizzles_and_constructors);
