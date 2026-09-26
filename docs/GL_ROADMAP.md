@@ -71,9 +71,9 @@ rewritten tests show a texture change taking a slot and the stream carrying on. 
 the *benefit* is a program that draws many textures a frame and reads nothing back - which is a
 port, not a probe.
 
-**And a program ran.** `oops-apps/src/oops-gl/glut-demo` - a GLUT program with no SDK call in it
-but its entry point - drew its lit solids and its `glutBitmapString` frame counter on a console
-on 2026-09-21, for 11,769 frames at a steady ten-to-twelve milliseconds a flip, with every
+**And a program ran.** `oops-apps/src/oops-frameworks/glut-demo` - a GLUT program with no SDK call
+in it but its entry point - drew its lit solids and its `glutBitmapString` frame counter on a
+console for 11,769 frames at a steady ten-to-twelve milliseconds a flip, with every
 submission returning `0x0` and none of this library's "a feature this path does not apply" lines
 in the log. A check suite says the pieces work; that says a port does.
 
@@ -826,7 +826,8 @@ count alone. (The third export itself is no longer the unknown: sweep `20260917-
 > next hardware run answers on **oops-gl's own stage**. That matters because the question below
 > stayed open through three obSCEne measurements, every one of which rebuilt the stage by hand
 > with the passthrough `VGT_SHADER_STAGES_EN` rather than the `0x00c12010` this programmes. The
-> register offsets and the third coordinate space the hardware wants are in the CHANGELOG entry.
+> register offsets and the third coordinate space the hardware wants are recorded with the
+> clip-plane code in `src/gl/gl_draw.c`.
 
 **User clip planes** (`glClipPlane`, `glGetClipPlane`, `GL_CLIP_PLANE0..5`) looked like a
 vertex-stage rewrite and are not. Mesa's `si_emit_clip_regs`

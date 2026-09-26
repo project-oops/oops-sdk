@@ -1,7 +1,8 @@
 # D001 - A verb with nothing behind it fails, rather than passing
 
 
-**decided** · 2026-09-03
+**Status:** decided
+**Date:** 2026-09-03
 
 Every OOPS repository is reached through `bin/<project>`, and the collection sweeps them with
 `oops all`. This repository has a build and nothing else: no test suite, no linter, no

@@ -1,7 +1,8 @@
 # D003 - Source inclusion over static archives for freestanding consumers
 
 
-**decided** · 2026-09-04
+**Status:** decided
+**Date:** 2026-09-04
 
 The SDK initially provided both source lists (`OOPS_SDK_C_SRCS`) and a pre-built static archive
 (`liboops.a`). Consumers were linking against `liboops.a`. That straddled two distribution models

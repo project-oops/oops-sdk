@@ -1,6 +1,7 @@
 # D007 - oops-gl is an instrument scoped to fixed-function, and oops-mesa is the GL anyone runs
 
-**decided** · 2026-09-16
+**Status:** decided
+**Date:** 2026-09-16
 
 ### Context
 

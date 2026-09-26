@@ -1,7 +1,8 @@
 # D002 - There is no slot for a vendor archive
 
 
-**decided** · 2026-09-03
+**Status:** decided
+**Date:** 2026-09-03
 
 The first version of this repository documented a `lib/` directory holding a vendor tiler
 archive, and carried a `!lib/*.a` negation in `.gitignore` whose only possible effect was to

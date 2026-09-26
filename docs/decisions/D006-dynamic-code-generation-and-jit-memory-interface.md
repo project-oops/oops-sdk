@@ -1,6 +1,7 @@
 # D006 - Dynamic code generation and JIT memory interface
 
-**decided** · 2026-09-14
+**Status:** decided
+**Date:** 2026-09-14
 
 ### Context
 

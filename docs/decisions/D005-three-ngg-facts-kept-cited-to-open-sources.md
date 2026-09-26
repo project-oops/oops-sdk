@@ -1,7 +1,8 @@
 # D005 - Three NGG facts first seen in a decrypted module are kept, cited to the open sources
 
 
-**decided** · 2026-09-14
+**Status:** decided
+**Date:** 2026-09-14
 
 ## What happened
 
