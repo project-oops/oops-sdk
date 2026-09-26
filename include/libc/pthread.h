@@ -16,6 +16,7 @@
 #include "oops/thread.h"
 #include "oops/time.h"
 
+#include <errno.h> /* ENOSYS, which the attribute setters below return */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h> /* abort, likewise */
@@ -29,7 +30,8 @@ typedef oops_mutex_t pthread_mutex_t;
 typedef oops_cond_t pthread_cond_t;
 typedef oops_tls_key_t pthread_key_t;
 
-/* Thread and condition attributes carry nothing: every caller here passes NULL. */
+/* Thread and condition attributes carry nothing: `pthread_create` ignores them, and the setters
+ * below all fail. */
 typedef struct {
     int unused;
 } pthread_attr_t;
@@ -65,6 +67,97 @@ typedef struct {
  * that recurses nowhere. */
 #define OOPS_PTHREAD_PRIORITY 700
 #define OOPS_PTHREAD_STACK (256u * 1024u)
+
+/*
+ * The attribute object, as functions that fail.
+ *
+ * `pthread_create` above ignores its `attr`, so an attribute that appeared to be set would be a
+ * thread running at a priority and stack size it was not given. Every one of these returns ENOSYS
+ * instead, which is what the attribute cannot do rather than a claim it did it.
+ *
+ * `pthread_attr_init` failing is the whole point: a caller written to tolerate it - miniaudio's
+ * `ma_thread_create` is, and says so in its own comment - skips the block and creates the thread
+ * with the defaults, which is what it gets here either way. A caller that ignores the return value
+ * also gets the defaults; before these existed it did not compile, and the honest failure is the
+ * better of the two only because the code that needs them is inside somebody else's header where
+ * the build error cannot be acted on.
+ *
+ * `sched.h`'s note carries the other half: the policy names and `struct sched_param`.
+ */
+static inline int pthread_attr_init(pthread_attr_t *attr) {
+    if (attr) {
+        attr->unused = 0;
+    }
+    return ENOSYS;
+}
+static inline int pthread_attr_destroy(pthread_attr_t *attr) {
+    (void)attr;
+    return 0; /* Nothing was allocated, so nothing fails to be released. */
+}
+static inline int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize) {
+    (void)attr;
+    (void)stacksize;
+    return ENOSYS;
+}
+static inline int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize) {
+    (void)attr;
+    if (stacksize) {
+        *stacksize = OOPS_PTHREAD_STACK;
+    }
+    return 0; /* The size every pthread here is given, which is a fact rather than a setting. */
+}
+static inline int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate) {
+    (void)attr;
+    (void)detachstate;
+    return ENOSYS;
+}
+
+/*
+ * The scheduling attributes. `struct sched_param` is declared here under FreeBSD's own guard name,
+ * so whichever of this and `<sched.h>` a source reaches first provides it and the other skips it.
+ * The policy names themselves are `<sched.h>`'s, along with the reasoning for all of this.
+ */
+#ifndef _SCHED_PARAM_DECLARED
+#define _SCHED_PARAM_DECLARED
+struct sched_param {
+    int sched_priority;
+};
+#endif
+
+#define PTHREAD_INHERIT_SCHED 0
+#define PTHREAD_EXPLICIT_SCHED 1
+
+static inline int pthread_attr_setschedpolicy(pthread_attr_t *attr, int policy) {
+    (void)attr;
+    (void)policy;
+    return ENOSYS;
+}
+static inline int pthread_attr_getschedpolicy(const pthread_attr_t *attr, int *policy) {
+    (void)attr;
+    (void)policy;
+    return ENOSYS;
+}
+static inline int pthread_attr_setschedparam(pthread_attr_t *attr,
+                                            const struct sched_param *param) {
+    (void)attr;
+    (void)param;
+    return ENOSYS;
+}
+static inline int pthread_attr_getschedparam(const pthread_attr_t *attr,
+                                             struct sched_param *param) {
+    (void)attr;
+    /* Zeroed rather than left alone: a caller that ignores the return value and then adjusts the
+     * priority it read would otherwise work from its own uninitialised stack. */
+    if (param) {
+        param->sched_priority = 0;
+    }
+    return ENOSYS;
+}
+static inline int pthread_attr_setinheritsched(pthread_attr_t *attr, int inheritsched) {
+    (void)attr;
+    (void)inheritsched;
+    return ENOSYS;
+}
 
 /* `attr` is accepted and ignored; every caller here passes NULL. A non-NULL one would
  * not be honoured, so it is named and documented rather than quietly dropped. */

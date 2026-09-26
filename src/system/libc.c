@@ -24,6 +24,7 @@
 #include "libc/string.h"
 #include "libc/strings.h"
 #include "libc/time.h"
+#include "libc/wchar.h"
 #include "libc/sys/time.h"
 #include "oops/time.h"
 #include "oops/freestd.h"
@@ -259,6 +260,96 @@ float frexpf(float x, int *exp_) { return (float)frexp((double)x, exp_); }
  * --------------------------------------------------------------------------- */
 
 size_t strlen(const char *s) { return obs_strlen(s); }
+
+/*
+ * The two wide-string functions `<wchar.h>` declares, and why only these two: a C library that
+ * carries a wide-string file-path API beside its byte one compiles both halves whatever the caller
+ * uses, so the names have to resolve. See that header's note.
+ *
+ * `wchar_t` is a Unicode scalar value on this target, so the conversion is UTF-8 encoding and is
+ * exact. An unpaired surrogate or a value past U+10FFFF is not a character, and both are reported
+ * as EILSEQ rather than encoded into something that would read back as a different string.
+ */
+size_t wcslen(const wchar_t *s) {
+    const wchar_t *p = s;
+    if (!s) {
+        return 0u;
+    }
+    while (*p) {
+        p++;
+    }
+    return (size_t)(p - s);
+}
+
+size_t wcsrtombs(char *dst, const wchar_t **src, size_t len, mbstate_t *ps) {
+    size_t written = 0u;
+    const wchar_t *p;
+    unsigned char buf[4];
+
+    (void)ps; /* Single-byte-to-wide has no partial state to carry; see `<wchar.h>`. */
+    if (!src || !*src) {
+        errno = EINVAL;
+        return (size_t)-1;
+    }
+    p = *src;
+
+    for (;;) {
+        const uint32_t c = (uint32_t)*p;
+        size_t n;
+
+        if (c < 0x80u) {
+            n = 1u;
+            buf[0] = (unsigned char)c;
+        } else if (c < 0x800u) {
+            n = 2u;
+            buf[0] = (unsigned char)(0xc0u | (c >> 6));
+            buf[1] = (unsigned char)(0x80u | (c & 0x3fu));
+        } else if (c < 0x10000u) {
+            if (c >= 0xd800u && c <= 0xdfffu) { /* a lone surrogate is not a character */
+                errno = EILSEQ;
+                return (size_t)-1;
+            }
+            n = 3u;
+            buf[0] = (unsigned char)(0xe0u | (c >> 12));
+            buf[1] = (unsigned char)(0x80u | ((c >> 6) & 0x3fu));
+            buf[2] = (unsigned char)(0x80u | (c & 0x3fu));
+        } else if (c <= 0x10ffffu) {
+            n = 4u;
+            buf[0] = (unsigned char)(0xf0u | (c >> 18));
+            buf[1] = (unsigned char)(0x80u | ((c >> 12) & 0x3fu));
+            buf[2] = (unsigned char)(0x80u | ((c >> 6) & 0x3fu));
+            buf[3] = (unsigned char)(0x80u | (c & 0x3fu));
+        } else {
+            errno = EILSEQ;
+            return (size_t)-1;
+        }
+
+        /* `dst` null means "how many bytes would this take", and then `len` is ignored and the
+           source pointer is not advanced - the one place the two modes differ. */
+        if (dst) {
+            if (written + n > len) {
+                break;
+            }
+            for (size_t i = 0u; i < n; i++) {
+                dst[written + i] = (char)buf[i];
+            }
+        }
+        written += n;
+
+        if (c == 0u) {
+            /* The terminator is written but not counted, and the sequence is complete. */
+            if (dst) {
+                *src = (const wchar_t *)0;
+            }
+            return written - 1u;
+        }
+        p++;
+    }
+
+    *src = p;
+    return written;
+}
+
 int strcmp(const char *a, const char *b) { return obs_strcmp(a, b); }
 int strncmp(const char *a, const char *b, size_t n) { return obs_strncmp(a, b, n); }
 char *strncpy(char *dest, const char *src, size_t n) { return obs_strncpy(dest, src, n); }

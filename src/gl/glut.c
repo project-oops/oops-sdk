@@ -1112,9 +1112,9 @@ int glutExtensionSupported(const char *name) {
         return 1;
 
     /*
-     * And the indexed form, for a core profile where the above returns NULL. Guarded
-     * because this file builds against oops-gl's headers, which declare neither
-     * `GL_NUM_EXTENSIONS` nor `glGetStringi`, and against upstream Mesa's, which do.
+     * And the indexed form, for a core profile where the above returns NULL. Still
+     * guarded: this file builds against oops-gl's headers, which now declare both names,
+     * and against upstream Mesa's, which have always done - but a third set need not.
      */
 #ifdef GL_NUM_EXTENSIONS
     GLint count = 0;
