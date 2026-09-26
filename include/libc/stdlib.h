@@ -148,8 +148,26 @@ long long llabs(long long x);
 
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;
+typedef struct { long long quot; long long rem; } lldiv_t;
 div_t div(int num, int den);
 ldiv_t ldiv(long num, long den);
+lldiv_t lldiv(long long num, long long den);
+
+/*
+ * `realpath`, **declared here and defined in `oops-apps/common/posix/posix.c`** - the same split
+ * `open`, `fcntl` and `clock_gettime` have, and for the same reason: it is POSIX rather than C,
+ * and it needs a filesystem.
+ *
+ * The declaration is in *this* header rather than the port layer's because this is the copy a
+ * compile reaches - libc++'s `src/filesystem/operations.cpp` calls `::realpath` having included
+ * `<stdlib.h>`, and with the declaration in the shadowed copy three of its filesystem sources do
+ * not compile. `fcntl.h` records the same trap for the `F_*` commands.
+ *
+ * On this platform it is a *lexical* resolution and that is not a shortcut: `realpath` resolves
+ * symbolic links, and there are none here, so collapsing `.` and `..` against an absolute path is
+ * the complete answer. The definition says so.
+ */
+char *realpath(const char *path, char *resolved);
 
 #ifdef __cplusplus
 }
