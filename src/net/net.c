@@ -311,14 +311,28 @@ struct fbsd_sockaddr_in {
  * it.**
  *
  * A title tells us which ones it has taken through `oops_net_bare_names_are_shimmed`,
- * whose bits `oops/net.h` defines. It is a weak reference, so a title with no POSIX
- * shim leaves it null and every bare name stays available - the arrangement that was
- * working before, unchanged. The answer is per name rather than all-or-nothing, because
- * the shim defines `bind` and `connect` and does *not* define `listen` or `accept`, and
- * a blanket refusal would take a working path away from the latter two for the sake of
- * the former.
+ * whose bits `oops/net.h` defines. The answer is per name rather than all-or-nothing,
+ * because the shim defines `bind` and `connect` and does *not* define `listen` or
+ * `accept`, and a blanket refusal would take a working path away from the latter two for
+ * the sake of the former.
+ *
+ * **The default is defined here, weak, rather than left as a weak reference.** A weak
+ * *reference* resolves to null in a title with no POSIX shim, which is the right answer
+ * and reads correctly at run time - but it leaves the symbol *undefined* in the payload,
+ * and `oops-apps/common/app.mk`'s guard reports every undefined name whether or not it
+ * is weak. OOPSy-daisy links `net` and not the shim, so it stopped linking. Its
+ * `UNDEF_ALLOW` is the list of imports *the loader* resolves, and an optional hook
+ * between two files in this tree does not belong in it, so the symbol is given a real
+ * definition instead: 0, nothing shimmed, every bare name available. A title that does
+ * link the shim overrides it, because a strong definition beats a weak one.
+ *
+ * The null test below stays even though nothing can null it now. It costs one compare
+ * and it is the only thing standing between a future link that somehow drops both
+ * definitions and a call through address zero.
  */
-__attribute__((weak)) unsigned oops_net_bare_names_are_shimmed(void);
+__attribute__((weak)) unsigned oops_net_bare_names_are_shimmed(void) {
+    return 0u;
+}
 static int bare_ok(unsigned which) {
     if (!oops_net_bare_names_are_shimmed)
         return 1;
