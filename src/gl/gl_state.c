@@ -1,17 +1,17 @@
 /*
- * oops-gl: State management, capability switches, and clear operations
+ * oops-gl: context state entry points - viewport and scissor, clears, capability
+ * switches, the glGet* queries, texture objects and framebuffer objects. Each entry
+ * point records into an open display list first, then updates the context and marks
+ * the hardware state it touches dirty.
  */
 
 #include "gl_internal.h"
 
-/* **An integer colour component maps across the whole signed range onto [-1, 1]**, so
- * INT_MAX means 1.0 - it is not a cast. Used by the integer spellings of the lighting
- * calls and of glTexEnv, which is why it sits up here rather than beside either of
- * them.
- *
- * The rule and the constant are Mesa's `INT_TO_FLOAT` (`src/mesa/main/macros.h`),
- * applied to exactly the colour-valued pnames in `src/mesa/main/light.c` and
- * `src/mesa/vbo/vbo_attrib_tmp.h`. */
+/* An integer colour component maps across the whole signed range onto [-1, 1], so
+ * INT_MAX means 1.0; it is not a cast. Shared by the integer spellings of the lighting
+ * calls and of glTexEnv. The rule and the constant are Mesa's `INT_TO_FLOAT`
+ * (`src/mesa/main/macros.h`), applied to the colour-valued pnames in
+ * `src/mesa/main/light.c` and `src/mesa/vbo/vbo_attrib_tmp.h`. */
 static float gl_int_to_colour(GLint i) {
     return (float)((2.0 * (double)i + 1.0) * (1.0 / 4294967294.0));
 }
@@ -74,23 +74,18 @@ void glClearDepth(GLclampd depth) {
     ctx->clear_depth = (float)depth;
 }
 
-/* A clear of colour or depth that has to keep to a scissor box or go through a colour
- * mask, done as GL defines a clear: a rectangle of fragments at the clear values, with
- * only the scissor test and the write masks applied. So it is drawn - one quad over the
- * whole window, at the clear colour and the clear depth, through the ordinary pipeline
- * - with every other per-fragment effect set aside for it and put back after it: depth
- * test ALWAYS (and off, with depth writes off, when depth is not being cleared), no
- * blending, logic op, alpha test, texture, lighting, fog, stencil test, culling,
- * offset, stipple or clip planes, filled polygons, identity matrices, the whole window
- * as the viewport and the full depth range.
+/* A clear that keeps to a scissor box or goes through a write mask, done as GL defines
+ * a clear: a rectangle of fragments at the clear values with only the scissor test and
+ * the write masks applied. It draws one quad over the whole window through the ordinary
+ * pipeline, with every other per-fragment effect set aside and restored after: depth
+ * test ALWAYS (off, with writes off, when depth is not cleared), no blending, logic op,
+ * alpha test, texture, lighting, fog, culling, offset, stipple or clip planes, filled
+ * polygons, identity matrices, the whole window as viewport and the full depth range.
  *
- * Why draw rather than fill: the hardware clears with a DMA fill of the whole
- * allocation, which cannot keep to a rectangle of a tiled surface or leave a channel
- * alone. A draw can, the scissor registers and CB_TARGET_MASK already do both, and the
- * same draw on the host goes through the software rasteriser's scissor and mask - so
- * the two paths clear identically. An unscissored, unmasked clear still takes the fill,
- * which leaves every frame that clears the whole surface - gl-cube's recorded one
- * included - exactly as it was. */
+ * The hardware clears with a DMA fill of the whole allocation, which cannot keep to a
+ * rectangle of a tiled surface or leave a channel alone; the scissor registers and
+ * CB_TARGET_MASK can. The host path goes through the software rasteriser's scissor and
+ * mask, so both paths clear identically. A whole, unmasked clear takes the fill. */
 static void gl_clear_by_draw(gl_context_t *ctx, GLboolean colour, GLboolean depth,
                              GLboolean sten) {
     gl_mat4_t *mv = &ctx->modelview_stack[ctx->modelview_depth];
@@ -116,8 +111,7 @@ static void gl_clear_by_draw(gl_context_t *ctx, GLboolean colour, GLboolean dept
     const GLboolean blend = ctx->cap_blend, logic = ctx->cap_color_logic_op;
     const GLboolean alpha = ctx->cap_alpha_test;
     const GLboolean light = ctx->cap_lighting, fog = ctx->cap_fog;
-    /* Every texture target on every unit. Only 1D and 2D were set aside until
-     * 2026-09-19, so an enabled 3D texture or cube map textured the drawn clear. */
+    /* Every texture target on every unit, so no enabled target textures the clear. */
     GLboolean tex_caps[OOPS_GL_MAX_TEXTURE_UNITS][4];
     for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
         gl_tex_unit_t *tu = &ctx->tex_unit[u];
@@ -173,10 +167,9 @@ static void gl_clear_by_draw(gl_context_t *ctx, GLboolean colour, GLboolean dept
     }
     ctx->cap_lighting = GL_FALSE;
     ctx->cap_fog = GL_FALSE;
-    /* **A stencil clear the console cannot fill** (boxed or masked; since 2026-09-19):
-     * the stencil test on, passing always, every surviving fragment's stencil REPLACEd
-     * by the clear value - through the stencil write mask, which is left as it is
-     * because GL applies it to a clear. */
+    /* A boxed or masked stencil clear: the stencil test on, passing always, every
+     * surviving fragment's stencil REPLACEd by the clear value through the stencil
+     * write mask, which stays as it is because GL applies it to a clear. */
     ctx->cap_stencil_test = sten;
     if (sten) {
         ctx->stencil_func = GL_ALWAYS;
@@ -260,8 +253,7 @@ void glClear(GLbitfield mask) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
         return;
-    /* A bit that names no buffer is GL_INVALID_VALUE, and nothing is cleared. These
-     * were ignored until 2026-09-19. */
+    /* A bit that names no buffer is GL_INVALID_VALUE, and nothing is cleared. */
     if ((mask & ~(GLbitfield)(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
                               GL_STENCIL_BUFFER_BIT | GL_ACCUM_BUFFER_BIT)) != 0u) {
         gl_record_error(ctx, GL_INVALID_VALUE);
@@ -282,12 +274,9 @@ void glClear(GLbitfield mask) {
     if (mask & GL_ACCUM_BUFFER_BIT)
         gl_accum_clear(ctx);
 
-    /* **A clear keeps to the scissor box and goes through the write masks** - GL's
-     * rule, which this ignored on both paths until 2026-09-19: every clear filled the
-     * whole surface, so a program clearing one viewport of a split screen wiped the
-     * others, and one clearing colour with a channel masked lost that channel too. The
-     * depth mask drops the depth clear outright (Mesa main/clear.c: "don't clear depth
-     * buffer if depth writing disabled"). */
+    /* A clear keeps to the scissor box and goes through the write masks. The depth mask
+     * drops the depth clear outright (Mesa main/clear.c: "don't clear depth buffer if
+     * depth writing disabled"). */
     if (!ctx->depth_mask)
         mask &= ~(GLbitfield)GL_DEPTH_BUFFER_BIT;
     int x0 = 0, y0 = 0, x1 = (int)ctx->width, y1 = (int)ctx->height;
@@ -306,12 +295,10 @@ void glClear(GLbitfield mask) {
     const GLboolean partial =
         (GLboolean)(x0 > 0 || y0 > 0 || x1 < (int)ctx->width || y1 < (int)ctx->height);
 
-    /* The stencil buffer, cleared inside the box and through the write mask. This
-     * ignored the mask on the claim that GL does, and it does not - the specification
-     * applies every buffer's write mask to a clear. On the console the stencil buffer
-     * is the GPU's surface, tiled, since 2026-09-19: a whole clear is a fill in the
-     * command stream (a constant is the same in any layout), and a boxed or masked one
-     * is drawn. */
+    /* The stencil buffer, cleared inside the box and through the write mask; GL applies
+     * every buffer's write mask to a clear. On the console the stencil buffer is the
+     * GPU's tiled surface: a whole clear is a fill in the command stream (a constant is
+     * the same in any layout), and a boxed or masked one is drawn. */
     if ((mask & GL_STENCIL_BUFFER_BIT) && ctx->stencil_buffer) {
         const uint8_t wm = (uint8_t)(ctx->stencil_writemask & 0xffu);
         const uint8_t v = (uint8_t)(ctx->clear_stencil & 0xff);
@@ -564,19 +551,10 @@ void glEnable(GLenum cap) {
         ctx->cap_alpha_test = GL_TRUE;
         gl_ps_patch_alpha_test(ctx);
         break;
-    /* **A capability this subset does not have is refused, not ignored.**
-     *
-     * `glEnable` is the first thing a GL program does, and a silently dropped one is
-     * the most expensive kind of nothing: enable GL_STENCIL_TEST or GL_FOG here and the
-     * call returned clean while the feature stayed off, so the render was wrong with no
-     * error anywhere to say why. The cases above and GL_LIGHT0..7 are the whole of what
-     * exists (D008); everything else says so - and glIsEnabled answers from the same
-     * list, or the two disagree.
-     *
-     * **The refusal carries the capability**, because the name of the call is only half
-     * an answer: GL_POINT_SPRITE was found here by a log that said `glEnable` and then
-     * needed the port's source read to learn which enable it meant. `glEnable 0x8861`
-     * needs nothing read. */
+    /* A capability this subset does not have is refused, not ignored: a silently
+     * dropped enable leaves a wrong render with no error to explain it. The cases above
+     * and the lights are the whole of what exists (D008), and glIsEnabled answers from
+     * the same list. The error carries the capability so the log names it. */
     default:
         gl_record_error_val(ctx, GL_INVALID_ENUM, cap);
         break;
@@ -793,10 +771,7 @@ GLboolean glIsEnabled(GLenum cap) {
         return ctx->cap_rescale_normal;
     case GL_COLOR_MATERIAL:
         return ctx->cap_color_material;
-    /* **These two were missing**, so glIsEnabled answered GL_FALSE for a capability
-     * glEnable had just switched on - and glGetBooleanv, which forwards here, repeated
-     * it. The list has to be the same list glEnable accepts; anything else is a query
-     * that disagrees with the state it is querying. */
+    /* The same list glEnable accepts; glGetBooleanv forwards here too. */
     case GL_POLYGON_OFFSET_FILL:
         return ctx->cap_polygon_offset_fill;
     case GL_POLYGON_OFFSET_LINE:
@@ -821,8 +796,7 @@ GLboolean glIsEnabled(GLenum cap) {
         return ctx->cap_sample_coverage;
     case GL_INDEX_ARRAY:
         return ctx->array_index.enabled;
-    /* **The client arrays are capabilities too**, as far as glIsEnabled is concerned -
-     * the specification lists them, and these were refused as unknown until 2026-09-19.
+    /* The client arrays are capabilities to glIsEnabled; the specification lists them.
      */
     case GL_VERTEX_ARRAY:
         return ctx->array_vertex.enabled;
@@ -857,13 +831,8 @@ GLboolean glIsEnabled(GLenum cap) {
 /* The factors each side of the blend may name, as Mesa's `legal_src_factor` and
  * `legal_dst_factor` list them for desktop GL without ARB_blend_func_extended
  * (main/blend.c:49-118). The two lists differ in one entry: GL_SRC_ALPHA_SATURATE is a
- * source factor only.
- *
- * **These were not checked at all until 2026-09-19.** Any enum was stored, reported
- * back by glGetIntegerv, and then turned into BLEND_SRC_ALPHA /
- * BLEND_ONE_MINUS_SRC_ALPHA by gl_blend_op's fallback on the way to the register - so a
- * misspelt factor blended as the GL default with no error anywhere, and so did the four
- * constant-colour factors before they existed. */
+ * source factor only. An unchecked factor would reach gl_blend_op's fallback and blend
+ * as the default with no error. */
 static GLboolean gl_blend_factor_ok(GLenum f, GLboolean is_src) {
     switch (f) {
     case GL_ZERO:
@@ -904,16 +873,10 @@ void glBlendFunc(GLenum sfactor, GLenum dfactor) {
     ctx->blend_dst = dfactor;
     ctx->blend_src_alpha = sfactor;
     ctx->blend_dst_alpha = dfactor;
-    /*
-     * **The constant has to go out again, because which value lands in `0x108` depends
-     * on these factors and not only on `glBlendColor`.** A colour-constant draw puts
-     * green there and an alpha-constant draw puts alpha there - see `gl_draw.c` and
-     * `docs/hardware/agc-blend-and-export-fw1240.md`.
-     *
-     * Without this, switching families between draws reuses whatever the last emission
-     * left, and the second draw blends against the first one's channel. A host test
-     * caught exactly that.
-     */
+    /* The constant goes out again because the value in `0x108` depends on these
+     * factors, not only on `glBlendColor`: a colour-constant draw puts green there and
+     * an alpha-constant draw puts alpha. See `gl_draw.c` and
+     * `docs/hardware/agc-blend-and-export-fw1240.md`. */
     ctx->hw_blend_color_dirty = GL_TRUE;
 }
 
@@ -945,17 +908,15 @@ void glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlp
 }
 
 /* The five simple equations (Mesa main/blend.c:435-447, legal_simple_blend_equation).
- * Anything else used to be stored and then blended as GL_FUNC_ADD by gl_blend_comb's
- * default. */
+ */
 static GLboolean gl_blend_equation_ok(GLenum mode) {
     return (GLboolean)(mode == GL_FUNC_ADD || mode == GL_FUNC_SUBTRACT ||
                        mode == GL_FUNC_REVERSE_SUBTRACT || mode == GL_MIN ||
                        mode == GL_MAX);
 }
 
-/* The work, shared by the GL 1.4 call and the GL 2.0 one - `glBlendEquation` sets both
- * groups and must not reach through the 2.0 entry point, which is gated on 2.0 having
- * been claimed. */
+/* Shared by the GL 1.4 call and the GL 2.0 one. `glBlendEquation` must not go through
+ * the 2.0 entry point, which is gated on 2.0 having been claimed. */
 static void blend_equation_set(gl_context_t *ctx, GLenum modeRGB, GLenum modeAlpha) {
     if (!gl_blend_equation_ok(modeRGB) || !gl_blend_equation_ok(modeAlpha)) {
         gl_record_error(ctx, GL_INVALID_ENUM);
@@ -965,10 +926,8 @@ static void blend_equation_set(gl_context_t *ctx, GLenum modeRGB, GLenum modeAlp
     ctx->blend_equation_alpha = modeAlpha;
 }
 
-/* **Not gated on 1.4**, although that is the version that took it into the core:
- * `GL_EXT_blend_minmax` and `GL_EXT_blend_subtract` are both advertised, and an
- * extension is available whatever the core version. See the note on
- * `gl_require_version`. */
+/* Not gated on 1.4: `GL_EXT_blend_minmax` and `GL_EXT_blend_subtract` are advertised,
+ * and an extension is available whatever the core version. See `gl_require_version`. */
 void glBlendEquation(GLenum mode) {
     if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_BLEND_EQUATION, gl_la_e(mode)))
         return;
@@ -978,15 +937,10 @@ void glBlendEquation(GLenum mode) {
     blend_equation_set(ctx, mode, mode);
 }
 
-/* GL 2.0: an equation per channel group - GL_FUNC_ADD for the colour and
- * GL_FUNC_SUBTRACT for the alpha, say. `glBlendEquation` above is the both-the-same
- * case of this, exactly as the specification defines it from 2.0 onwards.
- *
- * **GL_MIN and GL_MAX ignore the blend factors**, so an equation that is one of them on
- * one group and not the other is two different treatments in one blend. The software
- * path below and the console's `CB_BLEND0_CONTROL` both already carry `ALPHA_COMB_FCN`
- * separately from `COLOR_COMB_FCN`, which is why this costs nothing beyond the second
- * field. */
+/* GL 2.0: an equation per channel group; `glBlendEquation` is the both-the-same case.
+ * GL_MIN and GL_MAX ignore the blend factors, so mixing them with another equation is
+ * two treatments in one blend. The software path and `CB_BLEND0_CONTROL` both carry
+ * `ALPHA_COMB_FCN` separately from `COLOR_COMB_FCN`. */
 void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !gl_require_version(ctx, 2u, 0u))
@@ -1052,9 +1006,8 @@ static GLboolean gl_stencil_func_ok(GLenum f) {
                : GL_FALSE;
 }
 
-/* GL 1.4's GL_INCR_WRAP and GL_DECR_WRAP included since 2026-09-19 (Mesa
- * main/stencil.c:70-71), each its own rule in gl_stencil_apply - wrapping, where
- * GL_INCR and GL_DECR saturate. */
+/* GL 1.4's GL_INCR_WRAP and GL_DECR_WRAP included (Mesa main/stencil.c:70-71); in
+ * gl_stencil_apply they wrap where GL_INCR and GL_DECR saturate. */
 static GLboolean gl_stencil_op_ok(GLenum o) {
     return (o == GL_KEEP || o == GL_ZERO || o == GL_REPLACE || o == GL_INCR ||
             o == GL_DECR || o == GL_INVERT || o == GL_INCR_WRAP || o == GL_DECR_WRAP)
@@ -1096,8 +1049,7 @@ static void gl_fog_set(gl_context_t *ctx, GLenum pname, const GLfloat *v) {
             ctx->fog_color[i] = v[i];
         return;
     /* Colour-index fog: state in an RGBA context, kept and never drawn with, as Mesa
-     * keeps it (main/fog.c:136-142). It was refused until 2026-09-19, which a
-     * conforming program setting up both modes' fog saw as an error. */
+     * keeps it (main/fog.c:136-142). */
     case GL_FOG_INDEX:
         ctx->fog_index = v[0];
         return;
@@ -1161,9 +1113,8 @@ void glFogi(GLenum pname, GLint param) {
     gl_fog_set(ctx, pname, v);
 }
 
-/* **An integer fog colour is normalised, like every other integer colour here.** The
- * distances are plain casts; only GL_FOG_COLOR converts by range. Getting that
- * backwards gives a fog that is white whenever the caller asked for anything at all. */
+/* An integer fog colour is normalised, like every other integer colour here; the
+ * distances are plain casts. */
 void glFogiv(GLenum pname, const GLint *params) {
     if (params && gl_list_recording() &&
         gl_list_rec_iv(GL_LIST_OP_FOG_IV, pname, 0u, GL_FALSE, pname, params)) {
@@ -1184,9 +1135,8 @@ void glFogiv(GLenum pname, const GLint *params) {
     gl_fog_set(ctx, pname, v);
 }
 
-/* Both are screen-space widths in pixels, and both are refused at zero or below - a
- * zero-width line is not a thin line, it is a request the specification calls an error.
- */
+/* Point size and line width are screen-space pixels; the specification makes zero or
+ * below an error. */
 void glPointSize(GLfloat size) {
     if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_POINT_SIZE, gl_la_f(size)))
         return;
@@ -1239,9 +1189,8 @@ void glPointParameterfv(GLenum pname, const GLfloat *params) {
         else
             ctx->point_fade_threshold = params[0];
         return;
-    /* GL 2.0's fifth parameter, now that point sprites exist here to need it. Only the
-     * two corners are values; anything else is an enum error, as it is for the pname
-     * itself. */
+    /* GL 2.0's fifth parameter. Only the two corners are values; anything else is an
+     * enum error. */
     case GL_POINT_SPRITE_COORD_ORIGIN: {
         const GLenum e = (GLenum)(GLint)params[0];
         if (e != GL_LOWER_LEFT && e != GL_UPPER_LEFT) {
@@ -1319,10 +1268,9 @@ void glLineStipple(GLint factor, GLushort pattern) {
     ctx->line_stipple_pattern = pattern;
 }
 
-/* The GL 1.0 calls. Each sets **both faces** - which is how the specification defines
- * them from 2.0 onwards - by going to the shared body below, not through the 2.0 entry
- * point: that one is gated on the context having claimed 2.0, and these have been here
- * since 1.0. */
+/* The GL 1.0 calls. Each sets both faces, as the specification defines them from 2.0
+ * onwards, through the shared body below rather than the 2.0 entry point, which is
+ * gated on the context having claimed 2.0. */
 static void stencil_func_set(gl_context_t *ctx, GLenum face, GLenum func, GLint ref,
                              GLuint mask);
 static void stencil_op_set(gl_context_t *ctx, GLenum face, GLenum sfail, GLenum dpfail,
@@ -1362,11 +1310,8 @@ void glStencilMask(GLuint mask) {
 /* -------------------------------------------------------------------------
  * GL 2.0's separate stencil state
  *
- * **The three GL 1.x calls above are the `GL_FRONT_AND_BACK` case of these**, which is
- * exactly how the specification defines them from 2.0 onwards - so there is one
- * implementation rather than two that have to agree, and a GL 1.x program keeps working
- * because setting both faces to the same thing is what it always did.
- *
+ * The three GL 1.x calls above are the `GL_FRONT_AND_BACK` case of these, as the
+ * specification defines them from 2.0 onwards, so there is one implementation.
  * `face` is GL_FRONT, GL_BACK or GL_FRONT_AND_BACK; anything else is GL_INVALID_ENUM.
  * ------------------------------------------------------------------------- */
 
@@ -1375,22 +1320,17 @@ static GLboolean gl_stencil_face_ok(GLenum face) {
                        face == GL_FRONT_AND_BACK);
 }
 
-/* **The work, shared by the GL 1.x call and the GL 2.0 one.**
- *
- * `glStencilFunc` is the `GL_FRONT_AND_BACK` case of `glStencilFuncSeparate` and is
- * implemented as one - but the 2.0 entry point is gated on the context having
- * claimed 2.0, and the 1.0 one must not be. So the body lives here and each entry point
- * brings its own gate, rather than the older call reaching through the newer one and
- * being refused by it. */
+/* Shared by the GL 1.x call and the GL 2.0 one. The 2.0 entry point is gated on the
+ * context having claimed 2.0 and the 1.0 one must not be, so each entry point brings
+ * its own gate. */
 static void stencil_func_set(gl_context_t *ctx, GLenum face, GLenum func, GLint ref,
                              GLuint mask) {
     if (!gl_stencil_face_ok(face) || !gl_stencil_func_ok(func)) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
-    /* The reference is clamped to the buffer's range, which the specification requires
-     * and which also keeps the comparison honest: an unclamped 300 would never equal
-     * anything an 8-bit buffer can hold, so GL_EQUAL would silently never pass. */
+    /* The reference is clamped to the 8-bit buffer's range, as the specification
+     * requires; an unclamped 300 would never pass GL_EQUAL. */
     const GLint clamped = (ref < 0) ? 0 : (ref > 255 ? 255 : ref);
     if (face != GL_BACK) {
         ctx->stencil_func = func;
@@ -1438,8 +1378,7 @@ static void stencil_mask_set(gl_context_t *ctx, GLenum face, GLuint mask) {
         ctx->stencil_back_writemask = mask;
 }
 
-/* The GL 2.0 entry points. Each is the shared body above plus the one thing that makes
- * it 2.0's rather than 1.0's: a context that has not claimed 2.0 does not have it. */
+/* The GL 2.0 entry points: the shared body above, gated on the context claiming 2.0. */
 void glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !gl_require_version(ctx, 2u, 0u))
@@ -1479,16 +1418,12 @@ static int gl_clip_plane_index(GLenum plane) {
 }
 
 /* The plane arrives in object coordinates and is stored in eye coordinates, multiplied
- * by the inverse modelview of this moment. That is the specification's rule and it is
- * what makes a clip plane stay put in the world while the modelview moves afterwards -
- * storing the caller's numbers and using them directly would make the plane follow the
- * object instead, which is a different feature that happens to look right in any scene
- * that never moves after setting it. */
+ * by the current inverse modelview, as the specification requires. That keeps the plane
+ * fixed in the world when the modelview later moves. */
 void glClipPlane(GLenum plane, const GLdouble *equation) {
-    /* Recorded in object coordinates, as passed - the transform into eye space belongs
-     * to the modelview current when the list *runs*, which is the whole point of
-     * recording the call. Narrowed to float as the plane is stored anyway (Mesa's
-     * save_ClipPlane does the same). */
+    /* Recorded in object coordinates, as passed: the transform into eye space uses the
+     * modelview current when the list runs. Narrowed to float, as the plane is stored
+     * (Mesa's save_ClipPlane does the same). */
     if (equation && gl_list_recording() &&
         GL_LIST_REC(GL_LIST_OP_CLIP_PLANE, gl_la_e(plane),
                     gl_la_f((GLfloat)equation[0]), gl_la_f((GLfloat)equation[1]),
@@ -1556,8 +1491,8 @@ static int gl_texgen_index(GLenum coord) {
     }
 }
 
-/* The five generation modes. GL_NORMAL_MAP and GL_REFLECTION_MAP, GL 1.3's cube-map
- * modes, were refused while there was no cube map here (until 2026-09-19). */
+/* The five generation modes, GL 1.3's cube-map modes GL_NORMAL_MAP and
+ * GL_REFLECTION_MAP among them. */
 static GLboolean gl_texgen_mode_ok(GLenum mode) {
     return (mode == GL_OBJECT_LINEAR || mode == GL_EYE_LINEAR ||
             mode == GL_SPHERE_MAP || mode == GL_REFLECTION_MAP || mode == GL_NORMAL_MAP)
@@ -1600,9 +1535,8 @@ static void gl_texgen_set(gl_context_t *ctx, GLenum coord, GLenum pname,
         return;
     }
     if (pname == GL_EYE_PLANE) {
-        /* **Stored through the inverse modelview of this moment**, which is what makes
-         * an eye-linear plane stay where it was put while the modelview moves
-         * afterwards. */
+        /* Stored through the current inverse modelview, so an eye-linear plane stays
+         * where it was put when the modelview later moves. */
         gl_mat4_t inv;
         if (mat4_invert(&inv, &ctx->modelview_stack[ctx->modelview_depth])) {
             /* The plane is a row vector: p' = p * M^-1, which is M^-T applied as a
@@ -1646,9 +1580,8 @@ void glTexGeniv(GLenum coord, GLenum pname, const GLint *params) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !params)
         return;
-    /* Four are read for a plane and one for a mode, so only the first is touched unless
-     * the parameter is a plane - reading four from a one-element array would be a
-     * fault. */
+    /* Four are read for a plane and one for a mode; a mode's array may hold one
+     * element. */
     GLfloat f[4] = {(GLfloat)params[0], 0.0f, 0.0f, 0.0f};
     if (pname == GL_OBJECT_PLANE || pname == GL_EYE_PLANE) {
         for (int k = 1; k < 4; k++)
@@ -1748,15 +1681,13 @@ void glGetTexGendv(GLenum coord, GLenum pname, GLdouble *params) {
         params[k] = (GLdouble)f[k];
 }
 
-/* The environment modes: Mesa's legal set (main/texenv.c, set_env_mode). Anything else
- * was stored until 2026-09-19 and drawn as GL_MODULATE, with no error; GL_COMBINE was
- * refused until the combiner landed, the same day. */
+/* The environment modes: Mesa's legal set (main/texenv.c, set_env_mode). */
 static GLboolean gl_tex_env_mode_ok(GLenum m) {
     return (GLboolean)(m == GL_MODULATE || m == GL_DECAL || m == GL_BLEND ||
                        m == GL_REPLACE || m == GL_ADD || m == GL_COMBINE);
 }
 
-/* **The one texture-environment setter**, every form reaching it with floats. The
+/* The one texture-environment setter; every form reaches it with floats. The
  * combiner's parameters are checked as Mesa checks them (main/texenv.c:107-370): a
  * colour or alpha function GL 1.3 has, GL_DOT3_RGB and GL_DOT3_RGBA for the colour
  * only; a source among GL_TEXTURE, GL_CONSTANT, GL_PRIMARY_COLOR, GL_PREVIOUS and
@@ -1837,17 +1768,14 @@ static void gl_tex_env_set(gl_context_t *ctx, GLenum pname, const GLfloat *p) {
     default:
         break;
     }
-    /* The pname, not the value: the switch above is on the parameter name, and a pname
-       this does not keep is the common refusal. A value it does not accept for a pname
-       it does lands here too, and the pname is still the more useful half. */
+    /* The error names the pname, not the value, for a rejected value too: the pname is
+       the more useful half. */
     gl_record_error_val(ctx, GL_INVALID_ENUM, pname);
 }
 
 /* The two targets: GL_TEXTURE_ENV, and GL 1.4's GL_TEXTURE_FILTER_CONTROL, whose one
- * parameter is the unit's level-of-detail bias (Mesa main/texenv.c:448-460). Same rule
- * as everywhere else here: a target or a parameter this does not keep is refused rather
- * than dropped - silently ignoring one left a caller believing it had set an
- * environment that was never stored. */
+ * parameter is the unit's level-of-detail bias (Mesa main/texenv.c:448-460), and
+ * GL_POINT_SPRITE. A target or parameter this does not keep is refused, not dropped. */
 static void gl_tex_env_target_set(gl_context_t *ctx, GLenum target, GLenum pname,
                                   const GLfloat *p) {
     if (target == GL_TEXTURE_ENV) {
@@ -1855,9 +1783,7 @@ static void gl_tex_env_target_set(gl_context_t *ctx, GLenum target, GLenum pname
     } else if (target == GL_TEXTURE_FILTER_CONTROL && pname == GL_TEXTURE_LOD_BIAS) {
         gl_tu(ctx)->tex_lod_bias = p[0];
     } else if (target == GL_POINT_SPRITE && pname == GL_COORD_REPLACE) {
-        /* The third target. A boolean, so anything non-zero is true - the specification
-         * takes it as a GLboolean and Mesa compares against zero rather than against
-         * GL_TRUE. */
+        /* A GLboolean: anything non-zero is true, as Mesa compares against zero. */
         gl_tu(ctx)->coord_replace = (GLboolean)(p[0] != 0.0f);
     } else {
         gl_record_error_val(ctx, GL_INVALID_ENUM, target);
@@ -1877,18 +1803,15 @@ void glTexEnvi(GLenum target, GLenum pname, GLint param) {
     gl_tex_env_target_set(ctx, target, pname, p);
 }
 
-/* **Its own path, not glTexEnvi's**, which truncated: glTexEnvf(GL_RGB_SCALE, 1.5f) is
- * a value error, not a scale of 1. */
+/* Through the float path, not glTexEnvi's: glTexEnvf(GL_RGB_SCALE, 1.5f) is a value
+ * error, not a scale of 1. */
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
     const GLfloat p[4] = {param, 0.0f, 0.0f, 0.0f};
     glTexEnvfv(target, pname, p);
 }
 
-/* **This used to return clean having done nothing** for a target or pname it did not
- * keep, while its own sibling glTexEnvi refused the same arguments. Two spellings of
- * one call disagreeing about what is an error is worse than either answer: a program
- * that set the environment through the vector form believed it had, and the scalar form
- * would have told it otherwise. */
+/* Refuses the same targets and pnames as glTexEnvi; the spellings of one call agree on
+ * what is an error. */
 void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params) {
     if (params && gl_list_recording() &&
         gl_list_rec_fv(GL_LIST_OP_TEX_ENV_FV, target, pname, GL_TRUE, pname, params)) {
@@ -1978,9 +1901,7 @@ void glGetTexEnviv(GLenum target, GLenum pname, GLint *params) {
         params[0] = (GLint)gl_tu(ctx)->tex_lod_bias;
         return;
     }
-    /* The setter learned a third target, so this has to as well - a query that refuses
-     * what the matching set accepts is the disagreement `glTexEnvfv` above was already
-     * fixed for once. */
+    /* The query accepts every target the setter does. */
     if (target == GL_POINT_SPRITE && pname == GL_COORD_REPLACE) {
         params[0] = gl_tu(ctx)->coord_replace ? 1 : 0;
         return;
@@ -1996,10 +1917,9 @@ void glGetTexEnviv(GLenum target, GLenum pname, GLint *params) {
     }
     switch (pname) {
     case GL_TEXTURE_ENV_COLOR:
-        /* GL converts a float colour to an integer across the signed range, which is
-         * the inverse of the conversion going in. **In double** - this multiplied by
-         * 2147483647.0f, which is 2^31 as a float, so a channel of 1.0 overflowed GLint
-         * and read back as -2147483648 until 2026-09-19. */
+        /* GL converts a float colour to an integer across the signed range, the
+         * inverse of the conversion going in. In double: 2147483647.0f is 2^31 as a
+         * float, and a channel of 1.0 would overflow GLint. */
         for (int i = 0; i < 4; i++) {
             params[i] = gl_float_to_int_color(gl_tu(ctx)->tex_env_color[i]);
         }
@@ -2061,14 +1981,9 @@ static GLenum *gl_hint_slot(gl_context_t *ctx, GLenum target) {
     }
 }
 
-/* `glHint` - advisory by definition: each target is recorded and reported, and none of
- * them changes a pixel, which is the whole of what a hint is entitled to do.
- *
- * **Only the perspective hint was accepted until 2026-09-19**, on the grounds that the
- * fog, point and line hints named features this did not draw. It draws all three now -
- * and even then, a hint is a preference about *how*, which an implementation is free to
- * ignore; refusing it made the `glHint(GL_FOG_HINT, GL_NICEST)` a great deal of 1.x
- * start-up code carries an error. */
+/* `glHint` is advisory: each target is recorded and reported, and none changes a pixel.
+ * A hint is a preference an implementation may ignore, so every GL 1.x target is
+ * accepted. */
 void glHint(GLenum target, GLenum mode) {
     if (gl_list_recording() &&
         GL_LIST_REC(GL_LIST_OP_HINT, gl_la_e(target), gl_la_e(mode)))
@@ -2103,12 +2018,7 @@ void glHint(GLenum target, GLenum mode) {
  * - The right buffers and GL_AUX0..3 name buffers this visual does not have:
  *   GL_INVALID_OPERATION, as the specification says. Anything else is GL_INVALID_ENUM,
  * and so is glReadBuffer(GL_NONE); glDrawBuffer(GL_NONE) draws into no colour buffer
- * (colour writes off, the other buffers still written).
- *
- * Only GL_BACK was accepted until 2026-09-19, everything else an enum error. Later that
- * day the other names were accepted, but the front ones were refused, because the
- * display handed out its back buffer only. That evening the front became a surface of
- * its own (oops_display_present puts it on screen). */
+ * (colour writes off, the other buffers still written). */
 static GLboolean gl_color_buffer_check(gl_context_t *ctx, unsigned bits) {
     if (bits == 0u) {
         gl_record_error(ctx, GL_INVALID_ENUM);
@@ -2140,30 +2050,16 @@ void glDrawBuffer(GLenum buf) {
 }
 
 /*
- * GL 2.0's `glDrawBuffers`: several colour buffers named at once.
+ * GL 2.0's `glDrawBuffers`: several colour buffers named at once. On a window-system
+ * framebuffer that sends the same fragment colour to each, so this is `glDrawBuffer` of
+ * the union. `GL_MAX_DRAW_BUFFERS` is 1 because the fragment stage exports one colour
+ * and GLSL sizes `gl_FragData` by it; see `OOPS_GL_MAX_DRAW_BUFFERS`. Front and back
+ * together is `glDrawBuffer(GL_FRONT_AND_BACK)`.
  *
- * **On a window-system framebuffer this means the same fragment colour to each of
- * them**, not a different one per buffer - true multiple render targets are framebuffer
- * objects and their GL_COLOR_ATTACHMENT names, which are GL 3.0 and are not here. So
- * this is `glDrawBuffer` of the union, which is what the two existing colour targets
- * already do under GL_FRONT_AND_BACK.
- *
- * **`GL_MAX_DRAW_BUFFERS` is 1 here**, so this call takes at most one name and
- * `glDrawBuffers(2, {GL_FRONT, GL_BACK})` is GL_INVALID_VALUE. That is not a narrowing
- * of what the implementation can do - front *and* back together is
- * `glDrawBuffer(GL_FRONT_AND_BACK)`, the singular call, and it always worked. It is the
- * limit telling the truth: the fragment stage exports one colour, GLSL declares
- * `gl_FragData[gl_MaxDrawBuffers]`, and a limit of 2 made that array's length disagree
- * with the number a shader is told. `OOPS_GL_MAX_DRAW_BUFFERS` has the whole argument.
- *
- * The specification's three errors, and each is a mistake worth naming rather than
- * accepting: `n` outside [0, GL_MAX_DRAW_BUFFERS] is GL_INVALID_VALUE; a name covering
- * more than one buffer may not appear in a list at all (2.0, 4.2.1), which is
- * GL_INVALID_OPERATION; and a buffer named twice is the same error. **`GL_FRONT` and
- * `GL_BACK` are single names here** and are accepted - 4.2.1 excludes them because on a
- * stereo framebuffer each covers a left and a right buffer, and this implementation has
- * no stereo, so refusing one would report a constraint no program here can have hit.
- * `GL_FRONT_AND_BACK` genuinely covers two and is refused.
+ * The specification's errors (2.0, 4.2.1): `n` outside [0, GL_MAX_DRAW_BUFFERS] is
+ * GL_INVALID_VALUE; a name covering more than one buffer, or a buffer named twice, is
+ * GL_INVALID_OPERATION. `GL_FRONT` and `GL_BACK` are single names on a mono visual and
+ * are accepted; 4.2.1 excludes them only because stereo makes each cover two.
  */
 void glDrawBuffers(GLsizei n, const GLenum *bufs) {
     gl_context_t *ctx = gl_get_ctx();
@@ -2296,19 +2192,15 @@ GLenum glGetError(void) {
 
 /*
  * The version string, built into the context because glGetString hands out a pointer
- * that has to outlive the call. "<major>.<minor> oops-gl fixed-function subset" - the
- * suffix always, so a caller reading past the number learns what this is whatever
- * version it asked for.
+ * that has to outlive the call: "<major>.<minor> oops-gl <kind> subset".
  */
 void gl_version_string(gl_context_t *ctx) {
     char *p = ctx->version_string;
     *p++ = (char)('0' + (ctx->version_major % 10u));
     *p++ = '.';
     *p++ = (char)('0' + (ctx->version_minor % 10u));
-    /* **The suffix follows the number**, because "fixed-function" is the wrong word for
-     * a badge that says 2.0 - the whole of what 2.0 adds is the pipeline that is not
-     * fixed-function. Both still say `subset`, which is the part that must never come
-     * off. */
+    /* A 2.x badge says "programmable", since 2.0 adds the programmable pipeline. Both
+     * say `subset`. */
     static const char tail_1x[] = " oops-gl fixed-function subset";
     static const char tail_2x[] = " oops-gl programmable subset";
     const char *tail = (ctx->version_major >= 2u) ? tail_2x : tail_1x;
@@ -2318,43 +2210,25 @@ void gl_version_string(gl_context_t *ctx) {
 }
 
 /*
- * **The version is the caller's to state** (2026-09-20), because the badge is about the
- * program's expectations, not this library's opinion of itself.
+ * The reported version is the program's to state: the badge reflects what the program
+ * targets, not a conformance claim by this library. The default is 1.1. The number
+ * leads the string so the usual atof() reads it.
  *
- * The default is 1.1: the honest class of what is implemented everywhere, and what
- * GL_VERSION said unconditionally until now. It had said "OpenGL 1.3 oops-gl 2.0"
- * before that, which was wrong twice over - it claimed a 1.3 nothing here distinguished
- * from 1.1, and it put a word in front of the number, so a caller doing the usual
- * atof() read 0.0 rather than any version.
- *
- * A port written against a later 1.x checks the badge before calling something this
- * library *does* have, and refuses to run when it reads lower. Setting the version lets
- * that port run. It changes nothing else: no call becomes implemented, and the suffix
- * keeps saying subset. What it does do is put the claim where it belongs - a program
- * asserting what it targets, with a log line recording that it asked, rather than this
- * library asserting a conformance it has not got.
+ * A port written against a later version checks the badge and refuses to run when it
+ * reads lower; setting the version lets it run. Nothing else changes: no call becomes
+ * implemented, the suffix keeps saying subset, and a log line records the request.
  */
 GLboolean glContextSetVersion(GLuint major, GLuint minor) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
         return GL_FALSE;
-    /* **1.0 through 1.5, and 2.0 and 2.1** (2026-09-21). This refused anything but 1.x,
-     * and said "nothing above it is implemented at all" - which stopped being true the
-     * day the programmable pipeline ran: `glCreateShader` through `glUseProgram` exist,
-     * both stages run, and `gl2-probe` measures forty-odd checks against them.
+    /* 1.0 through 1.5, 2.0 and 2.1. 2.1 pairs with GLSL 1.20, which the front end takes
+     * (implicit int-to-float conversion, `invariant`, `centroid`, `transpose`,
+     * `outerProduct`). 3.x and above are refused because none is implemented.
      *
-     * **2.1 is the GLSL 1.20 one**, and is claimable because the front end takes that
-     * dialect: implicit int-to-float conversion, `invariant` and `centroid`,
-     * `transpose` and `outerProduct`. It was refused for exactly as long as that was
-     * untrue.
-     *
-     * 3.x and above are refused because none of them is implemented, which is the
-     * reason this gate exists at all.
-     *
-     * A badge is still only a badge: what it changes is what `glGetString` answers, not
-     * what any call does. An app that claims 1.1 and then calls `glCreateShader` gets a
-     * shader, exactly as a desktop driver would - a context exposes what it exposes,
-     * and the number is the program stating what it targets. */
+     * The badge changes what `glGetString` answers, not what any call does: a program
+     * that claims 1.1 and calls `glCreateShader` gets a shader, as on a desktop
+     * driver. */
     const GLboolean ok =
         (GLboolean)((major == 1u && minor <= 5u) || (major == 2u && minor <= 1u));
     if (!ok) {
@@ -2391,85 +2265,28 @@ const GLubyte *glGetString(GLenum name) {
             return (const GLubyte *)"1.1 oops-gl fixed-function subset";
         }
         return (const GLubyte *)ctx->version_string;
-    /* **The shading language has its own version and its own string**, and it answers
-     * the *highest* dialect the front end takes rather than the one the GL badge pairs
-     * with - which is what the specification asks for and is why the two numbers are
-     * allowed to differ. A shader may still say `#version 110`, and it is then held
-     * to 1.10's rules: the number here is a ceiling, not a mode. Anything above 1.20 is
-     * refused by number at compile rather than taken as one of them. */
+    /* The shading language version is the highest dialect the front end takes, not the
+     * one the GL badge pairs with, as the specification asks. It is a ceiling: a shader
+     * saying `#version 110` is held to 1.10's rules, and above 1.20 is refused at
+     * compile. */
     case GL_SHADING_LANGUAGE_VERSION:
         /* GL 2.0's enumerant, so a context that has not claimed 2.0 has never heard of
          * it. */
         if (!ctx || !gl_require_version_enum(ctx, 2u, 0u))
             return (const GLubyte *)0;
         return (const GLubyte *)"1.20 oops-gl";
-    /* **Empty, and that is the honest answer.**
+    /* The extensions this library implements, under the names a program of that era
+     * looks for. An extension is a promise about its own entry points, so one is listed
+     * only when those exist: `glGenBuffersARB`, `glTexImage3DEXT`, `glBeginQueryARB`
+     * and the rest are the core functions under their published names (gl.h's
+     * compatibility section). Extensions that add only enums and state, such as
+     * GL_ARB_texture_cube_map and GL_ARB_shadow, are listed beside them.
      *
-     * This used to say `GL_EXT_vertex_array`. The arrays are here - but an extension
-     * string is a promise about *that extension's entry points*, and
-     * `glVertexPointerEXT`, `glDrawArraysEXT`, `glArrayElementEXT` and the rest do not
-     * exist here. Only the core spellings do. A program that reads the string and calls
-     * the EXT names fails to link, which is a loud failure but still one this library
-     * invited.
-     *
-     * The same reasoning kept `GL_ARB_vertex_buffer_object` out when the buffer objects
-     * landed: the core `glGenBuffers` exists, `glGenBuffersARB` does not, so the
-     * extension is not supported however much of its behaviour is.
-     *
-     * An empty list is not a refusal and not a placeholder - it is the true statement
-     * that no extension's own entry points are provided. */
-    /* **What this library implements, under the names a program of that era looks for**
-     * (2026-09-19; empty until then).
-     *
-     * The rule that kept it empty stands: an extension is a promise about *its own
-     * entry points*, so none was listed while only the core spellings existed. The
-     * entry points are here now - `glGenBuffersARB`, `glSecondaryColor3fEXT`,
-     * `glWindowPos2iARB` and the rest, each the core function under its published name
-     * (gl.h's compatibility section) - and the extensions that need no entry point at
-     * all, only state this library keeps, are listed beside them.
-     *
-     * **The list is what the path in use does.** GL_ARB_multitexture was on it for the
-     * software rasteriser and off on the console, where a draw sampled unit 0 alone; it
-     * is on both since 2026-09-20, the console path having gained the second unit that
-     * `REQ-20260920T0745Z-9a41` measured (gl_multitex.h). The console still applies two
-     * units where the software rasteriser applies every one `glActiveTexture` names,
-     * and `GL_MAX_TEXTURE_UNITS` says so on each: the extension promises two, which is
-     * what the name is about, and a program asking for more is asking the query, not
-     * the list.
-     *
-     * **GL_ARB_texture_cube_map joined both lists on 2026-09-20**, when the console
-     * gained the sample: it adds no entry point of its own, only targets, enums and the
-     * GL_NORMAL_MAP and GL_REFLECTION_MAP generation modes, and every one of those is
-     * kept on both paths now. A cube map whose six faces have not all arrived is not
-     * sampled on either - GL does not sample an incomplete one (2.1, 3.8.10) - so the
-     * promise holds.
-     *
-     * **GL_EXT_texture3D joined both lists on 2026-09-20**, the same day the console
-     * gained the volume sample. It has two entry points of its own, `glTexImage3DEXT`
-     * and `glTexSubImage3DEXT`, and they arrived with it (gl.h's compatibility section)
-     * - a list entry without them would be the broken promise this library refuses to
-     * make. The console samples the base level only, which is a level-of-detail
-     * difference and not a missing feature; the extension says nothing about mip chains
-     * that GL 1.2 does not.
-     *
-     * **GL_ARB_depth_texture and GL_ARB_shadow joined both lists on 2026-09-20**, when
-     * the console gained the comparison sample. Like the cube-map extension neither
-     * adds an entry point - depth textures are `glTexImage2D` with a
-     * `GL_DEPTH_COMPONENT` internal format, and the comparison is `glTexParameteri` -
-     * so what they promise is enums and behaviour, and both paths have all of it.
-     * GL_ARB_shadow is listed only beside GL_ARB_depth_texture, which is the pair a
-     * program looks for.
-     *
-     * **GL_ARB_occlusion_query joined both lists on 2026-09-20**, when the GPU started
-     * counting: two `ZPASS_DONE` events bracket the query and the answer is the sum
-     * over the sixteen render backends (`REQ-20260919T2048Z-4d19`). Its eight entry
-     * points arrived with it - `glBeginQueryARB` and the rest, each the core function
-     * under its published name - because the extension predates GL 1.5 and a program
-     * using it calls those. The one case the console still will not count is a query
-     * whose draws never test depth, which the log says; the extension is about
-     * GL_SAMPLES_PASSED, which is the depth test's own count, so the promise holds.
-     *
-     * Nothing is left off either list. */
+     * Each list is what its path does. `GL_MAX_TEXTURE_UNITS` reports how many units a
+     * path applies. An incomplete cube map is not sampled (2.1, 3.8.10). The console's
+     * occlusion query brackets the draws with two `ZPASS_DONE` events and sums the
+     * render backends; a query whose draws never test depth is not counted, and the
+     * log says so. */
     case GL_EXTENSIONS:
         return (const GLubyte
                     *)((ctx && ctx->use_hardware)
@@ -2515,20 +2332,16 @@ const GLubyte *glGetString(GLenum name) {
                              "GL_EXT_texture_env_dot3 GL_EXT_texture_lod_bias "
                              "GL_SGIS_texture_edge_clamp");
     default:
-        /* The specification's answer for an unrecognised name: no string, and an error
-         * the caller can see. An empty string is indistinguishable from a real answer
-         * of "no extensions", which is a wrong answer rather than a refused one. */
+        /* The specification's answer for an unrecognised name: no string and an error.
+         * An empty string would read as a real answer. */
         if (ctx)
             gl_record_error(ctx, GL_INVALID_ENUM);
         return (const GLubyte *)0;
     }
 }
 
-/* **How many elements a query writes.** The caller sizes its buffer from the pname, so
- * this is not a convenience: a query that writes four values into a `GLint[1]` corrupts
- * whatever the caller put next to it, and does so only for the pnames nobody tested.
- * Anything not named here writes one value, which is the common case and the safe one.
- */
+/* How many elements a query writes. The caller sizes its buffer from the pname, so a
+ * wrong count here writes past it. Anything not named here writes one value. */
 static int gl_query_element_count(GLenum pname) {
     switch (pname) {
     case GL_MODELVIEW_MATRIX:
@@ -2546,9 +2359,7 @@ static int gl_query_element_count(GLenum pname) {
     case GL_COLOR_CLEAR_VALUE:
     case GL_COLOR_WRITEMASK:
     case GL_LIGHT_MODEL_AMBIENT:
-    /* **These five were missing**, so glGetDoublev - which copies exactly this many out
-     * of glGetFloatv's answer - returned one component of each four-component vector
-     * and left the other three as the caller's buffer had them. */
+    /* glGetDoublev copies exactly this many out of glGetFloatv's answer. */
     case GL_BLEND_COLOR:
     case GL_FOG_COLOR:
     case GL_ACCUM_CLEAR_VALUE:
@@ -2654,8 +2465,7 @@ static GLboolean gl_get_integer_bindings(gl_context_t *ctx, GLenum pname,
         params[0] = (GLint)OOPS_GL_MAX_TEXTURE_SIZE;
         break;
     /* ES 2.0's shader-compiler queries. This GL compiles online and has no binary
-     * format, so the pair is GL_TRUE and zero - and the zero is what makes
-     * glShaderBinary's refusal the correct answer rather than an arbitrary one. */
+     * format, so the pair is GL_TRUE and zero, which is why glShaderBinary refuses. */
     case GL_SHADER_COMPILER:
         params[0] = (GLint)GL_TRUE;
         break;
@@ -2677,9 +2487,7 @@ static GLboolean gl_get_integer_bindings(gl_context_t *ctx, GLenum pname,
     case GL_MAX_3D_TEXTURE_SIZE:
         params[0] = OOPS_GL_MAX_3D_TEXTURE_SIZE;
         break;
-    /* The pixel-store state, every parameter of it - none was answered until
-     * 2026-09-19, GL_UNPACK_ALIGNMENT included, so a helper that saves and restores it
-     * by hand read an error instead. */
+    /* The pixel-store state, every parameter of it. */
     case GL_UNPACK_ALIGNMENT:
         params[0] = ctx->unpack_alignment;
         break;
@@ -2760,8 +2568,7 @@ static GLboolean gl_get_integer_colour_limits(gl_context_t *ctx, GLenum pname,
         break;
     /* Colours as integers map [0, 1] onto [0, INT_MAX] - Mesa's FLOAT_TO_INT
      * (main/macros.h:111), which get.c applies to every TYPE_FLOATN_4 query
-     * (get.c:2084-2089). A plain cast would answer 0 for anything short of full
-     * intensity. */
+     * (get.c:2084-2089). */
     case GL_BLEND_COLOR:
         for (int i = 0; i < 4; i++)
             params[i] = gl_float_to_int_color(ctx->blend_color[i]);
@@ -2786,10 +2593,7 @@ static GLboolean gl_get_integer_colour_limits(gl_context_t *ctx, GLenum pname,
         params[0] = (GLint)gl_tu(ctx)->tex_env_mode;
         break;
 
-    /* The implementation limits. A program reads these to size its own work - how many
-     * lights to set up, how deep it may nest glPushMatrix - so returning zero, which is
-     * what the silent default below used to do, makes a correct program refuse to run.
-     */
+    /* The implementation limits, which a program reads to size its own work. */
     case GL_MAX_LIGHTS:
         params[0] = OOPS_GL_LIGHT_COUNT;
         break;
@@ -2808,15 +2612,12 @@ static GLboolean gl_get_integer_colour_limits(gl_context_t *ctx, GLenum pname,
     case GL_MAX_CLIENT_ATTRIB_STACK_DEPTH:
         params[0] = OOPS_GL_CLIENT_ATTRIB_STACK_CAPACITY;
         break;
-    /* The widest rectangle the framebuffer copy path can carry a row of, which is the
-     * real bound on a texture here - not a number picked to look generous. */
+    /* The widest rectangle the framebuffer copy path can carry a row of, which bounds a
+     * texture here. */
     case GL_MAX_TEXTURE_SIZE:
         params[0] = OOPS_GL_MAX_TEXTURE_SIZE;
         break;
-    /* **Two, GL 1.3's minimum** (section 2.6, table 6.29). This answered 1 until
-     * 2026-09-19 - honestly, with glActiveTexture refusing a second unit, but short of
-     * what GL 1.3 requires. The console applies unit 0 alone, and logs once when a draw
-     * uses more. */
+    /* At least two, GL 1.3's minimum (section 2.6, table 6.29). */
     case GL_MAX_TEXTURE_UNITS:
         params[0] = OOPS_GL_MAX_TEXTURE_UNITS;
         break;
@@ -2836,11 +2637,8 @@ static GLboolean gl_get_integer_program_fog(gl_context_t *ctx, GLenum pname,
     /* -----------------------------------------------------------------
      * GL 2.0's limits
      *
-     * Every one is this implementation's own number and every one meets the
-     * specification's minimum. **None of them is rounded up to look generous**: a
-     * program that asks GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS and is told 4 will take a
-     * path that then samples nothing, where being told 0 sends it down the one that
-     * works.
+     * Each is this implementation's own number and meets the specification's minimum.
+     * None is rounded up: a program told a limit takes the path that limit implies.
      * ----------------------------------------------------------------- */
     case GL_MAX_VERTEX_ATTRIBS:
         if (!gl_require_version_enum(ctx, 2u, 0u))
@@ -2852,25 +2650,22 @@ static GLboolean gl_get_integer_program_fog(gl_context_t *ctx, GLenum pname,
             break;
         params[0] = OOPS_GL_MAX_VARYING_FLOATS; /* 32, the minimum: eight vec4 slots */
         break;
-    /* **The samplers a fragment shader may name**, which is not the fixed-function
-     * stage count - see `OOPS_GL_MAX_TEXTURE_IMAGE_UNITS`. Equal today. */
+    /* The samplers a fragment shader may name, distinct from the fixed-function stage
+     * count; see `OOPS_GL_MAX_TEXTURE_IMAGE_UNITS`. */
     case GL_MAX_TEXTURE_IMAGE_UNITS:
     case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
         if (!gl_require_version_enum(ctx, 2u, 0u))
             break;
         params[0] = OOPS_GL_MAX_TEXTURE_IMAGE_UNITS;
         break;
-    /* **The fixed-function one**, because `gl_TexCoord[]` is a fixed-function array and
-     * its length is the stage count rather than the sampler count. A shader indexing
-     * past it is refused by the built-in's own array bound. */
+    /* The fixed-function stage count: `gl_TexCoord[]` is a fixed-function array. A
+     * shader indexing past it is refused by the built-in's own array bound. */
     case GL_MAX_TEXTURE_COORDS:
         if (!gl_require_version_enum(ctx, 2u, 0u))
             break;
         params[0] = OOPS_GL_MAX_TEXTURE_UNITS;
         break;
-    /* **Zero, which is legal and is true.** GL 2.0's minimum is 0 and a vertex shader
-     * here has no sampler - the vertex stage on this hardware is not wired to the
-     * texture pipe. */
+    /* Zero, GL 2.0's minimum: a vertex shader here has no sampler. */
     case GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS:
         if (!gl_require_version_enum(ctx, 2u, 0u))
             break;
@@ -2883,12 +2678,8 @@ static GLboolean gl_get_integer_program_fog(gl_context_t *ctx, GLenum pname,
             break;
         params[0] = OOPS_GL_MAX_PROGRAM_UNIFORMS * 4;
         break;
-    /* **One**, because the fragment stage exports one colour target - and because this
-     * is the same number as `gl_FragData`'s length and the `gl_MaxDrawBuffers` a shader
-     * reads, which GLSL ties together as `gl_FragData[gl_MaxDrawBuffers]`. See
-     * `OOPS_GL_MAX_DRAW_BUFFERS` for why the two surfaces of a double-buffered
-     * framebuffer are not two draw buffers, and for the one deviation from 4.2.1 that
-     * remains. */
+    /* One: the fragment stage exports one colour target, and GLSL ties this to
+     * `gl_FragData[gl_MaxDrawBuffers]`. See `OOPS_GL_MAX_DRAW_BUFFERS`. */
     case GL_MAX_DRAW_BUFFERS:
         if (!gl_require_version_enum(ctx, 2u, 0u))
             break;
@@ -2899,11 +2690,8 @@ static GLboolean gl_get_integer_program_fog(gl_context_t *ctx, GLenum pname,
             break;
         params[0] = (GLint)ctx->program_current;
         break;
-    /* **Zero, and the list that follows it is empty.** The specification allows the set
-     * of compressed formats to be empty and expects a program to ask; answering
-     * honestly is what sends it down its uncompressed path instead of into a refusal it
-     * did not plan for. GL_COMPRESSED_TEXTURE_FORMATS writes nothing, because there is
-     * nothing. */
+    /* No compressed formats, which the specification allows; a program asking takes its
+     * uncompressed path. GL_COMPRESSED_TEXTURE_FORMATS writes nothing. */
     case GL_NUM_COMPRESSED_TEXTURE_FORMATS:
         params[0] = 0;
         break;
@@ -2934,8 +2722,7 @@ static GLboolean gl_get_integer_program_fog(gl_context_t *ctx, GLenum pname,
     case GL_FOG_COORD_ARRAY_BUFFER_BINDING:
         params[0] = (GLint)ctx->array_fog_coord.buffer;
         break;
-    /* The distances as plain integers; the colour normalised back, the inverse of
-     * glFogiv. */
+    /* The distances as plain integers, as glFogiv takes them. */
     case GL_FOG_START:
         params[0] = (GLint)ctx->fog_start;
         break;
@@ -2979,9 +2766,7 @@ static GLboolean gl_get_integer_stencil_stacks(gl_context_t *ctx, GLenum pname,
     case GL_STENCIL_PASS_DEPTH_PASS:
         params[0] = (GLint)ctx->stencil_zpass;
         break;
-    /* GL 2.0's back face. Answered even by a context nothing has split, where they read
-     * the same as the front ones - which is what makes them safe to query
-     * unconditionally. */
+    /* GL 2.0's back face. With nothing split they read the same as the front. */
     case GL_STENCIL_BACK_FUNC:
         if (!gl_require_version_enum(ctx, 2u, 0u))
             break;
@@ -3017,9 +2802,8 @@ static GLboolean gl_get_integer_stencil_stacks(gl_context_t *ctx, GLenum pname,
             break;
         params[0] = (GLint)ctx->stencil_back_zpass;
         break;
-    /* **GL_BLEND_EQUATION_RGB has the same value as GL_BLEND_EQUATION**, which is why
-     * there is no case for it: the 2.0 name is the 1.4 name, renamed rather than added,
-     * so it is answered by the 1.4 one and is gated with it. */
+    /* GL_BLEND_EQUATION_RGB has the same value as GL_BLEND_EQUATION, so the 1.4 case
+     * answers it. */
     case GL_BLEND_EQUATION_ALPHA:
         if (!gl_require_version_enum(ctx, 2u, 0u))
             break;
@@ -3034,15 +2818,14 @@ static GLboolean gl_get_integer_stencil_stacks(gl_context_t *ctx, GLenum pname,
     case GL_CLIENT_ACTIVE_TEXTURE:
         params[0] = (GLint)(GL_TEXTURE0 + ctx->client_active_texture);
         break;
-    /* **The framebuffer's own extent, which is the honest answer.** There is one
-     * surface and it is this size; a viewport larger than it has nothing to rasterise
-     * into. */
+    /* The framebuffer's own extent: there is one surface, and a larger viewport has
+     * nothing to rasterise into. */
     case GL_MAX_VIEWPORT_DIMS:
         params[0] = (GLint)ctx->width;
         params[1] = (GLint)ctx->height;
         break;
 
-    /* Where the stacks currently stand. `*_depth` counts the *saved* frames, and GL
+    /* Where the stacks stand. `*_depth` counts the saved frames, and GL
      * counts the current matrix as one of them, so the matrix stacks report one more.
      */
     case GL_ATTRIB_STACK_DEPTH:
@@ -3057,15 +2840,12 @@ static GLboolean gl_get_integer_stencil_stacks(gl_context_t *ctx, GLenum pname,
     case GL_PROJECTION_STACK_DEPTH:
         params[0] = ctx->projection_depth + 1;
         break;
-    /* The active unit's (GL 1.3). Not answered at all - nor its enum declared - until
-     * 2026-09-19, though the two above were. */
+    /* The active unit's (GL 1.3). */
     case GL_TEXTURE_STACK_DEPTH:
         params[0] = gl_tu(ctx)->texture_depth + 1;
         break;
-    /* **Ten table names nothing answered** (nor declared) until 2026-09-19, found by
-     * querying every name in GL 1.5's state tables through every getter. Mesa's answers
-     * where they are constants (main/get_hash_params.py:779, :788, :846; config.h:131,
-     * :134). */
+    /* Names from GL 1.5's state tables; constants are Mesa's answers
+     * (main/get_hash_params.py:779, :788, :846; config.h:131, :134). */
     case GL_LIST_INDEX:
         params[0] = (GLint)ctx->list_compiling;
         break;
@@ -3122,7 +2902,7 @@ static GLboolean gl_get_integer_raster_hints(gl_context_t *ctx, GLenum pname,
     case GL_SHADE_MODEL:
         params[0] = (GLint)ctx->shade_model;
         break;
-    /* The light model's scalars, neither answered until 2026-09-19. */
+    /* The light model's scalars. */
     case GL_LIGHT_MODEL_LOCAL_VIEWER:
         params[0] = ctx->light_model_local_viewer ? 1 : 0;
         break;
@@ -3288,9 +3068,7 @@ static GLboolean gl_get_integer_points_lines(gl_context_t *ctx, GLenum pname,
 static GLboolean gl_get_integer_arrays_bits(gl_context_t *ctx, GLenum pname,
                                             GLint *params) {
     switch (pname) {
-    /* **Each array's description.** None of these was answered until 2026-09-19 - they
-     * were refused as unknown - though every one is state glVertexPointer and its
-     * siblings set, and a program that saves and restores arrays by hand reads them. */
+    /* Each array's description, as glVertexPointer and its siblings set it. */
     case GL_VERTEX_ARRAY_SIZE:
         params[0] = ctx->array_vertex.size;
         break;
@@ -3355,11 +3133,9 @@ static GLboolean gl_get_integer_arrays_bits(gl_context_t *ctx, GLenum pname,
         params[0] = (GLint)ctx->array_secondary.buffer;
         break;
 
-    /* The evaluator grid. The domains are floats, rounded here like every non-colour
-     * float asked for as an integer. */
     /* The buffers' sizes: eight bits a colour channel, the 32-bit float depth buffer
      * both paths keep (DB_Z_INFO's Z_32_FLOAT), eight stencil bits (above), sixteen-bit
-     * accumulation channels. None of these was answered until 2026-09-19. */
+     * accumulation channels. */
     case GL_RED_BITS:
     case GL_GREEN_BITS:
     case GL_BLUE_BITS:
@@ -3502,10 +3278,8 @@ static GLboolean gl_get_integer_pixel_eval(gl_context_t *ctx, GLenum pname,
 
 /* A pname no topic holds: an enable, then a float-valued state, then refused. */
 static void gl_get_integer_fallback(gl_context_t *ctx, GLenum pname, GLint *params) {
-    /* **An enable is a query too.** GL answers every capability glIsEnabled knows
-     * through each glGet as well - glGetIntegerv(GL_DEPTH_TEST) is 1 or 0 - and
-     * until 2026-09-19 only glGetBooleanv did; the integer, float and double forms
-     * refused them all. */
+    /* An enable is a query too: GL answers every capability glIsEnabled knows through
+     * each glGet, so glGetIntegerv(GL_DEPTH_TEST) is 1 or 0. */
     const GLenum before = ctx->last_error;
     ctx->last_error = GL_NO_ERROR;
     const GLboolean enabled = glIsEnabled(pname);
@@ -3515,12 +3289,8 @@ static void gl_get_integer_fallback(gl_context_t *ctx, GLenum pname, GLint *para
         return;
     }
     ctx->last_error = before;
-    /* **So is a float-valued state** (GL 1.5, 6.1.2). The raster position, colour
-     * and distance, the alpha reference, the current normal, the depth clear value,
-     * the light model's ambient colour, the polygon offset and the pixel zoom -
-     * eleven - answered glGetFloatv and refused this until 2026-09-19, found by
-     * querying every name in the specification's state tables through every getter.
-     * Rounded, or mapped linearly for the normalised ones. */
+    /* So is a float-valued state (GL 1.5, 6.1.2) that only glGetFloatv holds: rounded,
+     * or mapped linearly for the normalised ones. */
     if (s_get_float_fallback == 0) {
         GLfloat fv[16];
         s_get_float_fallback++;
@@ -3539,9 +3309,8 @@ static void gl_get_integer_fallback(gl_context_t *ctx, GLenum pname, GLint *para
         }
         ctx->last_error = before;
     }
-    /* **Refused, not ignored.** An ignored query leaves the caller's buffer holding
-     * whatever it held before and raises nothing, so the program reads stack
-     * garbage that looks like an answer. */
+    /* Refused, not ignored: an ignored query leaves the caller reading its own
+     * uninitialised buffer as an answer. */
     gl_record_error(ctx, GL_INVALID_ENUM);
 }
 
@@ -3628,8 +3397,7 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
             params[i] = gl_tu(ctx)->texture_stack[gl_tu(ctx)->texture_depth].m[i];
         }
         break;
-    /* GL 1.3's row-major views of the same three, which nothing answered (nor declared)
-     * until 2026-09-19 though glLoadTransposeMatrix existed. Element (row, col) of the
+    /* GL 1.3's row-major views of the same three. Element (row, col) of the
      * column-major store is m[col * 4 + row]. */
     case GL_TRANSPOSE_MODELVIEW_MATRIX:
     case GL_TRANSPOSE_PROJECTION_MATRIX:
@@ -3658,10 +3426,7 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
             params[i] = ctx->cur_normal[i];
         break;
     case GL_CURRENT_TEXTURE_COORDS:
-        /* All four. This answered the constants 0 and 1 for r and q from when only s
-         * and t were tracked, and went on doing it after glTexCoord3/4 started setting
-         * them - so a program reading back a projective coordinate got q = 1 whatever
-         * it had set. */
+        /* All four, as glTexCoord3/4 set them. */
         for (int i = 0; i < 4; i++)
             params[i] = ctx->cur_texcoord[ctx->active_texture][i];
         break;
@@ -3690,9 +3455,8 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
     case GL_POLYGON_OFFSET_UNITS:
         params[0] = ctx->polygon_offset_units;
         break;
-    /* Answered for the first time on 2026-09-19 - declared in the header since points
-     * and lines landed, and refused by every query. The sizes are what was set; the
-     * ranges are what is drawn (see OOPS_GL_MAX_POINT_LINE_SIZE). */
+    /* The sizes are what was set; the ranges are what is drawn (see
+     * OOPS_GL_MAX_POINT_LINE_SIZE). */
     case GL_POINT_SIZE:
         params[0] = ctx->point_size;
         break;
@@ -3723,8 +3487,7 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
         params[1] = (GLfloat)OOPS_GL_MAX_POINT_LINE_SIZE;
         break;
     /* The smooth sizes' step (GL 1.2 names these GL_SMOOTH_*_GRANULARITY): an aliased
-     * size is rounded to a whole pixel, a smooth one to an eighth. It was 1 while
-     * nothing smoothed. */
+     * size is rounded to a whole pixel, a smooth one to an eighth. */
     case GL_POINT_SIZE_GRANULARITY:
     case GL_LINE_WIDTH_GRANULARITY:
         params[0] = OOPS_GL_SMOOTH_GRANULARITY;
@@ -3788,12 +3551,10 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
         params[0] = ctx->alpha_ref;
         break;
     default:
-        /* Anything glGetIntegerv can answer, this can answer too - GL says every query
-         * is available in every type, converted. Only a pname neither knows is refused.
-         *
-         * **Exactly `gl_query_element_count` of them.** The caller sized the buffer
-         * from the pname, so a GLfloat[1] for GL_DEPTH_FUNC is correct and writing four
-         * would run off the end of it. */
+        /* Anything glGetIntegerv answers, this answers too: GL makes every query
+         * available in every type. Only a pname neither knows is refused. It writes
+         * exactly `gl_query_element_count` values, as the caller sized the buffer from
+         * the pname. */
         {
             GLint iv[4] = {0, 0, 0, 0};
             GLenum before = ctx->last_error;
@@ -3814,10 +3575,8 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
     }
 }
 
-/* Every query, converted to double. GL requires each pname to be available in every
- * type, and the conversion is the whole of the difference - so this goes through
- * glGetFloatv rather than repeating the table, which is what keeps the two from
- * disagreeing about a pname. */
+/* Every query, converted to double. It goes through glGetFloatv rather than repeating
+ * the table, so the two cannot disagree about a pname. */
 void glGetDoublev(GLenum pname, GLdouble *params) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !params)
@@ -3840,11 +3599,8 @@ void glGetDoublev(GLenum pname, GLdouble *params) {
         params[i] = (GLdouble)fv[i];
 }
 
-/* **Not every boolean query is an enable.** This used to forward everything to
- * glIsEnabled, which answers GL_FALSE for GL_COLOR_WRITEMASK - a mask of all four
- * channels reported as all four channels off, with no error to say the question was
- * misunderstood. The two masks are answered here; everything else is either an enable
- * or reaches the general query below. */
+/* Not every boolean query is an enable. The two masks are answered here; everything
+ * else is either an enable or reaches the general query below. */
 void glGetBooleanv(GLenum pname, GLboolean *params) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !params)
@@ -3895,10 +3651,10 @@ void glGetBooleanv(GLenum pname, GLboolean *params) {
  * Fixed-Function Lighting & Materials
  * ------------------------------------------------------------------------- */
 
-/* Recorded in the coordinates passed: a light's position and spot direction are put
- * through the modelview current when the list *runs*, which is what lets a list place a
- * light relative to whatever it is drawn inside. The integer forms convert and forward
- * here, so they record the normalised values. */
+/* Recorded in the coordinates passed: a light's position and spot direction go through
+ * the modelview current when the list runs, so a list places a light relative to
+ * whatever it is drawn inside. The integer forms convert and forward here, so they
+ * record the normalised values. */
 void glLightfv(GLenum light, GLenum pname, const GLfloat *params) {
     if (params && gl_list_recording() &&
         gl_list_rec_fv(GL_LIST_OP_LIGHT_FV, light, pname, GL_TRUE, pname, params)) {
@@ -4005,11 +3761,9 @@ static GLboolean apply_material_param(gl_material_t *m, GLenum pname,
         memcpy(m->ambient, params, 4 * sizeof(float));
         memcpy(m->diffuse, params, 4 * sizeof(float));
         break;
-    /* A material property this does not keep is refused rather than dropped: the six
-     * above are the whole of what the lighting model reads, and a caller setting a
-     * seventh was told nothing and shaded as though it had not. Reported rather than
-     * recorded here, because this helper has no context - the caller owns the error
-     * flag. */
+    /* A material property this does not keep is refused rather than dropped; the six
+     * above are all the lighting model reads. Reported, not recorded: this helper has
+     * no context, and the caller owns the error flag. */
     default:
         return GL_FALSE;
     }
@@ -4029,14 +3783,12 @@ static GLboolean gl_cm_tracks(const gl_context_t *ctx, GLboolean back, GLenum pr
                                      (prop == GL_AMBIENT || prop == GL_DIFFUSE)));
 }
 
-/* **The current colour written into every property GL_COLOR_MATERIAL tracks** - Mesa's
- * _mesa_update_color_material (main/light.c:759-772), run where Mesa runs it: when the
+/* The current colour written into every property GL_COLOR_MATERIAL tracks: Mesa's
+ * _mesa_update_color_material (main/light.c:759-772), run where Mesa runs it - when the
  * colour changes (vbo/vbo_exec_api.c:237-240), when the enable goes on
  * (main/enable.c:568-577) and when glColorMaterial changes what is tracked while it is
- * on (main/light.c:800-803). Until 2026-09-19 the colour was only substituted while
- * lighting, so glGetMaterial read back the material as last set, and once
- * GL_COLOR_MATERIAL went off the material was that stale value again rather than the
- * last colour it had tracked. */
+ * on (main/light.c:800-803). The material keeps the last tracked colour after the
+ * enable goes off. */
 void gl_color_material_update(gl_context_t *ctx) {
     if (!ctx || !ctx->cap_color_material)
         return;
@@ -4067,7 +3819,7 @@ void glMaterialfv(GLenum face, GLenum pname, const GLfloat *params) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
-    /* **A property GL_COLOR_MATERIAL tracks is left alone** - the colour owns it while
+    /* A property GL_COLOR_MATERIAL tracks is left alone: the colour owns it while
      * the enable is on (Mesa, vbo/vbo_exec_api.c:590-598). Set on a copy, and the
      * tracked ones put back. */
     GLboolean kept = GL_TRUE;
@@ -4122,11 +3874,9 @@ void glLightModelfv(GLenum pname, const GLfloat *params) {
         ctx->light_model_color_control = e;
         break;
     }
-    /* **Two-sided lighting** (2026-09-19): a polygon facing away is lit with the back
-     * material and its normal reversed. It was refused - it needs the polygon's facing,
-     * and lighting was thought to run before that existed - and before it was refused
-     * it set a field nothing read. The triangle stage lights all three vertices
-     * together, so it winds them first (gl_draw_triangle_pv). */
+    /* Two-sided lighting: a polygon facing away is lit with the back material and its
+     * normal reversed. The triangle stage lights all three vertices together, so it
+     * winds them first (gl_draw_triangle_pv). */
     case GL_LIGHT_MODEL_TWO_SIDE:
         ctx->light_model_two_side = (params[0] != 0.0f) ? GL_TRUE : GL_FALSE;
         break;
@@ -4143,12 +3893,9 @@ void glLightModelf(GLenum pname, GLfloat param) {
 /* -------------------------------------------------------------------------
  * The integer spellings of the lighting calls
  *
- * **A colour is not converted the same way a scalar is.** An integer colour component
- * is mapped across the whole signed range onto [-1, 1] - so GL_AMBIENT with INT_MAX
- * means 1.0, not 2147483647.0 - while a position, a direction, an attenuation or a
- * shininess is an ordinary cast. Casting a colour would make every integer colour
- * astronomically out of range and light the scene pure white, which looks like a
- * lighting bug anywhere but here.
+ * A colour is not converted the way a scalar is. An integer colour component maps
+ * across the whole signed range onto [-1, 1], so GL_AMBIENT with INT_MAX means 1.0,
+ * while a position, a direction, an attenuation or a shininess is an ordinary cast.
  *
  * The rule and the constant are Mesa's: `INT_TO_FLOAT` in `src/mesa/main/macros.h`,
  * applied to exactly these pnames in `src/mesa/main/light.c` (`_mesa_Lightiv`) and
@@ -4234,9 +3981,7 @@ void glColorMaterial(GLenum face, GLenum mode) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
         return;
-    /* Checked, as Mesa checks them (main/light.c, _mesa_ColorMaterial): any value used
-     * to be stored, and one that named no side or no material property tracked nothing.
-     */
+    /* Checked, as Mesa checks them (main/light.c, _mesa_ColorMaterial). */
     const GLboolean face_ok =
         (GLboolean)(face == GL_FRONT || face == GL_BACK || face == GL_FRONT_AND_BACK);
     const GLboolean mode_ok =
@@ -4267,7 +4012,7 @@ static void gl_buffer_release(void *p);
 static gl_texture_object_t *gl_find_texture(gl_context_t *ctx, GLuint id) {
     if (!ctx || id == 0)
         return NULL;
-    /* Slot `id - 1` first, for the reason `gl_lookup_texture` gives at length. */
+    /* Slot `id - 1` first, for the reason `gl_lookup_texture` gives. */
     if (id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS) {
         gl_texture_object_t *t = &ctx->textures[id - 1u];
         if (t->used && t->id == id)
@@ -4316,30 +4061,12 @@ static gl_texture_object_t *gl_find_or_create_texture(gl_context_t *ctx, GLuint 
 }
 
 /*
- * **GPU-visible texture storage may not be freed while a built frame still points at
- * it.**
- *
- * The hardware path is deferred: `glDrawArrays` writes PM4 into the command buffer and
- * returns, and nothing executes until the flush. A texture's pixels live in GARLIC
- * memory and the draw carries their *address*, not a copy - so freeing that memory
- * between the draw call and the submission hands the sampler pages that are no longer
- * mapped.
- *
- * The specification is on the caller's side here: deleting a texture that is still in
- * use is legal, and it is the implementation that owes the storage a lifetime long
- * enough for the draws referencing it. gl1-probe's texture check does exactly that -
- * draws, deletes, then reads the pixels back - and on 2026-09-17 it took the console's
- * GPU down with it:
- *
- *     GPU Protection fault. client:TCP(8) access:Read permission:0x3
- *     reason: Unmapped page access, Protection fault addr(VA): 0x0000000203190000
- *     504 wavefronts ... XNACK_ERROR MEMVIOL
- *
- * `TCP` is the texture cache. 504 wavefronts faulted, the GPU was reset and the user
- * interface restarted. Flushing first is the blunt fix and the correct one: it costs a
- * submission only when a program changes texture storage mid-frame, and it makes the
- * free safe by making the draws that reference it finish. A deferred-free list keyed on
- * the fence would cost less and is worth having when something needs it.
+ * GPU-visible texture storage may not be freed while a built frame still points at it.
+ * The hardware path is deferred: a draw writes PM4 carrying the texels' GARLIC address,
+ * and nothing executes until the flush, so freeing between the draw and the submission
+ * leaves the texture cache reading unmapped pages (a GPU protection fault). Deleting a
+ * texture still in use is legal GL, so the implementation owes the storage that
+ * lifetime. Flushing first costs a submission only when storage changes mid-frame.
  */
 static void gl_tex_storage_release_sync(gl_context_t *ctx) {
 #ifndef OOPS_HOST_BUILD
@@ -4372,9 +4099,8 @@ static uint32_t gl_hw_wrap(GLenum w) {
  * GL's depth comparison as the sampler's DEPTH_COMPARE_FUNC. The order is the
  * hardware's own (Mesa `ac_descriptors.c:119` writes GL's/Gallium's function straight
  * into the field, and the two enumerations agree): NEVER 0, LESS 1, EQUAL 2, LEQUAL 3,
- * GREATER 4, NOTEQUAL 5, GEQUAL 6, ALWAYS 7. obSCEne's `-6c80` ran function 3 and
- * reported a pass and a fail either side of the stored depth, which anchors the one
- * value the whole ordering hangs on.
+ * GREATER 4, NOTEQUAL 5, GEQUAL 6, ALWAYS 7. Function 3 measured on this part passes
+ * and fails either side of the stored depth.
  */
 static uint32_t gl_hw_depth_compare(GLenum func) {
     switch (func) {
@@ -4401,14 +4127,9 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     if (!tex)
         return;
     /* The mip chain when there is one to describe (gl_tex_hw_prepare decides), the base
-     * level's own storage otherwise - which is every texture that does not read
-     * mipmaps, and so gets exactly the descriptors it always had. */
-    /* **`mipchain=off` in `/app0/oops-gl` takes the chain out of the descriptor**,
-     * leaving the base level's own storage - which is the allocation `tex->pixels`
-     * names and the one a frame capture carries, so it is the configuration a replay on
-     * the software rasteriser reproduces exactly. Any difference between the console
-     * and that replay is then a difference about the chain and nothing else. Default
-     * on; this is a question, not a setting. */
+     * level's own storage otherwise. `mipchain=off` in `/app0/oops-gl` takes the chain
+     * out, leaving the allocation a frame capture carries, so a software replay
+     * reproduces the console exactly; a remaining difference is about the chain. */
     const GLboolean chain =
         (GLboolean)(tex->desc_chain && tex->chain_data && gl_mipchain_enabled);
     uint64_t va = chain ? tex->chain_va : tex->garlic_va;
@@ -4428,14 +4149,11 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
         h = w;
     }
 
-    /* **A depth texture's texels are one 32-bit float each**, not four bytes of colour,
-     * so its image format is a different one (since 2026-09-20).
-     * `GFX10_FORMAT_32_FLOAT` is 22 and `GFX10_FORMAT_8_8_8_8_UNORM` is 56 -
-     * `mesa/src/amd/registers/gfx10-rsrc.json:27` and `:61`, the second being the value
-     * this descriptor has always carried, which is what says the table being read is
-     * the right one. FORMAT is `SQ_IMG_RSRC_WORD1` bits [20,28] (`:371`). Both are four
-     * bytes a texel, so the row pitch, the chain layout and the slice stride are all
-     * unchanged by this. */
+    /* A depth texture's texels are one 32-bit float each, not four bytes of colour.
+     * `GFX10_FORMAT_32_FLOAT` is 22 and `GFX10_FORMAT_8_8_8_8_UNORM` is 56
+     * (`mesa/src/amd/registers/gfx10-rsrc.json:27` and `:61`); FORMAT is
+     * `SQ_IMG_RSRC_WORD1` bits [20,28] (`:371`). Both are four bytes a texel, so the
+     * row pitch, chain layout and slice stride are the same. */
     gl_tex_view_t fv;
     const GLboolean is_depth =
         (GLboolean)(gl_tex_level_view(tex, tex->base_level, &fv) &&
@@ -4443,34 +4161,25 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     const uint32_t img_format = is_depth ? 22u : 56u;
 
     /* RDNA2 SQ_IMG_RSRC_WORD0..7 (32 bytes), laid out as the public RDNA ISA reference
-     * gives them. The base address is in 256-byte units: the unshifted address sent the
-     * sampler 256 times too far and drew a wavefront fault on 2026-09-14. */
+     * gives them. The base address is in 256-byte units. */
     tex->img_desc[0] = (uint32_t)(va >> 8); /* BASE_ADDRESS[39:8] */
     tex->img_desc[1] =
         (uint32_t)((va >> 40) & 0xffu) | (img_format << 20) |
         (((w - 1u) & 3u) << 30); /* BASE_ADDRESS_HI, MIN_LOD=0, FORMAT, WIDTH_LO */
     tex->img_desc[2] = (((w - 1u) >> 2) & 0x3fffu) | (((h - 1u) & 0x3fffu) << 14) |
                        (1u << 31); /* WIDTH_HI, HEIGHT, RESOURCE_LEVEL */
-    /* TYPE=2D (9), SW_MODE=0, DST_SEL X,Y,Z,W = channels 0,1,2,3 (4,5,6,7).
+    /* TYPE, SW_MODE=0, DST_SEL X,Y,Z,W = channels 0,1,2,3 (4,5,6,7).
      *
-     * SW_MODE 0 is `ADDR_SW_LINEAR`, **not** `ADDR_SW_LINEAR_GENERAL`, which this
-     * comment used to call it. The two behave differently and the distinction decides
-     * the row pitch: addrlib gives LINEAR_GENERAL a pitch alignment of one element and
-     * LINEAR an alignment of `256 / elementBytes`
-     * (mesa/src/amd/addrlib/src/gfx9/gfx9addrlib.cpp:5117-5127). It cannot be the
-     * former here in any case - `ADDR_SW_LINEAR_GENERAL` is 32
-     * (mesa/src/amd/addrlib/inc/addrtypes.h:259) and SW_MODE is five bits wide,
-     * mesa/src/amd/registers/gfx10-rsrc.json:388, so 32 does not fit in the field. It
-     * is an addrlib-internal mode, not a value the hardware takes. */
-    /*
-     * **TYPE is the target's** since 2026-09-20: 9 for 2D, 0xa for 3D, 0xb for a cube
-     * map
-     * (`S_00A00C_TYPE`, Mesa `ac_descriptors.c:372`). obSCEne's
-     * `REQ-20260920T0745Z-6c80` (sweep `20260920-103636`, `166-agc/texture-extended`)
-     * sampled all three on this part and reports the words: `0xa0000fac` for the 3D
-     * arm, `0xb0000fac` for the cube, `0x90000fac` for the 2D control over the same
-     * memory - which is what says the field, and not something else about the arm, is
-     * what changed the result.
+     * SW_MODE 0 is `ADDR_SW_LINEAR`, not `ADDR_SW_LINEAR_GENERAL`, and the distinction
+     * decides the row pitch: addrlib aligns LINEAR's pitch to `256 / elementBytes` and
+     * LINEAR_GENERAL's to one element
+     * (mesa/src/amd/addrlib/src/gfx9/gfx9addrlib.cpp:5117-5127). LINEAR_GENERAL is 32
+     * (mesa/src/amd/addrlib/inc/addrtypes.h:259), an addrlib-internal mode that does
+     * not fit the five-bit field (mesa/src/amd/registers/gfx10-rsrc.json:388).
+     *
+     * TYPE is the target's: 9 for 2D, 0xa for 3D, 0xb for a cube map (`S_00A00C_TYPE`,
+     * Mesa `ac_descriptors.c:372`). Measured on this part, WORD3 is `0x90000fac`,
+     * `0xa0000fac` and `0xb0000fac` for the three.
      */
     uint32_t img_type = 9u;
     if (tex->target == GL_TEXTURE_3D)
@@ -4483,21 +4192,16 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
      * when the pitch exceeds the width - "1D, 2D, 2D_MSAA: the pitch if pitch > width,
      * the low bits are in DEPTH", mesa/src/amd/registers/gfx10-rsrc.json:401-406 (type
      * SQ_IMG_RSRC_WORD4_gfx103). Mesa encodes it the same way at
-     * ac_descriptors.c:711-712.
-     *
-     * Left at zero for a texture whose rows are exactly as wide as the image, which is
-     * every width that is a multiple of 64 pixels - so the descriptor gl-cube gets is
-     * unchanged. */
+     * ac_descriptors.c:711-712. Zero for a texture whose rows are exactly as wide as
+     * the image, which is every width that is a multiple of 64 pixels. */
     const uint32_t pitch = tex->pitch ? tex->pitch : w;
     if (tex->target == GL_TEXTURE_3D || tex->target == GL_TEXTURE_CUBE_MAP) {
-        /* **For a 3D image and a cube map the field is the last slice, not a pitch** -
-         * DEPTH is the slice count less one, which is what `-6c80` set: `0x1` for its
-         * two-slice volume and `0x5` for the cube's six faces. The pitch reading below
-         * is the 2D one, and writing it here would describe a volume one row wide. */
-        /* A chain's depth is the **base level's**, as its width and height above are:
-         * the descriptor's level 0 is GL's base level, and the hardware halves all
-         * three from there. `tex->depth` is level 0's, which is the same number
-         * whenever the base level is 0 and the wrong one when it is not. */
+        /* For a 3D image and a cube map the field is the last slice, not a pitch: DEPTH
+         * is the slice count less one, `0x1` for a two-slice volume and `0x5` for a
+         * cube's six faces. */
+        /* A chain's depth is the base level's, as its width and height above are: the
+         * descriptor's level 0 is GL's base level, and the hardware halves all three
+         * from there. `tex->depth` is GL level 0's. */
         uint32_t volume_slices = (uint32_t)(tex->depth > 0 ? tex->depth : 1);
         if (chain && tex->target == GL_TEXTURE_3D && cb.depth > 0) {
             volume_slices = (uint32_t)cb.depth;
@@ -4512,11 +4216,8 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
         tex->img_desc[4] = 0u;
     }
     /* WORD5 PERF_MOD [20,22] (gfx10-rsrc.json:413, and :424 for the gfx10.3 form this
-     * part uses). **Mesa writes 4 here unconditionally** for every gfx10 texture it
-     * builds - `S_00A014_PERF_MOD(4)`, ac_descriptors.c:543 - and this wrote zero,
-     * which is the one field of the eight where the descriptor differs from the
-     * reference implementation for an ordinary 2D image. Zero is not a documented
-     * "default" so much as the value nobody chose.
+     * part uses) is 4, as Mesa writes it for every gfx10 texture
+     * (`S_00A014_PERF_MOD(4)`, ac_descriptors.c:543).
      *
      * ARRAY_PITCH [0,3] stays 0: it is meaningful only for a 3D image, where 0 selects
      * the read-only reading of DEPTH that the sampler wants. MAX_MIP [4,7] is the
@@ -4524,43 +4225,19 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     tex->img_desc[5] = 4u << 20;
     tex->img_desc[6] = 0u;
     tex->img_desc[7] = 0u;
-    /* **What a texture actually got**, for the first few packed in a run.
-     *
-     * A port whose textures render as blocky, banded, wrongly-coloured surfaces has a
-     * sampling fault, and the candidates - the row pitch, whether the chain path or the
-     * plain one was taken, what WORD4 ended up as - are all decided right here and none
-     * of them are visible from outside. Guessing between them has cost several hardware
-     * runs; this prints them.
-     *
-     * Eight, because a title's first textures are the ones a title screen draws, and
-     * because a line per texture for eighty-five of them would bury what it is
-     * competing with. */
+    /* What a texture got, for the first packs in a run: the row pitch, the chain level
+     * count and WORD4 are decided here and are not visible from outside. */
 #ifndef OOPS_HOST_BUILD
     {
-        /* **Every distinct texture once**, the default excluded. Filtering by width was
-           a guess about which textures were interesting, and the guess is what needs
-           testing: a port whose *text* draws correctly while its level art does not
-           already proves the sampling path works for some textures, so the useful
-           comparison is a working one beside a broken one, not a preselected set. The
-           default texture is skipped because it is repacked on every bind and ate the
-           whole window when it was not. */
+        /* Every real image, keyed on its size: the default texture is repacked on every
+           bind, and a 1x1 placeholder is often re-specified at its true size at once.
+         */
         static uint32_t told;
-        /* **Every real image, keyed on the size rather than the name.** Two earlier
-           versions of this filter each spent the whole window before anything
-           interesting loaded: first on the default texture, which is repacked on every
-           bind, and then on skipping a repeat of the last id - which turned out to
-           discard every picture this port has, because its loader uploads a 1x1
-           placeholder and immediately re-specifies the same texture at its true size.
-           The call worth seeing is always the one straight after the one that got
-           printed. Eighty-four lines of `0x1 0x1` from a title that plainly draws
-           pictures was what said so. A hundred and twenty-eight of these is nothing
-           next to the six thousand lines a frame of this port already emits. */
         if (told < 128u && tex->id > 1u && (w > 1u || h > 1u)) {
             told++;
-            /* Two lines. The first is the descriptor as packed; the second is what the
-               texels actually are in GPU memory, which is the half of the question the
-               descriptor cannot answer. `gl_klog_val` belongs to gl_context.c, so this
-               builds its own from the hex helper every refusal message already uses. */
+            /* Two lines: the descriptor as packed, and the texels as they are in GPU
+               memory. `gl_klog_val` belongs to gl_context.c, so this builds its own
+               from the hex helper. */
             char m[200];
             size_t n = 0;
             const char *lead = "tex id/w/h/pitch/levels/word4/valo";
@@ -4574,21 +4251,14 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
             n = gl_msg_hex(m, sizeof(m), n, pitch);
             n = gl_msg_hex(m, sizeof(m), n, (uint32_t)tex->chain_levels);
             n = gl_msg_hex(m, sizeof(m), n, tex->img_desc[4]);
-            /* The low byte of the address the descriptor could not carry: `img_desc[0]`
-               is the address in 256-byte units, so anything here is a texture the
-               sampler reads from the wrong place. Expected zero - `oops_mem_alloc` is
-               asked for 256. */
+            /* The low byte of the address, which `img_desc[0]` in 256-byte units cannot
+               carry. Zero, since `oops_mem_alloc` is asked for 256-byte alignment. */
             n = gl_msg_hex(m, sizeof(m), n, (uint32_t)(va & 0xffu));
             m[n] = 0;
             oops_log_info("GL", "%s", m);
 
-            /* **The first four texels of row 0, and the first of row 1.** This is the
-               one measurement that splits the problem in half whichever theory is
-               right: if these bytes are the image, the upload is sound and the fault is
-               in how the sampler is told to read them; if they are not, nothing about
-               the descriptor matters yet. Row 1 comes along because it is where a wrong
-               pitch shows up first - it should be the image's second row, not more of
-               the first. */
+            /* The first four texels of row 0, and the first of row 1: they separate an
+               upload fault from a descriptor fault, and row 1 shows a wrong pitch. */
             const uint32_t *t0 = (const uint32_t *)tex->garlic_data;
             if (t0) {
                 char t[200];
@@ -4603,9 +4273,8 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
                 k = gl_msg_hex(t, sizeof(t), k, t0[1]);
                 k = gl_msg_hex(t, sizeof(t), k, t0[2]);
                 k = gl_msg_hex(t, sizeof(t), k, t0[3]);
-                /* Guarded: the allocation is `pitch * height` texels, so row 1 exists
-                   only when there is a second row to read. A one-pixel-high texture
-                   would otherwise read one texel past the end. */
+                /* The allocation is `pitch * height` texels, so row 1 exists only when
+                   the height is above one. */
                 k = gl_msg_hex(t, sizeof(t), k, h > 1u ? t0[pitch] : 0u);
                 t[k] = 0;
                 oops_log_info("GL", "%s", t);
@@ -4627,23 +4296,18 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     }
 
     /* RDNA2 SQ_IMG_SAMP_WORD0..3 (16 bytes). CLAMP_X [0,2] and CLAMP_Y [3,5] as
-     * radeonsi's si_tex_wrap chooses them (si_state.c:1927). GL_CLAMP was
-     * CLAMP_LAST_TEXEL here until 2026-09-19, which is GL_CLAMP_TO_EDGE; it is the
+     * radeonsi's si_tex_wrap chooses them (si_state.c:1927). GL_CLAMP is the
      * half-border clamp, whose linear filter at the edge takes half the border colour.
      */
     uint32_t cx = gl_hw_wrap(tex->wrap_s);
     uint32_t cy = gl_hw_wrap(tex->wrap_t);
-    /* **CLAMP_Z [6,8] for the third coordinate**, which only a 3D image has - `-6c80`'s
-     * 3D arm carried `0x92` where its 2D control carried `0x12`, the difference being
-     * this field set to the same clamp as the other two. A 2D image leaves it zero, as
-     * every descriptor here has.
+    /* CLAMP_Z [6,8] for the third coordinate, which only a 3D image has (measured:
+     * `0x92` for a 3D image where the 2D one carries `0x12`). A 2D image leaves it
+     * zero.
      *
-     * **DEPTH_COMPARE_FUNC [12,14]** is GL's `GL_TEXTURE_COMPARE_FUNC` when
+     * DEPTH_COMPARE_FUNC [12,14] is GL's `GL_TEXTURE_COMPARE_FUNC` when
      * `GL_TEXTURE_COMPARE_MODE` asks for it (`S_008F30_DEPTH_COMPARE_FUNC`, Mesa
-     * `ac_descriptors.c:119`). `-6c80` ran two arms with one reference either side of
-     * the stored depth under function 3, `LEQUAL`, and they came back `0xffffffff` and
-     * `0xff000000` - the comparison passing and failing, which is what says the field
-     * works rather than the sample returning nothing. */
+     * `ac_descriptors.c:119`). */
     const uint32_t cz = (tex->target == GL_TEXTURE_3D) ? gl_hw_wrap(tex->wrap_r) : 0u;
     uint32_t cmp = 0u;
     if (tex->compare_mode == GL_COMPARE_R_TO_TEXTURE)
@@ -4652,10 +4316,9 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     /* WORD1: MIN_LOD [0,11] and MAX_LOD [12,23], unsigned 4.8 fixed point clamped to
      * [0, 15], as radeonsi encodes GL_TEXTURE_MIN_LOD and _MAX_LOD before GFX12
      * (ac_descriptors.c:139-140) - in the chain's own levels, whose level 0 is GL's
-     * base level, where GL measures from too.
-     * **Except the default maximum**, which stays the field's own 0xfff rather than
-     * radeonsi's 15.0: that is what every descriptor here has carried, gl-cube's
-     * included, and no texture here has 15 levels for the difference to reach. */
+     * base level, where GL measures from too. The default maximum is the field's own
+     * 0xfff rather than radeonsi's 15.0; no texture here has 15 levels for the
+     * difference to reach. */
     const float lo =
         (tex->min_lod > 0.0f) ? ((tex->min_lod < 15.0f) ? tex->min_lod : 15.0f) : 0.0f;
     const float hi =
@@ -4672,7 +4335,7 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     /* MIP_FILTER [26,27]: NONE 0, POINT 1, LINEAR 2 (gfx8.json:668-673, the same field
      * at gfx10-rsrc.json:493), chosen as radeonsi's si_tex_mipfilter does
      * (si_state.c:1950-1961). NONE without a chain, which samples the base level
-     * whatever the filter - what the hardware has always done here - and for a chain of
+     * whatever the filter, and for a chain of
      * one level, which a base level other than 0 or a non-mipmap filter gives. */
     uint32_t mip = 0u;
     if (chain && tex->chain_levels > 1 && gl_filter_uses_mipmaps(tex->min_filter)) {
@@ -4684,7 +4347,7 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     tex->samp_desc[2] = (mag << 20) | (min << 22) | (mip << 26);
 
     /* WORD3: BORDER_COLOR_TYPE [30,31] and BORDER_COLOR_PTR [0,11], as radeonsi's
-     * si_translate_border_color picks them (si_state.c:4010-4074) - transparent black
+     * si_translate_border_color picks them (si_state.c:4010-4074): transparent black
      * when no axis reads the border (GL_CLAMP only does under a linear filter), one of
      * the three built-in colours when the border is one, and otherwise entry 0 of the
      * border colour table (SQ_TEX_BORDER_COLOR_REGISTER; the values are
@@ -4693,13 +4356,11 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     for (int i = 0; i < 4; i++)
         tex->border_hw[i] = tex->border_color[i];
     if (is_depth) {
-        /* **A depth texture's border is the border colour's red, as a depth** - the
-         * software path's rule, and the one the comparison needs: the border is a
-         * *stored depth* that `GL_TEXTURE_COMPARE_FUNC` still runs against, and what
-         * GL_DEPTH_TEXTURE_MODE describes is what the comparison's result becomes
-         * afterwards. Expanding by that mode here would be applying it a step too early
-         * - and for `GL_ALPHA` it zeroes red, which is the one channel a 32_FLOAT image
-         * reads. */
+        /* A depth texture's border is the border colour's red, as a depth, as on the
+         * software path: the border is a stored depth that `GL_TEXTURE_COMPARE_FUNC`
+         * runs against, and GL_DEPTH_TEXTURE_MODE applies to the comparison's result.
+         * Expanding by that mode here would zero red for `GL_ALPHA`, the one channel a
+         * 32_FLOAT image reads. */
         tex->border_hw[1] = tex->border_hw[2] = tex->border_hw[3] = tex->border_hw[0];
     } else {
         gl_tex_rebase_f(tex->border_hw, gl_tex_sample_format(tex));
@@ -4726,15 +4387,6 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     tex->desc_dirty = GL_TRUE;
 }
 
-/* The object a glTex* call acts on: the named target's binding, or that target's *own*
- * default texture when nothing is bound. `create` distinguishes an upload, which may
- * bring the default into existence, from a query, which should not.
- *
- * Returns NULL for a target this does not have; the caller reports GL_INVALID_ENUM. */
-/* The targets that name a binding point here. The `glTex*2D` entry points stay 2D-only
- * - a GL_TEXTURE_1D passed to glTexImage2D is an error in GL, not a shorthand. This is
- * for the calls that are shared between targets: the parameter setters and the queries.
- */
 /* Forward declarations: the copy helper is defined above the upload helper it calls,
  * and the 1D entry points below use all three. */
 static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
@@ -4752,7 +4404,7 @@ static GLboolean gl_copy_internal_format_ok(GLenum internalformat);
 static gl_tex_level_t *gl_proxy_level(gl_context_t *ctx, GLenum target, GLint level);
 static GLboolean gl_is_proxy_target(GLenum t);
 
-/* The targets a texture *object* is named by - glBindTexture, glTexParameter,
+/* The targets a texture object is named by - glBindTexture, glTexParameter,
  * glGetTexParameter, glEnable. */
 static GLboolean gl_texture_target_ok(GLenum t) {
     return (t == GL_TEXTURE_2D || t == GL_TEXTURE_1D || t == GL_TEXTURE_3D ||
@@ -4761,7 +4413,7 @@ static GLboolean gl_texture_target_ok(GLenum t) {
                : GL_FALSE;
 }
 
-/* The targets an *image* is named by - the uploads, glGetTexImage,
+/* The targets an image is named by - the uploads, glGetTexImage,
  * glGetTexLevelParameter: a cube map's are its six faces, never GL_TEXTURE_CUBE_MAP
  * itself. */
 static GLboolean gl_tex_image_target_ok(GLenum t) {
@@ -4780,6 +4432,10 @@ static GLboolean gl_tex_target_view(const gl_texture_object_t *tex, GLenum targe
                        : gl_tex_level_view(tex, level, out);
 }
 
+/* The object a glTex* call acts on: the named target's binding, or that target's own
+ * default texture when nothing is bound. `create` distinguishes an upload, which may
+ * bring the default into existence, from a query, which does not. Returns NULL for a
+ * target this does not have; the caller reports GL_INVALID_ENUM. */
 static gl_texture_object_t *gl_texture_for_target(gl_context_t *ctx, GLenum target,
                                                   GLboolean create) {
     GLuint *slot = gl_binding_slot(ctx, target);
@@ -4807,7 +4463,7 @@ static uint8_t gl_mip_mean(unsigned sum, unsigned shift) {
     return (uint8_t)q;
 }
 
-/* **GL_GENERATE_MIPMAP** (GL 1.4, 3.8.8): the levels above the base rebuilt from it,
+/* GL_GENERATE_MIPMAP (GL 1.4, 3.8.8): the levels above the base rebuilt from it,
  * each the box filter of the one below - every 2x2 texel block (2x2x2 in a volume)
  * averaged, a side of 1 reused rather than halved, and a leftover odd row or column
  * dropped, as Mesa's do_row does. As far as GL_TEXTURE_MAX_LEVEL or a 1x1 level,
@@ -4903,7 +4559,7 @@ static void gl_tex_generate_mipmap(gl_context_t *ctx, gl_texture_object_t *tex,
 
 /* After a level of `target` changed: generate the levels above it when
  * GL_GENERATE_MIPMAP is on and it is the base level below GL_TEXTURE_MAX_LEVEL, Mesa's
- * condition (main/teximage.c:2889- 2897). Held back while a copy uploads row by row
+ * condition (main/teximage.c:2889-2897). Held back while a copy uploads row by row
  * (`gen_mipmap_suspend`), which asks once at the end instead. */
 static void gl_tex_gen_mipmap_check(gl_context_t *ctx, GLenum target, GLint level) {
     if (ctx->gen_mipmap_suspend > 0 || gl_is_proxy_target(target))
@@ -4933,21 +4589,11 @@ void glGenTextures(GLsizei n, GLuint *textures) {
             ctx->hw_tex_created++;
             next_id++;
         } else {
-            /* **Running out of names is silent on a desktop driver, so nothing checks
-             * for it.** A real GL has 2^32 texture names and this has
-             * `OOPS_GL_MAX_TEXTURE_OBJECTS`, so exhaustion is a failure mode unique to
-             * this implementation - and until now it was reported the way the
-             * specification allows and no program reads: a zero in the output array. A
-             * port then binds 0, uploads into the default texture, draws, and gets flat
-             * surfaces with no error anywhere. That is a day of looking in the wrong
-             * place, and it costs three lines to make it say so.
-             *
-             * GL_OUT_OF_MEMORY is the right code: the specification has no "out of
-             * names" because it does not anticipate a fixed pool, and out-of-memory is
-             * the general arm for an implementation that cannot satisfy a request. The
-             * log line is what actually gets read, though, because the same programs
-             * that ignore the zero also never call glGetError(). Once per context -
-             * after that the count carries it. */
+            /* The pool holds `OOPS_GL_MAX_TEXTURE_OBJECTS` names where a desktop driver
+             * has 2^32, so programs never check for exhaustion. A zero goes in the
+             * output, GL_OUT_OF_MEMORY is recorded (the specification has no "out of
+             * names"), and a log line says so once per context, since the programs
+             * that ignore the zero also skip glGetError(). */
             textures[i] = 0;
             ctx->hw_tex_failed++;
             if (ctx->hw_tex_failed == 1u) {
@@ -4989,10 +4635,8 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
             }
 #endif
             gl_tex_free_mips(tex);
-            /* Deleting a bound texture binds 0 in its place - on every target it was
-             * bound to, in every unit, as Mesa's unbind_texobj_from_texunits does
-             * (main/texobj.c:1381). Only the 2D binding was reset until 2026-09-19, so
-             * a deleted 1D texture stayed "bound" by a name that no longer existed. */
+            /* Deleting a bound texture binds 0 in its place, on every target in every
+             * unit, as Mesa's unbind_texobj_from_texunits does (main/texobj.c:1381). */
             for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
                 gl_tex_unit_t *tu = &ctx->tex_unit[u];
                 if (tu->bound_texture_2d == id)
@@ -5064,32 +4708,20 @@ void gl_tex_free_mips(gl_texture_object_t *tex) {
  *
  * A mipmapped texture that is complete and a power of two on both axes takes every
  * level from GL_TEXTURE_BASE_LEVEL to the top level (GL_TEXTURE_MAX_LEVEL may cut it
- * short). **Power of two because the two rounding rules agree only there**: GL halves a
+ * short). Power of two because the two rounding rules agree only there: GL halves a
  * level by floor, addrlib by ceil (GetMipSize), and a 3-wide base would be 1 wide at
  * level 1 to GL and 2 wide to the hardware. GL 1.x requires power-of-two textures
  * anyway; one that is not samples its base level alone.
  *
- * **A base level other than 0 is a chain even of one level**, since the image the
+ * A base level other than 0 is a chain even of one level, since the image the
  * hardware otherwise samples is level 0's; the descriptor's level 0 is then GL's base
  * level, which is also where GL measures the level of detail from. */
 static int gl_tex_chain_levels(const gl_texture_object_t *tex) {
-    /* **A volume is sampled from level 0 only, and the reason is now measured rather
-     * than structural.** The layout was two-dimensional until 2026-09-21, which was
-     * reason enough; `gl_tex_chain_layout_3d` halves depth with width and height and
-     * the copy walks slices, so that reason is gone. The hardware still reads the base
-     * level: gl1-probe's `volume-mipmap` minifies a 4x4x4 red volume whose level 1 is
-     * green, and the console answered `saw 0xffff0000` - red - with the descriptor
-     * carrying `LAST_LEVEL` 1 and `MAX_MIP` 1, which
-     * `test_pm4_gl_volume_and_cube_sample_on_hardware` pins.
-     *
-     * So **where a 3D image's mip levels sit is not the 2D rule with a depth term**,
-     * and this library does not know what it is. `texture-3d` measures the slice stride
-     * *within* level 0 and `mipmap-levels` measures the level placement of a *2D*
-     * chain; neither measures the placement of a level in a volume, which is what was
-     * extrapolated and what the part rejected. `REQ-20260921T1300Z-9b73` asks for it.
-     * Until it answers, a volume keeps the behaviour it has always had here and says so
-     * in the log, rather than pointing the descriptor at a chain the hardware reads the
-     * wrong end of. */
+    /* A volume is sampled from level 0 only. With a chain laid out by
+     * `gl_tex_chain_layout_3d` (depth halved with width and height) the hardware still
+     * reads the base level when minifying, as
+     * `test_pm4_gl_volume_and_cube_sample_on_hardware` pins: where a 3D image's mip
+     * levels sit is not the 2D rule with a depth term, and is not known here. */
     if (tex->target == GL_TEXTURE_3D)
         return 0;
     if (!gl_texture_complete(tex))
@@ -5100,11 +4732,7 @@ static int gl_tex_chain_levels(const gl_texture_object_t *tex) {
         return 0;
     int levels =
         gl_filter_uses_mipmaps(tex->min_filter) ? gl_tex_top_level(tex) - b + 1 : 1;
-    /* **A volume's depth is a third axis to round**, and it goes through the same test
-     * as the other two: the two halving rules agree only on a power of two, so a 2-deep
-     * volume chains and a 3-deep one samples its base level alone. This read `target ==
-     * GL_TEXTURE_3D` and returned 0 until 2026-09-21 - no chain at all for a volume,
-     * because the layout was two dimensional. It is three now
+    /* A volume's depth is a third axis to round and takes the same power-of-two test
      * (`gl_tex_chain_layout_3d`). */
     if (levels > 1 &&
         ((bv.width & (bv.width - 1)) != 0 || (bv.height & (bv.height - 1)) != 0)) {
@@ -5118,30 +4746,15 @@ static int gl_tex_chain_levels(const gl_texture_object_t *tex) {
 }
 
 /*
- * **A cube map's six faces uploaded as one array** (since 2026-09-20).
+ * A cube map's six faces uploaded as one array. The faces arrive one at a time, each a
+ * tight-packed image in process memory (`gl_texture_object_t::cube`) for the software
+ * rasteriser. The hardware wants one image of six slices, face f at slice f in GL's
+ * order +X, -X, +Y, -Y, +Z, -Z (the hardware's cube order too), each slice laid out as
+ * a 2D image with the 256-byte row pitch. Built once all six are present, not per face.
  *
- * The faces arrive one at a time, each its own tight-packed image in process memory
- * (`gl_texture_object_t::cube`), because that is what the software rasteriser samples.
- * The hardware wants one image of six slices: face f at slice f in GL's order - +X, -X,
- * +Y, -Y, +Z, -Z, which is the order the hardware's cube addressing uses too - each
- * slice laid out exactly as a 2D image, with the same 256-byte row pitch every other
- * image here has.
- *
- * Built here rather than as each face arrives, because a face is not a texture: a
- * program gives six of them, and allocating and copying on every `glTexImage2D` would
- * do the work six times and hold a half-built cube in between.
- *
- * **The slice stride is derived, not measured.** obSCEne's `-6c80` sampled a 3D image
- * and a cube on this part, but each reported one texel: nothing in those rows says
- * where the second slice begins. Consecutive slices of `pitch * height` is what addrlib
- * computes for a linear array and what this library's own 3D upload already writes, and
- * the pitch is a multiple of 256 bytes so no slice needs padding to reach an alignment.
- * A stride that is wrong anyway would leave face 0 right and the other five wrong,
- * which is the shape this project keeps catching, so it is asked about in
- * `REQ-20260920T1050Z-5d7c` and said out loud here until that answers.
- *
- * Only level 0 of each face: the mip chain for a cube map is a second question, and a
- * chain built from one face would be wrong for the other five.
+ * The slice stride, consecutive slices of `pitch * height`, is derived rather than
+ * measured: it is what addrlib computes for a linear array and what the 3D upload
+ * writes, and the 256-byte pitch needs no slice padding. Only level 0 of each face.
  */
 static void gl_tex_cube_upload(gl_context_t *ctx, gl_texture_object_t *tex) {
     if (!tex->cube)
@@ -5182,9 +4795,8 @@ static void gl_tex_cube_upload(gl_context_t *ctx, gl_texture_object_t *tex) {
     }
     tex->garlic_va = (uint64_t)(uintptr_t)tex->garlic_data;
     tex->pitch = (uint32_t)pitch_px;
-    /* Zeroed first: the padding between each row's pixels and the pitch is written by
-     * nothing below, and the sampler would otherwise read whatever the allocator left
-     * there. */
+    /* Zeroed first: nothing below writes the padding between a row's pixels and the
+     * pitch. */
     memset(tex->garlic_data, 0, bytes);
     for (int f = 0; f < 6; f++) {
         const gl_tex_level_t *lv = &tex->cube[(size_t)f * OOPS_GL_MAX_TEXTURE_LEVELS];
@@ -5244,12 +4856,10 @@ void gl_tex_hw_prepare(gl_context_t *ctx, gl_texture_object_t *tex) {
             gl_tex_view_t lv;
             if (!gl_tex_level_view(tex, b + i, &lv))
                 continue; /* complete, so never */
-            /* **Slice by slice, and a 2D texture is one slice.** The source is
-             * tight-packed at `width * height` a slice, which is how every level is
-             * stored here; the destination pads each row to the level's pitch and puts
-             * the slices one after another at `pitch * height`, which is where
-             * `texture-3d` measured the hardware reading slice 1. A 2D level runs this
-             * loop once and copies exactly the rows it always did. */
+            /* Slice by slice; a 2D texture is one slice. The source is tight-packed at
+             * `width * height` a slice; the destination pads each row to the level's
+             * pitch and puts the slices at `pitch * height`, where gl1-probe's
+             * `texture-3d` sees the hardware read slice 1. */
             const GLsizei slices =
                 (tex->target == GL_TEXTURE_3D && lv.depth > 0) ? lv.depth : 1;
             const size_t dst_slice = (size_t)pitches[i] * (size_t)lv.height * 4u;
@@ -5308,10 +4918,9 @@ void glBindTexture(GLenum target, GLuint texture) {
     if (!tex)
         return;
 
-    /* **An object belongs to the target it was first bound to.** Rebinding it elsewhere
-     * is GL_INVALID_OPERATION, not a silent reinterpretation: the image inside has a
-     * shape the other target cannot read, and handing it over would sample a 1D image
-     * as a 2D one. */
+    /* An object belongs to the target it was first bound to. Rebinding it elsewhere is
+     * GL_INVALID_OPERATION: the image inside has a shape the other target cannot read.
+     */
     if (tex->target != 0u && tex->target != target) {
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
@@ -5325,8 +4934,7 @@ void glBindTexture(GLenum target, GLuint texture) {
  * `GL_UNPACK_ROW_LENGTH` gives the row width in pixels when it is not the width being
  * uploaded - which is what makes a sub-rectangle of a larger client image uploadable at
  * all - and `GL_UNPACK_ALIGNMENT` rounds each row's start up to 1, 2, 4 or 8 bytes.
- * Both default to the values the specification gives (0 and 4), so a caller that never
- * calls glPixelStorei gets exactly the behaviour this had before they existed. */
+ * Both default to the specification's values (0 and 4). */
 size_t gl_unpack_row_stride(const gl_context_t *ctx, GLsizei width,
                             size_t pixel_bytes) {
     size_t row_pixels =
@@ -5358,8 +4966,8 @@ GLboolean gl_list_rec_image(gl_list_op_t op, const gl_list_arg_t *args, int narg
     if (pixels && gl_pixel_fmt(format, type, &f) == GL_NO_ERROR && width > 0 &&
         height > 0) {
         img = gl_pixel_copy_client(ctx, &f, pixels, width, height, 1);
-        /* Out of memory, already recorded. Nothing is kept - a command replayed without
-         * its image would upload garbage - and under GL_COMPILE_AND_EXECUTE the call
+        /* Out of memory, already recorded. Nothing is kept, since a command replayed
+         * without its image would upload garbage; under GL_COMPILE_AND_EXECUTE the call
          * still runs. */
         if (!img)
             return (GLboolean)(ctx->list_mode == GL_COMPILE);
@@ -5368,14 +4976,10 @@ GLboolean gl_list_rec_image(gl_list_op_t op, const gl_list_arg_t *args, int narg
     return gl_list_rec_owned(op, args, nargs, img, img_bytes);
 }
 
-/* `glAlphaFunc(func, ref)` - discards a fragment whose alpha fails the comparison.
- *
- * RDNA2 has no fixed-function alpha test; it was removed after the fixed-function era,
- * and a modern driver implements it by discarding in the pixel shader. So this records
- * the state and `gl_ps_patch_alpha_test` writes the comparison into both shaders -
- * which is why a function this does not know is refused here rather than silently doing
- * nothing: the shader would carry no test and every fragment would pass, which is a
- * picture rather than an error.
+/* `glAlphaFunc(func, ref)` discards a fragment whose alpha fails the comparison. RDNA2
+ * has no fixed-function alpha test, so this records the state and
+ * `gl_ps_patch_alpha_test` writes the comparison into both shaders as a discard. An
+ * unknown function is refused rather than leaving a shader with no test.
  */
 void glAlphaFunc(GLenum func, GLclampf ref) {
     if (gl_list_recording() &&
@@ -5408,17 +5012,6 @@ void glAlphaFunc(GLenum func, GLclampf ref) {
     gl_ps_patch_alpha_test(ctx);
 }
 
-/* `glPolygonOffset(factor, units)` - nudges a filled polygon's depth so coplanar
- * geometry can be drawn over it without fighting.
- *
- * Both are kept as given and scaled where they are written, because the scaling depends
- * on the depth format rather than on the call: Mesa multiplies the factor by 16 for
- * every format, and the units by 4, 2 or 1 for 16-, 24- and 32-bit z-buffers. This one
- * is 32-bit float, so the units go in unscaled - see the DB_FMT_CNTL comment in
- * `gl_draw.c` for how that was settled.
- *
- * Takes no error: the specification defines no error for this call, and any float pair
- * is meaningful - including negative, which pulls geometry towards the viewer. */
 /* The colour-index clear value and write mask: RGBA-context state, kept and reported.
  * The clear value is not clamped - an index is a number, not an intensity. */
 void glClearIndex(GLfloat c) {
@@ -5489,6 +5082,13 @@ void glPolygonMode(GLenum face, GLenum mode) {
     }
 }
 
+/* `glPolygonOffset(factor, units)` nudges a filled polygon's depth so coplanar
+ * geometry draws over it. Both are kept as given and scaled where they are written,
+ * because the scaling depends on the depth format: Mesa multiplies the factor by 16,
+ * and the units by 4, 2 or 1 for 16-, 24- and 32-bit z-buffers. This one is 32-bit
+ * float, so the units go in unscaled; see the DB_FMT_CNTL comment in `gl_draw.c`. The
+ * specification defines no error for this call; a negative offset pulls geometry
+ * towards the viewer. */
 void glPolygonOffset(GLfloat factor, GLfloat units) {
     if (gl_list_recording() &&
         GL_LIST_REC(GL_LIST_OP_POLYGON_OFFSET, gl_la_f(factor), gl_la_f(units)))
@@ -5513,8 +5113,7 @@ void glPixelStorei(GLenum pname, GLint param) {
         return;
     switch (pname) {
     case GL_UNPACK_ALIGNMENT:
-        /* The specification's four values and no others; anything else would silently
-         * misplace every row after the first. */
+        /* The specification's four values and no others. */
         if (param != 1 && param != 2 && param != 4 && param != 8) {
             gl_record_error(ctx, GL_INVALID_VALUE);
             return;
@@ -5539,9 +5138,7 @@ void glPixelStorei(GLenum pname, GLint param) {
         break;
     /* Rows per slice of a volume in the caller's memory (GL 1.2), 0 meaning the image's
      * own height; the skips; the pack side's row length. All counts, so none may be
-     * negative. Refused until 2026-09-19 - and a refused skip is worse than a missing
-     * feature: the program's glTexSubImage2D then reads its sub-rectangle from the
-     * image's corner. */
+     * negative. */
     case GL_UNPACK_IMAGE_HEIGHT:
     case GL_PACK_IMAGE_HEIGHT:
     case GL_UNPACK_SKIP_ROWS:
@@ -5604,35 +5201,19 @@ void glPixelStorei(GLenum pname, GLint param) {
     }
 }
 
-/* `glReadPixels(x, y, width, height, format, type, pixels)` - the framebuffer, read
- * back.
+/* `glReadPixels`: the framebuffer read back, in every format and type gl_pixel.c knows,
+ * through every pack parameter (GL 1.2's skips, row length, image height and byte
+ * swapping as well as the alignment).
  *
- * # The y flip, which is the whole of what makes this easy to get wrong
+ * GL's window origin is the bottom-left corner and this framebuffer's row 0 is the top,
+ * so window row `y` is memory row `height_fb - 1 - y`. `glTexImage2D` does not flip: a
+ * texture's rows are the caller's to order.
  *
- * **GL's window origin is the bottom-left corner; this framebuffer's row 0 is the
- * top.** So row `y` of the requested rectangle is row `height_fb - 1 - y` of memory,
- * and a reader that forgets it gets a vertically mirrored image - which looks like a
- * plausible screenshot, so nothing downstream notices. The same flip is why
- * `glTexImage2D` does *not* flip: a texture's rows are the caller's to order, a
- * window's are not.
- *
- * # Where the pixels come from
- *
- * On target, the command processor's own copy of the render target if a frame has been
- * submitted and confirmed - it is CPU-cached, where the render target is write-combined
- * and slow to read. Otherwise the framebuffer itself, which is what a host build always
- * uses.
- *
- * # Out of bounds is zero, not whatever was next in memory
- *
- * The specification leaves pixels outside the framebuffer undefined, and undefined is
- * allowed to be zero. Writing whatever happened to follow the framebuffer would be
- * permitted too and is the kind of plausible garbage this subsystem refuses to hand
- * back, so the destination is cleared first and only the part that overlaps is filled.
+ * On target the pixels come from the command processor's CPU-cached copy of the render
+ * target when a submitted frame is confirmed, since the render target is write-combined
+ * and slow to read; otherwise, and always on the host, from the framebuffer. Pixels
+ * outside the framebuffer are undefined in GL and written as zero.
  */
-/* Every format and type gl_pixel.c knows, through every pack parameter - GL 1.2's
- * skips, row length, image height and byte swapping as well as the alignment. Only the
- * unsigned-byte formats were written until 2026-09-19. */
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
                   GLenum type, GLvoid *pixels) {
     gl_context_t *ctx = gl_get_ctx();
@@ -5656,12 +5237,10 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
     if (width == 0 || height == 0 || !pixels)
         return;
 
-    /* **Depth and stencil** (GL_DEPTH_COMPONENT, GL_STENCIL_INDEX), refused until
-     * 2026-09-19 - though they are GL 1.0's, and reading the depth under the cursor is
-     * how a program unprojects a click. Each value through its own transfer
-     * (gl_pack_value); pixels outside the window are undefined in GL and written as 0.
-     * On the console the flush finishes the frame, and the values are read out of the
-     * GPU's tiled surfaces (gl_zs_depth_ptr). */
+    /* Depth and stencil (GL_DEPTH_COMPONENT, GL_STENCIL_INDEX), each value through its
+     * own transfer (gl_pack_value); pixels outside the window are written as 0. On the
+     * console the flush finishes the frame, and the values are read out of the GPU's
+     * tiled surfaces (gl_zs_depth_ptr). */
     if (f.kind != GL_COLOR) {
         glFlush();
         const float *zb = ctx->depth_buffer;
@@ -5697,14 +5276,9 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
         return;
     }
 
-    /* **Everything issued before this call has to have happened.** The specification
-     * requires it, and on the hardware path it is not free: drawing builds a command
-     * stream and returns, so without the flush this would read a target the GPU has not
-     * been told to draw into yet and report the previous frame - or, before any frame,
-     * the buffer as the display left it. The readback the source below prefers is
-     * filled by that same submission, so the flush is also what makes it current rather
-     * than one frame stale. On the host the flush costs nothing beyond closing an open
-     * glBegin, which the specification also wants. */
+    /* Everything issued before this call has to have happened, as the specification
+     * requires. On the hardware path drawing only builds a command stream, so the flush
+     * submits it; the same submission fills the readback the source below prefers. */
     glFlush();
 
     /* The buffer glReadBuffer names - through the CP's cached copy when that is
@@ -5718,21 +5292,15 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
     gl_pixel_dst_t d;
     gl_pack_dest(ctx, &f, pixels, width, height, &d);
     const GLboolean transfer = gl_pixel_transfer_active(ctx);
-    /* **Luminance read from colour is R + G + B**, clamped, not R alone - the
+    /* Luminance read from colour is R + G + B, clamped, not R alone: the
      * specification's conversion, which Mesa applies whenever an RGB buffer is read as
-     * luminance (main/readpix.c:484, pack.c:1297). A grey pixel reads the same either
-     * way; pure blue read as 0 with R alone, where GL reads it as 1. gl_pack_pixel_f's
-     * `lum_sum`. */
+     * luminance (main/readpix.c:484, pack.c:1297). See gl_pack_pixel_f's `lum_sum`. */
     static const float outside[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     for (GLsizei row = 0; row < height; row++) {
-        /* **Only the row's own pixels are written** - out-of-window ones as zero -
-         * never the alignment padding after them. This zeroed `stride * height` up
-         * front until 2026-09-19, which wrote the *last* row's padding too: a 1x1
-         * GL_RGB read at the default alignment of 4 wrote four bytes into the three the
-         * caller had sized for it, and AddressSanitizer caught it in this file's own
-         * test. The padding between rows is the caller's memory as well; GL leaves it
-         * alone and so does this. */
+        /* Only the row's own pixels are written, out-of-window ones as zero, never the
+         * alignment padding after them: the caller sizes a buffer without the last
+         * row's padding, and GL leaves the padding alone. */
         uint8_t *out = d.base + (size_t)row * d.row_stride;
         GLint window_y = y + row;
         const GLboolean row_in =
@@ -5746,11 +5314,9 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
             }
             /* The flip, and on the scanout path the swizzle, are gl_color_index's. */
             const size_t at = gl_color_index(ctx, window_x, window_y);
-            /* **And when `source` is the CP's copy, the line has to be dropped first**,
-             * because a DMA filled it behind the CPU's back. Without this the read
-             * returns whatever the CPU had cached of an earlier frame - see
-             * gl_color_copy_invalidate_word, and the drifting bytes that sent two
-             * suites chasing a blend. */
+            /* When `source` is the CP's copy, the cache line is dropped first because a
+             * DMA filled it behind the CPU's back; see gl_color_copy_invalidate_word.
+             */
             gl_color_copy_invalidate_word(ctx, source, at);
             const uint32_t argb = source[at];
             float c[4] = {(float)((argb >> 16) & 0xffu) / 255.0f,
@@ -5770,14 +5336,11 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
  * A named block of memory the vertex arrays and the index array are read out of. The
  * storage here is ordinary process memory rather than a GPU allocation: everything that
  * reads it is the CPU-side array reader, and the hardware path copies the vertices it
- * assembles into its own allocation afterwards regardless of where they came from. A
- * GPU-resident buffer would save that copy and is a measurable optimisation rather than
- * a correctness question.
+ * assembles into its own allocation afterwards regardless of where they came from.
  * ------------------------------------------------------------------------- */
 
 /* The allocator differs by build: a freestanding target has the SDK's own heap, and the
- * host test build has the C library's. Wrapped here so the five call sites below do not
- * each carry the #if. */
+ * host test build has the C library's. */
 void *gl_heap_alloc(size_t bytes) {
 #ifdef OOPS_HOST_BUILD
     return malloc(bytes);
@@ -5796,8 +5359,7 @@ void gl_heap_free(void *p) {
 #endif
 }
 
-/* The buffer objects' own names for the pair, kept so the call sites below read as they
- * did and so there is one place that knows which heap this build has. */
+/* The buffer objects' names for the heap pair. */
 static void *gl_buffer_alloc(size_t bytes) {
     return gl_heap_alloc(bytes);
 }
@@ -5829,9 +5391,7 @@ void gl_free_all_buffers(gl_context_t *ctx) {
     ctx->bound_element_array_buffer = 0u;
 }
 
-/* Which binding a target names. Returns NULL for a target this does not have, so the
- * callers can refuse uniformly rather than each deciding what an unknown target means.
- */
+/* Which binding a target names, or NULL for a target this does not have. */
 static GLuint *gl_buffer_binding(gl_context_t *ctx, GLenum target) {
     switch (target) {
     case GL_ARRAY_BUFFER:
@@ -5847,34 +5407,23 @@ const uint8_t *gl_array_base(const gl_context_t *ctx, const gl_client_array_t *a
     if (!ctx || !a)
         return NULL;
     if (a->buffer == 0u) {
-        /* **An offset with no buffer bound is not an address, and dereferencing it
-         * faults.** With a buffer bound `pointer` holds a byte offset; with none, GL
-         * says it is a client pointer and this has to honour that. But a program that
-         * ignored a failed `glGenBuffers` - Neverball, 2026-09-23 - binds 0 and then
-         * passes its offsets anyway, and the first page is never mapped, so what
-         * arrives here is a small integer and the array reader took a SIGSEGV on
-         * address 8 rather than drawing anything.
-         *
-         * Treating that as "no array" gives the draw its default attribute instead,
-         * which is wrong on screen and diagnosable off it: `glGenBuffers` has already
-         * raised GL_OUT_OF_MEMORY, and a log with that error and a strange-looking
-         * frame is a better place to start than a fault address. No real client array
-         * lives in the first page. */
+        /* With no buffer bound, GL takes `pointer` as a client pointer. A program that
+         * ignored a failed `glGenBuffers` binds 0 and passes buffer offsets anyway,
+         * which land in the unmapped first page. That is treated as no array, so the
+         * draw gets its default attribute and `glGenBuffers` has already raised
+         * GL_OUT_OF_MEMORY. No real client array lives in the first page. */
         if ((uintptr_t)a->pointer != 0u && (uintptr_t)a->pointer < 4096u)
             return NULL;
         return (const uint8_t *)a->pointer;
     }
 
-    /* **The name is resolved now, not when the pointer was set.** glBufferData may have
-     * replaced the storage since - respecifying a buffer every frame is ordinary - so
-     * an address captured at glVertexPointer time would be stale.
+    /* The name is resolved now, not when the pointer was set: glBufferData may have
+     * replaced the storage since.
      *
-     * **Indexed, not searched.** `glGenBuffers` is the only thing that creates a buffer
-     * and it names slot `i` as `i + 1`; `glBindBuffer` refuses a name it did not hand
-     * out, so the name is the slot and always has been. This walked all 1024 entries
-     * per array per vertex until 2026-09-23, which is why the table could not grow. The
-     * identity is still checked rather than assumed, so a future creator that breaks it
-     * fails a draw instead of reading the wrong buffer. */
+     * Indexed, not searched: `glGenBuffers` is the only creator and names slot `i` as
+     * `i + 1`, and `glBindBuffer` refuses a name it did not hand out. The identity is
+     * still checked, so a creator that breaks the rule fails a draw instead of reading
+     * the wrong buffer. */
     const GLuint id = a->buffer;
     if (id >= 1u && id <= (GLuint)OOPS_GL_MAX_BUFFER_OBJECTS) {
         const gl_buffer_object_t *buf = &ctx->buffers[id - 1u];
@@ -5909,9 +5458,8 @@ void glGenBuffers(GLsizei n, GLuint *buffers) {
         ctx->buffers[i].access = GL_READ_WRITE; /* GL 1.5's initial GL_BUFFER_ACCESS */
         buffers[made++] = ctx->buffers[i].id;
     }
-    /* Ran out. The names already handed back are real; the rest are zeroed rather than
-     * left as the caller found them, so a program that ignores the error still binds
-     * nothing instead of binding whatever was in its array. */
+    /* Out of names. Those handed back are real; the rest are zeroed, so a program that
+     * ignores the error binds nothing rather than whatever was in its array. */
     if (made < n) {
         for (GLsizei i = made; i < n; i++)
             buffers[i] = 0u;
@@ -5939,9 +5487,7 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
         buf->id = 0u;
         buf->mapped = GL_FALSE; /* a mapped buffer is unmapped by its deletion */
 
-        /* **A deleted buffer that was bound reverts the binding to 0.** Leaving it
-         * bound would have the next glBufferData look up a name nothing owns; GL
-         * specifies the unbind. */
+        /* A deleted buffer that was bound reverts the binding to 0, as GL specifies. */
         if (ctx->bound_array_buffer == buffers[i])
             ctx->bound_array_buffer = 0u;
         if (ctx->bound_element_array_buffer == buffers[i])
@@ -5959,9 +5505,9 @@ void glBindBuffer(GLenum target, GLuint buffer) {
         return;
     }
     /* Binding 0 means "back to client memory" and is always legal. Any other name has
-     * to be one glGenBuffers handed out: GL lets an implementation accept an unknown
-     * name and create the object, but doing so quietly turns a typo into a
-     * working-looking buffer full of nothing. */
+     * to be one glGenBuffers handed out. GL lets an implementation create an object for
+     * an unknown name; refusing it keeps a mistyped name from becoming an empty buffer.
+     * `gl_array_base` relies on the name being the slot. */
     if (buffer != 0u && !gl_find_buffer(ctx, buffer)) {
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
@@ -5978,8 +5524,8 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
-    /* All nine of GL 1.5's usages - the _READ and _COPY ones were refused until
-     * 2026-09-19. A hint, which process memory has no use for; kept and reported. */
+    /* All nine of GL 1.5's usages. A hint process memory has no use for; kept and
+     * reported. */
     switch (usage) {
     case GL_STREAM_DRAW:
     case GL_STREAM_READ:
@@ -6007,14 +5553,14 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
         return;
     }
 
-    /* **Replaced, not resized.** glBufferData respecifies the whole store, so the old
-     * one goes even when the size is unchanged - and the arrays pointing at this buffer
-     * find the new storage because they kept the name rather than an address. */
+    /* Replaced, not resized: glBufferData respecifies the whole store, so the old one
+     * goes even when the size is unchanged. Arrays find the new storage because they
+     * keep the name, not an address. */
     gl_buffer_release(buf->data);
     buf->data = NULL;
     buf->size = 0;
     buf->usage = usage;
-    /* A new store unmaps the old one - the pointer it handed out is gone with it. */
+    /* A new store unmaps the old one; the pointer it handed out is gone with it. */
     buf->mapped = GL_FALSE;
     buf->access = GL_READ_WRITE;
     if (size == 0)
@@ -6029,10 +5575,8 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     if (data) {
         memcpy(buf->data, data, (size_t)size);
     } else {
-        /* A null pointer reserves the store, which is how a program sets a buffer up to
-         * fill with glBufferSubData. Zeroed rather than left as the allocator found it,
-         * so a draw before the first update reads zeroes instead of whatever was in
-         * that memory. */
+        /* A null pointer reserves the store for glBufferSubData to fill. Zeroed, so a
+         * draw before the first update reads zeroes. */
         memset(buf->data, 0, (size_t)size);
     }
 }
@@ -6052,10 +5596,8 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size,
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
-    /* **Bounds are an error, not a clamp**, and the addition is done in a width that
-     * cannot wrap past the check: offset and size are both signed and both already
-     * known to be non-negative, so `offset + size` compared against the store is safe
-     * here. */
+    /* Bounds are an error, not a clamp. Both are checked non-negative before the sum.
+     */
     if (offset < 0 || size < 0 || offset + size > buf->size) {
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
@@ -6099,11 +5641,11 @@ void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, GLvoid 
     memcpy(data, (const uint8_t *)buf->data + offset, (size_t)size);
 }
 
-/* **GL 1.5's mapping.** The store is process memory, so the pointer handed out is the
- * store itself - reads see the data, writes are the data, with nothing to copy on
- * unmap. Checked in Mesa's order (main/bufferobj.c:3876-3897): the access (an enum
- * error), the target, a bound buffer, and not already mapped (each
- * GL_INVALID_OPERATION). A buffer with no store maps to NULL. */
+/* GL 1.5's mapping. The store is process memory, so the pointer handed out is the
+ * store itself, with nothing to copy on unmap. Checked in Mesa's order
+ * (main/bufferobj.c:3876-3897): the access (an enum error), the target, a bound buffer,
+ * and not already mapped (each GL_INVALID_OPERATION). A buffer with no store maps to
+ * NULL. */
 GLvoid *glMapBuffer(GLenum target, GLenum access) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
@@ -6171,11 +5713,10 @@ void glGetBufferPointerv(GLenum target, GLenum pname, GLvoid **params) {
     params[0] = buf->mapped ? buf->data : NULL;
 }
 
-/* **GL_ARB_vertex_buffer_object's own spellings** (2026-09-19). The extension came
- * before GL 1.5 took it into the core, so a program of that era calls these names. Each
- * is the core function; the extension's types are the core's (`GLsizeiptrARB` is
- * `GLsizeiptr`). This is what lets glGetString advertise the extension, which it would
- * not for behaviour alone. */
+/* GL_ARB_vertex_buffer_object's own spellings, which a program written before GL 1.5
+ * calls. Each is the core function; the extension's types are the core's
+ * (`GLsizeiptrARB` is `GLsizeiptr`). They are what lets glGetString advertise the
+ * extension. */
 void glBindBufferARB(GLenum target, GLuint buffer) {
     glBindBuffer(target, buffer);
 }
@@ -6253,16 +5794,14 @@ GLboolean glIsBuffer(GLuint buffer) {
  * names from glGenQueries, or a new name at glBeginQuery in a compatibility context; a
  * query object only once begun; one active query a target.
  *
- * **On the hardware path the GPU counts them** since 2026-09-20: two `ZPASS_DONE`
- * events bracket the query, each dumping all sixteen render backends' counters, and the
- * result is the sum of the differences (`gl_hw_query_begin`/`gl_hw_query_end`). The
- * count is exact rather than conservative because DB_COUNT_CONTROL gains
- * `PERFECT_ZPASS_COUNTS` while a query runs. It was the CPU's fragments alone before
- * that, with GL_QUERY_COUNTER_BITS 0 to say so.
+ * On the hardware path the GPU counts: two `ZPASS_DONE` events bracket the query, each
+ * dumping all sixteen render backends' counters, and the result is the sum of the
+ * differences (`gl_hw_query_begin`/`gl_hw_query_end`). DB_COUNT_CONTROL carries
+ * `PERFECT_ZPASS_COUNTS` while a query runs, so the count is exact.
  *
- * **A query whose draws never test depth still is not counted there**, and keeps the
- * CPU's zero with one log line: the counters need a bound depth surface, and setting
- * ZPASS_ENABLE without one stalls the depth block and never retires the fence.
+ * A query whose draws never test depth is not counted there and keeps the CPU's zero
+ * with one log line: the counters need a bound depth surface, and ZPASS_ENABLE without
+ * one stalls the depth block and never retires the fence.
  * ------------------------------------------------------------------------- */
 
 static gl_query_object_t *gl_find_query(gl_context_t *ctx, GLuint id) {
@@ -6398,12 +5937,10 @@ void glEndQuery(GLenum target) {
     }
     q->active = GL_FALSE;
     q->result = ctx->query_samples;
-    /* **The GPU's count replaces the CPU's on the hardware path**, where the CPU draws
-     * nothing and `query_samples` is zero anyway. A query none of whose draws tested
-     * depth never armed, and keeps the software count with one line saying so -
-     * GL_SAMPLES_PASSED with the depth test off is legal and common, and the
-     * alternative is setting ZPASS_ENABLE against no depth target, which is what wedged
-     * the GPU in `REQ-20260919T1600Z-e3a7`. */
+    /* The GPU's count replaces the CPU's on the hardware path, where the CPU draws
+     * nothing. A query none of whose draws tested depth never armed and keeps the
+     * software count, with one log line: ZPASS_ENABLE against no depth target wedges
+     * the GPU. */
     if (ctx->use_hardware) {
         GLboolean counted = GL_FALSE;
         const uint64_t gpu = gl_hw_query_end(ctx, &counted);
@@ -6429,11 +5966,9 @@ void glGetQueryiv(GLenum target, GLenum pname, GLint *params) {
         return;
     }
     switch (pname) {
-    /* **32 on both paths** since 2026-09-20, when the console started counting: it was
-     * 0 there, which GL 1.5 allows and which tells a program the count carries no
-     * information (4.1.6). 32 rather than the counters' own 63 usable bits because a
-     * result leaves here through `glGetQueryObjectiv` and `glGetQueryObjectuiv` and
-     * nothing wider, so 32 is what either path can promise. */
+    /* 32 on both paths (GL 1.5, 4.1.6), not the counters' 63 usable bits: a result
+     * leaves through `glGetQueryObjectiv` and `glGetQueryObjectuiv` and nothing wider.
+     */
     case GL_QUERY_COUNTER_BITS:
         params[0] = 32;
         break;
@@ -6487,10 +6022,8 @@ void glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params) {
         params[0] = (v > 0xffffffffu) ? 0xffffffffu : (GLuint)v;
 }
 
-/* **GL_ARB_occlusion_query's own spellings** (since 2026-09-20, with the extension
- * itself). The extension predates GL 1.5 and a program written against it calls these;
- * gl.h's compatibility section says why the names and the list entry have to arrive
- * together. */
+/* GL_ARB_occlusion_query's own spellings, which a program written before GL 1.5 calls;
+ * gl.h's compatibility section says why the names and the list entry go together. */
 void glGenQueriesARB(GLsizei n, GLuint *ids) {
     glGenQueries(n, ids);
 }
@@ -6553,9 +6086,7 @@ void glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params) {
  * The per-object queries
  *
  * State belonging to a texture, a light or a material rather than to the context. Each
- * answers from the same field the matching setter writes - not from a parallel copy,
- * which is how a query comes to disagree with the state it is querying (see
- * glIsEnabled, which did).
+ * answers from the same field the matching setter writes, never a parallel copy.
  * ------------------------------------------------------------------------- */
 
 void glGetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
@@ -6567,13 +6098,12 @@ void glGetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
         return;
     }
     const gl_texture_object_t *tex = gl_texture_for_target(ctx, target, GL_FALSE);
-    /* No texture object yet is not an error - GL answers with the defaults a fresh
-     * object would have, which is what a program setting up one parameter at a time
-     * reads back. */
+    /* No texture object yet is not an error: GL answers with a fresh object's
+     * defaults. */
     switch (pname) {
     /* The float parameters as integers, as Mesa converts them (main/texparam.c, the iv
      * getter): a colour and the priority across the signed range by FLOAT_TO_INT, and
-     * residency as the boolean it is - every texture here is resident. */
+     * residency as the boolean it is; every texture here is resident. */
     case GL_TEXTURE_BORDER_COLOR:
         for (int i = 0; i < 4; i++) {
             params[i] = gl_float_to_int_color(tex ? tex->border_color[i] : 0.0f);
@@ -6622,10 +6152,9 @@ void glGetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
     case GL_TEXTURE_WRAP_R:
         params[0] = (GLint)(tex ? tex->wrap_r : (GLenum)GL_REPEAT);
         break;
-    /* The defaults have to be the ones gl_find_or_create_texture actually assigns, or
-     * the query answers differently before and after the first glTexImage2D. min_filter
-     * is GL_NEAREST_MIPMAP_LINEAR, which is the specification's default and not
-     * GL_LINEAR. */
+    /* The defaults match what gl_find_or_create_texture assigns, so the answer is the
+     * same before and after the first upload. min_filter's is the specification's
+     * GL_NEAREST_MIPMAP_LINEAR. */
     case GL_TEXTURE_MIN_FILTER:
         params[0] = (GLint)(tex ? tex->min_filter : (GLenum)GL_NEAREST_MIPMAP_LINEAR);
         break;
@@ -6676,8 +6205,7 @@ void glGetTexParameterfv(GLenum target, GLenum pname, GLfloat *params) {
     params[0] = (GLfloat)iv;
 }
 
-/* The per-level queries: what the image actually is, as opposed to how it is sampled. A
- * program asking these has usually just uploaded and wants to know what it got. */
+/* The per-level queries: what the image is, as opposed to how it is sampled. */
 void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *params) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !params)
@@ -6690,10 +6218,9 @@ void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *p
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
-    /* **The level asked about.** `level` was ignored, so every level answered with the
-     * base image's size. A level never specified answers zero, as the specification
-     * says. A proxy's level is what its last glTexImage asked for, or zeros if that
-     * would not have fitted. */
+    /* The level asked about. A level never specified answers zero, as the
+     * specification says. A proxy's level is what its last glTexImage asked for, or
+     * zeros if that would not have fitted. */
     gl_tex_view_t lv;
     GLboolean has;
     const gl_tex_level_t *proxy = gl_proxy_level(ctx, target, level);
@@ -6753,9 +6280,7 @@ void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *p
     case GL_TEXTURE_DEPTH:
         params[0] = has ? lv.depth : 0;
         break;
-    /* No texture here is compressed, which is a fact about all of them rather than a
-     * refusal - so this answers rather than erroring, and the size query answers zero.
-     */
+    /* No texture here is compressed, so these answer rather than refuse. */
     case GL_TEXTURE_COMPRESSED:
         params[0] = GL_FALSE;
         break;
@@ -6763,11 +6288,9 @@ void glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *p
         params[0] = 0;
         break;
     case GL_TEXTURE_INTERNAL_FORMAT:
-        /* **What was asked for**, as Mesa answers (main/texparam.c:1807) - but a
-         * generic compressed format, which nothing here compresses, as its base format,
-         * which is what GL 1.3 says it is replaced by. This answered GL_RGBA for
-         * everything while the internal format was ignored; a level never specified
-         * still does. */
+        /* What was asked for, as Mesa answers (main/texparam.c:1807), except that a
+         * generic compressed format answers its base format, which GL 1.3 says replaces
+         * it. A level never specified answers GL_RGBA. */
         if (!has) {
             params[0] = (GLint)GL_RGBA;
         } else if (lv.internal_format >= (GLint)GL_COMPRESSED_ALPHA &&
@@ -6804,9 +6327,8 @@ void glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname,
     params[0] = (GLfloat)iv;
 }
 
-/* How many floats a light or material query writes. Same reasoning as
- * gl_query_element_count: the caller sized its buffer from the pname, so four into a
- * GLfloat[1] is an overrun. */
+/* How many floats a light query writes; the caller sized its buffer from the pname, as
+ * for gl_query_element_count. */
 static int gl_light_element_count(GLenum pname) {
     switch (pname) {
     case GL_AMBIENT:
@@ -6831,11 +6353,7 @@ void glGetLightfv(GLenum light, GLenum pname, GLfloat *params) {
     }
     const gl_light_t *l = &ctx->lights[(size_t)(light - GL_LIGHT0)];
     switch (pname) {
-    /* **Eye coordinates, which is what GL says and what is stored.** glLightfv
-     * transformed the position by the modelview matrix on the way in, so returning the
-     * object-space value the caller passed would need a copy of it kept and an inverse
-     * applied - and would answer a different question from the one the specification
-     * asks. */
+    /* Eye coordinates, as GL specifies and as glLightfv stored them. */
     case GL_POSITION:
         for (int i = 0; i < 4; i++)
             params[i] = l->position[i];
@@ -6900,9 +6418,8 @@ void glGetMaterialfv(GLenum face, GLenum pname, GLfloat *params) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !params)
         return;
-    /* GL_FRONT_AND_BACK is refused here although glMaterialfv accepts it: setting both
-     * at once is meaningful, reading "both" is not - there is no single answer to
-     * return. */
+    /* GL_FRONT_AND_BACK is refused here although glMaterialfv accepts it: reading both
+     * has no single answer. */
     const gl_material_t *m;
     if (face == GL_FRONT) {
         m = &ctx->mat_front;
@@ -6957,8 +6474,7 @@ void glGetMaterialiv(GLenum face, GLenum pname, GLint *params) {
         params[i] = (GLint)fv[i];
 }
 
-/* The array pointers, read back. `glInterleavedArrays` is the reason this matters: a
- * program that let it compute the offsets may want to know what they came out as. */
+/* The array pointers read back, including those `glInterleavedArrays` computed. */
 void glGetPointerv(GLenum pname, GLvoid **params) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx || !params)
@@ -6980,8 +6496,6 @@ void glGetPointerv(GLenum pname, GLvoid **params) {
     case GL_EDGE_FLAG_ARRAY_POINTER:
         params[0] = (GLvoid *)(uintptr_t)ctx->array_edge_flag.pointer;
         break;
-    /* Answered since 2026-09-19; the index array had a pointer and no way to read it
-     * back. */
     case GL_INDEX_ARRAY_POINTER:
         params[0] = (GLvoid *)(uintptr_t)ctx->array_index.pointer;
         break;
@@ -7003,12 +6517,8 @@ void glGetPointerv(GLenum pname, GLvoid **params) {
     }
 }
 
-/* `glGetTexImage(...)` - the bound texture, read back into client memory.
- *
- * **Not a flip.** glReadPixels turns the framebuffer over because GL's window origin is
- * the bottom-left corner; a texture has no window and row 0 of a texture image is row 0
- * of what was uploaded, so this walks straight through. Sharing glReadPixels' loop here
- * would have been the tidy-looking mistake.
+/* `glGetTexImage`: the bound texture read back into client memory. No flip: row 0 of a
+ * texture image is row 0 of what was uploaded, unlike glReadPixels' window rows.
  *
  * The stored image is RGBA8 at `tex->pitch`, so this converts out through the same
  * `gl_pack_pixel` glReadPixels uses and honours GL_PACK_ALIGNMENT the same way.
@@ -7040,18 +6550,16 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
     if (!pixels)
         return;
 
-    /* The level asked for - `level` was ignored and every level read back the base
-     * image. */
     const gl_texture_object_t *tex = gl_texture_for_target(ctx, target, GL_FALSE);
     gl_tex_view_t lv;
     if (!gl_tex_target_view(tex, target, level, &lv)) {
-        /* No image under the query. The same error glTexSubImage2D raises for the same
-         * reason: the caller is asking about something that was never uploaded. */
+        /* No image at that level: the error glTexSubImage2D raises for the same case.
+         */
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
     /* A depth texture reads back as GL_DEPTH_COMPONENT and only so, a colour one never
-     * so (Mesa main/texgetimage.c's format checks) - GL_INVALID_OPERATION either way.
+     * so (Mesa main/texgetimage.c's format checks); GL_INVALID_OPERATION either way.
      */
     if ((lv.base_format == GL_DEPTH_COMPONENT) != (f.kind == GL_DEPTH) ||
         f.kind == GL_STENCIL) {
@@ -7060,10 +6568,9 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
     }
 
     /* A volume comes back slice after slice, GL_PACK_IMAGE_HEIGHT rows apart when that
-     * is set - and every pack parameter applies, as for glReadPixels. Luminance is the
-     * red channel, the texture's own luminance, not a sum - and a luminance or
-     * intensity texture reports it in red alone, so asking for GL_RGB of one gives (L,
-     * 0, 0). */
+     * is set, and every pack parameter applies as for glReadPixels. Luminance is the
+     * red channel, not a sum; a luminance or intensity texture reports it in red alone,
+     * so GL_RGB of one gives (L, 0, 0). */
     gl_pixel_dst_t d;
     gl_pack_dest(ctx, &f, pixels, lv.width, lv.height, &d);
     const uint8_t *src = lv.pixels;
@@ -7074,9 +6581,8 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
                 src + ((size_t)z * lv.slice + (size_t)row * lv.pitch) * 4u;
             uint8_t *out =
                 d.base + (size_t)z * d.image_stride + (size_t)row * d.row_stride;
-            /* Only the row's own pixels. This zeroed `stride * height` first, which
-             * wrote the last row's alignment padding past the end of a buffer sized as
-             * GL sizes it - the same overrun glReadPixels had. */
+            /* Only the row's own pixels, never the alignment padding, as in
+             * glReadPixels. */
             for (GLsizei col = 0; col < lv.width; col++) {
                 if (f.kind == GL_DEPTH) {
                     float dv;
@@ -7097,17 +6603,11 @@ void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
     }
 }
 
-/* `glCopyTexSubImage2D(...)` - the framebuffer into a bound texture. Render-to-texture,
- * the 1.x way.
- *
- * Reads through `glReadPixels`, which means it inherits the y flip: the window
- * rectangle is read in GL's bottom-left orientation and lands in the texture the same
- * way up as a `glTexSubImage2D` of the same pixels would. Sharing that path rather than
- * copying it is the point - a second flip written by hand is a second chance to get the
- * flip wrong.
+/* The framebuffer-to-texture copy behind `glCopyTexSubImage2D` and
+ * glCopyTexSubImage1D, target already validated. It reads through `glReadPixels` and
+ * so inherits its y flip: the window rectangle lands in the texture the same way up as
+ * a `glTexSubImage2D` of the same pixels would.
  */
-/* The framebuffer-to-texture copy, target already validated - shared with
- * glCopyTexSubImage1D. */
 static void gl_copy_tex_sub_common(gl_context_t *ctx, GLenum target, GLint level,
                                    GLint xoffset, GLint yoffset, GLint zoffset, GLint x,
                                    GLint y, GLsizei width, GLsizei height) {
@@ -7118,10 +6618,8 @@ static void gl_copy_tex_sub_common(gl_context_t *ctx, GLenum target, GLint level
     if (width == 0 || height == 0)
         return;
 
-    /* **A bounded scratch rather than an allocation.** This is called per frame by
-     * anything doing render-to-texture, and a freestanding binary has no business
-     * allocating on that path; a rectangle wider than the scratch is refused rather
-     * than silently truncated. */
+    /* A bounded scratch rather than an allocation, since render-to-texture runs every
+     * frame; a rectangle wider than the scratch is refused, not truncated. */
     enum { COPY_MAX_WIDTH = 2048 };
     static uint8_t row[COPY_MAX_WIDTH * 4];
     if (width > COPY_MAX_WIDTH) {
@@ -7129,13 +6627,10 @@ static void gl_copy_tex_sub_common(gl_context_t *ctx, GLenum target, GLint level
         return;
     }
 
-    /* One row at a time, so the scratch is a row rather than a rectangle. Row `r` of
-     * the destination is row `r` of the source read in GL orientation, which is what
-     * keeps this identical to a glTexSubImage2D of the same pixels. */
-    /* The scratch is tight and native, so neither the program's pack state (reading
-     * into it) nor its unpack state (uploading from it) may apply: no padding, row
-     * length, skips or byte swapping on either side. Only the alignment was set aside
-     * before the other parameters existed. */
+    /* One row at a time: row `r` of the destination is row `r` of the source read in
+     * GL orientation. The scratch is tight and native, so neither the program's pack
+     * state nor its unpack state applies: no padding, row length, skips or byte
+     * swapping on either side. */
     const GLint p_align = ctx->pack_alignment, p_row = ctx->pack_row_length;
     const GLint p_rows = ctx->pack_skip_rows, p_px = ctx->pack_skip_pixels;
     const GLint p_img = ctx->pack_skip_images, p_ih = ctx->pack_image_height;
@@ -7148,7 +6643,7 @@ static void gl_copy_tex_sub_common(gl_context_t *ctx, GLenum target, GLint level
     ctx->pack_image_height = 0;
     ctx->pack_swap_bytes = GL_FALSE;
     gl_unpack_saved_t saved_unpack;
-    /* **Into a depth texture the copy reads the depth buffer** (GL 1.4), as floats,
+    /* Into a depth texture the copy reads the depth buffer (GL 1.4), as floats,
      * through glReadPixels like any other copy. */
     const gl_texture_object_t *dtex = gl_texture_for_target(ctx, target, GL_FALSE);
     gl_tex_view_t dlv;
@@ -7159,13 +6654,9 @@ static void gl_copy_tex_sub_common(gl_context_t *ctx, GLenum target, GLint level
     ctx->gen_mipmap_suspend++; /* GL_GENERATE_MIPMAP once, after the last row */
     for (GLsizei r = 0; r < height; r++) {
         glReadPixels(x, y + r, width, 1, rd_format, rd_type, row);
-        /* The shared helper, not glTexSubImage2D: `target` may be GL_TEXTURE_1D here
-         * and the public 2D entry point refuses that - correctly, which is why it
-         * cannot be used.
-         *
-         * **glReadPixels has already applied the pixel transfer**, which a copy
-         * undergoes once; the upload would apply it a second time, so it is suspended
-         * for the upload. */
+        /* The shared helper, not glTexSubImage2D, which refuses GL_TEXTURE_1D.
+         * glReadPixels has already applied the pixel transfer, which a copy undergoes
+         * once, so it is suspended for the upload. */
         ctx->pixel_transfer_suspend = GL_TRUE;
         gl_unpack_neutral(ctx, &saved_unpack);
         gl_tex_sub_image_common(ctx, target, level, xoffset, yoffset + r, zoffset,
@@ -7186,8 +6677,7 @@ static void gl_copy_tex_sub_common(gl_context_t *ctx, GLenum target, GLint level
 
 void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                          GLint x, GLint y, GLsizei width, GLsizei height) {
-    /* A copy reads the framebuffer when it *runs*, so there is nothing to capture but
-     * the call. */
+    /* A copy reads the framebuffer when it runs, so only the call is recorded. */
     if (gl_list_recording() &&
         GL_LIST_REC(GL_LIST_OP_COPY_TEX_SUB_IMAGE_2D, gl_la_e(target), gl_la_i(level),
                     gl_la_i(xoffset), gl_la_i(yoffset), gl_la_i(x), gl_la_i(y),
@@ -7205,16 +6695,9 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
                            height);
 }
 
-/* `glCopyTexImage2D(...)` - the allocating half of the copy pair.
- *
- * Sizes the texture from the window rectangle and then copies into it through
- * glCopyTexSubImage2D, so there is exactly one piece of code that decides which way up
- * a framebuffer copy lands. Writing the flip a second time here is the failure this
- * avoids: it would work for a square rectangle and be upside down for everything else.
- *
- * `border` must be zero. The bordered texture is a GL 1.0 feature no implementation has
- * supported for decades, and accepting a non-zero border would mean claiming a texture
- * one pixel larger in each direction than the one actually allocated.
+/* `glCopyTexImage2D`: sizes the texture from the window rectangle, then copies into it
+ * through glCopyTexSubImage2D, so one piece of code decides which way up a framebuffer
+ * copy lands. `border` must be zero; bordered textures are refused at every upload.
  */
 void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x,
                       GLint y, GLsizei width, GLsizei height, GLint border) {
@@ -7237,24 +6720,19 @@ void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x
         return;
     }
 
-    /* Allocated with no pixels: every texel is overwritten by the copy below, so
-     * uploading anything here would be work thrown away. A depth format is allocated as
-     * depth, which is what the copy then reads the depth buffer into. */
+    /* Allocated with no pixels, since the copy below overwrites every texel. A depth
+     * format is allocated as depth, which the copy fills from the depth buffer. */
     const GLboolean depth =
         (GLboolean)(gl_tex_base_format((GLint)internalformat) == GL_DEPTH_COMPONENT);
     glTexImage2D(target, level, (GLint)internalformat, width, height, 0,
                  depth ? (GLenum)GL_DEPTH_COMPONENT : (GLenum)GL_RGBA,
                  depth ? (GLenum)GL_FLOAT : (GLenum)GL_UNSIGNED_BYTE, NULL);
 
-    /* **Checked against the texture, not against glGetError.** GL errors are sticky, so
-     * an error left over from some earlier call would abort a copy that had every right
-     * to run. What matters is whether the allocation above actually produced an image
-     * of this size. */
+    /* Checked against the texture, not glGetError: GL errors are sticky, and one left
+     * from an earlier call must not abort the copy. The level is the one just
+     * specified. */
     gl_texture_object_t *tex = gl_texture_for_target(ctx, target, GL_FALSE);
     gl_tex_view_t lv;
-    /* The level just specified, not the base one - this compared against the base
-     * level's size until 2026-09-19, so a copy into any mip level found a mismatch and
-     * silently copied nothing. */
     if (!gl_tex_target_view(tex, target, level, &lv) || lv.width != width ||
         lv.height != height) {
         return;
@@ -7335,8 +6813,7 @@ static void gl_tex_sub_image_common(gl_context_t *ctx, GLenum target, GLint leve
 
     gl_texture_object_t *tex = gl_texture_for_target(ctx, target, GL_FALSE);
     if (!tex || !tex->pixels) {
-        /* Nothing to update. The specification's error for a sub-image with no image
-         * under it. */
+        /* The specification's error for a sub-image with no image under it. */
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
@@ -7345,9 +6822,7 @@ static void gl_tex_sub_image_common(gl_context_t *ctx, GLenum target, GLint leve
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
-    /* **Bounds are an error, not a clamp.** A sub-image that ran off the edge would
-     * otherwise corrupt whatever followed the texture, or silently draw a different
-     * rectangle from the one the caller asked for. */
+    /* Bounds are an error, not a clamp. */
     const GLsizei td = tex->depth > 0 ? tex->depth : 1;
     if ((size_t)xoffset + (size_t)width > (size_t)tex->width ||
         (size_t)yoffset + (size_t)height > (size_t)tex->height ||
@@ -7407,12 +6882,6 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                             format, type, pixels);
 }
 
-/* The upload, with the target already validated by the caller.
- *
- * Everything below this point is the same for a 1D and a 2D image - a 1D one is stored
- * as a height-1 2D one, which is what the sampler reads and what the descriptor
- * describes. The only thing the two do not share is *which binding* the texture comes
- * from, and that arrives as `target`. */
 /* A copy's internal format: any glTexImage takes, but for the legacy 1 to 4, and a
  * refusal here is an enum error rather than glTexImage's value error (Mesa,
  * main/teximage.c:2462-2471). */
@@ -7451,6 +6920,9 @@ static GLboolean gl_is_proxy_target(GLenum t) {
                        t == GL_PROXY_TEXTURE_3D || t == GL_PROXY_TEXTURE_CUBE_MAP);
 }
 
+/* The upload, target already validated by the caller. A 1D image is stored as a
+ * height-1 2D one, which is what the sampler reads and the descriptor describes; the
+ * two differ only in which binding `target` names. */
 static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
                                 GLint internalformat, GLsizei width, GLsizei height,
                                 GLsizei depth, GLenum format, GLenum type,
@@ -7463,27 +6935,22 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
-    /* **Checked before anything is allocated.** This used to convert only GL_RGBA and
-     * GL_RGB and fall through silently for everything else, leaving the texture holding
-     * whatever the allocation contained - uninitialised memory, sampled, with no error
-     * raised. */
+    /* Checked before anything is allocated. */
     gl_pixel_fmt_t f;
     const GLenum fmt_err = gl_pixel_fmt(format, type, &f);
     if (fmt_err != GL_NO_ERROR) {
         gl_record_error(ctx, fmt_err);
         return;
     }
-    /* **The internal format was ignored until 2026-09-19** - every texture was RGBA
-     * whatever it was asked to be, so a GL_ALPHA texture drawn GL_MODULATE painted its
-     * black RGB over the fragment's colour, and GL_INTENSITY did not exist. One GL 1.x
+    /* The internal format decides the base format the texels expand by; one GL 1.x
      * does not define is a value error (Mesa, main/teximage.c:1953). */
     const GLenum base = gl_tex_base_format(internalformat);
     if (base == 0u) {
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
-    /* **Depth textures** (GL 1.4): 1D and 2D only in GL 1.x - cube maps are GL 3.0's
-     * (Mesa main/teximage.c:1744-1790, :2021-2025) - and depth data for a depth format,
+    /* Depth textures (GL 1.4): 1D and 2D only in GL 1.x, cube maps being GL 3.0's
+     * (Mesa main/teximage.c:1744-1790, :2021-2025); and depth data for a depth format,
      * colour data for a colour one, never a stencil index (texture_formats_agree,
      * :1795-1832). Each is GL_INVALID_OPERATION. */
     if (base == GL_DEPTH_COMPONENT &&
@@ -7497,7 +6964,7 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
         return;
     }
     /* An image larger than its level can be: the specification's limit is the maximum
-     * size halved once per level - GL_MAX_3D_TEXTURE_SIZE on all three sides of a
+     * size halved once per level, GL_MAX_3D_TEXTURE_SIZE on all three sides of a
      * volume, and GL_MAX_CUBE_MAP_TEXTURE_SIZE for a cube map's face, which must also
      * be square (Mesa, main/teximage.c:1079-1100). */
     const GLboolean is3d =
@@ -7508,20 +6975,17 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
     const GLsizei max =
         is3d ? OOPS_GL_MAX_3D_TEXTURE_SIZE
              : (cube ? OOPS_GL_MAX_CUBE_MAP_TEXTURE_SIZE : OOPS_GL_MAX_TEXTURE_SIZE);
-    /* **A zero in any dimension is a legal size**, and means no image at all - which is
-     * how a program releases a level it no longer wants. It was refused with
-     * GL_INVALID_VALUE here until 2026-09-20, which was this library's one behavioural
-     * difference from the specification; the release is handled below, after the
-     * texture is found. */
+    /* A zero in any dimension is a legal size meaning no image, which is how a program
+     * releases a level; the release is handled below, after the texture is found. */
     const GLboolean empty = (GLboolean)(width == 0 || height == 0 || depth == 0);
     const GLboolean fits =
         (GLboolean)(empty || (width <= (max >> level) && height <= (max >> level) &&
                               depth <= (max >> level) && (is3d || depth == 1) &&
                               (!cube || width == height)));
 
-    /* **A proxy allocates nothing and raises no size error**: it records what it was
-     * asked and whether that would have worked - a level all zeros when it would not -
-     * for glGetTexLevelParameter to report. Errors in the enums are still errors. */
+    /* A proxy allocates nothing and raises no size error: it records what it was asked,
+     * or a level of zeros when that would not fit, for glGetTexLevelParameter. Errors
+     * in the enums are still errors. */
     gl_tex_level_t *proxy = gl_proxy_level(ctx, target, level);
     if (proxy) {
         const gl_tex_level_t none = {0, 0, 0, (void *)0, 0, 0u};
@@ -7545,16 +7009,11 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
         return;
 
     /*
-     * **A zero-sized image releases the level and allocates nothing.**
-     *
-     * `gl_tex_level_view` already reports a level with no pixels or no extent as
-     * absent, so releasing one is the whole of what a zero size has to do: the texture
-     * becomes incomplete if that level was needed, which is a draw with no texture, and
-     * a mip chain built from it is rebuilt without it.
-     *
-     * The base level frees its GPU-visible storage rather than its process memory,
-     * because that is where a level-0 image lives; a built frame may still name the old
-     * address, so the frame is submitted first, as every other release of it does.
+     * A zero-sized image releases the level and allocates nothing. `gl_tex_level_view`
+     * reports a level with no pixels or no extent as absent, so the texture becomes
+     * incomplete if the level was needed, and a chain is rebuilt without it. The base
+     * level frees its GPU-visible storage, where a level-0 image lives, after
+     * submitting any built frame that may name it.
      */
     if (empty) {
         if (face >= 0) {
@@ -7593,7 +7052,7 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
         return;
     }
 
-    /* **A mip level is its own image**, not the base one - see `mips` in
+    /* A mip level is its own image, not the base one; see `mips` in
      * gl_texture_object_t. It lives in process memory with its rows packed tight; the
      * hardware does not read it. So does every level of a cube map's face, whose table
      * is made the first time one is given. */
@@ -7647,30 +7106,12 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
     }
 
     size_t num_pixels = (size_t)width * (size_t)height;
-    /* A linear image's rows are stored at a 256-byte pitch - 64 pixels at four bytes
-     * each.
-     *
-     * The note this replaces said the sampler takes the pitch from the width, measured
-     * 2026-09-14, and closed with "widths that are not a multiple of 64 pixels are
-     * unmeasured". That caveat was the whole answer: at a width of 64 pixels the row
-     * pitch *is* 256 bytes, so a texture that wide cannot tell "pitch = width" apart
-     * from "pitch = width rounded up", and the texture that measurement used was 64
-     * wide - as gl-cube's still is.
-     *
-     * gl1-probe's textures are 2x2, where the two differ, and the split in its results
-     * says which is right: `texture-wrap` passes on hardware while `texture-2d`,
-     * `tex-env-modes`, `copy-tex` and `tex-sub-image` fail. The one that passes is the
-     * one that samples only row 0 - it holds t at 0.25 throughout and varies s. Every
-     * check that needs a second row fails, which is what a row pitch wider than the
-     * rows were written gives you.
-     *
-     * Mesa aligns a linear pitch the same way and carries it explicitly when it exceeds
-     * the width (ac_descriptors.c:697-713, "GFX10.3+ can set a custom pitch for 1D and
-     * 2D non-array, but it must be a multiple of 256B"); gl_pack_descriptors writes it.
-     *
-     * Rounding up cannot disturb what already works: for any width that is a multiple
-     * of 64 the pitch is the width, the descriptor field stays inert, and the bytes are
-     * laid out exactly as before. */
+    /* A linear image's rows are stored at a pitch rounded up to 256 bytes, 64 pixels at
+     * four bytes each. Mesa aligns a linear pitch the same way and carries it
+     * explicitly when it exceeds the width (ac_descriptors.c:697-713, "GFX10.3+ can set
+     * a custom pitch for 1D and 2D non-array, but it must be a multiple of 256B");
+     * gl_pack_descriptors writes it. For a width that is a multiple of 64 the pitch is
+     * the width and the descriptor field stays zero. */
     size_t pitch_px = ((size_t)width + 63u) & ~(size_t)63u;
     /* A volume's slices follow one another, each `pitch_px * height` pixels. */
     const size_t slice_px = pitch_px * (size_t)height;
@@ -7695,11 +7136,9 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
     tex->pitch = (uint32_t)pitch_px;
     (void)num_pixels;
 
-    /* Zeroed first, and unconditionally. A null `pixels` reserves storage to be filled
-     * by glTexSubImage2D, and without this the sampler reads whatever the allocator
-     * last left in GARLIC until that happens - the host branch below has always zeroed
-     * for exactly that reason, and the two should not disagree. It also covers the
-     * padding between the rows and the pitch, which no upload ever writes. */
+    /* Zeroed first, and unconditionally, as on the host: a null `pixels` reserves
+     * storage for glTexSubImage2D to fill, and no upload writes the padding between
+     * the rows and the pitch. */
     memset(tex->garlic_data, 0, rgba_bytes);
     if (pixels) {
         uint8_t *dst = (uint8_t *)tex->garlic_data;
@@ -7728,17 +7167,9 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
         gl_record_error(ctx, GL_OUT_OF_MEMORY);
         return;
     }
-    /* Zeroed first, and unconditionally - the same as the target branch above.
-     *
-     * A null pointer reserves the storage, which is legal and is how a program sets a
-     * texture up to fill with glTexSubImage2D; zeroing means a draw before the first
-     * sub-image samples black instead of whatever the allocator found. That much was
-     * always true here. What made it unconditional is the row padding: an upload writes
-     * `width` pixels into a row `pitch` wide, so with a `pixels` argument the gap
-     * between them was left as malloc returned it.
-     * test_gl_copy_tex_sub_image_matches_a_read_then_upload caught it immediately - two
-     * textures holding identical images compared unequal in the padding between their
-     * rows. */
+    /* Zeroed first, and unconditionally, as on the target: a null pointer reserves the
+     * storage, and an upload writes `width` pixels into a row `pitch` wide, leaving the
+     * padding (test_gl_copy_tex_sub_image_matches_a_read_then_upload). */
     memset(tex->pixels, 0, rgba_bytes);
     if (pixels) {
         uint8_t *dst = (uint8_t *)tex->pixels;
@@ -7757,11 +7188,7 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
     tex->width = width;
     tex->height = height;
     tex->depth = depth;
-    /* **Set here rather than only in the target branch**, where it used to be. On a
-     * host build it stayed zero, which was harmless for exactly as long as nothing read
-     * it - and glTexSubImage2D reads it to find a row, so every row landed on top of
-     * row zero. A field that is only correct under one build is the kind that is
-     * discovered by the first code to depend on it. */
+    /* Set on both builds: glTexSubImage2D reads it to find a row. */
     tex->pitch = (uint32_t)pitch_px;
     tex->format = format;
     tex->type = type;
@@ -7775,10 +7202,9 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width,
                   GLsizei height, GLint border, GLenum format, GLenum type,
                   const GLvoid *pixels) {
-    /* The image is copied into the list now, through the unpack state of now - the
-     * program may free or reuse its buffer the moment this returns, and a list replayed
-     * later must still upload what was passed. A proxy is never compiled - it runs now,
-     * as the specification says and Mesa does (main/dlist.c:4163). */
+    /* The image is copied into the list now, through the current unpack state, since
+     * the program may reuse its buffer once this returns. A proxy is never compiled; it
+     * runs now, as the specification says and Mesa does (main/dlist.c:4163). */
     if (gl_list_recording() && !gl_is_proxy_target(target) &&
         gl_list_rec_image(GL_LIST_OP_TEX_IMAGE_2D,
                           GL_LIST_ARGV(gl_la_e(target), gl_la_i(level),
@@ -7798,8 +7224,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
-    /* Refused as the 1D and 3D uploads refuse it - this one alone accepted a border and
-     * stored an image without it until 2026-09-19. */
+    /* Refused as the 1D and 3D uploads refuse it. */
     if (border != 0) {
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
@@ -7811,23 +7236,15 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 /* -------------------------------------------------------------------------
  * Three-dimensional textures (GL 1.2)
  *
- * A volume is stored slice after slice, each slice laid out exactly as a 2D image is -
- * so the upload, sub-upload and copy helpers above serve it with a depth and a z
- * offset, and slice z of the caller's image starts GL_UNPACK_IMAGE_HEIGHT rows after
- * slice z - 1 (or the image's own height, when that is 0). Its binding, enable and
- * default texture are its own, as 1D's are.
- *
- * **Sampled on the console too since 2026-09-20**, and this said it was the software
- * rasteriser's alone until 2026-09-21: it listed the three things the hardware path
- * needed - a 3D image descriptor, r carried to the pixel shader, a shader sampling with
- * three coordinates - and all three landed the day after it was written. `texture-3d`
- * does not fail there; it passes, and it is what measures the slice stride the mip
- * chain relies on. The chain itself followed on 2026-09-21 (`gl_tex_chain_layout_3d`);
- * what a volume still lacks there is a chain when its **depth** is not a power of two,
- * which is the rule a width that is not has always had.
+ * A volume is stored slice after slice, each laid out as a 2D image is, so the upload,
+ * sub-upload and copy helpers above serve it with a depth and a z offset. Slice z of
+ * the caller's image starts GL_UNPACK_IMAGE_HEIGHT rows after slice z - 1 (or the
+ * image's own height, when that is 0). Its binding, enable and default texture are its
+ * own, as 1D's are. Both paths sample it; gl1-probe's `texture-3d` measures the slice
+ * stride on the console.
  * ------------------------------------------------------------------------- */
 
-/* A volume packed tight for a list, through the unpack state of now - the 2D recorder
+/* A volume packed tight for a list through the current unpack state: the 2D recorder
  * with one more dimension. */
 static GLboolean gl_list_rec_volume(gl_list_op_t op, const gl_list_arg_t *args,
                                     int nargs, GLsizei width, GLsizei height,
@@ -7900,11 +7317,10 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                             height, depth, format, type, pixels);
 }
 
-/* **GL_EXT_texture3D's own spellings** (since 2026-09-20). A program written before
- * GL 1.2 calls these, not the core names, and the extension string promises them -
- * gl.h's compatibility section says why the two have to arrive together. The extension
- * has exactly these two entry points: `glCopyTexSubImage3D` is GL 1.2's, not this
- * extension's. */
+/* GL_EXT_texture3D's own spellings, which a program written before GL 1.2 calls and
+ * the extension string promises; gl.h's compatibility section says why the two go
+ * together. The extension has exactly these two entry points: `glCopyTexSubImage3D`
+ * is GL 1.2's. */
 void glTexImage3DEXT(GLenum target, GLint level, GLenum internalformat, GLsizei width,
                      GLsizei height, GLsizei depth, GLint border, GLenum format,
                      GLenum type, const GLvoid *pixels) {
@@ -7919,8 +7335,7 @@ void glTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset
                     format, type, pixels);
 }
 
-/* A framebuffer rectangle into one slice of a volume - there is no copy that makes a
- * volume. */
+/* A framebuffer rectangle into one slice of a volume; no copy makes a volume. */
 void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                          GLint zoffset, GLint x, GLint y, GLsizei width,
                          GLsizei height) {
@@ -7949,21 +7364,17 @@ void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffse
  * Compressed textures, of which there are none
  *
  * The specification allows the set of compressed formats to be empty, and this one is.
- * `GL_NUM_COMPRESSED_TEXTURE_FORMATS` reports 0, so a program that asks - which is what
- * a program using compressed textures is supposed to do - takes its uncompressed path.
- * A program that does not ask gets `GL_INVALID_ENUM`, which is the specification's
- * answer for an internal format that is not a supported compressed one.
+ * `GL_NUM_COMPRESSED_TEXTURE_FORMATS` reports 0, so a program that asks takes its
+ * uncompressed path; one that does not gets `GL_INVALID_ENUM`, the specification's
+ * answer for an unsupported compressed internal format.
  *
- * **These are conformant, not stubs.** The distinction matters here: the payload links
- * with
- * `-Wl,--unresolved-symbols=ignore-all`, so leaving them out is not "an absent feature
- * is an absent symbol" (D009) in practice - it is a call to address zero with no
- * diagnostic. A refusal a program can read is strictly better than a crash it cannot.
+ * These are conformant entry points, not stubs. The payload links with
+ * `-Wl,--unresolved-symbols=ignore-all`, so an absent symbol (D009) would be a call to
+ * address zero with no diagnostic.
  * ------------------------------------------------------------------------- */
 static void gl_compressed_refuse(gl_context_t *ctx, GLenum target) {
-    /* An unknown target is reported as such; a known one fails on the format, because
-     * there is no compressed format this accepts. Both are GL_INVALID_ENUM, but getting
-     * the reason right matters to anyone reading the code later. */
+    /* An unknown target and an unsupported format are both GL_INVALID_ENUM, and no
+     * compressed format is supported, so the target needs no check. */
     (void)target;
     gl_record_error(ctx, GL_INVALID_ENUM);
 }
@@ -8061,9 +7472,8 @@ void glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint 
         gl_compressed_refuse(ctx, target);
 }
 
-/* No texture here is compressed, so this is GL_INVALID_OPERATION - which is what the
- * specification says for a query against a texture whose image is uncompressed, and is
- * a different answer from the format refusals above. */
+/* No texture here is compressed, so this is GL_INVALID_OPERATION, the specification's
+ * answer for a query against an uncompressed image. */
 void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *img) {
     (void)level;
     (void)img;
@@ -8080,15 +7490,12 @@ void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *img) {
 /* -------------------------------------------------------------------------
  * One-dimensional textures
  *
- * A 1D image is stored as a height-1 2D one, because that is what the sampler reads and
- * what the descriptor describes - the row pitch rule and the upload path are unchanged.
- * **What is not shared is the binding**: GL_TEXTURE_1D has its own binding point, its
- * own enable and its own default texture, which is the whole reason these are separate
- * entry points rather than callers passing height = 1.
+ * A 1D image is stored as a height-1 2D one, which is what the sampler reads and the
+ * descriptor describes. GL_TEXTURE_1D has its own binding point, enable and default
+ * texture, which is why these are separate entry points.
  *
- * `border` must be zero. GL 1.x allows a one-texel border and this has never stored
- * one; a non-zero border is refused rather than ignored, because a program that asks
- * for one and is given a texture without it samples the wrong texels at the edges.
+ * `border` must be zero. GL 1.x allows a one-texel border and this stores none, so a
+ * non-zero border is refused rather than ignored.
  * ------------------------------------------------------------------------- */
 void glTexImage1D(GLenum target, GLint level, GLint internalFormat, GLsizei width,
                   GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
@@ -8111,8 +7518,7 @@ void glTexImage1D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
-    /* The 2D path does the work, against the 1D binding - which is why the binding is
-     * resolved from the target rather than assumed. */
+    /* The 2D path does the work, against the binding the target names. */
     gl_tex_image_common(ctx, target, level, internalFormat, width, 1, 1, format, type,
                         pixels);
 }
@@ -8162,10 +7568,8 @@ void glCopyTexImage1D(GLenum target, GLint level, GLenum internalFormat, GLint x
     glTexImage1D(target, level, (GLint)internalFormat, width, 0,
                  depth ? (GLenum)GL_DEPTH_COMPONENT : (GLenum)GL_RGBA,
                  depth ? (GLenum)GL_FLOAT : (GLenum)GL_UNSIGNED_BYTE, NULL);
-    /* **Checked against the level, not with glGetError** - which this used, and which
-     * *clears* the error flag: an error from the allocation above was consumed here and
-     * never reached the program, and an older unrelated error aborted a copy that had
-     * every right to run. The 2D version's comment warns of exactly this. */
+    /* Checked against the level, not with glGetError, which would clear the flag the
+     * program reads and abort on an older unrelated error. */
     gl_tex_view_t lv;
     if (!gl_tex_level_view(gl_texture_for_target(ctx, target, GL_FALSE), level, &lv) ||
         lv.width != width) {
@@ -8191,21 +7595,19 @@ void glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLi
     gl_copy_tex_sub_common(ctx, target, level, xoffset, 0, 0, x, y, width, 1);
 }
 
-/* **The one texture-parameter setter**, every form reaching it with floats - an enum as
- * its value (exact in a float), the border colour as four. Mesa's rules
- * (main/texparam.c, set_tex_parameteri and set_tex_parameterf):
+/* The one texture-parameter setter; every form reaches it with floats, an enum as its
+ * value (exact in a float), the border colour as four. Mesa's rules (main/texparam.c,
+ * set_tex_parameteri and set_tex_parameterf):
  *
  * - a wrap mode is GL_REPEAT, GL_CLAMP, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_BORDER or
- * GL_MIRRORED_REPEAT (validate_texture_wrap_mode, :64), a minification filter one of
- * the six and a magnification filter GL_NEAREST or GL_LINEAR; anything else is
- * GL_INVALID_ENUM and changes nothing. Until 2026-09-19 any value was stored, and a
- * mistyped filter sampled as GL_NEAREST;
- * - GL_TEXTURE_PRIORITY is clamped to [0, 1] (:828) and GL_TEXTURE_BORDER_COLOR's four
- * channels too (:877, without float textures). Both were refused before;
+ *   GL_MIRRORED_REPEAT (validate_texture_wrap_mode, :64), a minification filter one of
+ *   the six and a magnification filter GL_NEAREST or GL_LINEAR; anything else is
+ *   GL_INVALID_ENUM and changes nothing;
+ * - GL_TEXTURE_PRIORITY is clamped to [0, 1] (:828), and so are
+ * GL_TEXTURE_BORDER_COLOR's four channels (:877, without float textures);
  * - GL_TEXTURE_RESIDENT is a query, not a parameter;
  * - GL 1.2's GL_TEXTURE_BASE_LEVEL and GL_TEXTURE_MAX_LEVEL are non-negative integers,
- * and GL_TEXTURE_MIN_LOD and GL_TEXTURE_MAX_LOD any float. All four were refused until
- *   2026-09-19. */
+ *   and GL_TEXTURE_MIN_LOD and GL_TEXTURE_MAX_LOD any float. */
 static GLboolean gl_tex_wrap_ok(GLenum w) {
     return (GLboolean)(w == GL_REPEAT || w == GL_CLAMP || w == GL_CLAMP_TO_EDGE ||
                        w == GL_CLAMP_TO_BORDER || w == GL_MIRRORED_REPEAT);
@@ -8299,13 +7701,9 @@ static void gl_tex_parameter(GLenum target, GLenum pname, const GLfloat *p) {
      * (GL 1.5 widened 1.4's two), the depth mode luminance, intensity or alpha - an
      * enum error otherwise.
      *
-     * **The first two reach the hardware sampler since 2026-09-20**: obSCEne's `-6c80`
-     * measured DEPTH_COMPARE_FUNC working on the part, so they break to the repack
-     * below rather than returning. They were state for the software sampler alone while
-     * the hardware drew a depth texture untextured, and a descriptor that did not
-     * follow them would have compared against whatever the field last held.
-     * `GL_DEPTH_TEXTURE_MODE` still returns: it says which channels the comparison's
-     * result fills, which the shader does and the sampler does not. */
+     * The first two reach the hardware sampler's DEPTH_COMPARE_FUNC, so they break to
+     * the repack below. `GL_DEPTH_TEXTURE_MODE` returns: the channels the comparison's
+     * result fills are the shader's business, not the sampler's. */
     case GL_TEXTURE_COMPARE_MODE:
         if (e != GL_NONE && e != GL_COMPARE_R_TO_TEXTURE) {
             gl_record_error(ctx, GL_INVALID_ENUM);
@@ -8327,9 +7725,8 @@ static void gl_tex_parameter(GLenum target, GLenum pname, const GLfloat *p) {
         }
         tex->depth_mode = e;
         return;
-    /* The target was checked above and the parameter was not, so a caller setting one
-     * this does not keep - a later version's swizzle, say - had it dropped and went on
-     * believing the texture was configured. */
+    /* A parameter this does not keep, such as a later version's swizzle, is refused
+     * rather than dropped. */
     default:
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
@@ -8354,9 +7751,8 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     gl_tex_parameter(target, pname, f);
 }
 
-/* **Its own path, not glTexParameteri's.** This truncated to an integer on the way
- * through, so glTexParameterf(GL_TEXTURE_PRIORITY, 0.5f) would have set 0 - and a list
- * compiled it as the integer form too. */
+/* Its own path, not glTexParameteri's, so glTexParameterf(GL_TEXTURE_PRIORITY, 0.5f)
+ * sets 0.5 and a list compiles the float form. */
 void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
     if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_TEX_PARAMETER_F, gl_la_e(target),
                                            gl_la_e(pname), gl_la_f(param))) {
@@ -8406,12 +7802,8 @@ void glTexParameteriv(GLenum target, GLenum pname, const GLint *params) {
     gl_tex_parameter(target, pname, f);
 }
 
-/* **Texture residency, answered honestly rather than optimistically.**
- *
- * Every texture here lives in memory the GPU can already reach and nothing evicts them,
- * so they are all resident and glAreTexturesResident returns GL_TRUE. A name that was
- * never generated is an error, not a "no" - a program asking about a texture it does
- * not own has a bug, and reporting it as merely non-resident would hide that.
+/* Every texture lives in memory the GPU can reach and nothing evicts them, so all are
+ * resident. A name never generated is GL_INVALID_VALUE, not a "no".
  */
 GLboolean glAreTexturesResident(GLsizei n, const GLuint *textures,
                                 GLboolean *residences) {
@@ -8432,9 +7824,8 @@ GLboolean glAreTexturesResident(GLsizei n, const GLuint *textures,
     return GL_TRUE;
 }
 
-/* A hint about which textures to keep resident, on an implementation where nothing is
- * ever evicted. Accepted and ignored, which is what the specification permits a hint to
- * be - but the names are still validated, so a typo is still an error. */
+/* A hint about which textures to keep resident, where nothing is evicted. The names are
+ * validated and the priorities kept for GL_TEXTURE_PRIORITY. */
 void glPrioritizeTextures(GLsizei n, const GLuint *textures,
                           const GLclampf *priorities) {
     /* Compiled with both arrays copied, names first and priorities after, in one block.
@@ -8474,8 +7865,8 @@ void glPrioritizeTextures(GLsizei n, const GLuint *textures,
             return;
         }
     }
-    /* **Kept now**, clamped as glTexParameter clamps it, so GL_TEXTURE_PRIORITY reads
-     * it back. Until 2026-09-19 the priorities were validated and dropped. */
+    /* Kept, clamped as glTexParameter clamps it, so GL_TEXTURE_PRIORITY reads it back.
+     */
     for (GLsizei i = 0; i < n && priorities; i++) {
         gl_texture_object_t *t = gl_find_texture(ctx, textures[i]);
         if (t)
@@ -8495,14 +7886,14 @@ GLboolean glIsTexture(GLuint texture) {
 /* -------------------------------------------------------------------------
  * Framebuffer objects
  *
- * The object layer: names, storage, attachments and the completeness rules. What it
- * does *not* yet do is redirect a draw - see glCheckFramebufferStatus, which says so in
- * the only way a caller can act on.
+ * The object layer: names, storage, attachments and the completeness rules. Where a
+ * draw lands is `gl_draw_targets`'s decision; glCheckFramebufferStatus reports what it
+ * cannot do.
  * ------------------------------------------------------------------------- */
 
 /* A renderbuffer's storage comes from the GPU allocator on the console and the heap on
- * a build machine, so releasing it has to ask which - `gl_buffer_release` on a Garlic
- * allocation is the wrong free, and silent. */
+ * a build machine, so releasing it asks which; `gl_buffer_release` on a Garlic
+ * allocation is the wrong free. */
 static void gl_renderbuffer_storage_release(gl_renderbuffer_object_t *rb) {
     if (!rb || !rb->pixels) {
         if (rb)
@@ -8522,9 +7913,7 @@ static void gl_renderbuffer_storage_release(gl_renderbuffer_object_t *rb) {
     rb->gpu_resident = GL_FALSE;
 }
 
-/* The lookups themselves are in `gl_internal.h`, because `gl_draw_targets` needs them
- * from another file. These are the names the entry points below were written against.
- */
+/* Local names for the lookups in `gl_internal.h`, which `gl_draw_targets` shares. */
 static gl_framebuffer_object_t *gl_find_framebuffer(gl_context_t *ctx, GLuint id) {
     return gl_framebuffer_slot(ctx, id);
 }
@@ -8554,7 +7943,7 @@ static gl_fb_attachment_t *gl_fb_attachment_for(gl_framebuffer_object_t *fb,
 
 /* An attachment's size, and whether it has storage at all. A texture level that was
  * never given an image, and a renderbuffer with no glRenderbufferStorage, are both
- * attachments that exist and are not renderable - which is the difference between
+ * attachments that exist and are not renderable: the difference between
  * INCOMPLETE_ATTACHMENT and INCOMPLETE_MISSING_ATTACHMENT. */
 static GLboolean gl_fb_attachment_size(gl_context_t *ctx, const gl_fb_attachment_t *at,
                                        GLsizei *w, GLsizei *h) {
@@ -8624,9 +8013,7 @@ void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers) {
         gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, id);
         if (!fb)
             continue;
-        /* Deleting the bound framebuffer binds 0 in its place, as GL says - otherwise
-         * the binding names a slot that has been cleared and every later draw reads it.
-         */
+        /* Deleting the bound framebuffer binds 0 in its place, as GL says. */
         if (ctx->bound_framebuffer == id)
             ctx->bound_framebuffer = 0;
         memset(fb, 0, sizeof(*fb));
@@ -8638,9 +8025,7 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
         return;
-    /* **Three targets since 2026-09-25**, for `glBlitFramebuffer`. `GL_FRAMEBUFFER`
-     * moves both bindings, which is what it meant when it was the only one - so nothing
-     * written against the single-binding model changes behaviour. See
+    /* Three targets, for `glBlitFramebuffer`; `GL_FRAMEBUFFER` moves both bindings. See
      * `bound_read_framebuffer`. */
     const GLboolean set_draw =
         (GLboolean)(target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER);
@@ -8651,9 +8036,8 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         return;
     }
     if (framebuffer != 0 && !gl_find_framebuffer(ctx, framebuffer)) {
-        /* **A name glGenFramebuffers never gave.** ES 2.0 refuses it; desktop GL
-         * before 3.0 let a bind create one. This takes the ES rule, because that is the
-         * surface being answered here and the other spelling is not offered. */
+        /* A name glGenFramebuffers never gave. ES 2.0 refuses it, where desktop GL
+         * before 3.0 let a bind create one; this follows ES, the surface offered. */
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
@@ -8663,8 +8047,7 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         return;
     ctx->bound_framebuffer = framebuffer;
     /* Only the draw binding changes where pixels land, so only it re-points the
-     * targets. A read binding is consulted by `glBlitFramebuffer` when it runs and at
-     * no other time. */
+     * targets; `glBlitFramebuffer` alone reads the read binding. */
     gl_draw_targets(ctx);
 }
 
@@ -8721,9 +8104,7 @@ void glDeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers) {
         gl_renderbuffer_storage_release(rb);
         if (ctx->bound_renderbuffer == id)
             ctx->bound_renderbuffer = 0;
-        /* **Every attachment naming it goes too**, on every framebuffer and not only
-         * the bound one, which is what GL says happens and what keeps
-         * gl_fb_attachment_size from looking up a name that no longer exists. */
+        /* Every attachment naming it goes too, on every framebuffer, as GL says. */
         for (int f = 0; f < OOPS_GL_MAX_FRAMEBUFFER_OBJECTS; f++) {
             gl_framebuffer_object_t *fb = &ctx->framebuffers[f];
             if (!fb->used)
@@ -8796,19 +8177,13 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width,
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
-    /* **One word a sample whatever the format.** A renderbuffer is not sampled, so
-     * nothing reads it in its declared layout - the format is kept to answer the
-     * queries and to decide completeness, and the storage is the width this GL's colour
-     * and depth buffers already are. Packing RGB565 tightly would save memory a render
-     * target does not have a shortage of, and would need a second addressing path
-     * through the rasteriser.
+    /* One word a sample whatever the format. A renderbuffer is not sampled, so the
+     * format only answers the queries and decides completeness; the storage matches
+     * this GL's colour and depth buffers, with one addressing path in the rasteriser.
      *
-     * **Where it lives is what decides whether the console can draw into it.** A
-     * renderbuffer is a render target, so it is allocated the way this GL's other
-     * render target is - Garlic, 64KB aligned, which is what `gl_front_buffer` asks
-     * for. On this platform that address is the GPU address, so `CB_COLOR0_BASE` can be
-     * pointed straight at it; the process heap the first version of this used is not
-     * memory the command processor can reach. */
+     * It is allocated as `gl_front_buffer` is, in Garlic and 64KB aligned: that address
+     * is the GPU address, so `CB_COLOR0_BASE` can point straight at it. The process
+     * heap is not memory the command processor can reach. */
     gl_renderbuffer_storage_release(rb);
     rb->internal_format = internalformat;
     rb->width = width;
@@ -8835,25 +8210,12 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width,
 }
 
 /*
- * **Multisampled renderbuffer storage, which refuses more samples than it can give.**
- *
- * This GL rasterises one sample per pixel. `GL_MAX_SAMPLES` is therefore 1, and the
- * honest implementations of this entry point are "accept 0 or 1 and behave as
- * `glRenderbufferStorage`" and "refuse anything above it" - which is what the
- * specification already says to do
- * (`GL_INVALID_OPERATION` when `samples` exceeds `GL_MAX_SAMPLES`).
- *
- * **The flattering alternative was rejected for the reason `glCheckFramebufferStatus`
- * gives a few hundred lines down.** Silently downgrading a request for four samples to
- * one produces a framebuffer that renders, looks very slightly wrong, and reports
- * nothing - and a caller that asked because it has an aliasing problem is given the
- * aliasing back with a success code. libultraship asks with a runtime `msaa_level` and
- * is written to cope with a refusal, which is the common shape: a program that wants
- * multisampling asks and falls back.
- *
- * Existing for the sake of the link is itself worth something here. The alternative is
- * an undefined symbol in a payload, which - as `oops-sdk/AGENTS.md` records - links
- * clean and faults on the console.
+ * Multisampled renderbuffer storage. This GL rasterises one sample per pixel, so
+ * `GL_MAX_SAMPLES` is 1: 0 or 1 samples behave as `glRenderbufferStorage`, and more is
+ * `GL_INVALID_OPERATION`, as the specification says. A silent downgrade would hand a
+ * program its aliasing back with a success code; a program that wants multisampling
+ * asks and falls back on refusal. The entry point also keeps the payload link free of
+ * an undefined symbol, which links clean and faults on the console (`AGENTS.md`).
  */
 void glRenderbufferStorageMultisample(GLenum target, GLsizei samples,
                                       GLenum internalformat, GLsizei width,
@@ -8876,15 +8238,13 @@ void glRenderbufferStorageMultisample(GLenum target, GLsizei samples,
 /* -------------------------------------------------------------------------
  * glBlitFramebuffer
  *
- * The one operation that reads one framebuffer while writing another, which is why the
- * read and draw bindings had to be told apart for it - see `bound_read_framebuffer`.
+ * The one operation that reads one framebuffer while writing another, hence the
+ * separate read binding (`bound_read_framebuffer`).
  *
- * **Both sides are resolved to plain pixels here rather than through
- * `gl_color_index`.** That helper addresses *the bound framebuffer* through
- * `ctx->width`/`ctx->height`, and a blit has two surfaces of possibly different sizes;
- * asking it about the other one would silently address the wrong memory. The swizzle it
- * applies for a tiled framebuffer 0 is reproduced below, for that surface only, because
- * an attachment is never tiled.
+ * Both sides are resolved to plain pixels here rather than through `gl_color_index`,
+ * which addresses the bound framebuffer through `ctx->width`/`ctx->height`; a blit has
+ * two surfaces of possibly different sizes. Its swizzle for a tiled framebuffer 0 is
+ * reproduced below for that surface only, since an attachment is never tiled.
  * ------------------------------------------------------------------------- */
 
 typedef struct {
@@ -8898,9 +8258,8 @@ static GLboolean gl_blit_surface(gl_context_t *ctx, GLuint name,
                                  gl_blit_surface_t *out) {
     memset(out, 0, sizeof(*out));
     if (name == 0u) {
-        /* The window system's own buffer, at its own size - which is not `ctx->width`
-         * when a framebuffer object is bound, and that is exactly the case a blit is
-         * used in. */
+        /* The window system's own buffer at its own size, which is not `ctx->width`
+         * while a framebuffer object is bound. */
         out->pixels = ctx->back_fb ? ctx->back_fb : ctx->framebuffer;
         out->w = (GLsizei)ctx->fb0_width;
         out->h = (GLsizei)ctx->fb0_height;
@@ -8951,22 +8310,16 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
-    /* GL 3.0: filtering a depth or stencil blit is not a thing that means anything. */
+    /* GL 3.0: a depth or stencil blit cannot be filtered. */
     if (filter == GL_LINEAR &&
         (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0u) {
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
-    /* **The depth and stencil halves are not copied, and this says so once.**
-     *
-     * A depth attachment here is a float buffer the software rasteriser owns, and on
-     * the console the depth surface is 64KB_Z_X tiled and programmed through its own
-     * registers - the same reason `gl_fbo_bound_target` refuses a framebuffer object
-     * with a depth attachment on hardware. Copying colour and quietly not copying depth
-     * is the "flattering answer" this file argues against a few hundred lines down, so
-     * it is reported rather than hidden. Every caller measured so far - libultraship's
-     * three call sites at `gfx_opengl.cpp:907,977,994` - asks for `GL_COLOR_BUFFER_BIT`
-     * alone. */
+    /* Depth and stencil are not copied, and a log line says so once. A depth
+     * attachment is a float buffer the software rasteriser owns, and on the console the
+     * depth surface is 64KB_Z_X tiled and programmed through its own registers, the
+     * reason `gl_fbo_bound_target` refuses a depth attachment on hardware. */
     if ((mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0u &&
         !ctx->hw_blit_ds_logged) {
         oops_log_info(
@@ -8981,16 +8334,14 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint
     gl_blit_surface_t src, dst;
     if (!gl_blit_surface(ctx, ctx->bound_read_framebuffer, &src) ||
         !gl_blit_surface(ctx, ctx->bound_framebuffer, &dst)) {
-        /* An incomplete framebuffer on either side. The specification's answer. */
+        /* An incomplete framebuffer on either side, as the specification answers it. */
         gl_record_error(ctx, GL_INVALID_FRAMEBUFFER_OPERATION);
         return;
     }
 
-    /* **Signed spans, because either rectangle may be given inverted and that is how a
-     * blit flips.** The destination is walked in its own direction and the source
-     * mapped onto it, so a reversed pair on one side and not the other mirrors, which
-     * is what `gfx_opengl.cpp` relies on to turn the game's bottom-up target the right
-     * way up. */
+    /* Signed spans: either rectangle may be inverted, which is how a blit flips. The
+     * destination is walked in its own direction and the source mapped onto it, so a
+     * pair reversed on one side only mirrors. */
     const GLint dw = dstX1 - dstX0, dh = dstY1 - dstY0;
     const GLint sw = srcX1 - srcX0, sh = srcY1 - srcY0;
     if (dw == 0 || dh == 0 || sw == 0 || sh == 0)
@@ -8998,14 +8349,11 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint
     const GLint dxs = dw > 0 ? 1 : -1, dys = dh > 0 ? 1 : -1;
     const GLint dnx = dw > 0 ? dw : -dw, dny = dh > 0 ? dh : -dh;
 
-    /* Same size and no flip is a straight copy, and it is the common case - a
-     * full-screen blit from the game's framebuffer to the display. Taking it separately
-     * keeps the general path from having to be fast as well as correct. */
     for (GLint j = 0; j < dny; j++) {
         const GLint dy = dstY0 + j * dys;
         if (dy < 0 || dy >= dst.h)
             continue;
-        /* Pixel centres, which is what makes an unscaled blit exact. */
+        /* Nearest source row for each destination row; exact when unscaled. */
         const GLint sy = srcY0 + (GLint)(((int64_t)j * sh) / dny);
         if (sy < 0 || sy >= src.h)
             continue;
@@ -9020,11 +8368,8 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint
                 src.pixels[gl_blit_index(&src, sx, sy)];
         }
     }
-    /* **`GL_LINEAR` is honoured as nearest only where the two agree**, which is
-     * whenever the rectangles are the same size - sample centres land exactly on source
-     * texels and a linear filter returns that texel. A scaled linear blit is a real
-     * difference and this does not do it yet; said once rather than assumed, for the
-     * reason the depth note above gives. */
+    /* `GL_LINEAR` is sampled as nearest, which agrees when the rectangles are the same
+     * size. A scaled linear blit differs, and a log line says so once. */
     if (filter == GL_LINEAR &&
         (dnx != (sw > 0 ? sw : -sw) || dny != (sh > 0 ? sh : -sh)) &&
         !ctx->hw_blit_linear_logged) {
@@ -9059,10 +8404,7 @@ void glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params) {
     case GL_RENDERBUFFER_INTERNAL_FORMAT:
         *params = (GLint)fmt;
         break;
-    /* The sizes the *declared* format promises, not the storage above - a program
-     * choosing a format reads these back to find out what it got, and answering 8888
-     * for an RGB565 renderbuffer would report a precision it did not ask for and cannot
-     * rely on. */
+    /* The sizes the declared format promises, not the one-word storage. */
     case GL_RENDERBUFFER_RED_SIZE:
         *params = (fmt == GL_RGBA4)                         ? 4
                   : (fmt == GL_RGB5_A1 || fmt == GL_RGB565) ? 5
@@ -9111,9 +8453,8 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
-    /* **Attaching to the window-system framebuffer is an error, not a no-op.** Name 0
-     * is the display and has no attachment points; a program that gets here has
-     * forgotten its bind. */
+    /* Attaching to the window-system framebuffer is an error: name 0 has no attachment
+     * points. */
     gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, ctx->bound_framebuffer);
     if (!fb) {
         gl_record_error(ctx, GL_INVALID_OPERATION);
@@ -9211,9 +8552,8 @@ void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment,
                                                             : (GLint)GL_NONE;
         break;
     case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
-        /* **Only when something is attached.** GL says this query is an error against
-         * an empty attachment point rather than answering zero - the caller is expected
-         * to have asked for the type first. */
+        /* Only when something is attached: GL makes this query an error against an
+         * empty attachment point. */
         if (at->kind == GL_FB_ATTACH_NONE) {
             gl_record_error(ctx, GL_INVALID_ENUM);
             return;
@@ -9248,8 +8588,7 @@ GLenum glCheckFramebufferStatus(GLenum target) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return 0;
     }
-    /* The window-system framebuffer is always complete - there is nothing to attach to
-     * it. */
+    /* The window-system framebuffer is always complete. */
     gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, ctx->bound_framebuffer);
     if (!fb)
         return GL_FRAMEBUFFER_COMPLETE;
@@ -9278,22 +8617,11 @@ GLenum glCheckFramebufferStatus(GLenum target) {
     }
 
     /*
-     * **Complete by the rules, and only if a draw can actually reach it.**
-     *
-     * `gl_fbo_bound_target` is the function `gl_draw_targets` uses to point the colour
-     * buffer at the attachment, so asking it here is asking the draw path directly
-     * rather than restating its conditions - the two cannot drift, and a COMPLETE from
-     * this function is a promise the next draw keeps. What it refuses is the scanout
-     * and hardware paths, whose colour buffers are addressed in a swizzle an attachment
-     * is not in, and a base-level texture whose rows are further apart than they are
-     * wide.
-     *
-     * GL_FRAMEBUFFER_UNSUPPORTED is the specification's answer for exactly that, and
-     * callers must handle it. Reporting COMPLETE instead would be the flattering answer
-     * and a false one: the program would draw, the pixels would land on the display,
-     * and a suite reading the attachment afterwards would get whatever was there before
-     * - a pass in some cases and an unexplained failure in others. A refusal makes dEQP
-     * report NotSupported, which is true.
+     * Complete by the rules, and only if a draw can reach it. `gl_fbo_bound_target` is
+     * what `gl_draw_targets` uses to point the colour buffer at the attachment, so
+     * asking it here keeps the two from drifting: COMPLETE is a promise the next draw
+     * keeps. What it refuses is GL_FRAMEBUFFER_UNSUPPORTED, the specification's answer
+     * for a combination the implementation cannot render to.
      */
     gl_fb_storage_t colour;
     float *depth = NULL;
@@ -9306,17 +8634,9 @@ GLenum glCheckFramebufferStatus(GLenum target) {
 }
 
 /*
- * **ES 2.0's explicit call, over GL 1.4's automatic one.**
- *
- * `gl_tex_generate_mipmap` already builds the chain, because GL_GENERATE_MIPMAP
- * (GL 1.4, 3.8.8) has needed it since long before this - it is the same box filter over
- * the same levels, and it already handles a volume, a cube face, GL_TEXTURE_BASE_LEVEL
- * and GL_TEXTURE_MAX_LEVEL. The only thing ES adds is asking for it by hand rather than
- * on every upload.
- *
- * So this is the entry point and the validation, and none of the filtering. A second
- * reduction written here would have been a second answer to "what is the level above
- * this one", and the two would have drifted.
+ * ES 2.0's explicit call over GL 1.4's automatic GL_GENERATE_MIPMAP (3.8.8): the entry
+ * point and validation only. `gl_tex_generate_mipmap` does the filtering for both,
+ * including a volume, a cube face, GL_TEXTURE_BASE_LEVEL and GL_TEXTURE_MAX_LEVEL.
  */
 void glGenerateMipmap(GLenum target) {
     gl_context_t *ctx = gl_get_ctx();
@@ -9334,10 +8654,8 @@ void glGenerateMipmap(GLenum target) {
     }
 
     if (target == GL_TEXTURE_CUBE_MAP) {
-        /* **Every face, and only if the cube is complete.** GL says a cube map whose
-         * six faces do not agree in size and format is an error here rather than six
-         * independent chains - a sampler reading such a map has no defined level to
-         * read from. */
+        /* Every face, and only if the cube is complete: GL makes six faces that do not
+         * agree in size and format an error here. */
         gl_tex_view_t f0;
         if (!tex->cube || !gl_tex_face_view(tex, 0, tex->base_level, &f0)) {
             gl_record_error(ctx, GL_INVALID_OPERATION);
@@ -9357,9 +8675,8 @@ void glGenerateMipmap(GLenum target) {
         return;
     }
 
-    /* No base image is an error, not a texture with one empty chain - and it has to be
-     * checked here, because the generator answers an absent base by returning quietly.
-     */
+    /* No base image is an error, checked here because the generator returns quietly on
+     * an absent base. */
     gl_tex_view_t base;
     if (!gl_tex_level_view(tex, tex->base_level, &base)) {
         gl_record_error(ctx, GL_INVALID_OPERATION);
@@ -9389,11 +8706,9 @@ void glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint *
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
-    /* **Every precision here is IEEE single.** ES allows a fragment shader to carry
-     * less, and the values below are what the specification names for an implementation
-     * that does not: the range and precision of binary32, and 24 bits for the integer
-     * types because that is what a float holds exactly. Nothing in this GL narrows
-     * anything to mediump. */
+    /* Every precision here is IEEE single: the range and precision of binary32, and 24
+     * bits for the integer types, which a float holds exactly. Nothing is narrowed to
+     * mediump. */
     switch (precisiontype) {
     case GL_LOW_FLOAT:
     case GL_MEDIUM_FLOAT:
@@ -9421,10 +8736,8 @@ void glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint *
     }
 }
 
-/* A hint that the compiler's memory may be reclaimed. This compiler is part of the
- * library and has nothing to release, and the specification allows ignoring it - a
- * later glCompileShader must work regardless, which is what makes ignoring it correct
- * rather than lazy. */
+/* A hint that the compiler's memory may be reclaimed. This compiler has nothing to
+ * release, and the specification allows ignoring the hint. */
 void glReleaseShaderCompiler(void) {}
 
 void glShaderBinary(GLsizei count, const GLuint *shaders, GLenum binaryformat,
@@ -9439,7 +8752,7 @@ void glShaderBinary(GLsizei count, const GLuint *shaders, GLenum binaryformat,
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
-    /* GL_NUM_SHADER_BINARY_FORMATS is zero here, so no value of `binaryformat` is valid
-     * and GL_INVALID_ENUM is the required answer rather than a stub's silence. */
+    /* GL_NUM_SHADER_BINARY_FORMATS is zero, so no `binaryformat` is valid and
+     * GL_INVALID_ENUM is the required answer. */
     gl_record_error(ctx, GL_INVALID_ENUM);
 }

@@ -1,3 +1,13 @@
+/*
+ * The webview (oops/webview.h): litehtml for layout and drawing, QuickJS for scripts.
+ *
+ * Loading a document parses it, runs its `<script>` elements in document order (a
+ * `src` is fetched over oops/http.h, relative to the base URL), then fires
+ * `DOMContentLoaded` and `load` on the window. `oops_webview_pump` runs due timers,
+ * pending fetches and promise jobs. A DOM change from a script marks the layout dirty,
+ * and the next pump or render lays the document out again at the view's width.
+ */
+
 #include "webview_impl.hpp"
 #include "dom_bridge.hpp"
 #include "host_env.hpp"

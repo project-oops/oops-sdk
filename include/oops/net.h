@@ -1,3 +1,7 @@
+/*
+ * IPv4 networking over the platform's BSD sockets: sockets, address formatting, a
+ * try-again test, and DNS resolution.
+ */
 #ifndef OOPS_NET_H
 #define OOPS_NET_H
 
@@ -17,9 +21,8 @@ extern "C" {
 
 /* Message flags (send/recv). MSG_DONTWAIT = 0x80: a single non-blocking receive
  * without putting the socket in non-blocking mode, measured on this console
- * (obSCEne, 12.40). MSG_PEEK = 0x2 is the stable FreeBSD ABI value, the same
- * derivation the AF/SOCK/IPPROTO constants below already rely on; read a
- * datagram without consuming it. */
+ * (obSCEne, 12.40). MSG_PEEK = 0x2, reading a datagram without consuming it, is
+ * the stable FreeBSD ABI value, as are the AF/SOCK/IPPROTO constants. */
 #define OOPS_MSG_DONTWAIT 0x80
 #define OOPS_MSG_PEEK 0x2
 
@@ -52,22 +55,18 @@ static inline uint32_t oops_ntohl(uint32_t val) {
 }
 
 /*
- * # Telling the SDK which bare BSD names a port layer has taken
+ * Which bare BSD socket names a port layer has taken.
  *
  * `src/net/net.c` reaches the platform's sockets through weak references to the
- * exported names - both the plain spelling and the leading-underscore one. **The plain
- * spellings are also what a POSIX shim defines**, and a weak reference is satisfied by
- * any strong definition in the same link, so in a title that has both, `oops_bind`
- * would call the shim's `bind`, which calls `oops_bind`. That is an unbounded
- * recursion, and a stack overflow on the first packet does not name itself.
+ * exported names, both the plain spelling and the leading-underscore one. A POSIX shim
+ * defines the plain spellings too, and a weak reference binds to any strong definition
+ * in the link, so `oops_bind` would call the shim's `bind`, which calls `oops_bind`,
+ * without end.
  *
- * A port layer that defines any of these names says so by defining this function and
- * returning the bits for the ones it took. It is a **weak** symbol in the SDK: a title
- * without a POSIX shim defines nothing, the reference stays null, and the bare names
- * remain available exactly as before.
- *
- * `oops-apps/common/posix/posix.c` is the implementation to copy if you write another
- * port layer.
+ * A port layer that defines any of these names defines this function and returns the
+ * bits for the ones it took. It is weak in the SDK: a title without a POSIX shim
+ * defines nothing and the bare names stay available. `oops-apps/common/posix/posix.c`
+ * is the implementation to copy.
  */
 #define OOPS_NET_SHIMMED_BIND 0x0001u
 #define OOPS_NET_SHIMMED_LISTEN 0x0002u
@@ -98,13 +97,10 @@ long oops_send(int sock, const void *buf, size_t len, int flags);
 long oops_recv(int sock, void *buf, size_t len, int flags);
 long oops_sendto(int sock, const void *buf, size_t len, int flags, const char *to_ip,
                  uint16_t to_port);
-/* The byte count, or negative. **`from_ip` is set to the empty string when the
- * sender could not be determined**, which happens when the platform binds no
- * `recvfrom` export - the data arrives and the peer does not. That is not the
- * same as 0.0.0.0, and a caller that identifies peers by address (a game
- * protocol, say) has to check for it: reading a zeroed address instead makes
- * every datagram look as though it came from one wrong host. `*from_port` is 0
- * in the same case. */
+/* The byte count, or negative. `from_ip` is set to the empty string, and
+ * `*from_port` to 0, when the sender could not be determined, which happens when the
+ * platform binds no `recvfrom` export. That is not 0.0.0.0: a caller that identifies
+ * peers by address checks for it. */
 long oops_recvfrom(int sock, void *buf, size_t len, int flags, char *from_ip,
                    size_t ip_len, uint16_t *from_port);
 int oops_setsockopt(int sock, int level, int optname, const void *optval,

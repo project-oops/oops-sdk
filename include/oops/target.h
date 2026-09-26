@@ -24,7 +24,7 @@
     (OOPS_TARGET == OOPS_TARGET_PROSPERO || OOPS_TARGET == OOPS_TARGET_TRINITY)
 
 /*
- * OOPS_TARGET is what a binary is COMPILED FOR, fixed at build time. It is not
+ * OOPS_TARGET is what a binary is compiled for, fixed at build time. It is not
  * the environment the binary turns out to run in. A payload compiled `prospero`
  * can land in a previous-generation compatibility sandbox where the
  * current-generation graphics driver does not resolve at all, so the running
@@ -45,7 +45,7 @@ typedef enum oops_target {
     OOPS_TRINITY = OOPS_TARGET_TRINITY,
 } oops_target_t;
 
-/* Returns the target the current binary was COMPILED FOR - not the environment
+/* Returns the target the current binary was compiled for - not the environment
  * it is running in, which is measured elsewhere (see the note above
  * OOPS_TARGET_IS_ORBIS). */
 static inline oops_target_t oops_get_target(void) {

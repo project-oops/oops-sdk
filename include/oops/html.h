@@ -1,3 +1,7 @@
+/*
+ * HTML and CSS layout through litehtml, rendered onto an `oops_surface_t`, with
+ * scrolling and link hit-testing.
+ */
 #ifndef OOPS_HTML_H
 #define OOPS_HTML_H
 
@@ -36,7 +40,7 @@ void oops_html_set_size(oops_html_t *html, int width, int height);
 int oops_html_load(oops_html_t *html, const char *html_source, const char *base_url);
 
 /*
- * Render the rendered HTML document into the provided surface.
+ * Render the laid-out HTML document into the provided surface.
  * Respects scroll offsets and clips drawing to viewport bounds.
  */
 void oops_html_render(oops_html_t *html, oops_surface_t *surf);

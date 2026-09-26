@@ -1,31 +1,13 @@
 /*
- * oops-glut: the subset of GLUT that a GL 1.x program actually calls, over this SDK's
- * display, input and timing. See include/GL/glut.h for what is here and what is not.
+ * oops-glut: the subset of GLUT that GL 1.x programs call, over this SDK's display,
+ * input and timing. include/GL/glut.h lists what is here.
  *
- * # The main loop
- *
- * GLUT's contract is that `glutMainLoop` never returns and the program lives in its
- * callbacks. On a console that leaves no way to stop, so `glutLeaveMainLoop` -
- * freeglut's spelling, because GLUT has none - ends it, and `glutMainLoop` returns to
- * whatever called it.
- *
- * One pass of the loop: drain the input devices and dispatch their callbacks, fire any
- * timer that is due, then either redisplay or idle. A program that never calls
- * `glutPostRedisplay` and has no idle callback still polls input, so it can always be
- * left.
- *
- * # Input
- *
- * The keyboard arrives as HID usage codes, which this maps to the ASCII
- * `glutKeyboardFunc` expects and the `GLUT_KEY_*` values `glutSpecialFunc` expects.
- * Only the keys those two callbacks can express are mapped; anything else is dropped
- * rather than delivered as a plausible wrong character.
- *
- * The mouse is relative, and GLUT's callbacks are absolute, so a cursor position is
- * kept here and clamped to the window. It starts at the centre, which is where a
- * program that reads the first motion event expects to find it.
- *
- * The pad is not GLUT's idea at all - see `glutOopsPadKeys`.
+ * `glutLeaveMainLoop` (freeglut's) ends the loop and `glutMainLoop` returns. One pass
+ * drains input and dispatches callbacks, fires due timers, then redisplays or idles.
+ * HID keys map to ASCII and `GLUT_KEY_*`; keys neither callback can express are
+ * dropped. The mouse is relative, so an absolute cursor is kept here, clamped to the
+ * window and starting at its centre. The pad reaches a program through
+ * `glutOopsPadKeys`.
  */
 #include "GL/glut.h"
 #include "gl_internal.h"
@@ -83,9 +65,7 @@ static struct {
 void glutInit(int *argcp, char **argv) {
     (void)argcp;
     (void)argv;
-    /* GLUT strips its own arguments here; this has none to strip, and a program that
-     * passes
-     * `-geometry` gets the window it was given either way. */
+    /* GLUT strips its own arguments here; this has none to strip. */
     g.want_width = g.want_width ? g.want_width : 1280;
     g.want_height = g.want_height ? g.want_height : 720;
     g.pad_keys = 1;
@@ -168,10 +148,8 @@ void glutIdleFunc(void (*func)(void)) {
 }
 /*
  * Registering a keyboard callback says the program reads characters, so the keyboard
- * stops doubling as a pad for it. Without this, `a` arrives as both the letter and
- * `GLUT_KEY_LEFT`
- * (`oops_input_set_keyboard_as_pad`). A program that registers no keyboard callback
- * keeps the fallback, which is what makes a keyboard usable in a pad-only demo.
+ * stops doubling as a pad (`oops_input_set_keyboard_as_pad`) and `a` is not also
+ * `GLUT_KEY_LEFT`. A program with no keyboard callback keeps the fallback.
  */
 void glutKeyboardFunc(void (*func)(unsigned char, int, int)) {
     g.keyboard = func;
@@ -196,9 +174,8 @@ void glutMotionFunc(void (*func)(int, int)) {
 void glutPassiveMotionFunc(void (*func)(int, int)) {
     g.passive = func;
 }
-/* The window is visible for as long as the program runs, so this is called once with
- * GLUT_VISIBLE when the main loop starts and never again - which is the whole of what a
- * permanently visible window has to report. */
+/* The window is always visible, so this is called once with GLUT_VISIBLE when the main
+ * loop starts. */
 void glutVisibilityFunc(void (*func)(int)) {
     g.visibility = func;
 }
@@ -280,8 +257,7 @@ int glutGet(GLenum state) {
     case GLUT_WINDOW_ACCUM_BLUE_SIZE:
     case GLUT_WINDOW_ACCUM_ALPHA_SIZE:
         return 16;
-    /* One top-level window, no children, no colour map, no multisampling, no stereo -
-     * each of these is the state rather than a value this cannot produce. */
+    /* One top-level window, no children, no colour map, no multisampling, no stereo. */
     case GLUT_WINDOW_PARENT:
         return 0;
     case GLUT_WINDOW_NUM_CHILDREN:
@@ -306,8 +282,7 @@ int glutGet(GLenum state) {
         return g.want_height;
     case GLUT_INIT_DISPLAY_MODE:
         return (int)g.mode;
-    /* Every mode but colour-index is available; that one this library does not have, so
-     * a program that asks is told before it draws nothing. */
+    /* Every mode but colour-index is available. */
     case GLUT_DISPLAY_MODE_POSSIBLE:
         return (g.mode & GLUT_INDEX) ? 0 : 1;
     case GLUT_ELAPSED_TIME:
@@ -320,8 +295,8 @@ int glutGet(GLenum state) {
 /* ---------------------------------------------------------------------------
  * The one window
  *
- * Each of these is exact here rather than approximated - see glut.h for which of GLUT's
- * window calls are deliberately absent instead.
+ * Each of these is exact rather than approximated; glut.h lists the window calls that
+ * are absent.
  * --------------------------------------------------------------------------- */
 
 int glutGetWindow(void) {
@@ -335,9 +310,8 @@ void glutSetWindow(int window) {
     (void)window;
 }
 
-/* A title has nowhere to go on this display. Accepted and ignored, as
- * glutInitWindowPosition is: a program that sets one is not asking for anything it can
- * see fail. */
+/* A title has nowhere to go on this display: accepted and ignored, as
+ * glutInitWindowPosition is. */
 void glutSetWindowTitle(const char *title) {
     (void)title;
 }
@@ -501,10 +475,8 @@ static void glut_pump_mouse(void) {
 }
 
 /*
- * The pad as keys. A GLUT program has no notion of a controller, and a console often
- * has no keyboard, so without this many ports run and cannot be controlled. Edges only
- * - a held button is one event, as a key press is - and the option button ends the
- * loop, which is the way out of a program whose own is a window close.
+ * The pad as keys, since a GLUT program has no notion of a controller. Edges only - a
+ * held button is one event, as a key press is - and the option button ends the loop.
  */
 static void glut_pump_pad(void) {
     if (!g.pad_keys)
@@ -582,19 +554,15 @@ void glutMainLoop(void) {
         g.visibility(GLUT_VISIBLE);
     g.redisplay = 1;
     while (g.running) {
-        /* Cooperate with the dashboard's Close (oops/system.h): end the loop so
-         * glutMainLoop returns and the program's own teardown runs, rather than the
-         * program being killed mid-frame. Every GLUT program gets this without a line
-         * of its own. */
+        /* The dashboard's Close (oops/system.h) ends the loop, so glutMainLoop returns
+         * and the program's own teardown runs. */
         if (oops_system_close_requested())
             glutLeaveMainLoop();
-        /* **And be suspendable, which the Close above does not cover.** The kernel
-         * suspends a big-app asynchronously - after a Close, and for rest mode with no
-         * signal at all - and kills it at `0xa0d0c00f` if it has not reached a suspend
-         * point within a hundred seconds. Servicing the system's queue every frame is
-         * half of that; the drain on the way out is the other half, below. The same
-         * pair the SDL backend does, so a GLUT title is no more likely to be killed for
-         * resting than an SDL one. */
+        /* Suspendability: the kernel suspends a big-app asynchronously (after a Close,
+         * and for rest mode with no signal) and kills it with `0xa0d0c00f` if it
+         * reaches no suspend point within a hundred seconds. Servicing the system queue
+         * every frame, plus the drain on the way out, provides one, as the SDL backend
+         * does. */
         (void)oops_system_pump_events();
         glut_pump_keyboard();
         glut_pump_mouse();
@@ -609,10 +577,8 @@ void glutMainLoop(void) {
             g.idle();
         }
     }
-    /* Out of the loop for any reason - a Close, or the program's own
-       `glutLeaveMainLoop`. Empty the queue once more and drain the renderer, so
-       whatever the caller does next happens on a quiesced process and the kernel has a
-       suspend point to find. */
+    /* However the loop ended, empty the queue once more and drain the renderer, so the
+       caller continues on a quiesced process and the kernel has a suspend point. */
     oops_system_prepare_for_suspend();
 }
 
@@ -696,32 +662,14 @@ void glutWireCube(GLdouble size) {
 }
 
 /*
- * **The Platonic solids, derived rather than transcribed.**
- *
- * Every GLUT ships these as literal tables of vertices and face indices. Copying one
- * would be taking another implementation's data, and writing a table out by hand is the
- * kind of work that is wrong in one entry and looks right everywhere - a dodecahedron
- * with one face wound backwards draws almost correctly under the default cull. So the
- * vertices come out of the definitions and the faces are found from the vertices.
- *
- * The vertices:
- *   - tetrahedron: four alternate corners of the cube (+-1, +-1, +-1) - those with an
- * even number of minus signs. Radius sqrt(3).
- *   - octahedron: the six unit axes. Radius 1.
- *   - icosahedron: the twelve corners of three mutually perpendicular golden
- * rectangles, (0, +-1, +-phi) and its two cyclic rotations, scaled to radius 1.
- *   - dodecahedron: the cube's eight corners plus the twelve points (0, +-1/phi, +-phi)
- * and its rotations, all of which are at radius sqrt(3) as the cube's corners are.
- *
- * The faces: for the three triangular solids, a face is any three vertices that are
- * pairwise the shortest distance apart in the solid - which is what "edge" means. For
- * the dodecahedron, whose faces are pentagons, the twelve face normals are the
- * icosahedron's twelve vertices, because the two solids are duals; each face is the
- * five vertices furthest along its normal, put in order around it.
- *
- * The radii are GLUT's documented ones - 1 for the octahedron and the icosahedron,
- * sqrt(3) for the other two - so a program that scales expecting GLUT's sizes gets
- * them.
+ * The Platonic solids, derived from their definitions rather than transcribed from
+ * another GLUT's tables. Tetrahedron: the cube corners (+-1, +-1, +-1) with an even
+ * number of minus signs. Octahedron: the six unit axes. Icosahedron: three
+ * perpendicular golden rectangles, scaled to radius 1. Dodecahedron: the cube's corners
+ * plus (0, +-1/phi, +-phi) and its rotations. A triangular face is any three vertices
+ * pairwise an edge (the shortest distance) apart; a dodecahedron face is the five
+ * vertices furthest along one of its dual icosahedron's vertices. The radii are GLUT's
+ * documented ones: 1 for the octahedron and icosahedron, sqrt(3) for the other two.
  */
 #define GLUT_POLY_MAX_V 20
 #define GLUT_POLY_MAX_F 20
@@ -802,9 +750,9 @@ static void glut_poly_triangles(glut_poly_t *p) {
 /* The dodecahedron's twelve pentagons, one per direction in `normals`: the five
  * vertices furthest along it, ordered around it.
  *
- * **Ordered without an arc tangent.** The key below runs from 0 to 4 as the angle runs
- * from 0 to 2pi - the first half from the dot product, the second from its reflection -
- * which is monotone in the angle and enough to sort by. */
+ * Ordered without an arc tangent: the key runs from 0 to 4 as the angle runs from 0 to
+ * 2pi - the first half from the dot product, the second from its reflection - which is
+ * monotone in the angle. */
 static void glut_poly_pentagons(glut_poly_t *p, const float (*normals)[3], int count) {
     p->fv = 5;
     p->nf = 0;
@@ -870,15 +818,10 @@ static void glut_poly_pentagons(glut_poly_t *p, const float (*normals)[3], int c
  * Twelve directions at radius 1, the corners of three perpendicular golden rectangles -
  * an icosahedron.
  *
- * **There are two of them and they are not the same one.** Putting the long side of
- * each rectangle after the short gives (0, +-1, +-phi) and its rotations; putting it
- * first gives (0, +-phi, +-1). Both are regular icosahedra, mirror images of each
- * other, and only the second is the dual of the dodecahedron as its vertices are
- * written below - so only the second is the set of that dodecahedron's face normals.
- * Using the first put five vertices from three different faces into each pentagon, and
- * `test_gl_platonic_solids_are_the_solids_they_claim` caught it on the planarity check:
- * a set of five furthest along a direction that does not lie in one plane is not a
- * face.
+ * The long side after the short gives (0, +-1, +-phi) and its rotations; long first
+ * gives (0, +-phi, +-1). Both are regular icosahedra, mirror images of each other, and
+ * only the second is the dual of the dodecahedron below, so only it gives that
+ * dodecahedron's face normals (`test_gl_platonic_solids_are_the_solids_they_claim`).
  */
 static void glut_icosahedron_points(float out[12][3], int long_first) {
     const float phi = 1.61803398874989484820f; /* (1 + sqrt(5)) / 2 */
@@ -960,9 +903,8 @@ static void glut_build_poly(glut_poly_t *p, int which) {
     }
 }
 
-/* The normal is the face's own centre direction, which for a solid centred on the
- * origin is its outward normal exactly - the same value for every vertex of the face,
- * as a flat face wants. */
+/* The normal is the face's centre direction, which for a solid centred on the origin
+ * is its outward normal exactly, one value for the whole flat face. */
 static void glut_draw_poly(int which, GLenum mode) {
     glut_poly_t p;
     glut_build_poly(&p, which);
@@ -1010,7 +952,7 @@ void glutWireDodecahedron(void) {
 }
 
 /* The torus: `inner` is the tube's radius and `outer` the distance from the origin to
- * the tube's centre, which is GLUT's meaning of the two and not the other reading. */
+ * the tube's centre, as GLUT defines them. */
 static void glut_torus(GLdouble inner, GLdouble outer, GLint sides, GLint rings,
                        GLenum mode) {
     if (sides < 3)
@@ -1046,51 +988,22 @@ void glutWireTorus(GLdouble inner, GLdouble outer, GLint sides, GLint rings) {
 }
 
 /*
- * The teapot, and it is the only solid here that is not generated.
- *
- * Every other shape in this file comes out of arithmetic - a quadric, or the vertices
- * of a platonic solid. The teapot is 129 measured control points that Martin Newell
- * digitised off his own teapot in 1975, so it is transcribed rather than derived, and
- * it carries its source with it in `glut_teapot_data.h`.
- *
- * # Ten patches become thirty-two by symmetry
- *
- * The data holds ten bicubic Bezier patches and the rest of the pot is their mirrors,
- * which is why 129 points describe a shape that renders as thirty-two patches. The
- * data's z is up and the body is a surface of revolution about it, so:
- *
- *   - the rim, body, lid and bottom (patches 0-5) are drawn four times: as given,
- * mirrored in x, mirrored in y, and mirrored in both, which walks them round all four
- * quadrants;
- *   - the handle and spout (patches 6-9) lie in the x-z plane and are drawn twice,
- * mirrored in y only - a teapot has one of each, not four.
- *
- * That split is the reason for the `i < 6` below, and it is freeglut's own comment on
- * the data turned into code.
- *
- * # Why the transform looks arbitrary
- *
- * `glutSolidTeapot(size)` is expected to put a teapot of roughly `size` units at the
- * origin, y-up. The data is z-up, off-centre, and about two units tall, so the
- * rotate-scale-translate here is the fixed correction every GLUT has applied since
- * 1994. Matching it matters more than tidying it: a program ported to this platform
- * draws the teapot it expects, at the size and orientation it expects, or the port is
- * not a port.
- *
- * `GL_AUTO_NORMAL` is what makes this shade. The evaluator differentiates the surface
- * and emits a normal per vertex, so nothing here computes one - which is just as well,
- * because mirroring a patch reverses its winding and hand-computed normals would point
- * inwards on half the pot.
+ * The teapot: Newell's measured control points, transcribed with their source in
+ * `glut_teapot_data.h`. The data holds ten bicubic Bezier patches, z-up. The rim, body,
+ * lid and bottom (patches 0-5) are drawn four times, mirrored into each quadrant; the
+ * handle and spout (patches 6-9) twice, mirrored in y - hence `i < 6` below. The
+ * rotate-scale-translate is GLUT's fixed correction to a y-up teapot of about `size`
+ * units at the origin. `GL_AUTO_NORMAL` supplies the normals, so mirrored patches need
+ * no hand-computed ones.
  */
 #include "glut_teapot_data.h"
 
-/* Patches a side, per patch. GLUT's own default, and enough that the silhouette is
- * smooth at the sizes a title draws this. */
+/* Grid steps a side, per patch: GLUT's default. */
 #define GLUT_TEAPOT_GRID 14
 
 static void glut_teapot(GLdouble size, GLenum mode) {
-    /* Zeroed because `r` and `s` are only filled for the first six patches, and a
-     * compiler that cannot see the `i < 6` pairing would call them uninitialised. */
+    /* Zeroed: `r` and `s` are only filled for the first six patches, which a compiler
+     * cannot see. */
     GLfloat p[4][4][3] = {{{0}}}, q[4][4][3] = {{{0}}};
     GLfloat r[4][4][3] = {{{0}}}, s[4][4][3] = {{{0}}};
     static const GLfloat tex[2][2][2] = {{{0.0f, 0.0f}, {1.0f, 0.0f}},
@@ -1171,12 +1084,8 @@ void glutWireTeapot(GLdouble size) {
  * --------------------------------------------------------------------------- */
 
 /*
- * Whole-word search of a space-separated list.
- *
- * `strstr` alone is the trap: `GL_EXT_texture` occurs inside `GL_EXT_texture3D`, so a
- * driver offering only the latter would be reported as offering both. The boundary
- * checks are what make this an answer rather than a guess, and the failure they prevent
- * is silent - a port takes an extension path that is not there and draws nothing.
+ * Whole-word search of a space-separated list. `strstr` alone would find
+ * `GL_EXT_texture` inside `GL_EXT_texture3D`; the boundary checks prevent that.
  */
 static int glut_has_word(const char *list, const char *word) {
     if (!list || !word || !*word)
@@ -1203,21 +1112,16 @@ int glutExtensionSupported(const char *name) {
         return 1;
 
     /*
-     * And the indexed form, for a core profile where the above returns NULL.
-     *
-     * **Guarded, because this file compiles against two different sets of GL headers.**
-     * Built as part of this SDK it sees oops-gl's, which are GL 1.x/2.x and declare
-     * neither `GL_NUM_EXTENSIONS` nor `glGetStringi` - and do not need to, because a
-     * context that old has only the flat string. Built into a hosted title it sees
-     * upstream Mesa's, which declare both. The `#ifdef` is what lets one implementation
-     * be correct in both, rather than two copies drifting apart.
+     * And the indexed form, for a core profile where the above returns NULL. Guarded
+     * because this file builds against oops-gl's headers, which declare neither
+     * `GL_NUM_EXTENSIONS` nor `glGetStringi`, and against upstream Mesa's, which do.
      */
 #ifdef GL_NUM_EXTENSIONS
     GLint count = 0;
     glGetIntegerv(GL_NUM_EXTENSIONS, &count);
 
-    /* A context that does not support the query leaves an error rather than a count; it
-     * is cleared so a port does not later find somebody else's. */
+    /* A context without the query leaves an error rather than a count; it is cleared
+     * so the caller does not find it later. */
     if (count <= 0) {
         (void)glGetError();
         return 0;

@@ -2,6 +2,9 @@
 #include "src/audio/audio_port.h"
 #include "tests/test_common.h"
 
+/* Unit tests for `oops/audio.h`: argument checks, host unavailability, and how writes
+ * are cut into the platform's fixed-size chunks. */
+
 /* A recording sink in place of the platform's output call: each call keeps one
  * chunk. */
 #define SINK_MAX_CALLS 8
@@ -57,6 +60,7 @@ static void fill_ramp(int16_t *buf, int frames, int first) {
 /* Left sample of frame f in sink call c. */
 #define SINK_L(c, f) (s_sink_log[(c)][2 * (f)])
 
+/* NULL ports, NULL samples and zero frames are refused without reaching the sink. */
 static void test_audio_null_and_bounds(void) {
     int16_t samples[512 * 2];
     ASSERT_EQ(oops_audio_write(NULL, samples, 512), -1);
@@ -85,6 +89,7 @@ static void test_audio_open_contract_on_host(void) {
     ASSERT_EQ(oops_audio_get_last_error(), OOPS_AUDIO_EUNAVAIL);
 }
 
+/* A write of whole chunks goes straight to the sink, in order, with nothing held. */
 static void test_audio_write_whole_chunks_direct(void) {
     int16_t pcm[512 * 2];
     port_reset(256);
@@ -101,6 +106,7 @@ static void test_audio_write_whole_chunks_direct(void) {
     ASSERT_EQ(SINK_L(1, 255), 511);
 }
 
+/* A partial chunk is held and joined to the next write; flush pads it with silence. */
 static void test_audio_write_holds_partial_tail(void) {
     int16_t pcm[300 * 2];
     port_reset(256);
@@ -130,9 +136,8 @@ static void test_audio_write_holds_partial_tail(void) {
     ASSERT_EQ(s_sink_calls, 2); /* nothing held: no call */
 }
 
-/* Sizes that are not chunk multiples, written back to back, must join
- * seamlessly: the old path padded every call with silence, which is a click per
- * write. */
+/* Sizes that are not chunk multiples, written back to back, join seamlessly: padding
+ * each write with silence would be a click per write. */
 static void test_audio_write_mixed_sizes_no_gap(void) {
     int16_t pcm[300 * 2];
     port_reset(256);
@@ -157,6 +162,7 @@ static void test_audio_write_mixed_sizes_no_gap(void) {
     ASSERT_EQ(SINK_L(2, 88), 0);
 }
 
+/* A sink error stops the write and is returned to the caller. */
 static void test_audio_write_reports_sink_error(void) {
     int16_t pcm[512 * 2];
     port_reset(256);
@@ -166,6 +172,7 @@ static void test_audio_write_reports_sink_error(void) {
     ASSERT_EQ(s_sink_calls, 2); /* first chunk went, second failed, stop there */
 }
 
+/* Close flushes a held tail, and a closed port refuses writes. */
 static void test_audio_close_flushes_tail(void) {
     int16_t pcm[10 * 2];
     port_reset(256);

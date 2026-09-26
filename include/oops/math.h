@@ -1,3 +1,7 @@
+/*
+ * Freestanding math: scalar float and double kernels, 3D vectors and column-major 4x4
+ * matrices.
+ */
 #ifndef OOPS_MATH_H
 #define OOPS_MATH_H
 
@@ -40,28 +44,12 @@ static inline float oops_lerpf(float a, float b, float t) {
 }
 
 /*
- * **Double-precision scalar math, and why it is not the float set widened.**
- *
- * `<libc/math.h>`'s `sin`, `acos` and their siblings used to be one line each: cast the
- * argument to `float`, call the float kernel, widen the result. That is right for a
- * shader-adjacent calculation and wrong for anything that reasons about its own
- * precision, because it silently moves the smallest representable step from 1e-16 to
- * 6e-8.
- *
- * Extreme Tux Racer is the measurement. Its quaternion interpolation guards a
- * singularity the way a double program should - `if (1.0 - cosphi > 1e-13)`, then
- * divide by `sin(acos(cosphi))`. On a double `acos`, `cosphi = 1 - 1e-13` gives
- * `4.5e-7` and the division is ordinary. Through a float `acos` the argument *rounds to
- * exactly 1*, `acos` returns 0, and the division is `0/0`. Every frame in which the
- * player's orientation barely changed produced a NaN quaternion, which reached the
- * course lookup as a NaN position and faulted two layers later. Nothing in between was
- * wrong.
- *
- * So these are real double kernels - argument reduction and polynomials carrying the
- * full 53 bits
- * - and `<libc/math.h>`'s double entry points are one line each on top of them.
- * `tests/unit/ test_math.c` checks them against the host's own libm, including the
- * near-1 case above.
+ * Double-precision scalar math: real double kernels, with argument reduction and
+ * polynomials carrying the full 53 bits, not the float set widened. A program that
+ * reasons about its own precision (a guard such as `1.0 - cosphi > 1e-13` before
+ * dividing by `sin(acos(cosphi))`) would get 0/0 through a float `acos`.
+ * `<libc/math.h>`'s double entry points are one line each on top of these.
+ * `tests/unit/test_math.c` checks them against the host's libm, near-1 case included.
  */
 double oops_sqrt(double x);
 double oops_sin(double x);
@@ -119,7 +107,7 @@ static inline float oops_vec3_length(oops_vec3_t v) {
 
 oops_vec3_t oops_vec3_normalize(oops_vec3_t v);
 
-/* 4x4 Matrix (Column-major layout matching OpenGL / RDNA2 PM4 uniform buffers) */
+/* 4x4 matrix, column-major as OpenGL and shader uniform buffers expect */
 typedef struct oops_mat4 {
     float m[16];
 } oops_mat4_t;

@@ -1,6 +1,9 @@
+/* Unit tests for the freestanding runtime helpers in `oops/freestd.h`: strings,
+ * formatting, NIDs, scanning, sorting and 128-bit division. */
 #include "oops/freestd.h"
 #include "tests/test_common.h"
 
+/* The string primitives agree with C's, including on NULL and empty arguments. */
 static void test_freestd_strings(void) {
     ASSERT_EQ(obs_strlen("hello"), 5);
     ASSERT_EQ(obs_strlen(""), 0);
@@ -25,6 +28,7 @@ static void test_freestd_strings(void) {
     ASSERT_TRUE(obs_strstr("short", "longer string") == NULL);
 }
 
+/* The integer formatters write decimal, signed and hex digits exactly. */
 static void test_freestd_formatting(void) {
     char buf[64];
     size_t len;
@@ -42,14 +46,11 @@ static void test_freestd_formatting(void) {
     ASSERT_EQ(obs_strcmp(buf, "0x1a2b"), 0);
 }
 
-/* NID hashing, pinned against SELFish (the format authority): SHA-1(name ||
- * 16-byte suffix 518D64A635DED8C1E6B039B1C3E55230), first 8 digest bytes read
- * little-endian, shifted left 2, emitted as 11 six-bit groups MSB-first through
- * base64 with + and - as the last two symbols. The length-only check could not
- * fail on a wrong suffix, byte order or alphabet; these values can.
- * sceKernelGetProcessId is the string obSCEne has not found the platform to
- * export, but the hash of the string is still well-defined and is what this
- * pins. (SELFish commit 6aa50c8, crates/selfish-nid/tests/depended_on.rs) */
+/* NID hashing matches SELFish, the format authority
+ * (crates/selfish-nid/tests/depended_on.rs): SHA-1(name || 16-byte suffix
+ * 518D64A635DED8C1E6B039B1C3E55230), first 8 digest bytes read little-endian, shifted
+ * left 2, emitted as 11 six-bit groups MSB-first through base64 with + and - as the
+ * last two symbols. Known values fail on a wrong suffix, byte order or alphabet. */
 static void test_freestd_nid(void) {
     char nid[12];
 
@@ -68,6 +69,7 @@ static void test_freestd_nid(void) {
     ASSERT_STR_EQ(nid, "YndgXqQVV7c");
 }
 
+/* `oops_snprintf` pads, aligns, truncates and returns the untruncated length. */
 static void test_freestd_snprintf(void) {
     char buf[128];
     int ret;
@@ -98,17 +100,8 @@ static void test_freestd_snprintf(void) {
     ASSERT_EQ(ret, 8);
 }
 
-/*
- * `%f` and the precision field.
- *
- * **The last assertion is the one that matters**, and it is not about floats. An
- * unimplemented conversion used to print itself verbatim *and leave its argument on the
- * stack*, so every conversion after it read the wrong vararg: `printf("w=%f n=%d", w,
- * n)` printed a plausible and entirely wrong `n`. That is how a course loader was
- * misdiagnosed on 2026-09-24 - the instrument lied about a value it had never been
- * given. A conversion this function does not implement is therefore a bug in every line
- * that follows it, not only its own.
- */
+/* `%f` and the precision field, and the arguments after a float conversion: a
+ * conversion that leaves its argument unconsumed shifts every vararg after it. */
 static void test_freestd_snprintf_floats(void) {
     char buf[128];
 
@@ -130,9 +123,7 @@ static void test_freestd_snprintf_floats(void) {
     oops_snprintf(buf, sizeof(buf), "%8.2f|%-8.2f|", 1.0, 1.0);
     ASSERT_STR_EQ(buf, "    1.00|1.00    |");
 
-    /* Not a number, which compares false against everything including itself. Printing
-       it as 0 would be the kind of quiet wrong answer this whole file exists to catch.
-     */
+    /* Not a number prints as "nan", never as a plausible 0. */
     double zero = 0.0;
     oops_snprintf(buf, sizeof(buf), "%f", zero / zero);
     ASSERT_STR_EQ(buf, "nan");
@@ -142,10 +133,8 @@ static void test_freestd_snprintf_floats(void) {
     ASSERT_STR_EQ(buf, "w=90.0 h=520.0 n=61");
 }
 
-/* The set functions and the tokeniser, which are `<libc/string.h>`'s `strspn`,
- * `strcspn`, `strpbrk`, `strtok` and `strtok_r`. The edges checked are the ones a
- * parser meets on its first bad line: an empty set, a string that is all delimiters,
- * and a trailing delimiter. */
+/* The set functions and the tokeniser (`strspn`, `strcspn`, `strpbrk`, `strtok_r`)
+ * handle an empty set, a string that is all delimiters, and a trailing delimiter. */
 static void test_freestd_sets_and_tokens(void) {
     ASSERT_EQ((int)obs_strspn("  \tab", " \t"), 3);
     ASSERT_EQ((int)obs_strspn("ab", ""), 0); /* the empty set contains nothing */
@@ -179,14 +168,9 @@ static void test_freestd_sets_and_tokens(void) {
     }
 }
 
-/* `obs_qsort` and `obs_bsearch`, which are `<libc/stdlib.h>`'s.
- *
- * **The inputs that matter are the ordered ones.** A naive quicksort recurses `count`
- * deep on a sorted array, which is exactly what a depth-sorted scene hands it on the
- * frame after it sorted - so the sorted, reversed and all-equal cases are here, at a
- * size past the insertion sort's sixteen, and the count of comparisons is checked to
- * stay near n log n rather than n^2.
- */
+/* `obs_qsort` and `obs_bsearch`, which are `<libc/stdlib.h>`'s. Sorted, reversed and
+ * all-equal inputs past the insertion sort's threshold stay near n log n comparisons
+ * rather than n^2: a depth-sorted scene hands the sort its own previous output. */
 static int fs_cmp_calls;
 
 static int fs_cmp_int(const void *a, const void *b) {
@@ -222,8 +206,8 @@ static void test_freestd_qsort_and_bsearch(void) {
         ASSERT_EQ(v[i], 7);
     ASSERT_TRUE(fs_cmp_calls < N * N / 4);
 
-    /* Two values only - the other classic killer, and the one that a partition which
-     * walks over equals turns into n^2 even with a median-of-three pivot. */
+    /* Two values only, which a partition that walks over equals turns into n^2 even
+     * with a median-of-three pivot. */
     for (int i = 0; i < N; i++)
         v[i] = (i & 1) ? 1 : 0;
     fs_cmp_calls = 0;
@@ -276,16 +260,10 @@ static void test_freestd_qsort_and_bsearch(void) {
     }
 }
 
-/*
- * `obs_sscanf`, which is `<libc/stdio.h>`'s `sscanf`.
- *
- * **The cases are the ones an asset loader meets**, because that is what it is for: an
- * OBJ vertex line, a face line with its slashes, an MTL colour, a key-value line, and
- * the two answers a read loop turns on - how many fields were assigned, and `EOF` when
- * there was nothing left to read at all.
- */
+/* `obs_sscanf` handles the lines an asset loader meets - OBJ vertices and faces, MTL
+ * colours, key-value pairs - and returns the assigned count, or `EOF` on no input. */
 static void test_freestd_sscanf(void) {
-    /* An OBJ vertex line, which is the whole reason this exists. */
+    /* An OBJ vertex line. */
     {
         float x = 0.0f, y = 0.0f, z = 0.0f;
         char tag[8] = {0};
@@ -370,7 +348,7 @@ static void test_freestd_sscanf(void) {
         ASSERT_STR_EQ(key, "name");
         ASSERT_STR_EQ(val, "value");
     }
-    /* **"1e" is a matching failure, not the number one.** C takes the longest sequence
+    /* "1e" is a matching failure, not the number one. C takes the longest sequence
      * that could begin a valid number - "1e" can, since "1e5" is one - and then fails
      * when that sequence is not itself valid. "1e5" is fine; "1e" converts nothing. */
     {
@@ -380,12 +358,8 @@ static void test_freestd_sscanf(void) {
         ASSERT_EQ(obs_sscanf("1e5", "%f", &f), 1);
         ASSERT_FLOAT_NEAR(f, 100000.0f, 1e-1f);
     }
-    /*
-     * **The two failures a read loop tells apart.** A *matching* failure - the input is
-     * there and is not a number - gives 0. An *input* failure, nothing left to read at
-     * all, gives EOF. C draws that line and a loader turns on it: 0 means "skip this
-     * line", EOF means "stop".
-     */
+    /* A matching failure - input that is not a number - gives 0; an input failure,
+     * nothing left to read, gives EOF. A loader skips on 0 and stops on EOF. */
     {
         int a = 0;
         ASSERT_EQ(obs_sscanf("# a comment", "%d", &a),
@@ -401,26 +375,11 @@ static void test_freestd_sscanf(void) {
 }
 
 /*
- * **Four (input, format) pairs where the host library is not the oracle.**
- *
- * C defines the input item as the longest sequence of characters that either is what
- * the conversion expects or is a *prefix* of something it would expect, and fails the
- * directive when that item cannot then be converted (C17 7.21.6.2). "1e" is a prefix of
- * "1e5" and "0x" is a prefix of "0x1"; neither is itself a number, so each is a
- * matching failure and the directive returns 0. That is what this library does, and
- * what `test_freestd_sscanf` above pins case by case.
- *
- * glibc converts the valid prefix instead and leaves the rest unread: there
- * `sscanf("1e", "%f")` is 1 and 1.0, and `sscanf("0x", "%x")` is 1 and 0. That is
- * glibc's own long-standing departure and not one host library being newer than another
- * - 2.36 and 2.41 were measured against this file and answer identically - while musl
- * agrees with this library on every input in the list below. So these four cannot be
- * settled by asking whichever host happens to be compiling the tests, and the standard
- * settles them instead.
- *
- * Every other input is still compared against whatever the host says, which is the
- * point of the test: a list of expectations only covers the rules somebody remembered
- * to write down.
+ * The (input, format) pairs where the host library is not the oracle. C's input item
+ * is the longest sequence that is, or is a prefix of, what the conversion expects, and
+ * the directive fails when that item cannot be converted (C17 7.21.6.2): "1e" and "0x"
+ * are matching failures returning 0. glibc converts the valid prefix instead, while
+ * musl agrees with the standard, so the standard answers these.
  */
 static const struct {
     const char *in;
@@ -444,20 +403,9 @@ static int obs_scan_standard_answer(const char *in, const char *fmt, int *return
     return 0;
 }
 
-/*
- * **The host's own `sscanf` as the oracle.**
- *
- * The cases above say what this should do; this says it does what C's does. The tests
- * build on the host, where `<stdio.h>` is the real library, so the same input and
- * format go to both and the return value and the converted values are compared. That is
- * a stronger check than any list of expectations, because it catches the rules nobody
- * remembered to write a case for - the first draft returned EOF where C returns 0,
- * which is the difference between a loader skipping a comment line and a loader
- * stopping at one.
- *
- * Where the host library itself departs from C the standard answers instead;
- * `k_host_diverges` above names every pair that does and says why.
- */
+/* `obs_sscanf` returns and converts what the host's `sscanf` does for the same input
+ * and format, which covers rules no hand-written case names. The pairs in
+ * `k_host_diverges` are answered by the standard instead. */
 static void test_freestd_sscanf_agrees_with_the_host(void) {
     static const char *const inputs[] = {
         "1 2 3",    "  -4  +5 ",  "7/12/3",
@@ -549,19 +497,10 @@ static void test_freestd_sscanf_agrees_with_the_host(void) {
 }
 
 /*
- * The 128-bit division helpers, against **known answers rather than the host's `/`**.
- *
- * That is not squeamishness. On x86-64, `/` on a 128-bit integer *is* a call to
- * `__udivti3`, and `freestd.c` is linked into this test - so comparing against the
- * operator would compare the subject with itself and pass for an implementation that is
- * consistently wrong. `oops-apps/common/rt/tests/rt_test.c` records the same trap from
- * the other side, where it was solved by renaming the subject; here the answers are
- * simply written down.
- *
- * The cases that matter are the signs, not the magnitudes. C truncates toward zero and
- * gives the remainder the *dividend's* sign: `-7 / 2` is -3 remainder -1, where a
- * floor-division implementation would say -4 remainder 1. And the most negative value
- * is where negating in signed arithmetic would be undefined.
+ * The 128-bit division helpers give C's answers: truncation toward zero, the remainder
+ * taking the dividend's sign (`-7 / 2` is -3 remainder -1), and the most negative value
+ * handled without signed overflow. Known answers, not the host's `/`: on x86-64 that
+ * operator calls `__udivti3`, which here is the subject itself.
  */
 typedef unsigned __int128 t_u128;
 typedef __int128 t_i128;

@@ -1,3 +1,6 @@
+/*
+ * Time: a process clock for frame pacing and measurement, the wall clock, and sleeps.
+ */
 #ifndef OOPS_TIME_H
 #define OOPS_TIME_H
 
@@ -7,28 +10,20 @@
 extern "C" {
 #endif
 
+/* Reads the counter frequencies the process clocks are built on; idempotent. */
 void oops_time_init(void);
 /*
- * **Wall-clock time: seconds since the Unix epoch** (2026-09-22), and zero when the
- * platform will not say.
+ * Wall-clock time: seconds since the Unix epoch, from the kernel's
+ * `clock_gettime(CLOCK_REALTIME)`. Everything else in this header is a process clock
+ * (`sceKernelGetProcessTimeCounter`, counting from process start), right for frame
+ * pacing and wrong for a date.
  *
- * Everything else in this header is a *process* clock - `oops_time_get_ns` sits on
- * `sceKernelGetProcessTimeCounter`, which counts from process start. That is the right
- * answer for frame pacing and for measuring how long something took, and it is the
- * wrong answer for a date. `<libc/time.h>` used to conclude from that that a payload
- * simply could not know the date, and say so firmly; it was never measured, only
- * inherited from which clock happened to be wired first.
- *
- * This asks the kernel instead, through `clock_gettime(CLOCK_REALTIME)` - the same
- * FreeBSD syscall table every other call in `<oops/syscall.h>` uses. Titles want it for
- * ordinary reasons: Neverball stamps replays with the date they were recorded.
- *
- * **Zero means "the platform did not answer", and callers must treat it as unknown**
- * rather than as 1970. That is the one honest failure available: there is no sentinel a
- * date cannot be.
+ * Zero means the platform did not answer; callers treat it as unknown, not as 1970.
  */
 uint64_t oops_time_get_epoch_seconds(void);
 
+/* The process clocks: raw tick and counter values with their frequencies, and time
+ * since process start in nanoseconds, microseconds, milliseconds and seconds. */
 uint64_t oops_time_get_ticks(void);
 uint64_t oops_time_get_counter(void);
 uint64_t oops_time_get_frequency(void);
@@ -37,6 +32,7 @@ uint64_t oops_time_get_ns(void);
 uint64_t oops_time_get_us(void);
 uint64_t oops_time_get_ms(void);
 double oops_time_get_seconds(void);
+/* Sleeps the calling thread. */
 void oops_time_sleep_us(uint32_t microseconds);
 void oops_time_sleep_ms(uint32_t milliseconds);
 

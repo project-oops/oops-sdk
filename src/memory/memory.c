@@ -1,3 +1,9 @@
+/*
+ * Direct (physical) memory: allocation, mapping, virtual-range reservation and batch
+ * mapping over the sceKernel entry points, plus `oops_mem_alloc`, which allocates and
+ * maps CPU- and GPU-visible memory in 64 KB pages and tracks it for free and physical
+ * lookup.
+ */
 #include "oops/memory.h"
 #include "oops/system.h"
 

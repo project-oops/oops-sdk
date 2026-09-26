@@ -1,13 +1,9 @@
 name: Deploy docs to GitHub Pages
 
-# The same shape oops-libs uses, and for the same reason: this is not one of the four, so it
-# publishes its documentation and nothing else. `/` redirects straight to it rather than
-# inventing a front page for a library that does not want one.
+# Publishes the documentation and nothing else, as oops-libs does; `/` redirects to it.
 #
-# `paths-ignore` rather than a `paths` allowlist. An allowlist that forgot `docs/**` is how
-# three of the sibling sites silently lagged their own documentation - the deploy went green
-# and published the previous commit's pages. Naming what cannot possibly change the site is
-# the safe direction to be wrong in.
+# `paths-ignore` rather than a `paths` allowlist: an allowlist that misses a docs path leaves
+# the site publishing stale pages, so only what cannot change the site is named.
 
 on:
   push:
@@ -30,16 +26,12 @@ concurrency:
 jobs:
   build:
     name: Build site bundle
-    # GitHub Pages does not serve a private repository on a free plan, so turning this
-    # repository private turns Pages off with it. Without this guard the workflow fails red on
-    # every push - a mark that means nothing but that the site is deliberately not there. Gated
-    # rather than deleted: flip the repository back to public and the site returns. The four
-    # project repos carry the same gate; this aligns oops-sdk with them.
+    # GitHub Pages does not serve a private repository on a free plan, so the build runs only
+    # while the repository is public. The four project repositories carry the same gate.
     if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     steps:
-      # The standard OOPS preamble, the same three steps every workflow in the collection
-      # begins with. See docs/BUILDING.md.
+      # The standard OOPS preamble; see docs/BUILDING.md.
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/OOPS
@@ -55,16 +47,15 @@ jobs:
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap oops-sdk
         env:
-          # Empty unless the org secret exists, and empty is the old behaviour.
+          # Empty unless the org secret exists; bootstrap works without it.
           OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
 
       - name: Assemble bundle
         run: |
           set -euo pipefail
           mkdir -p site
-          # The shared renderer, the same one the others call, so every set of docs in the
-          # collection looks alike. Grey rather than a project accent: this is not one of the
-          # four, and borrowing one of their colours would suggest it is.
+          # The collection's shared renderer. Grey rather than a project accent, since
+          # oops-sdk is not one of the four projects.
           bash ../tools/build-docs.sh . site "#8b9096" "oops-sdk"
           cat > site/index.html <<'HTML'
           <!DOCTYPE html>

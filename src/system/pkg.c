@@ -1,5 +1,8 @@
 ﻿#include "oops/pkg.h"
 
+/* Package install, uninstall and progress (oops/pkg.h) over `libSceAppInstUtil`. The
+ * entry points are weak, so a build without them fails the call instead of the link. */
+
 /* Platform weak symbols for libSceAppInstUtil */
 __attribute__((weak)) int sceAppInstUtilInitialize(void);
 __attribute__((weak)) int sceAppInstUtilTerminate(void);

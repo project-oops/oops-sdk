@@ -1,38 +1,13 @@
 /*
  * oops-gl: evaluators
  *
- * A map is a Bezier curve (glMap1) or surface (glMap2) - control points over a
- * parameter domain - for one vertex attribute. glEvalCoord evaluates every enabled map
- * of its dimension at a point and issues the result as the glVertex, glNormal, glColor
- * and glTexCoord calls it stands for; glMapGrid lays a grid over the domain and
- * glEvalMesh walks it. **All of it is CPU arithmetic feeding the ordinary
- * immediate-mode path**, so an evaluated patch is drawn, lit, textured and compiled
- * into lists exactly as the same vertices typed out by hand would be. This is what
- * `glutSolidTeapot` draws through, and a great deal of GL 1.x sample code besides.
- *
- * # What evaluation does and does not change
- *
- * The specification's rule is that evaluation **never changes the current colour,
- * normal or texture coordinate**: an evaluated value is used in place of the current
- * one for that vertex only. So each evaluated vertex sets them, issues glVertex, and
- * puts them back - the same thing Mesa does by saving and restoring the current vertex
- * around each evaluation (vbo/vbo_exec_api.c:712-770). A map that is not enabled leaves
- * its attribute at the current value, and with no vertex map enabled nothing is issued
- * at all.
- *
- * Of several texture-coordinate maps the highest enabled one wins, and GL_MAP*_VERTEX_4
- * wins over _3 (vbo/vbo_exec_eval.c:65-119). Colour-index maps are kept and queried and
- * evaluate to nothing: this is an RGBA context, and in one the index is never drawn
- * with.
- *
- * # The arithmetic
- *
- * De Casteljau's construction - repeated linear interpolation of the control points -
- * rather than the Bernstein sum or Horner's rule: it is the numerically steady one, and
- * its last-but-one step is the derivative, which GL_AUTO_NORMAL needs. A surface
- * evaluates each u-row of control points in v, then the resulting column in u. Maps are
- * at most 30 by 30 points (OOPS_GL_MAX_EVAL_ORDER), so the working arrays live on the
- * stack.
+ * A map is a Bezier curve (glMap1) or surface (glMap2) for one vertex attribute.
+ * glEvalCoord evaluates every enabled map and issues the glVertex, glNormal, glColor
+ * and glTexCoord calls it stands for, on the CPU through the immediate-mode path;
+ * glMapGrid and glEvalMesh walk a grid. The current attributes are put back after each
+ * evaluated vertex, as Mesa does (vbo/vbo_exec_api.c:712-770); map precedence follows
+ * vbo/vbo_exec_eval.c:65-119, and colour-index maps evaluate to nothing in this RGBA
+ * context. De Casteljau's construction gives the derivative GL_AUTO_NORMAL needs.
  */
 
 #include "gl_internal.h"
@@ -195,9 +170,7 @@ static void gl_eval_pack(float *out, const GLfloat *fp, const GLdouble *dp,
 /* glMap1 and glMap2, both spellings. Checked in the order that gives each wrong
  * argument its own error: the target (GL_INVALID_ENUM), then the domain, the orders,
  * the strides and the points (GL_INVALID_VALUE) - Mesa's checks, with the target first
- * (main/eval.c map1/map2). The specification's GL_INVALID_OPERATION for a map defined
- * while a texture unit other than 0 is active cannot arise: unit 0 is the only one
- * there is. */
+ * (main/eval.c map1/map2). */
 static void gl_eval_define(GLenum target, GLfloat u1, GLfloat u2, GLint ustride,
                            GLint uorder, GLfloat v1, GLfloat v2, GLint vstride,
                            GLint vorder, const GLfloat *fp, const GLdouble *dp,
@@ -596,7 +569,7 @@ static void gl_eval_coord2(gl_context_t *ctx, float u, float v) {
     }
 
     if (ctx->cap_auto_normal) {
-        /* **GL_AUTO_NORMAL is the surface's own normal**: the cross product of its
+        /* GL_AUTO_NORMAL is the surface's own normal: the cross product of its
          * partial derivatives, which takes precedence over a normal map. For a
          * four-component vertex map it is the normal of the projected surface (x/w,
          * y/w, z/w); each partial derivative of that is (dp w - dw p) / w^2, and the
@@ -723,11 +696,9 @@ void glMapGrid2d(GLint un, GLdouble u1, GLdouble u2, GLint vn, GLdouble v1,
     glMapGrid2f(un, (GLfloat)u1, (GLfloat)u2, vn, (GLfloat)v1, (GLfloat)v2);
 }
 
-/* Grid line `i` of `n` across [a, b]. **Computed from i each time, never accumulated**,
- * and line n is b exactly: two patches that meet along an edge each evaluate that edge
- * at the same parameter, so their shared vertices agree to the bit and the surface does
- * not crack between them - which an accumulated `u += du` drifting by an ulp per step
- * would not promise. */
+/* Grid line `i` of `n` across [a, b], computed from i each time rather than
+ * accumulated, and line n is b exactly: patches meeting along an edge then share
+ * vertices to the bit and the surface does not crack. */
 static float gl_grid_at(GLint i, GLint n, float a, float b) {
     if (i == n)
         return b;

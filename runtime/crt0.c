@@ -2,23 +2,17 @@
  * The payload crt0 for the console's homebrew loader (elfldr).
  *
  * elfldr maps a plain ET_DYN payload, applies only R_X86_64_RELATIVE, and jumps to the
- * entry with a `payload_args` pointer in rdi. It resolves no imports - so a payload is
- * on its own, and this is what makes an ordinary program run there: it walks the
- * payload's own relocation tables and fills every import from the target's libraries,
- * then calls the real entry.
+ * entry with a `payload_args` pointer in rdi. It resolves no imports, so this walks the
+ * payload's own relocation tables, fills every import from the target's libraries, and
+ * then calls the real entry (obscene#D211).
  *
- * Proven on hardware before it was moved here (obSCEne D211). The knowledge that is a
- * *format* fact - the args layout, the 16 KB pages, that only RELATIVE is applied -
- * belongs to selfish; the per-firmware vaddrs do not, and arrive in the resolution
- * table the caller supplies.
- *
- * The caller links this with the payload objects and a generated `obs_payload_table.c`
- * that defines the symbols declared `extern` below.
- *
+ * The format facts (the args layout, the 16 KB pages, that only RELATIVE is applied)
+ * belong to selfish; the per-firmware vaddrs arrive in the resolution table the caller
+ * supplies. The caller links this with the payload objects and a generated
+ * `obs_payload_table.c` that defines the symbols declared `extern` below.
  */
 
-/* --- the resolution table, generated per payload+firmware by selfish
- * --------------------- */
+/* The resolution table, generated per payload and firmware by selfish. */
 
 struct obs_import {
     const char *name; /* the payload's plain import name */
@@ -35,8 +29,7 @@ extern const unsigned long
     obs_loadstart_vaddr; /* sceKernelLoadStartModule, in libkernel */
 extern const unsigned long obs_modinfo_vaddr; /* sceKernelGetModuleInfo, in libkernel */
 
-/* --- ELF/reloc shapes
- * -------------------------------------------------------------------- */
+/* ELF dynamic and relocation shapes. */
 
 extern char __ehdr_start[];
 extern char _DYNAMIC[];
@@ -147,10 +140,8 @@ void _start(void) {
     unsigned long base = (unsigned long)&__ehdr_start;
 
     /* Zero the .bss. elfldr maps the LOAD segments but does not zero the region where a
-     * segment\x27s MemSiz exceeds its FileSiz, so every zero-initialised static holds
-     * garbage until this runs - which cost a resolver that read an uninitialised cache
-     * as a real base. A payload\x27s own loader would do this; here nothing does, so
-     * the crt0 must. */
+     * segment's MemSiz exceeds its FileSiz, so every zero-initialised static (the
+     * library base cache above included) holds garbage until this runs. */
     for (char *p = (char *)&__bss_start; p < (char *)&_end; p++)
         *p = 0;
     unsigned long kbase = ((unsigned long *)arg0)[0] - obs_getpid_vaddr;

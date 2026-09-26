@@ -9,9 +9,9 @@ extern "C" {
 #endif
 
 /*
- * Hardware-verified RDNA2 GFX10.3 Compute Shader Container Header (304 bytes).
- * Measured on retail Prospero FW 12.40 (obSCEne sweep 20260910-203426-eboot,
- * Section 166-agc).
+ * The compute tiler's shader: its RDNA2 compute shader container header (304 bytes),
+ * measured on retail Prospero FW 12.40 by the obSCEne probe 166-agc, and its payload.
+ * The dispatch interface is in <agc/tiler.h>.
  */
 static const uint8_t s_agc_tiler_hdr_full[304] = {
     0x31u, 0x32u, 0x33u, 0x34u, 0x18u, 0x00u, 0x00u, 0x00u, 0xd8u, 0x00u, 0x00u, 0x00u,
@@ -43,9 +43,8 @@ static const uint8_t s_agc_tiler_hdr_full[304] = {
 };
 
 /*
- * Base RDNA2 Compute Shader Template (1160 bytes).
- * Instantiated via sceAgcCreateShader, aligned to 256 bytes in GPU Onion
- * memory.
+ * The shader payload (1160 bytes), instantiated through sceAgcCreateShader from
+ * 256-byte-aligned GPU Onion memory.
  */
 __attribute__((aligned(256))) static const uint8_t s_agc_tiler_payload_base[1160] = {
     0x03u, 0x00u, 0xa0u, 0xbfu, 0x0au, 0x00u, 0x46u, 0xd7u, 0x0au, 0x06u, 0x05u, 0x04u,

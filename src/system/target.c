@@ -1,12 +1,12 @@
 /*
- * Target Process Resolver Implementation.
+ * Target process resolver.
  *
- * Walks process structures in kernel memory via krw to discover
- * running titles and resolve target processes.
+ * Walks the kernel's process list through krw to find a process by pid, name or title
+ * id, or the foreground retail game when no target is given. Structure field positions
+ * depend on the firmware version and are chosen from `krw_fw_version()`.
  */
 
 #include "oops/inject.h"
-/* injector.h replaced by oops/krw.h */
 #include "oops/freestd.h"
 #include "oops/krw.h"
 #include "oops/syscall.h"
@@ -17,9 +17,8 @@ static const uintptr_t KERNEL_OFFSET_PROC_P_UCRED = 0x40;
 static const uintptr_t KERNEL_OFFSET_PROC_P_PID = 0xBC;
 static const uintptr_t DEFAULT_OFFSET_PROC_P_COMM = 0x274;
 
-/* Search for Title ID (e.g. "PPSAxxxxx", "CUSAxxxxx") in proc structure at
- * offset 0x470
- */
+/* The title id ("PPSAxxxxx", "CUSAxxxxx") of a proc, read at its firmware-dependent
+ * field and otherwise found by scanning the structure. */
 static int get_proc_title_id(uintptr_t proc, char *out_title, size_t out_len) {
     if (proc == 0 || out_title == NULL || out_len < 16) {
         return 0;

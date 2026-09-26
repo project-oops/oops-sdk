@@ -4,10 +4,9 @@
 #
 #   bash tools/libc-check/build.sh
 #
-# Why this exists rather than a unit test: a payload link passes `--unresolved-symbols=ignore-all`
-# so the platform can resolve its own `sce*` imports at load, which means a missing `sqrtf` links
-# silently and faults on the console. Nothing but the symbol table can tell you, and nothing but
-# a call can put the name in it.
+# A payload link passes `--unresolved-symbols=ignore-all` so the platform can resolve its own
+# `sce*` imports at load, so a missing `sqrtf` links silently and faults on the console. Only
+# the symbol table shows it, and only a call puts the name there.
 #
 # Needs the target clang; the collection's WSL builder has it.
 set -eu
@@ -48,10 +47,8 @@ undefined_names() {
         | grep -vE '^sce[A-Z]|^sysctlbyname$|^__error$|^_sigaction$|^$' || true
 }
 
-# **Does this tool notice?** A checker that cannot fail says nothing when it passes, and this one
-# passes by finding no undefined names - which is also what it would report if the inspection
-# were broken. So a unit calling a function that exists nowhere is linked the same way, and its
-# name has to come back.
+# Self-test: a broken inspection would also report no undefined names, so a unit calling a
+# function that exists nowhere is linked the same way, and its name has to come back.
 cat > "$OUT/negative.c" <<'EOF'
 void libc_check_absent_function(void);
 void libc_check_negative(void);

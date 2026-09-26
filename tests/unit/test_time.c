@@ -1,6 +1,9 @@
 #include "oops/time.h"
 #include "tests/test_common.h"
 
+/* Unit tests for the clocks and sleeps in `oops/time.h`. */
+
+/* Ticks advance and microseconds never go backwards. */
 static void test_time_monotonic(void) {
     uint64_t t0 = oops_time_get_ticks();
     for (volatile int i = 0; i < 50000; i++)
@@ -15,6 +18,7 @@ static void test_time_monotonic(void) {
     ASSERT_TRUE(u1 >= u0);
 }
 
+/* The reported tick and counter frequencies are plausible for this hardware. */
 static void test_time_frequency(void) {
     uint64_t freq = oops_time_get_frequency();
     ASSERT_TRUE(freq >= 1000000000ULL); /* At least 1 GHz */
@@ -34,6 +38,7 @@ static void test_time_clocks_share_origin(void) {
     ASSERT_TRUE(oops_time_get_ms() * 1000ULL <= oops_time_get_us());
 }
 
+/* A zero-length sleep returns. */
 static void test_time_sleep_zero_returns(void) {
     oops_time_sleep_us(0);
     oops_time_sleep_ms(0);

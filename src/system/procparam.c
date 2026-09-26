@@ -2,10 +2,8 @@
  * Native process parameters and SDK versioning for Prospero / Orbis.
  *
  * Populates the .sce_process_param section mapped to PT_SCE_PROCPARAM (0x61000001).
- * Hardware-verified layout measured on Prospero FW 12.40:
- * - Magic: "ORBI" (0x4942524f)
- * - Size: 0x60 bytes, 5 entries
- * - Non-null libc_param (0xa8 bytes) and mem_param (0x38 bytes)
+ * The layout is measured on Prospero FW 12.40: magic "ORBI" (0x4942524f), 0x60 bytes
+ * with 5 entries, and non-null libc_param (0xa8 bytes) and mem_param (0x38 bytes).
  */
 
 #include <stdint.h>
@@ -36,24 +34,16 @@
 /*
  * The libc heap, sized for a real workload rather than the fallback.
  *
- * Left all-zero, this structure put `libSceLibcInternal` in its internal-memory
- * fallback: a static ~8-13 MiB heap that ignores the application's parameters. Mesa
- * exhausted it - a title that brings GL up through the DRI frontend crashed in
- * `driConcatConfigs` on a `malloc` that returned NULL, and a heap-ceiling probe could
- * not even allocate one 8 MiB block (oops-mesa worklog 050).
+ * An all-zero structure puts `libSceLibcInternal` in its internal-memory fallback: a
+ * static ~8-13 MiB heap that ignores the application's parameters and that Mesa's DRI
+ * frontend exhausts.
  *
- * The fields below select **Application Heap Mode** (`mode = 0`, `version = 14`) and
- * point libc at a grow-on-demand heap: `heap_size = UINT64_MAX` (up to the container
- * budget, ~432-448 MiB measured on FW 12.40) and `extended_alloc = 1`. Every
- * configuration entry is a *pointer* to its value, not the value inline, populated by
- * link-time relocations - which is why the values are separate mutable statics.
- * `init_alloc` is written to by libkernel during init, so it too is mutable.
- *
- * Layout, offsets, sentinels and the two trailing parameter blocks are the
- * authoritative reading of the 0xA8-byte `libc_param` from obSCEne
- * REQ-20260919T1335Z-7b90 (retail `AgcCompositor.elf` PT_SCE_PROCPARAM analysis,
- * obscene#D298, and a measured 432-448 MiB budget). The old "size-only, rest zeroed"
- * form is what that request diagnosed as the fallback trigger.
+ * The fields below select Application Heap Mode (`mode = 0`, `version = 14`) with a
+ * grow-on-demand heap: `heap_size = UINT64_MAX` (up to the container budget, ~432-448
+ * MiB measured on FW 12.40) and `extended_alloc = 1`. Each entry is a pointer to its
+ * value, filled by link-time relocations, so the values are separate mutable statics;
+ * libkernel writes `init_alloc` during init. The layout is the reading of a retail
+ * `AgcCompositor.elf` PT_SCE_PROCPARAM (obscene#D298).
  */
 static uint64_t oops_libc_heap_size =
     0xFFFFFFFFFFFFFFFFULL;                         /* grow to container capacity */

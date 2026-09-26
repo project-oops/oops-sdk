@@ -1,3 +1,12 @@
+/*
+ * The browser globals a page's scripts expect: `console`, the timer functions and
+ * `fetch`.
+ *
+ * Timers and fetches are queued on the webview and run by its pump. A fetch is a
+ * blocking `oops_http_get` made during the pump, and its promise resolves with a small
+ * Response object carrying `status`, `ok`, `statusText`, `text()` and `json()`.
+ */
+
 #include "host_env.hpp"
 #include "webview_impl.hpp"
 #include "oops/http.h"

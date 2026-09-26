@@ -1,5 +1,6 @@
 /*
- * Unit tests for oops-gl core state machine, matrix stacks, and rasterization
+ * Unit tests for oops-gl: the state machine, matrix stacks, rasterisation, GLU and
+ * GLUT, and the GLSL front end and code generator.
  */
 
 #include "GL/gl.h"
@@ -7,20 +8,11 @@
 #include "GL/glut.h"
 
 /*
- * **Every extension spelling is the same value as the core one it aliases.**
+ * Every extension spelling has the same value as the core one it aliases.
  *
- * These were written as `#define GL_DEPTH_COMPONENT16_ARB GL_DEPTH_COMPONENT16`, which
- * cannot be wrong, and on 2026-09-20 that turned out to be unbuildable: a hosted title
- * includes this header and Mesa's `GL/glext.h`, which defines the same names as
- * literals, and a macro redefined with a *different* token sequence is a diagnostic
- * under `-Werror` even when the value is identical. They are literals now - and a
- * literal can be mistyped, which the old form could not. That is the whole reason for
- * what follows.
- *
- * Compile-time, because a wrong one should stop the build rather than wait for a test
- * to run the one call that uses it. A port passes `GL_TEXTURE_WRAP_R_EXT` to
- * `glTexParameteri` and gets `GL_INVALID_ENUM` if the digit is wrong, which is a long
- * way from the typo.
+ * The aliases are literals, not `#define X_ARB X`, so a hosted title can include Mesa's
+ * `GL/glext.h` beside this header without a macro-redefinition error; a literal can be
+ * mistyped, so each is checked at compile time.
  */
 _Static_assert(GL_DEPTH_COMPONENT16_ARB == GL_DEPTH_COMPONENT16, "alias value");
 _Static_assert(GL_DEPTH_COMPONENT24_ARB == GL_DEPTH_COMPONENT24, "alias value");
@@ -56,16 +48,16 @@ _Static_assert(GL_TEXTURE7_ARB == GL_TEXTURE7, "alias value");
 _Static_assert(GL_TEXTURE31_ARB == GL_TEXTURE31, "alias value");
 _Static_assert(GL_TEXTURE31 - GL_TEXTURE0 == 31, "the selectors are consecutive");
 #include "oops/display.h"
-/* The texture tests read a texture's own storage rather than a sampled result: a
- * sampled check would also pass if an update landed in the wrong place and the sampler
- * happened to fetch the right colour, so the bytes are what say which texels moved.
- * `test_pm4.c` reaches into `agc_internal.h` for the same reason. */
+/* The texture tests read a texture's own storage rather than a sampled result, so the
+ * bytes say which texels moved. `test_pm4.c` reaches into `agc_internal.h` likewise. */
 #include "src/gl/gl_internal.h"
 #include "src/gl/gl_procs.h"
 #include "src/gl/glsl_internal.h"
 #include "tests/test_common.h"
 #include <math.h>
 
+/* A context becomes current on create, keeps viewport and scissor, and is released on
+ * destroy. */
 static void test_gl_context_lifecycle(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     ASSERT_TRUE(disp != NULL);
@@ -98,6 +90,7 @@ static void test_gl_context_lifecycle(void) {
     oops_display_close(disp);
 }
 
+/* glIsEnabled reports what glEnable and glDisable set. */
 static void test_gl_state_enables(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx = glContextCreate(disp);
@@ -120,6 +113,7 @@ static void test_gl_state_enables(void) {
     oops_display_close(disp);
 }
 
+/* Translation, the matrix stack and gluPerspective produce the expected matrices. */
 static void test_gl_matrix_transforms(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx = glContextCreate(disp);
@@ -168,6 +162,7 @@ static void test_gl_matrix_transforms(void) {
     oops_display_close(disp);
 }
 
+/* glClear fills the framebuffer and an immediate-mode triangle draws in its colour. */
 static void test_gl_clear_and_draw(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -205,6 +200,7 @@ static void test_gl_clear_and_draw(void) {
     oops_display_close(disp);
 }
 
+/* A quad drawn from vertex and colour arrays under a perspective projection lands. */
 static void test_gl_vertex_arrays_cube(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -242,6 +238,7 @@ static void test_gl_vertex_arrays_cube(void) {
     oops_display_close(disp);
 }
 
+/* A texture is generated, bound, parameterised, uploaded and deleted. */
 static void test_gl_texture_lifecycle(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -277,6 +274,7 @@ static void test_gl_texture_lifecycle(void) {
     oops_display_close(disp);
 }
 
+/* A white quad modulated by a blue texture draws blue. */
 static void test_gl_texture_rendering(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -295,9 +293,7 @@ static void test_gl_texture_rendering(void) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                  blue_pixels);
     /* A filter that reads no mipmaps: with the default GL_NEAREST_MIPMAP_LINEAR and one
-     * level, the texture is incomplete and draws untextured - as on any GL. This test
-     * sampled an incomplete texture until completeness was implemented on 2026-09-19.
-     */
+     * level, the texture is incomplete and draws untextured. */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glEnable(GL_TEXTURE_2D);
 
@@ -336,6 +332,7 @@ static void test_gl_texture_rendering(void) {
     oops_display_close(disp);
 }
 
+/* Lighting enables, light, material and light-model state read back as set. */
 static void test_gl_lighting_state(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx = glContextCreate(disp);
@@ -381,6 +378,7 @@ static void test_gl_lighting_state(void) {
     oops_display_close(disp);
 }
 
+/* A directional light lights a face by N dot L: full facing the light, none edge-on. */
 static void test_gl_lighting_rendering(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -458,6 +456,7 @@ static void test_gl_lighting_rendering(void) {
     oops_display_close(disp);
 }
 
+/* Alpha and additive blending combine source and destination as their factors say. */
 static void test_gl_blending_modes(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     ASSERT_TRUE(disp != NULL);
@@ -563,6 +562,7 @@ static void test_gl_blending_modes(void) {
     oops_display_close(disp);
 }
 
+/* GL_REPLACE takes the texel and GL_MODULATE multiplies it by the vertex colour. */
 static void test_gl_texture_env_modes(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -651,6 +651,7 @@ static void test_gl_texture_env_modes(void) {
     oops_display_close(disp);
 }
 
+/* The modelview stack reports overflow and underflow at its limits. */
 static void test_gl_matrix_stack_limits(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -686,17 +687,9 @@ static void test_gl_matrix_stack_limits(void) {
     oops_display_close(disp);
 }
 
-/* A mode this subset does not draw is refused, not silently skipped.
- *
- * The bug this pins was invisible by construction: GL_LINES reached a `default:
- * break;`, so the call drew nothing, set no error, and glGetError() kept answering
- * GL_NO_ERROR. A caller could not tell that apart from a successful draw - and in an
- * instrument, an empty record still looks like a record.
- *
- * Both halves are asserted, because either alone would pass while the other was broken:
- * the error is raised, AND the framebuffer is untouched. The triangle afterwards is the
- * positive control - without it this test would also pass against a build that refused
- * everything. */
+/* A mode this subset does not draw is refused with an error, not silently skipped.
+ * Both the error and the untouched framebuffer are asserted; the triangle afterwards is
+ * the positive control against a build that refuses everything. */
 static void test_gl_unsupported_primitive_mode_is_refused(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -711,19 +704,16 @@ static void test_gl_unsupported_primitive_mode_is_refused(void) {
     glLoadIdentity();
     (void)glGetError();
 
-    /* **Lines draw now**, as a screen-width quad of two triangles. They were refused
-     * here until 2026-09-17 because the geometry engine stalls on a two-vertex
-     * primitive - which is a fact about the native primitive, not about whether a line
-     * can be drawn. */
+    /* Lines draw, as a quad of two triangles: the geometry engine stalls on a native
+     * two-vertex primitive. */
     glBegin(GL_LINES);
     glColor3f(1.0f, 0.0f, 0.0f);
     glVertex3f(-0.9f, 0.0f, 0.0f);
     glVertex3f(0.9f, 0.0f, 0.0f);
     glEnd();
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
-    /* **One row thick.** The line lies exactly between two rows of pixel centres, on
-     * its quad's edges; both rows were drawn until the rasteriser's tie rule
-     * (2026-09-19), a width-1 line two pixels thick. Now exactly one of them is. */
+    /* One row thick. The line lies exactly between two rows of pixel centres, on its
+     * quad's edges; the rasteriser's tie rule draws exactly one of them. */
     {
         const GLboolean above =
             (GLboolean)(fb[(240 / 2 - 1) * 320 + 320 / 2] != 0xff000000u);
@@ -737,9 +727,8 @@ static void test_gl_unsupported_primitive_mode_is_refused(void) {
     glEnd();
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-    /* **All three switches must agree about which modes draw** - they used to disagree,
-     * and a mode accepted by glBegin but unhandled by the array assembly draws nothing
-     * and says nothing, which is worse than a refusal. */
+    /* All three switches agree about which modes draw: a mode accepted by glBegin but
+     * unhandled by the array assembly would draw nothing and say nothing. */
     glClear(GL_COLOR_BUFFER_BIT);
     static const GLfloat verts[9] = {-0.5f, -0.5f, 0.0f, 0.5f, -0.5f,
                                      0.0f,  0.0f,  0.5f, 0.0f};
@@ -783,10 +772,7 @@ static void test_gl_unsupported_primitive_mode_is_refused(void) {
     oops_display_close(disp);
 }
 
-/* A negative count is an error; a zero count is a legal draw of nothing.
- *
- * These shared one silent `return` on `count <= 0`, which made a caller's broken
- * arithmetic indistinguishable from an empty batch. */
+/* A negative count is an error; a zero count is a legal draw of nothing. */
 static void test_gl_draw_count_separates_empty_from_invalid(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -813,11 +799,8 @@ static void test_gl_draw_count_separates_empty_from_invalid(void) {
 }
 
 /* An index type the reader cannot read is refused before it reads.
- *
- * Not a cosmetic check. The reader selects 16-bit and 8-bit explicitly and treats
- * everything else as 32-bit, so an unchecked type read four bytes per index out of an
- * array the caller sized for one - past the end of it. The three legal types are
- * asserted alongside, so a build that refused all four would not pass this. */
+ * The reader treats anything not 8- or 16-bit as 32-bit, so an unchecked type reads
+ * past the caller's array. The three legal types are the positive control. */
 static void test_gl_draw_elements_refuses_an_unreadable_index_type(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -844,12 +827,9 @@ static void test_gl_draw_elements_refuses_an_unreadable_index_type(void) {
     oops_display_close(disp);
 }
 
-/* What the strings say, and that GL_VERSION is parseable at all.
- *
- * GL_VERSION had read "OpenGL 1.3 oops-gl 2.0": the wrong version, and with a word in
- * front of the number, so the conventional atof() on it returned 0.0. The specification
- * requires the string to begin with the version, and this asserts that shape rather
- * than the exact text, so the suffix stays editable. */
+/* What the strings say, and that GL_VERSION begins with the version so atof() parses
+ * it. The shape is asserted rather than the exact text, so the suffix stays editable.
+ */
 static void test_gl_strings_are_honest_and_parseable(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -860,10 +840,8 @@ static void test_gl_strings_are_honest_and_parseable(void) {
     ASSERT_TRUE(version[0] >= '0' && version[0] <= '9');
     ASSERT_TRUE(strncmp((const char *)version, "1.1", 3) == 0);
 
-    /* **The version is the caller's to state** (2026-09-20). A port written against a
-     * later 1.x checks the badge before calling something this library does have, so it
-     * can say what it targets - and nothing else changes: the suffix still says subset,
-     * and the same calls are implemented either way. */
+    /* The version is the caller's to state, so a port written against a later 1.x can
+     * say what it targets. The suffix still says subset and the same calls exist. */
     GLuint maj = 0u, min = 9u;
     glContextGetVersion(&maj, &min);
     ASSERT_EQ(maj, 1u);
@@ -876,9 +854,8 @@ static void test_gl_strings_are_honest_and_parseable(void) {
     ASSERT_EQ(min, 4u);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **2.0 is claimable since 2026-09-21**, because the programmable pipeline runs -
-     * and its badge says `programmable` rather than `fixed-function`, which is the
-     * wrong word for the one thing 2.0 adds. It still says `subset`. */
+    /* 2.0 is claimable, and its badge says `programmable` rather than `fixed-function`.
+     * It still says `subset`. */
     ASSERT_EQ(glContextSetVersion(2, 0), GL_TRUE);
     version = glGetString(GL_VERSION);
     ASSERT_TRUE(strncmp((const char *)version, "2.0", 3) == 0);
@@ -886,8 +863,7 @@ static void test_gl_strings_are_honest_and_parseable(void) {
     ASSERT_TRUE(strstr((const char *)version, "subset") != NULL);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **2.1 is the GLSL 1.20 one** and is claimable because the front end takes that
-     * dialect. */
+    /* 2.1 is claimable because the front end takes GLSL 1.20. */
     ASSERT_EQ(glContextSetVersion(2, 1), GL_TRUE);
     version = glGetString(GL_VERSION);
     ASSERT_TRUE(strncmp((const char *)version, "2.1", 3) == 0);
@@ -909,25 +885,20 @@ static void test_gl_strings_are_honest_and_parseable(void) {
     ASSERT_TRUE(strncmp((const char *)version, "1.1", 3) == 0);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* The brand that used to be in GL_RENDERER is not in any of them (conventions 2).
-     */
+    /* No console brand appears in GL_RENDERER (conventions 2). */
     const GLubyte *renderer = glGetString(GL_RENDERER);
     ASSERT_TRUE(renderer != NULL);
     ASSERT_TRUE(strstr((const char *)renderer, "PlayStation") == NULL);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **The extension list names what this library implements under the name a program
-     * looks for** (2026-09-19; empty before that).
+    /* The extension list names what this library implements, under the names a program
+     * looks for. An extension string promises that extension's own entry points
+     * (test_gl_extension_entry_points_are_the_core_ones).
      *
-     * An extension string is a promise about that extension's own entry points, which
-     * is why it was empty while only the core spellings existed. The entry points are
-     * here now (test_gl_extension_entry_points_are_the_core_ones), so the extensions
-     * are listed - and those that need no entry point, only state, beside them.
-     *
-     * Asserted by the rule and by both ends: every name begins with `GL_` and appears
-     * once; extensions whose entry points exist are named; extensions this library does
-     * not keep on every path are not. This context is the software rasteriser, which
-     * applies both texture units, so GL_ARB_multitexture is on its list. */
+     * Every name begins with `GL_` and appears once; extensions whose entry points
+     * exist are named; extensions not kept on every path are not. This context is the
+     * software rasteriser, which applies both texture units, so GL_ARB_multitexture is
+     * listed. */
     const GLubyte *ext = glGetString(GL_EXTENSIONS);
     ASSERT_TRUE(ext != NULL);
     ASSERT_TRUE(ext[0] != '\0');
@@ -958,20 +929,16 @@ static void test_gl_strings_are_honest_and_parseable(void) {
         "GL_EXT_stencil_wrap",
         "GL_EXT_separate_specular_color",
         "GL_EXT_texture_lod_bias",
-        /* Since 2026-09-20: it adds no entry point, only targets, enums and the two
-         * cube-map generation modes, and both paths keep all of them. */
+        /* No entry point, only targets, enums and the two cube-map generation modes,
+         * which both paths keep. */
         "GL_ARB_texture_cube_map",
-        /* Since 2026-09-20, when the console gained the volume sample. Its two entry
-         * points arrived with it - the check below calls them. */
+        /* Its two entry points are called by the check below. */
         "GL_EXT_texture3D",
-        /* Since 2026-09-20, when the console gained the comparison sample. Neither adds
-         * an entry point: a depth texture is glTexImage2D with a GL_DEPTH_COMPONENT
-         * internal format and the comparison is glTexParameteri, both of which every
-         * path has. */
+        /* No entry point: a depth texture is glTexImage2D with a GL_DEPTH_COMPONENT
+         * internal format and the comparison is glTexParameteri. */
         "GL_ARB_depth_texture",
         "GL_ARB_shadow",
-        /* Since 2026-09-20, when the GPU started counting. Its eight entry points
-         * arrived with it - the check below calls them. */
+        /* Its eight entry points are called by the check below. */
         "GL_ARB_occlusion_query",
     };
     for (size_t i = 0; i < sizeof(listed) / sizeof(listed[0]); i++) {
@@ -998,11 +965,7 @@ static void test_gl_strings_are_honest_and_parseable(void) {
     oops_display_close(disp);
 }
 
-/* **Every extension in the list has its entry points, and they are the core functions**
- * (2026-09-19). A port finds an extension in glGetString's list and calls that
- * extension's own names; each one here is checked to do what the core spelling does.
- * They exist at all only because the linker resolved them, which is half the point -
- * the other half is that they are not stubs. */
+/* Every listed extension's entry points exist and do what the core spelling does. */
 static void test_gl_extension_entry_points_are_the_core_ones(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -1081,9 +1044,8 @@ static void test_gl_extension_entry_points_are_the_core_ones(void) {
      * reporting what an ARB begin did is what says these share the state rather than
      * each keeping their own.
      *
-     * `glIsQuery` is false for a generated-but-never-begun name, which is GL's rule and
-     * Mesa's
-     * (`main/queryobj.c`): the name is reserved, the object exists only once begun. */
+     * `glIsQuery` is false for a generated-but-never-begun name (Mesa
+     * `main/queryobj.c`): the name is reserved, the object exists only once begun. */
     {
         GLuint aq = 0;
         glGenQueriesARB(1, &aq);
@@ -1159,32 +1121,9 @@ static void test_gl_extension_entry_points_are_the_core_ones(void) {
     oops_display_close(disp);
 }
 
-/* Capabilities, client arrays and matrix modes this subset does not have are refused.
- *
- * All three used to be dropped on a `default: break;`. glEnable is the worst of them,
- * because it is the first thing a GL program does and a dropped one renders wrong with
- * nothing to say why. glMatrixMode is the subtlest: an unrecognised mode left the
- * previous mode in place, so every matrix call afterwards edited a stack the caller was
- * not thinking about.
- *
- * Each refusal is paired with a supported value asserted to still work, so a build that
- * refused everything would fail this too. */
-/* **A captured frame replays to the same pixels.**
- *
- * This is the whole claim the capture rests on, so it is asserted against pixels rather
- * than against a call count: a stream that replays *nearly* right is worse than one
- * that fails, because its whole purpose is to be the reference a hardware run is
- * compared to.
- *
- * Three renders of the same drawing. The first is the truth. The second runs with
- * capture on, which must not change what is drawn - a capture that perturbed the frame
- * would be measuring itself. The third is the replay of that capture into a cleared
- * buffer, and has to match the first exactly, not approximately.
- *
- * The drawing carries the things that are easy to get wrong in a serialiser: a float
- * that has to survive bit-exact, an enum, and a texture upload, whose pixels are a blob
- * whose length the command did not previously record - which is why `gl_list_rec_owned`
- * grew a `bytes` parameter and every one of its nine call sites was visited. */
+/* A captured frame replays to exactly the same pixels, and capturing does not change
+ * the frame. The drawing carries a float that must survive bit-exact, an enum, and a
+ * texture upload whose pixel length the stream records. */
 static void test_gl_capture_replays_to_identical_pixels(void) {
     enum { W = 32, H = 32 };
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
@@ -1238,8 +1177,7 @@ static void test_gl_capture_replays_to_identical_pixels(void) {
     glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, truth);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* With capture on: the frame must be unchanged, and the stream must be non-empty.
-     */
+    /* With capture on: the frame is unchanged and the stream is non-empty. */
     oops_gl_capture_begin();
     DRAW_THE_FRAME();
     oops_gl_capture_end();
@@ -1278,32 +1216,20 @@ static void test_gl_capture_replays_to_identical_pixels(void) {
     oops_display_close(disp);
 }
 
+/* Capabilities, client arrays and matrix modes this subset does not have are refused.
+ * Each refusal is paired with a supported value that still works. */
 static void test_gl_unsupported_state_enums_are_refused(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
     (void)glGetError();
 
-    /* Real GL capabilities this subset does not implement. Written as their
-     * specification values rather than added to the header, because a #define there
-     * would read as a claim to support them.
-     *
-     * **GL_STENCIL_TEST used to be the first example here and is implemented now**, as
-     * GL_ALPHA_TEST and GL_FOG were before it, and GL_LINE_SMOOTH after it. That is
-     * this test doing its job again and again: a refusal that stops being a refusal
-     * shows up as a failure rather than as silence. GL 1.4's GL_COLOR_SUM stood here
-     * until 2026-09-19, and was the last GL 1.x core enable to go; **GL 2.0's
-     * GL_POINT_SPRITE stood here until 2026-09-22**, and went because Neverball asks
-     * for it on every frame that draws particles - 102 refusals in one short run, with
-     * the particle system falling back to flat untextured squares and nothing in the
-     * title ever calling glGetError to find out. It is asserted below instead.
-     *
-     * GL_VERTEX_PROGRAM_POINT_SIZE takes its place: GL 2.0's "let the vertex shader
-     * write gl_PointSize", which needs a vertex shader stage that writes it. */
+    /* Real GL capabilities this subset does not implement, written as specification
+     * values because a #define in the header would read as a claim to support them.
+     * GL_VERTEX_PROGRAM_POINT_SIZE needs a vertex stage that writes gl_PointSize. */
     glEnable((GLenum)0x8642u); /* GL_VERTEX_PROGRAM_POINT_SIZE */
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     /* GL_CONVOLUTION_1D: the imaging subset, which is optional and not advertised, so
-     * refusing it is conformant for good. (GL_DITHER stood here until 2026-09-19; it is
-     * on by default in every GL context and is accepted as state now.) */
+     * refusing it is conformant. */
     glDisable((GLenum)0x8010u);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     ASSERT_EQ(glIsEnabled(GL_DITHER), GL_TRUE);
@@ -1311,7 +1237,7 @@ static void test_gl_unsupported_state_enums_are_refused(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     ASSERT_EQ(glIsEnabled(GL_DITHER), GL_FALSE);
     glEnable(GL_DITHER);
-    /* And the ones that left this list are accepted, each with its own state. */
+    /* Implemented capabilities are accepted, each with its own state. */
     glEnable(GL_ALPHA_TEST);
     glAlphaFunc(GL_GREATER, 0.5f);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
@@ -1327,8 +1253,7 @@ static void test_gl_unsupported_state_enums_are_refused(void) {
     glDisable(GL_FOG);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     /* The point sprite, with the per-unit GL_COORD_REPLACE that is the whole point of
-     * it and the third glTexEnv target it arrives on. Neverball issues exactly this
-     * trio per frame. */
+     * it and the third glTexEnv target it arrives on. */
     glEnable(GL_POINT_SPRITE);
     ASSERT_EQ(glIsEnabled(GL_POINT_SPRITE), GL_TRUE);
     glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_TRUE);
@@ -1359,9 +1284,8 @@ static void test_gl_unsupported_state_enums_are_refused(void) {
     ASSERT_EQ(glIsEnabled(GL_DEPTH_TEST), GL_FALSE);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* Client arrays. GL_INDEX_ARRAY was the refused example until 2026-09-19; it is
-     * colour-index state, which an RGBA context keeps, so it is accepted now. An enum
-     * that is no array at all is what is refused. */
+    /* Client arrays. GL_INDEX_ARRAY is colour-index state, which an RGBA context keeps,
+     * so it is accepted; an enum that is no array at all is refused. */
     glEnableClientState(GL_INDEX_ARRAY);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glDisableClientState(GL_INDEX_ARRAY);
@@ -1388,18 +1312,9 @@ static void test_gl_unsupported_state_enums_are_refused(void) {
     oops_display_close(disp);
 }
 
-/* **The honesty badge, on a build with no GPU in it.**
- *
- * `glIsHardwareAccelerated()` is the one function here whose whole job is to not
- * overclaim, and it has had no test at all. The badge has lied once already - it used
- * to report the code path it took rather than a measurement - and the fix is only as
- * good as something watching it. A host build has no hardware, so the answer must be
- * GL_FALSE, and the status struct must agree with it rather than telling a different
- * story.
- *
- * This test would also fail on target if the badge ever went back to reporting intent:
- * there is no path by which a host build can confirm a frame, so `frames_confirmed` is
- * the thing that cannot be faked. */
+/* The hardware badge does not overclaim: a host build has no GPU, so
+ * `glIsHardwareAccelerated()` is GL_FALSE, the status struct agrees, and no frame is
+ * confirmed. */
 static void test_gl_hardware_badge_does_not_overclaim(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -1409,8 +1324,7 @@ static void test_gl_hardware_badge_does_not_overclaim(void) {
     gl_hw_status_t st;
     memset(&st, 0xcd, sizeof(st));
     glGetHardwareStatus(&st);
-    /* The two must not disagree: a struct saying "verified" beside a badge saying false
-     * would be the same overclaim wearing the other hat. */
+    /* The struct and the badge agree. */
     ASSERT_EQ(st.verified, glIsHardwareAccelerated());
     ASSERT_EQ(st.frames_confirmed, 0u);
     ASSERT_NE(st.fence, 0xbeefcafeu);
@@ -1437,28 +1351,16 @@ static void test_gl_hardware_badge_does_not_overclaim(void) {
     oops_display_close(disp);
 }
 
-/* The matrix builders, against their definitions rather than against themselves.
- *
- * glFrustum, glLoadMatrixf, glMultMatrixf and glScalef were reachable and untested.
- * Each is arithmetic that is silently wrong when it is wrong - geometry still appears,
- * in the wrong place - so the values are checked against what the specification says
- * they should be. */
 /*
- * GLU's image and coordinate functions - what a port calls that GL itself does not
- * provide.
- *
- * The mipmap check is the one with teeth: a chain built by sampling the *original* at
- * each level looks right at level 1 and wrong further down, where a level must be the
- * average of everything above it. A 4x4 of known values makes that visible - the 1x1
- * level is the mean of all sixteen texels only if each level was built from the one
- * above.
+ * GLU's image scaling, projection and mipmap building.
+ * Each mipmap level is the average of the level above, not a resample of the original:
+ * the 1x1 level of a 4x4 is the mean of all sixteen texels only then.
  */
 static void test_gl_glu_scales_projects_and_builds_mipmaps(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
 
-    /* **gluScaleImage**, halving: each output pixel is the average of its 2x2
-     * footprint. */
+    /* gluScaleImage, halving: each output pixel is the average of its 2x2 footprint. */
     static const GLubyte in4[4 * 4 * 4] = {
         0,  0, 0, 255, 40, 0, 0, 255, 80, 0, 0, 255, 120, 0, 0, 255,
         4,  0, 0, 255, 44, 0, 0, 255, 84, 0, 0, 255, 124, 0, 0, 255,
@@ -1493,8 +1395,7 @@ static void test_gl_glu_scales_projects_and_builds_mipmaps(void) {
         GLU_INVALID_ENUM);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **gluBuild2DMipmaps**: every level down to 1x1, each the average of the one
-     * above. */
+    /* gluBuild2DMipmaps: every level down to 1x1, each the average of the one above. */
     GLuint tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -1517,13 +1418,9 @@ static void test_gl_glu_scales_projects_and_builds_mipmaps(void) {
      * corner. */
     ASSERT_TRUE(back[0] >= 65 && back[0] <= 67);
 
-    /* The caller's unpack state is put back, not left as the builder needed it - and
-     * level zero is read *through* that state, so the source has to be the image that
-     * state describes. A row length of 7 with an alignment of 8 puts the rows 32 bytes
-     * apart, which is more than the 16 bytes a row of `in4` occupies: the 4x4 window
-     * goes in a staging buffer of that stride, with the columns past it filled with a
-     * red the image does not contain. Passing `in4` here would have the builder read
-     * 112 bytes out of 64. */
+    /* The caller's unpack state is restored, and level zero is read through it. A row
+     * length of 7 with an alignment of 8 puts rows 32 bytes apart, so the 4x4 window
+     * goes in a staging buffer of that stride, padded with a red the image lacks. */
     GLubyte wide[4 * 32];
     memset(wide, 0xFF, sizeof(wide));
     for (int wy = 0; wy < 4; wy++)
@@ -1540,13 +1437,12 @@ static void test_gl_glu_scales_projects_and_builds_mipmaps(void) {
     ASSERT_EQ(v, 7);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    /* The same sixteen reds as before, so the same 1x1 level: the stride was honoured
-     * and the padding columns never averaged in. Reading them would give 158, not 66.
-     */
+    /* The same 1x1 level: the stride is honoured and the padding never averaged in
+     * (that would give 158, not 66). */
     glGetTexImage(GL_TEXTURE_2D, 2, GL_RGBA, GL_UNSIGNED_BYTE, back);
     ASSERT_TRUE(back[0] >= 65 && back[0] <= 67);
 
-    /* **gluProject and gluUnProject** are each other's inverse, through a projection
+    /* gluProject and gluUnProject are each other's inverse, through a projection
      * that is not the identity - an orthographic one would hide a mistake in the w
      * divide. */
     glMatrixMode(GL_PROJECTION);
@@ -1585,11 +1481,8 @@ static void test_gl_glu_scales_projects_and_builds_mipmaps(void) {
 }
 
 /*
- * The GLUT shim's main loop, which is the part a port depends on and the part that
- * cannot be checked by reading it: that a reshape arrives before the first display,
- * that display runs only when one has been posted and idle runs otherwise, that a timer
- * fires, and that the loop can be left - a console program whose only exit is a window
- * close has none otherwise.
+ * The GLUT main loop: reshape arrives before the first display, display runs only when
+ * posted and idle otherwise, a timer fires, and glutLeaveMainLoop returns.
  */
 static int s_glut_display, s_glut_idle, s_glut_reshape, s_glut_timer;
 static int s_glut_reshape_w, s_glut_reshape_h, s_glut_reshape_first;
@@ -1658,14 +1551,9 @@ static void test_gl_glut_main_loop_dispatches_and_can_be_left(void) {
 }
 
 /*
- * The quadrics, checked through feedback - which reports the vertices a primitive was
- * assembled from, so the geometry can be read back without a framebuffer.
- *
- * Two things are pinned here because a port cannot see either of them go wrong in its
- * own source: the **texture convention** (s = 0 at +y, 0.25 at +x - a sphere whose s
- * runs the other way looks plausible until the label on it reads backwards) and the
- * **winding** (GLU_OUTSIDE must come out counter-clockwise seen from outside, or the
- * whole surface vanishes under the default cull).
+ * GLU quadrics, read back through feedback: the texture convention (s = 0 at +y, 0.25
+ * at +x) and the winding (GLU_OUTSIDE is counter-clockwise seen from outside, so the
+ * default cull keeps it).
  */
 static void test_gl_glu_quadrics_wind_and_texture_as_the_spec_says(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
@@ -1673,7 +1561,7 @@ static void test_gl_glu_quadrics_wind_and_texture_as_the_spec_says(void) {
     GLUquadric *q = gluNewQuadric();
     ASSERT_TRUE(q != (GLUquadric *)0);
 
-    /* Feedback reports **window** coordinates, so the transform is set up to be
+    /* Feedback reports window coordinates, so the transform is set up to be
      * inverted exactly: with this projection and viewport, object (x, y, z) arrives as
      * (x + 1, y + 1, (1 - z) / 2), and GLU_OBJ_* below takes it back. A round trip
      * through a positive x and y scale and a doubly negated z keeps the handedness, so
@@ -1744,7 +1632,7 @@ static void test_gl_glu_quadrics_wind_and_texture_as_the_spec_says(void) {
     ASSERT_TRUE(at_plus_y);
     ASSERT_TRUE(at_plus_x);
 
-    /* **Winding.** A GLU_OUTSIDE sphere's triangles face outwards: the cross product of
+    /* Winding. A GLU_OUTSIDE sphere's triangles face outwards: the cross product of
      * a polygon's first two edges points the same way as the polygon's own position.
      * Under the default GL_CCW front face that is what keeps it on screen when culling
      * is on. */
@@ -1883,22 +1771,9 @@ static void test_gl_glu_quadrics_wind_and_texture_as_the_spec_says(void) {
 }
 
 /*
- * **The Platonic solids are the solids they claim**, read back through feedback.
- *
- * `glut.c` derives their faces from their vertices rather than carrying a table, which
- * is what keeps them clean-room - so what needs checking is the derivation, not a
- * transcription. Five things, and between them nothing can be wrong and look right:
- *
- *  - the face count and the vertices a face has: 4 triangles, 8, 20, and 12 pentagons;
- *  - every vertex at the radius GLUT's manual documents - 1 for the octahedron and the
- *    icosahedron, sqrt(3) for the tetrahedron and the dodecahedron;
- *  - **Euler's formula**, V - E + F = 2, with V counted from the distinct vertices that
- * came back and E from the faces. A derivation that found one face twice, or missed
- * one, or built a pentagon out of the wrong five vertices, fails here;
- *  - **the winding**, counter-clockwise seen from outside, or the whole solid vanishes
- * under the default cull - the same trap the GLU quadrics have;
- *  - **the pentagons are flat**, which says the five vertices really are one face of
- * the dodecahedron and not five that merely happen to be furthest along a direction.
+ * The GLUT Platonic solids, whose faces `glut.c` derives from their vertices, have the
+ * right face counts, radii (GLUT's manual), Euler characteristic, outward winding and
+ * flat pentagons.
  */
 static void test_gl_platonic_solids_are_the_solids_they_claim(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
@@ -2013,17 +1888,15 @@ static void test_gl_platonic_solids_are_the_solids_they_claim(void) {
         }
         /* A pentagon arrives as three triangles, a triangle as one. */
         ASSERT_EQ(faces, solids[s].faces * (solids[s].face_verts - 2));
-        /* **Euler's formula on the edges that came back**, not on a count assumed from
-         * the face table: V - E + F = 2, with E the distinct edges of the triangles
-         * less the two diagonals each fanned pentagon contributed. A derivation that
-         * built a face out of the wrong vertices fails here as well as on the planarity
-         * check below. */
+        /* Euler's formula on the edges that came back: V - E + F = 2, with E the
+         * distinct edges of the triangles less the two diagonals each fanned pentagon
+         * contributed. */
         const int E = nedge - solids[s].faces * (solids[s].face_verts - 3);
         ASSERT_EQ(E, solids[s].faces * solids[s].face_verts / 2);
         ASSERT_EQ(nuniq - E + solids[s].faces, 2);
     }
 
-    /* **The pentagons are flat.** Each of the dodecahedron's faces arrives as three
+    /* The pentagons are flat. Each of the dodecahedron's faces arrives as three
      * triangles that must share one plane; a face built from the wrong five vertices
      * would not. Checked on the first face, whose three triangles are the first three
      * polygons back. */
@@ -2077,19 +1950,9 @@ static void test_gl_platonic_solids_are_the_solids_they_claim(void) {
 }
 
 /*
- * **The bitmap font draws the letters it is a picture of.**
- *
- * `glut_font.c` writes its glyphs as rows of `#` and `.` in source order and turns them
- * into bitmap bytes - which means the conversion is the part that can be wrong, and it
- * can be wrong in ways that still look like a font: rows upside down (a bitmap's first
- * row is its bottom one), bits mirrored, the baseline in the wrong place so every
- * descender sits on the line.
- *
- * So this checks the picture. 'F' is the glyph to check it with: it is asymmetric both
- * ways, so a vertical flip and a horizontal mirror each break it differently. Then the
- * baseline, through a letter with a descender and one without; then the advance; then
- * that every printable character has ink and the space has none, which catches an
- * off-by-one in the table index.
+ * The bitmap font draws the letters its `#`/`.` source rows picture: 'F' (asymmetric
+ * both ways) catches a flipped or mirrored conversion; then the baseline, the advance,
+ * and ink on every printable character but the space.
  */
 static void test_gl_bitmap_font_draws_what_it_is_a_picture_of(void) {
     enum { FW = 64, FH = 32 };
@@ -2140,8 +2003,7 @@ static void test_gl_bitmap_font_draws_what_it_is_a_picture_of(void) {
         ASSERT_EQ(FONT_PIX(4 + x, 6), 0x00000000u);
     }
 
-    /* **A descender goes below the baseline**, which is the whole of what the bitmap's
-     * origin decides - a 'g' level with an 'F' means yorig is 0. */
+    /* A descender goes below the baseline: a 'g' level with an 'F' means yorig is 0. */
     glClear(GL_COLOR_BUFFER_BIT);
     glRasterPos2i(4, 8);
     glutBitmapCharacter(GLUT_BITMAP_8_BY_13, 'g');
@@ -2155,7 +2017,7 @@ static void test_gl_bitmap_font_draws_what_it_is_a_picture_of(void) {
         ASSERT_TRUE(below > 0);
     }
 
-    /* **The advance**: two characters, the second eight pixels along, and the raster
+    /* The advance: two characters, the second eight pixels along, and the raster
      * position left where the next one goes. */
     glClear(GL_COLOR_BUFFER_BIT);
     glRasterPos2i(2, 8);
@@ -2172,9 +2034,8 @@ static void test_gl_bitmap_font_draws_what_it_is_a_picture_of(void) {
         ASSERT_EQ(FONT_PIX(2 + 5, 8 + 6), 0x00000000u); /* the gap between them */
     }
 
-    /* **Every printable character has ink, and the space has none.** A table indexed
-     * one entry out draws the wrong letter everywhere, which reads as a font until you
-     * try to read it; this catches the ends of the range instead. */
+    /* Every printable character has ink and the space has none, which catches a table
+     * indexed one entry out at the ends of the range. */
     for (int c = 32; c <= 126; c++) {
         glClear(GL_COLOR_BUFFER_BIT);
         glRasterPos2i(4, 8);
@@ -2217,13 +2078,8 @@ static void test_gl_bitmap_font_draws_what_it_is_a_picture_of(void) {
 }
 
 /*
- * **The newest surface, given what a sloppy port gives it.**
- *
- * Everything added on 2026-09-20 - the extended texture targets, the occlusion queries,
- * the bitmap font - was written against code that calls it correctly. A port does not:
- * it passes a depth of zero, deletes an object while it is bound, asks for a character
- * it does not have, and runs out of query names. On a console every one of those is a
- * fault rather than a diagnostic, so what they have to do is refuse.
+ * Extended texture targets, occlusion queries and the bitmap font refuse misuse (zero
+ * sizes, deleting a bound object, missing glyphs, wrong query order) rather than fault.
  */
 static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
@@ -2231,12 +2087,8 @@ static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
     (void)glGetError();
     GLint iv[4];
 
-    /*
-     * **A negative size is an error and a zero size is not.** GL draws that line, and a
-     * zero means no image at all - which is how a program releases a level it no longer
-     * wants. This library refused zero with GL_INVALID_VALUE until 2026-09-20, which
-     * was its one behavioural difference from the specification.
-     */
+    /* A negative size is an error and a zero size is not: zero means no image, which is
+     * how a program releases a level. */
     {
         static const GLubyte vol[2 * 2 * 2 * 4] = {0};
         GLuint t = 0;
@@ -2251,7 +2103,7 @@ static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
         ASSERT_EQ(glGetError(), GL_NO_ERROR);
         glEnable(GL_TEXTURE_3D);
         ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx), t);
-        /* **The release**: accepted, and the level is gone, so the texture is
+        /* The release: accepted, and the level is gone, so the texture is
          * incomplete and a draw with it is untextured rather than one that reads
          * storage nothing allocated. */
         glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 0, 0, 0, 0, GL_RGBA, GL_UNSIGNED_BYTE,
@@ -2275,8 +2127,7 @@ static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
         ASSERT_EQ(glGetError(), GL_NO_ERROR);
     }
 
-    /* The same for a 2D texture and for one mip level of it, which is the shape a
-     * loader that nulls levels out actually uses. */
+    /* The same for a 2D texture and for one mip level of it. */
     {
         static const GLubyte px[4 * 4 * 4] = {0};
         GLuint t = 0;
@@ -2291,8 +2142,7 @@ static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
         glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 0, 0, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                      NULL);
         ASSERT_EQ(glGetError(), GL_NO_ERROR);
-        /* Level 1 gone: a filter that reads the chain no longer has one, so the texture
-         * is incomplete - which is GL's own answer and not this library's invention. */
+        /* Level 1 gone: a filter that reads the chain makes the texture incomplete. */
         ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx), 0u);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         ASSERT_EQ(gl_effective_texture_id((gl_context_t *)ctx),
@@ -2302,7 +2152,7 @@ static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
         ASSERT_EQ(glGetError(), GL_NO_ERROR);
     }
 
-    /* **A cube map whose faces disagree** is incomplete, which GL draws untextured
+    /* A cube map whose faces disagree is incomplete, which GL draws untextured
      * rather than refusing - and which the upload must not try to build an array out
      * of. */
     {
@@ -2331,7 +2181,7 @@ static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
         ASSERT_EQ(glGetError(), GL_NO_ERROR);
     }
 
-    /* **The comparison state on a colour texture.** GL 1.4 says the mode applies to a
+    /* The comparison state on a colour texture. GL 1.4 says the mode applies to a
      * depth texture and is ignored otherwise, so setting it must be accepted and must
      * change nothing about how the colour is read. */
     {
@@ -2366,8 +2216,7 @@ static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
         glGenQueries(1, &q2);
         glBeginQuery(GL_SAMPLES_PASSED, q2); /* one active query a target */
         ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
-        /* **Deleting the active one** has to release it, or nothing can ever begin
-         * again. */
+        /* Deleting the active query releases it, so another can begin. */
         glDeleteQueries(1, &q);
         ASSERT_EQ(glGetError(), GL_NO_ERROR);
         glBeginQuery(GL_SAMPLES_PASSED, q2);
@@ -2401,6 +2250,8 @@ static void test_gl_the_newest_calls_refuse_rather_than_fault(void) {
     oops_display_close(disp);
 }
 
+/* glFrustum, glLoadMatrixf, glMultMatrixf and glScalef produce the matrices the
+ * specification defines. */
 static void test_gl_matrix_builders_match_their_definitions(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -2436,8 +2287,8 @@ static void test_gl_matrix_builders_match_their_definitions(void) {
     for (int i = 0; i < 16; i++)
         ASSERT_FLOAT_NEAR(m[i], known[i], 1e-5f);
 
-    /* glScalef scales the basis vectors, and must leave the translation column alone -
-     * which is the half of it a transposed implementation gets wrong. */
+    /* glScalef scales the basis vectors and leaves the translation column alone, which
+     * a transposed implementation gets wrong. */
     glLoadIdentity();
     glTranslatef(5.0f, 6.0f, 7.0f);
     glScalef(2.0f, 3.0f, 4.0f);
@@ -2453,12 +2304,8 @@ static void test_gl_matrix_builders_match_their_definitions(void) {
     oops_display_close(disp);
 }
 
-/* The vector and packed forms agree with the scalar ones they forward to.
- *
- * Cheap, and it catches the one bug this family has: a transposed or short-by-one index
- * in a forwarder, which produces colours and positions that are plausible and wrong.
- * Each pair is drawn and compared as pixels, because that is the only place the
- * difference shows. */
+/* The vector and packed forms agree with the scalar ones they forward to, compared as
+ * pixels so a transposed or short index in a forwarder shows. */
 #define VEC_DIM 64
 static uint32_t vec_reference[VEC_DIM * VEC_DIM];
 
@@ -2476,14 +2323,8 @@ static void test_gl_vector_forms_match_their_scalar_twins(void) {
     glLoadIdentity();
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
-    /* **Deliberately asymmetric, and compared whole.**
-     *
-     * The first version of this test used a triangle symmetric about x = y and checked
-     * one centre pixel, and it passed against a glVertex3fv with x and y transposed -
-     * the swapped triangle still covered the centre in the same flat colour. A
-     * forwarder bug is a geometry bug, so the geometry has to be the thing that differs
-     * and the whole buffer has to be what is compared. No vertex here shares a
-     * coordinate with another. */
+    /* Asymmetric, and compared whole: no vertex shares a coordinate with another, so a
+     * transposed x and y changes the geometry and the buffer. */
     static const GLfloat a[3] = {-0.8f, -0.6f, 0.0f};
     static const GLfloat b[3] = {0.7f, -0.5f, 0.0f};
     static const GLfloat c[3] = {0.1f, 0.9f, 0.0f};
@@ -2568,17 +2409,8 @@ static void test_gl_vector_forms_match_their_scalar_twins(void) {
 }
 #undef VEC_DIM
 
-/* The first error is the one kept, which is the one that says where it went wrong.
- *
- * GL is explicit: once the flag is set, nothing further is recorded until glGetError()
- * reads and clears it. Every site here used to assign the field directly, so the *last*
- * error won - a caller making several calls before one glGetError() was shown the most
- * recent failure and never the one that started it, which points at the wrong call.
- *
- * Asserted in both directions: the first of two different errors survives the second,
- * and the flag really does clear so the next error can be seen. Without the second half
- * this would also pass against an implementation that recorded one error and then
- * stopped forever. */
+/* The first error is kept until glGetError() reads and clears it, and after clearing
+ * the next error is recorded. */
 static void test_gl_first_error_is_the_one_retained(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -2588,20 +2420,14 @@ static void test_gl_first_error_is_the_one_retained(void) {
     glVertexPointer(3, GL_FLOAT, 0, verts);
     (void)glGetError();
 
-    /* An enum error, then a value error. The enum one came first and must be what is
-     * read.
-     *
-     * GL_CONVOLUTION_1D rather than GL_FOG or GL_DITHER, which have each been the
-     * generator here and are accepted now - the enum has to be one this genuinely does
-     * not have, or the test stops testing what it says. The imaging subset is optional,
-     * so this one stays refused. */
+    /* An enum error, then a value error; the enum one is read. GL_CONVOLUTION_1D is in
+     * the optional imaging subset, so it stays refused. */
     glEnable((GLenum)0x8010u);         /* GL_CONVOLUTION_1D: GL_INVALID_ENUM */
     glDrawArrays(GL_TRIANGLES, 0, -4); /* GL_INVALID_VALUE */
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-    /* Reading it cleared it, so the next error is visible - and this time the value
-     * error happens first, proving the order is what decides rather than the error
-     * code. */
+    /* Reading cleared it; now the value error comes first and is the one kept, so order
+     * decides, not the error code. */
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glDrawArrays(GL_TRIANGLES, 0, -4); /* GL_INVALID_VALUE */
     glEnable((GLenum)0x8010u);         /* GL_CONVOLUTION_1D: GL_INVALID_ENUM */
@@ -2613,13 +2439,7 @@ static void test_gl_first_error_is_the_one_retained(void) {
     oops_display_close(disp);
 }
 
-/* The scalar and vector twins that nothing else reached.
- *
- * These eight were the last entry points exercised by neither the oracle program nor
- * this suite. They are thin - most forward to a sibling that was already covered - but
- * a forwarder is exactly where a wrong argument order or a dropped parameter hides, and
- * "it is only a wrapper" is how it stays hidden. Each is checked against the twin it
- * forwards to, so the two cannot drift apart without this failing. */
+/* Each scalar or vector forwarder agrees with the twin it forwards to. */
 static void test_gl_scalar_twins_agree_with_their_vector_forms(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -2657,11 +2477,8 @@ static void test_gl_scalar_twins_agree_with_their_vector_forms(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glTexParameterf((GLenum)0x1234u, GL_TEXTURE_MIN_FILTER, (GLfloat)GL_NEAREST);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-    /* The target was validated and the parameter was not: GL 3.3's GL_TEXTURE_SWIZZLE_R
-     * is a real parameter this does not keep, and one like it used to be dropped in
-     * silence. (GL_TEXTURE_WRAP_R, GL_TEXTURE_MIN_LOD and then GL 1.4's
-     * GL_TEXTURE_COMPARE_MODE were the example until each became one this keeps - the
-     * last of GL 1.x's, 2026-09-19.) */
+    /* The parameter is validated as well as the target: GL 3.3's GL_TEXTURE_SWIZZLE_R
+     * is a real parameter this does not keep. */
     glTexParameteri(GL_TEXTURE_2D, (GLenum)0x8E42u, 0); /* GL_TEXTURE_SWIZZLE_R */
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glDeleteTextures(1, &tex);
@@ -2673,16 +2490,15 @@ static void test_gl_scalar_twins_agree_with_their_vector_forms(void) {
     glMaterialfv(GL_FRONT_AND_BACK, (GLenum)0x1234u, mat);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-    /* glLightf and glLightModelf reach the same light validation as their vector twins.
-     */
+    /* glLightf and glLightModelf reach the same validation as their vector twins. */
     glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION, 1.0f);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glLightf((GLenum)(GL_LIGHT0 + 64u), GL_CONSTANT_ATTENUATION, 1.0f);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glLightModelf(GL_LIGHT_MODEL_LOCAL_VIEWER, 0.0f);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
-    /* GL_LIGHT_MODEL_TWO_SIDE set a field nothing read, then was refused; since
-     * 2026-09-19 it is kept and lights back faces (test_gl_two_sided_lighting). */
+    /* GL_LIGHT_MODEL_TWO_SIDE is kept and lights back faces
+     * (test_gl_two_sided_lighting). */
     glLightModelf(GL_LIGHT_MODEL_TWO_SIDE, 1.0f);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     GLint two_side = 0;
@@ -2694,13 +2510,8 @@ static void test_gl_scalar_twins_agree_with_their_vector_forms(void) {
 
     /* glNormal3fv is glNormal3f with the components in the same order. Checked by
      * lighting a face and comparing pixels, because a transposed normal is only visible
-     * as shading.
-     *
-     * **The light must not point down an axis the normal is symmetric about.** The
-     * first version of this put the light at (0, 0, 1), so the shading depended on the
-     * normal's z alone and a glNormal3fv with x and y swapped lit identically - the
-     * test passed against the bug. It points along x now, where swapping x and y
-     * changes the dot product from 0.3 to 0.5 and the pixel with it. */
+     * as shading. The light points along x, where swapping x and y changes the dot
+     * product from 0.3 to 0.5. */
     uint32_t *fb = oops_display_get_framebuffer(disp);
     const int centre = 240 / 2 * 320 + 320 / 2;
     static const GLfloat lit[4] = {1.0f, 0.0f, 0.0f, 0.0f};
@@ -2734,8 +2545,7 @@ static void test_gl_scalar_twins_agree_with_their_vector_forms(void) {
     glEnd();
     ASSERT_EQ(fb[centre], scalar_normal);
 
-    /* glFlush completes an open immediate-mode block rather than discarding it - the
-     * one piece of behaviour it has on a host build. */
+    /* glFlush completes an open immediate-mode block rather than discarding it. */
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     ASSERT_EQ(fb[centre], 0xff000000u);
     glBegin(GL_TRIANGLES);
@@ -2750,9 +2560,8 @@ static void test_gl_scalar_twins_agree_with_their_vector_forms(void) {
     glContextDestroy(ctx);
     oops_display_close(disp);
 }
-/* The bound texture's storage, found by walking the table rather than calling
- * gl_state.c's own static lookup - a test that reached in for a private helper would
- * pin the helper as much as the behaviour. */
+/* The bound texture's storage, found by walking the table rather than through
+ * gl_state.c's static lookup, so the test pins behaviour and not the helper. */
 static const gl_texture_object_t *test_find_texture(const gl_context_t *ctx,
                                                     GLuint id) {
     for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
@@ -2762,12 +2571,7 @@ static const gl_texture_object_t *test_find_texture(const gl_context_t *ctx,
     return NULL;
 }
 
-/* **glTexSubImage2D updates a rectangle and leaves the rest alone.**
- *
- * Checked by reading the texture's own storage rather than by rendering, because a
- * sampled result would also pass if the update landed in the wrong place and the
- * sampler happened to read the right colour. The bytes say exactly which texels moved.
- */
+/* glTexSubImage2D updates its rectangle and leaves the rest of the storage alone. */
 static void test_gl_tex_sub_image_updates_only_its_rectangle(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx_handle = glContextCreate(disp);
@@ -2822,13 +2626,8 @@ static void test_gl_tex_sub_image_updates_only_its_rectangle(void) {
     oops_display_close(disp);
 }
 
-/* glPixelStorei changes where the rows are, and the default is the specification's 4.
- *
- * A three-byte format at width 3 is nine bytes per row, which alignment 4 rounds to
- * twelve and alignment 1 leaves at nine - so the two readings disagree from the second
- * row onward, and a texture uploaded under one and read under the other is visibly
- * skewed.
- */
+/* GL_UNPACK_ALIGNMENT moves the rows, and its default is the specification's 4: RGB at
+ * width 3 is nine bytes a row, twelve under alignment 4. */
 static void test_gl_pixel_store_alignment_moves_the_rows(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx_handle = glContextCreate(disp);
@@ -2878,13 +2677,8 @@ static void test_gl_pixel_store_alignment_moves_the_rows(void) {
     oops_display_close(disp);
 }
 
-/* **A format the upload cannot convert is refused, where it used to leave garbage.**
- *
- * glTexImage2D accepted any format, converted only RGBA and RGB, and left the texture
- * holding whatever the allocation contained for everything else - sampled, with no
- * error. The formats that now convert are asserted alongside, so a build that refused
- * them all fails this too.
- */
+/* A format the upload cannot convert is refused rather than left as uninitialised
+ * storage. The formats that convert are the positive control. */
 static void test_gl_tex_image_refuses_a_format_it_cannot_convert(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx_handle = glContextCreate(disp);
@@ -2906,9 +2700,7 @@ static void test_gl_tex_image_refuses_a_format_it_cannot_convert(void) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_BGRA, GL_UNSIGNED_BYTE, data);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* A real GL format this does not convert - GL 3.0's GL_DEPTH_STENCIL. (GL_FLOAT was
-     * the example of a type it did not convert until 2026-09-19, and then colour index;
-     * both convert now.) */
+    /* A real GL format this does not convert: GL 3.0's GL_DEPTH_STENCIL. */
     static const GLfloat one_float[4] = {1.0f, 0.5f, 0.0f, 1.0f};
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_FLOAT, one_float);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
@@ -2937,12 +2729,8 @@ static void test_gl_tex_image_refuses_a_format_it_cannot_convert(void) {
     oops_display_close(disp);
 }
 
-/* **A compiled list replays its calls, and compiling does not draw.**
- *
- * The two halves have to be asserted together: a list that drew at compile time and did
- * nothing on replay would produce the same final framebuffer as one that worked, and
- * only the check in between tells them apart.
- */
+/* A compiled list replays its calls, and compiling does not draw; the check in between
+ * tells the two apart. */
 static void test_gl_display_list_compiles_then_replays(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx = glContextCreate(disp);
@@ -3030,10 +2818,7 @@ static void test_gl_display_list_compile_and_execute_does_both(void) {
     oops_display_close(disp);
 }
 
-/* What a list refuses, and what it deliberately does not.
- *
- * Each refusal is paired with the legal case beside it, so a build that refused
- * everything - or nothing - fails this rather than passing half of it.
+/* What a list refuses, and what it does not, each refusal paired with its legal case.
  */
 static void test_gl_display_list_refusals(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
@@ -3059,11 +2844,9 @@ static void test_gl_display_list_refusals(void) {
     glNewList(run + 1u, GL_COMPILE);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
 
-    /* **The vertex-array draws compile** - as the glBegin/element/glEnd sequence they
-     * stand for, read out of the arrays now. They were refused with
-     * GL_INVALID_OPERATION until 2026-09-19;
-     * test_gl_display_list_records_what_gl_compiles checks that the values are the
-     * compile-time ones. */
+    /* The vertex-array draws compile, as the glBegin/element/glEnd sequence they stand
+     * for, read out of the arrays at compile time
+     * (test_gl_display_list_records_what_gl_compiles). */
     static const GLfloat verts[9] = {-0.5f, -0.5f, 0.0f, 0.5f, -0.5f,
                                      0.0f,  0.0f,  0.5f, 0.0f};
     glEnableClientState(GL_VERTEX_ARRAY);
@@ -3081,17 +2864,15 @@ static void test_gl_display_list_refusals(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glDisableClientState(GL_VERTEX_ARRAY);
 
-    /* **Calling a list that was never defined is ignored, not an error.** The
-     * specification is explicit, and it is what lets a list reference one compiled
-     * later. */
+    /* Calling a list that was never defined is ignored, not an error, so a list can
+     * reference one compiled later. */
     glCallList(run + 2u);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glCallList(999999u);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* A type outside GL_BYTE..GL_4_BYTES is refused before it reads one. (GL_FLOAT was
-     * the refused example until 2026-09-19, when glCallLists took all ten of GL 1.0's
-     * types.) */
+    /* A type outside GL 1.0's ten, GL_BYTE..GL_4_BYTES, is refused before it reads
+     * one. */
     static const GLubyte names[2] = {1, 2};
     glCallLists(2, GL_DOUBLE, names);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
@@ -3102,16 +2883,9 @@ static void test_gl_display_list_refusals(void) {
     oops_display_close(disp);
 }
 
-/* **Everything the specification compiles is compiled** - and each property that makes
- * a list a list rather than a macro is checked on its own: compiling changes nothing,
- * pointers are copied when compiled, images unpack through the pixel-store state of
- * compile time, arrays keep the values they held, the list base applies when the list
- * runs, GL_COMPILE_AND_EXECUTE records once, and a compiled call's error is raised when
- * it runs.
- *
- * Until 2026-09-19 a list recorded 21 operations and ran everything else at compile
- * time; the first block is the gears demo's shape, which drew every gear in the last
- * material set.
+/* Everything the specification compiles is compiled, with compile-time values: pointers
+ * and images are copied through compile-time unpack state, the list base applies when
+ * the list runs, and a compiled call's error is raised when it runs.
  */
 static void test_gl_display_list_records_what_gl_compiles(void) {
     const int W = 16, H = 16;
@@ -3173,7 +2947,7 @@ static void test_gl_display_list_records_what_gl_compiles(void) {
     ASSERT_TRUE(mv[0] == 2.0f && mv[5] == 2.0f);
     glLoadIdentity();
 
-    /* 3. An image, through the unpack state of *compile* time. A 2x2 corner of a 3-wide
+    /* 3. An image, through the unpack state of compile time. A 2x2 corner of a 3-wide
      * client image, compiled with GL_UNPACK_ROW_LENGTH 3; the state and the image are
      * both changed before the list runs, and the texture must still get the corner. */
     static GLubyte img[3 * 2 * 4];
@@ -3197,10 +2971,9 @@ static void test_gl_display_list_records_what_gl_compiles(void) {
     GLubyte got[2 * 2 * 4];
     memset(got, 0, sizeof(got));
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, got);
-    ASSERT_EQ(got[0], 10); /* row 0, pixel 0 */
-    ASSERT_EQ(got[4], 14); /* row 0, pixel 1 */
-    ASSERT_EQ(got[8],
-              10 + 12); /* row 1 starts one *client* row (3 pixels) on, not two */
+    ASSERT_EQ(got[0], 10);      /* row 0, pixel 0 */
+    ASSERT_EQ(got[4], 14);      /* row 0, pixel 1 */
+    ASSERT_EQ(got[8], 10 + 12); /* row 1 starts one client row (3 pixels) on, not two */
     ASSERT_EQ(got[12], 10 + 16);
     glBindTexture(GL_TEXTURE_2D, 0);
 
@@ -3229,7 +3002,7 @@ static void test_gl_display_list_records_what_gl_compiles(void) {
     ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x00ff0000u); /* red, as compiled - not blue */
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* 5. glCallLists applies the list base current when the list *runs*. */
+    /* 5. glCallLists applies the list base current when the list runs. */
     const GLuint pair = glGenLists(3);
     glNewList(pair + 1u, GL_COMPILE);
     glBlendFunc(GL_ZERO, GL_ZERO);
@@ -3336,13 +3109,8 @@ static void test_gl_display_list_recursion_is_bounded(void) {
     oops_display_close(disp);
 }
 
-/* **glReadPixels flips the rows, because GL's origin is the bottom-left corner.**
- *
- * This is the one detail that produces a plausible wrong answer: an unflipped read
- * gives a vertically mirrored image, which still looks like a screenshot, so nothing
- * downstream notices. The framebuffer is filled with a per-row value so a flip is
- * visible as a value rather than as a picture - row 0 of memory holds 10, row 1 holds
- * 11, and so on, so reading window row 0 must give the *last* row's value.
+/* glReadPixels flips the rows, because GL's origin is the bottom-left corner. Each
+ * memory row holds its own value, so window row 0 reads the last row's.
  */
 static void test_gl_read_pixels_flips_to_gl_orientation(void) {
     const int W = 8, H = 4;
@@ -3382,11 +3150,8 @@ static void test_gl_read_pixels_flips_to_gl_orientation(void) {
     oops_display_close(disp);
 }
 
-/* The channel order, the refusals, and what falls outside the window.
- *
- * Each refusal is paired with the case beside it that must still work, so a build that
- * refused everything would fail this too.
- */
+/* glReadPixels channel order, refusals (each paired with a legal case), and what falls
+ * outside the window. */
 static void test_gl_read_pixels_formats_and_bounds(void) {
     const int W = 4, H = 4;
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
@@ -3416,10 +3181,8 @@ static void test_gl_read_pixels_formats_and_bounds(void) {
     ASSERT_EQ(rgb[2], 0x33);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* Floats are read back as fractions of one (GL_FLOAT was this test's refused type
-     * until 2026-09-19); a colour-index read is refused rather than written as bytes -
-     * an RGBA buffer holds no indices, which is GL_INVALID_OPERATION now that the
-     * format itself is known. */
+    /* Floats are read back as fractions of one; a colour-index read is
+     * GL_INVALID_OPERATION, since an RGBA buffer holds no indices. */
     GLfloat fl[4] = {0};
     glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, fl);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
@@ -3430,9 +3193,8 @@ static void test_gl_read_pixels_formats_and_bounds(void) {
     glReadPixels(0, 0, -1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
 
-    /* **Outside the window reads zero, not whatever followed the framebuffer.** A
-     * rectangle half off the right edge fills the part that overlaps and leaves the
-     * rest cleared. */
+    /* Outside the window reads zero: a rectangle half off the right edge fills the part
+     * that overlaps and leaves the rest cleared. */
     static GLubyte wide[8 * 4];
     memset(wide, 0xcd, sizeof(wide));
     glReadPixels(W - 2, 0, 8, 1, GL_RGBA, GL_UNSIGNED_BYTE, wide);
@@ -3446,14 +3208,9 @@ static void test_gl_read_pixels_formats_and_bounds(void) {
     oops_display_close(disp);
 }
 
-/* **The alpha test, as words in the shader.**
- *
- * Checked by reading the payload rather than by rendering, because a wrong instruction
- * encoding cannot fail loudly here: it would assemble into the shader, the GPU would do
- * something else, and the result would be a wrong frame rather than a failed build. The
- * words below are the ones `clang -target amdgcn-amd-amdhsa -mcpu=gfx1030` produced for
- * the instruction in each comment, so this test is what ties the source assembly to
- * what ships.
+/* The alpha test patches the instruction words each comment names into both shaders.
+ * The words are what `clang -target amdgcn-amd-amdhsa -mcpu=gfx1030` assembles for
+ * them.
  */
 static void test_gl_alpha_test_patches_both_shaders(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
@@ -3487,8 +3244,7 @@ static void test_gl_alpha_test_patches_both_shaders(void) {
               0x7c081907u); /* v_cmp_gt_f32 vcc_lo, v7, v12 */
     ASSERT_EQ(untex[GL_PS_ALPHA_SLOT_UNTEX + 3],
               0x877e6a7eu); /* s_and_b32 exec_lo, exec_lo, vcc_lo */
-    /* **Both shaders**, because a textured draw and an untextured one must agree -
-     * patching one would make the test depend on whether a texture was bound. */
+    /* Both shaders, so textured and untextured draws agree. */
     for (unsigned i = 0; i < 4; i++) {
         ASSERT_EQ(tex[GL_PS_ALPHA_SLOT_TEX + i], untex[GL_PS_ALPHA_SLOT_UNTEX + i]);
     }
@@ -3532,12 +3288,8 @@ static void test_gl_alpha_test_patches_both_shaders(void) {
     oops_display_close(disp);
 }
 
-/* glCopyTexSubImage2D lands the same pixels a glTexSubImage2D of them would.
- *
- * Asserted by doing both and comparing, rather than against hand-worked expectations:
- * the two paths share the read, so what this pins is that sharing - a hand-written
- * second flip in the copy path would make them disagree, and that is the mistake worth
- * catching.
+/* glCopyTexSubImage2D lands the same pixels as a glReadPixels then glTexSubImage2D of
+ * them, so the copy path adds no second flip.
  */
 static void test_gl_copy_tex_sub_image_matches_a_read_then_upload(void) {
     const int W = 8, H = 8;
@@ -3600,13 +3352,9 @@ static void test_gl_copy_tex_sub_image_matches_a_read_then_upload(void) {
     oops_display_close(disp);
 }
 
-/* **glPushAttrib/glPopAttrib, and the trap is which bit owns an enable.**
- *
- * GL_ENABLE_BIT carries every enable, and each buffer bit *also* carries the enable for
- * its own feature - so GL_DEPTH_BUFFER_BIT alone must restore the depth-test enable.
- * Getting that wrong gives a pop that puts back a depth function while leaving the test
- * off, which renders plausibly and wrongly. So the narrow masks are tested on their own
- * rather than only through GL_ALL_ATTRIB_BITS, which would hide it.
+/* glPushAttrib/glPopAttrib restore each group, and each buffer bit also carries its own
+ * feature's enable (GL_DEPTH_BUFFER_BIT restores GL_DEPTH_TEST), so the narrow masks
+ * are tested on their own.
  */
 static void test_gl_attrib_stack_saves_and_restores(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
@@ -3641,21 +3389,18 @@ static void test_gl_attrib_stack_saves_and_restores(void) {
     ASSERT_EQ(glIsEnabled(GL_CULL_FACE), GL_FALSE);
     ASSERT_EQ(glIsEnabled(GL_SCISSOR_TEST), GL_FALSE);
 
-    /* GL_ALL_ATTRIB_BITS is narrowed to what exists rather than refused - it is the
-     * ordinary call, and a program saying "all" is asking for whatever there is. */
+    /* GL_ALL_ATTRIB_BITS is narrowed to what exists rather than refused. */
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glPopAttrib();
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
-    /* So is GL 1.0's spelling of "all", 0x000FFFFF, which this header used until
-     * 2026-09-19 and a program built against an old header still passes. */
+    /* So is GL 1.0's spelling of "all", 0x000FFFFF, which old headers pass. */
     glPushAttrib(0x000FFFFFu);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glPopAttrib();
 
-    /* The groups whose state existed without a bit to save it: line width, point size,
-     * hints and the multisample state. Each was refused as a group this "does not
-     * have". */
+    /* Line width, point size, hints and the multisample state are saved by their bits.
+     */
     glLineWidth(2.0f);
     glPointSize(3.0f);
     glHint(GL_FOG_HINT, GL_NICEST);
@@ -3682,14 +3427,8 @@ static void test_gl_attrib_stack_saves_and_restores(void) {
     glLineWidth(1.0f);
     glPointSize(1.0f);
 
-    /* A mask naming no group is refused, because a push that saved nothing is the leak
-     * this function exists to prevent.
-     *
-     * **GL_STENCIL_BUFFER_BIT, GL_FOG_BIT and last GL_ACCUM_BUFFER_BIT used to be the
-     * examples of groups this could not save**, which is this assertion doing its job:
-     * the list shrank as each feature landed, and on 2026-09-19 it emptied. The
-     * accumulation group now saves its clear value; a bit no GL 1.x group uses is what
-     * is left to refuse. */
+    /* The accumulation group saves its clear value. A mask naming no GL 1.x group is
+     * refused, because a push that saved nothing would leak state. */
     glClearAccum(0.25f, 0.0f, 0.0f, 0.0f);
     glPushAttrib(GL_ACCUM_BUFFER_BIT);
     glClearAccum(1.0f, 1.0f, 1.0f, 1.0f);
@@ -3723,7 +3462,7 @@ static void test_gl_attrib_stack_saves_and_restores(void) {
     }
     glDisable(GL_FOG);
 
-    /* And the stencil bit now saves and restores real state. */
+    /* The stencil bit saves and restores real state. */
     glEnable(GL_STENCIL_TEST);
     glStencilFunc(GL_EQUAL, 3, 0x0f);
     glPushAttrib(GL_STENCIL_BUFFER_BIT);
@@ -3756,8 +3495,8 @@ static void test_gl_attrib_stack_saves_and_restores(void) {
         glPopAttrib();
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **The alpha test lives in the shader, so a pop has to rewrite it** - unlike
-     * everything else here, which the next frame picks up from the context. */
+    /* The alpha test lives in the shader, so a pop rewrites it; everything else here
+     * the next frame picks up from the context. */
     glDisable(GL_ALPHA_TEST);
     const uint32_t *untex =
         (const uint32_t *)((const char *)payload + OOPS_GL_PS_UNTEX_OFFSET);
@@ -3775,18 +3514,9 @@ static void test_gl_attrib_stack_saves_and_restores(void) {
     oops_display_close(disp);
 }
 
-/* **glRect*, and the trap is the corner order.**
- *
- * The specification's four vertices are (x1,y1), (x2,y1), (x2,y2), (x1,y2). Three of
- * the four plausible wrong orders still draw *a* rectangle covering the same pixels -
- * the bowtie (x1,y1),(x2,y1),(x1,y2),(x2,y2) does not, but a transposition or a mirror
- * does - so the test is against the explicit quad the specification names rather than
- * against a bounding box.
- *
- * The fixture is deliberately **not square and not centred**. A rectangle symmetric
- * about x=y passes against an implementation that swaps the axes, which is the shape of
- * mistake this is here to catch, and it has been the shape of two real escapes in this
- * file already.
+/* glRect draws the quad the specification names, (x1,y1), (x2,y1), (x2,y2), (x1,y2),
+ * compared against that explicit quad. The fixture is neither square nor centred, so a
+ * swapped axis shows.
  */
 static void test_gl_rect_draws_the_quad_the_spec_names(void) {
     enum { W = 64, H = 64 };
@@ -3830,15 +3560,13 @@ static void test_gl_rect_draws_the_quad_the_spec_names(void) {
     }
     ASSERT_TRUE(painted > 100);
 
-    /* And the fixture can tell the axes apart: the transpose is a different picture, so
-     * an implementation that swapped x and y would fail the comparison above rather
-     * than sail through it. */
+    /* The fixture tells the axes apart: the transpose is a different picture. */
     glClear(GL_COLOR_BUFFER_BIT);
     glRectf(-0.25f, -0.75f, 0.75f, 0.25f);
     memcpy(transposed, fb, sizeof transposed);
     ASSERT_TRUE(memcmp(by_rect, transposed, sizeof by_rect) != 0);
 
-    /* The vector form takes two corners in *two* arrays. `v1` is four wide and carries
+    /* The vector form takes two corners in two arrays. `v1` is four wide and carries
      * decoys in [2] and [3]: an implementation reading the second corner out of the
      * first array draws the decoy rectangle, which is the `transposed` picture above
      * and not this one. */
@@ -3870,14 +3598,8 @@ static void test_gl_rect_draws_the_quad_the_spec_names(void) {
     oops_display_close(disp);
 }
 
-/* **The client attribute stack is a separate stack, and that is the whole point of
- * it.**
- *
- * A library that brackets its array setup with glPushClientAttrib sits inside a caller
- * that may have bracketed itself with glPushAttrib. If the two shared one stack the
- * inner pop would take the outer frame, and the caller's server state would come back
- * as whatever the library happened to be holding. So the independence is asserted
- * directly, not just the round trip.
+/* The client attribute stack is separate from the server one, so a library's
+ * glPushClientAttrib inside a caller's glPushAttrib cannot pop the caller's frame.
  */
 static void test_gl_client_attrib_stack_is_its_own_stack(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
@@ -3889,8 +3611,7 @@ static void test_gl_client_attrib_stack_is_its_own_stack(void) {
     static const GLfloat texco[8] = {0};
 
     /* A buffer bound while the pointer is specified, so the saved array has a non-zero
-     * buffer to restore - a frame saving 0 and restoring 0 would pass against an
-     * implementation that dropped the field entirely. */
+     * buffer to restore. */
     GLuint saved_vbo = 0;
     glGenBuffers(1, &saved_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, saved_vbo);
@@ -3915,25 +3636,22 @@ static void test_gl_client_attrib_stack_is_its_own_stack(void) {
     glPopClientAttrib();
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **The pointer and its enable travel together.** Restoring one without the other
+    /* The pointer and its enable travel together. Restoring one without the other
      * leaves an array switched on pointing at something never set for it. */
     ASSERT_EQ(ctx->array_vertex.size, 3);
     ASSERT_EQ(ctx->array_vertex.stride, 0);
     ASSERT_TRUE(ctx->array_vertex.pointer == NULL); /* offset 0 into the buffer */
     ASSERT_EQ(ctx->array_vertex.enabled, GL_TRUE);
     ASSERT_EQ(ctx->array_texcoord[0].enabled, GL_FALSE);
-    /* **The buffer an array reads from is part of the array**, so it is part of what
-     * this saves. gl_client_array_t carries it, which makes the struct copy enough -
-     * pinned here so a later change to field-by-field copying cannot quietly drop it.
-     * Between the push and the pop the pointer was respecified with no buffer bound, so
-     * this came back rather than never moving. */
+    /* The buffer an array reads from is part of the array, so it is saved. Between the
+     * push and the pop the pointer was respecified with no buffer bound, so this came
+     * back rather than never moving. */
     ASSERT_EQ(ctx->array_vertex.buffer, saved_vbo);
     ASSERT_EQ(ctx->unpack_alignment, 8);
     ASSERT_EQ(ctx->unpack_row_length, 17);
     ASSERT_EQ(ctx->pack_alignment, 2);
 
-    /* A mask naming one group leaves the other alone. Without this, a pop that ignored
-     * the mask and restored everything would pass every assertion above. */
+    /* A mask naming one group leaves the other alone. */
     glPushClientAttrib(GL_CLIENT_PIXEL_STORE_BIT);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glDisableClientState(GL_VERTEX_ARRAY);
@@ -3942,7 +3660,7 @@ static void test_gl_client_attrib_stack_is_its_own_stack(void) {
     ASSERT_EQ(ctx->array_vertex.enabled, GL_FALSE); /* not named, so not restored */
     glEnableClientState(GL_VERTEX_ARRAY);
 
-    /* The two stacks do not touch each other. The server push below is popped *after* a
+    /* The two stacks do not touch each other. The server push below is popped after a
      * whole client push and pop, and must still find its own frame. */
     glDepthFunc(GL_NEVER);
     glPushAttrib(GL_DEPTH_BUFFER_BIT);
@@ -3973,10 +3691,8 @@ static void test_gl_client_attrib_stack_is_its_own_stack(void) {
     oops_display_close(disp);
 }
 
-/* glCopyTexImage2D allocates and then copies through the path glCopyTexSubImage2D
- * already uses, so the two cannot disagree about which way up the result lands. The
- * rectangle is deliberately
- * **not square**: a width/height swap in the allocation would otherwise be invisible.
+/* glCopyTexImage2D allocates and then copies through glCopyTexSubImage2D's path, so
+ * both land the same way up. The rectangle is not square, so a width/height swap shows.
  */
 static void test_gl_copy_tex_image_allocates_then_copies(void) {
     enum { W = 16, H = 16, RW = 8, RH = 4 };
@@ -4012,7 +3728,7 @@ static void test_gl_copy_tex_image_allocates_then_copies(void) {
     ASSERT_EQ(memcmp(a->pixels, b->pixels, (size_t)RW * (size_t)RH * 4u), 0);
 
     /* Not blank, and flipped the same way the sub-image copy is. GL row 0 of the
-     * *window* is framebuffer row H-1 - the window's height, not the rectangle's,
+     * window is framebuffer row H-1 - the window's height, not the rectangle's,
      * because the read is from the window at y=0 and the flip is about the window's
      * origin. */
     const GLubyte *p = (const GLubyte *)a->pixels;
@@ -4039,38 +3755,8 @@ static void test_gl_copy_tex_image_allocates_then_copies(void) {
     oops_display_close(disp);
 }
 
-/* **Every spelling of an attribute must reach the same place.**
- *
- * GL 1.x names each attribute once per C type and once per arity, and old code reaches
- * for all of them. Each one here is checked against the value it should produce rather
- * than only against its float sibling, and every fixture uses a **different number in
- * every component**, because a fixture like (1,1,1) passes against an implementation
- * that writes the first argument three times.
- */
-/* The integer spellings convert, and they do not all convert the same way.
- *
- * Colours and normals are normalised onto [-1,1] or [0,1]; positions and texture
- * coordinates are the value as given. A single fixture cannot catch a mix-up, because
- * glVertex3i(1,1,1) and glColor3i(1,1,1) differ by nine orders of magnitude and both
- * "look plausible" in isolation - so each rule is asserted against the endpoint it is
- * supposed to land on exactly.
- */
-/* Multitexture on a one-unit implementation: unit 0 works, and asking for a second is
- * refused rather than silently given unit 0 again.
- *
- * The silent version is the dangerous one. A program that multitextures typically sets
- * a coordinate per unit and expects two textures combined; handed unit 0's coordinate
- * twice it draws something plausible and wrong, with GL_NO_ERROR throughout.
- * GL_MAX_TEXTURE_UNITS reporting 1 is what lets such a program take its single-texture
- * path instead.
- */
-/* Texture coordinate generation.
- *
- * The interesting case is GL_EYE_LINEAR, because it is the one whose answer depends on
- * *when* the plane was specified. An implementation that stores the caller's numbers
- * and uses them directly behaves identically to GL_OBJECT_LINEAR and passes any test
- * that never moves the modelview between specifying the plane and drawing - so this one
- * moves it.
+/* Texture coordinate generation, with GL_EYE_LINEAR planes fixed in eye space when
+ * specified: the modelview moves between specifying the plane and drawing.
  */
 static void test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
@@ -4117,8 +3803,8 @@ static void test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification(v
 
     /* Eye-linear: the plane is fixed in eye space when it is specified. Specify
      * (1,0,0,0) under an identity modelview, then translate by 10 in x. The vertex at
-     * object x = 3 is now at eye x = 13, so the coordinate is 13 - **not** 3, which is
-     * what storing the plane unchanged and treating it as object-linear would give. */
+     * object x = 3 is now at eye x = 13, so the coordinate is 13, not the
+     * object-linear 3. */
     glLoadIdentity();
     glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
     const GLfloat eyep[4] = {1.0f, 0.0f, 0.0f, 0.0f};
@@ -4164,9 +3850,8 @@ static void test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification(v
     ASSERT_TRUE(ctx->imm_verts[0].tc[0][1] >= 0.0f &&
                 ctx->imm_verts[0].tc[0][1] <= 1.0f);
 
-    /* The cube-map modes were refused while there was no cube map; they are accepted
-     * for s, t and r now (test_gl_cube_maps), and refused for q, which is no direction.
-     */
+    /* The cube-map modes are accepted for s, t and r (test_gl_cube_maps), and refused
+     * for q, which is no direction. */
     glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_REFLECTION_MAP);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glTexGeni(GL_Q, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP);
@@ -4183,13 +3868,8 @@ static void test_gl_texgen_generates_and_eye_planes_are_fixed_at_specification(v
     oops_display_close(disp);
 }
 
-/* Fog: a per-fragment blend towards the fog colour by eye-space distance.
- *
- * Checked at known distances rather than by "something changed", because the failure
- * modes are all plausible pictures: fog from window depth instead of eye distance
- * changes with glDepthRange, fog that touches alpha changes which fragments an alpha
- * test keeps, and a linear fog with start and end swapped fogs the near objects and
- * clears the far ones.
+/* Fog blends each fragment towards the fog colour by eye-space distance, checked at
+ * known distances, in the right direction, and without touching alpha.
  */
 static void test_gl_fog_blends_by_eye_distance(void) {
     const int W = 32, H = 32;
@@ -4239,9 +3919,8 @@ static void test_gl_fog_blends_by_eye_distance(void) {
     FOG_DRAW_AT(10.0f);
     ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x000000ffu);
 
-    /* **Halfway between start and end is halfway between the colours** - linear fog,
-     * and the direction the right way round: a swapped start and end would fog this the
-     * other way. */
+    /* Halfway between start and end is halfway between the colours, the right way
+     * round. */
     FOG_DRAW_AT(2.0f);
     {
         const uint32_t c = fb[centre];
@@ -4265,7 +3944,7 @@ static void test_gl_fog_blends_by_eye_distance(void) {
     const int red_exp2 = (int)((fb[centre] >> 16) & 0xffu);
     ASSERT_TRUE(red_exp2 < red_exp);
 
-    /* **Fog does not touch alpha.** A fragment that passes the alpha test unfogged
+    /* Fog does not touch alpha. A fragment that passes the alpha test unfogged
      * still passes fully fogged - fogging alpha too would change what a cut-out texture
      * keeps. */
     glFogi(GL_FOG_MODE, GL_LINEAR);
@@ -4280,7 +3959,7 @@ static void test_gl_fog_blends_by_eye_distance(void) {
     glDisable(GL_ALPHA_TEST);
 
     /* Refusals: a scalar colour, a negative density, an unknown mode. Colour-index fog
-     * is state, kept and reported (it was refused until 2026-09-19). */
+     * is state, kept and reported. */
     glFogf(GL_FOG_COLOR, 1.0f);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glFogi(GL_FOG_INDEX, 3);
@@ -4301,12 +3980,9 @@ static void test_gl_fog_blends_by_eye_distance(void) {
     oops_display_close(disp);
 }
 
-/* glLogicOp: the stored bits combined with the fragment's, instead of blending.
- *
- * Checked with values whose bytes differ in every combination a truth table
- * distinguishes, and with the opcodes where getting GL's enum order backwards shows:
- * GL_AND_REVERSE (s & ~d) and GL_AND_INVERTED (~s & d) swap if the table is read the
- * wrong way round, and GL_XOR does not - so XOR alone would pass a broken mapping.
+/* glLogicOp combines the stored bits with the fragment's instead of blending.
+ * GL_AND_REVERSE (s & ~d) and GL_AND_INVERTED (~s & d) are checked because a reversed
+ * enum table swaps them, which GL_XOR alone would not show.
  */
 static void test_gl_logic_op_combines_stored_bits(void) {
     const int W = 16, H = 16;
@@ -4364,7 +4040,7 @@ static void test_gl_logic_op_combines_stored_bits(void) {
     LOGIC_DRAW();
     ASSERT_EQ(fb[centre], 0xff3c3c55u);
 
-    /* **The logic op replaces blending.** ONE + ONE would saturate every channel; XOR
+    /* The logic op replaces blending. ONE + ONE would saturate every channel; XOR
      * does not. */
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE);
@@ -4439,9 +4115,8 @@ static void test_gl_blend_constant_and_factor_rules(void) {
     glDisable(GL_DEPTH_TEST);
     const int centre = (H / 2) * W + (W / 2);
 
-    /* **GL's defaults are GL_ONE and GL_ZERO** (Mesa main/blend.c:1148-1151): enabling
-     * blending without choosing factors overwrites. oops-gl defaulted to alpha
-     * blending. */
+    /* GL's defaults are GL_ONE and GL_ZERO (Mesa main/blend.c:1148-1151): enabling
+     * blending without choosing factors overwrites. */
     GLint f = 0;
     glGetIntegerv(GL_BLEND_SRC, &f);
     ASSERT_EQ((GLenum)f, (GLenum)GL_ONE);
@@ -4495,7 +4170,7 @@ static void test_gl_blend_constant_and_factor_rules(void) {
     glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
     ASSERT_EQ(fb[centre] & 0x00ffffffu, 0x00bfbfbfu);
 
-    /* **GL_SRC_ALPHA_SATURATE is 1 for alpha**, min(As, 1 - Ad) only for colour. Onto a
+    /* GL_SRC_ALPHA_SATURATE is 1 for alpha, min(As, 1 - Ad) only for colour. Onto a
      * transparent black destination with source alpha 0.5, a ONE-less saturate that
      * also scaled alpha would write 0.25 alpha; the right answer keeps the source's
      * 0.5. */
@@ -4540,9 +4215,8 @@ static void test_gl_blend_constant_and_factor_rules(void) {
     oops_display_close(disp);
 }
 
-/* Queries that answered less than the state held: the projective texture coordinate,
- * the colour queries as integers, and the four-component vectors glGetDoublev copied
- * one of. */
+/* Vector queries answer every component: the projective texture coordinate, the colour
+ * queries as integers, and glGetDoublev's four-component vectors. */
 static void test_gl_vector_queries_answer_every_component(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 16, 16);
     void *ctx_handle = glContextCreate(disp);
@@ -4554,7 +4228,7 @@ static void test_gl_vector_queries_answer_every_component(void) {
     glGetFloatv(GL_CURRENT_TEXTURE_COORDS, tc);
     ASSERT_TRUE(tc[2] == 0.3f && tc[3] == 2.0f);
 
-    /* Colours as integers map 1.0 to INT_MAX; these were refused outright. */
+    /* Colours as integers map 1.0 to INT_MAX. */
     glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
     GLint iv[4] = {0, 0, 0, 0};
     glGetIntegerv(GL_COLOR_CLEAR_VALUE, iv);
@@ -4624,8 +4298,7 @@ static void test_gl_texgen_keeps_the_vertex_own_coordinates(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
     /* A generated q of 2 (w times 2) goes to the vertex beside the given s and t, which
-     * the rasteriser then divides per fragment (it halved them at the vertex until
-     * 2026-09-19). */
+     * the rasteriser then divides per fragment. */
     const GLfloat q2[4] = {0.0f, 0.0f, 0.0f, 2.0f};
     glTexGeni(GL_Q, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
     glTexGenfv(GL_Q, GL_OBJECT_PLANE, q2);
@@ -4646,15 +4319,12 @@ static void test_gl_texgen_keeps_the_vertex_own_coordinates(void) {
     oops_display_close(disp);
 }
 
-/* glPolygonMode and edge flags - and the three things that had to be right underneath
- * them: culling and the fill offset belong to polygons, not to the quads a line
- * becomes, and a flat-shaded primitive takes its colour from the vertex the
- * specification names.
+/* glPolygonMode and edge flags draw boundaries; culling and the fill offset apply to
+ * polygons, not to the quads a line becomes; flat shading takes the specified vertex.
  *
- * A 32x32 target with identity matrices, so NDC x maps to column (x + 1) * 16 and NDC y
- * to row 16 - 16y. The quad spans columns and rows 8..24; its diagonal from the first
- * corner to the third passes through the centre, which is why an unlit centre proves
- * the diagonal is not drawn.
+ * 32x32 with identity matrices: NDC x is column (x + 1) * 16, NDC y is row 16 - 16y.
+ * The quad spans 8..24 and its diagonal passes through the centre, so an unlit centre
+ * means no diagonal.
  */
 static void test_gl_polygon_mode_draws_boundaries(void) {
     const int W = 32, H = 32;
@@ -4805,7 +4475,7 @@ static void test_gl_polygon_mode_draws_boundaries(void) {
     glGetIntegerv(GL_POLYGON_MODE, pm);
     ASSERT_EQ((GLenum)pm[0], (GLenum)GL_FILL);
 
-    /* **A GL_LINES line is not culled**, whatever way its quad winds. */
+    /* A GL_LINES line is not culled, whatever way its quad winds. */
     glEnable(GL_CULL_FACE);
     glCullFace(GL_FRONT_AND_BACK);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -4816,7 +4486,7 @@ static void test_gl_polygon_mode_draws_boundaries(void) {
     ASSERT_EQ(PX(16, 16), 0x00ffffffu);
     glDisable(GL_CULL_FACE);
 
-    /* **Nor does it take the fill offset.** A filled quad at z = 0 without offset, then
+    /* Nor does it take the fill offset. A filled quad at z = 0 without offset, then
      * a line at the same depth with GL_POLYGON_OFFSET_FILL on and a large offset:
      * GL_LEQUAL passes the line only if the offset left it alone. */
     glEnable(GL_DEPTH_TEST);
@@ -4840,7 +4510,7 @@ static void test_gl_polygon_mode_draws_boundaries(void) {
     ASSERT_EQ(glIsEnabled(GL_POLYGON_OFFSET_LINE), GL_TRUE);
     glDisable(GL_POLYGON_OFFSET_LINE);
 
-    /* **A flat quad is its fourth vertex's colour** - both triangles, not just the
+    /* A flat quad is its fourth vertex's colour in both triangles, not just the
      * second. And a flat polygon is its first vertex's. (18,20) is in the quad's first
      * triangle, (12,12) in its second. */
     glShadeModel(GL_FLAT);
@@ -4877,7 +4547,7 @@ static void test_gl_polygon_mode_draws_boundaries(void) {
 
 /* State an RGBA context keeps and never draws with - the colour index, the index mask
  * and clear value, the index array, the multisample enables and coverage - plus the
- * point and line queries, which were declared and answered nowhere. Defaults are Mesa's
+ * point and line queries. Defaults are Mesa's
  * (main/context.c:269, main/blend.c:1139-1141, main/multisample.c:69-75).
  */
 static void test_gl_rgba_context_keeps_index_and_sample_state(void) {
@@ -4992,14 +4662,12 @@ static void test_gl_rgba_context_keeps_index_and_sample_state(void) {
     glGetIntegerv(GL_POINT_SIZE_RANGE, iv);
     ASSERT_EQ(iv[0], 1);
     ASSERT_EQ(iv[1], OOPS_GL_MAX_POINT_LINE_SIZE);
-    /* The smooth sizes' step - an eighth since smoothing landed; 1 before, when nothing
-     * smoothed. */
+    /* The smooth sizes' step is an eighth. */
     glGetFloatv(GL_POINT_SIZE_GRANULARITY, fv);
     ASSERT_TRUE(fv[0] == OOPS_GL_SMOOTH_GRANULARITY);
 
-    /* **A sub-pixel width draws a one-pixel line**, as an aliased line of any width
-     * below 1.5 does. The raw 0.3 used to be the quad's width, which can miss every
-     * pixel centre. */
+    /* A sub-pixel width draws a one-pixel line, as an aliased line of any width below
+     * 1.5 does; a raw 0.3-wide quad can miss every pixel centre. */
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);
@@ -5024,13 +4692,9 @@ static void test_gl_rgba_context_keeps_index_and_sample_state(void) {
     oops_display_close(disp);
 }
 
-/* Mipmap levels, completeness, the default texture, the filters, and
- * perspective-correct interpolation - the texturing a real 1.x program depends on, each
- * against GL's own numbers.
- *
- * The first assertion is the one that matters most: uploading levels 1 and 2 must leave
- * level 0 alone. `level` was ignored until 2026-09-19, so a mip chain uploaded level by
- * level ended as its own 1x1 level on the base image.
+/* Mipmap levels (uploading levels 1 and 2 leaves level 0 alone), completeness, the
+ * default texture, the filters, and perspective-correct interpolation, each against
+ * GL's own numbers.
  */
 static void test_gl_mipmaps_completeness_and_filtering(void) {
     const int W = 32, H = 32;
@@ -5116,14 +4780,13 @@ static void test_gl_mipmaps_completeness_and_filtering(void) {
     ASSERT_EQ(PX(16, 16), 0x0000ff00u);
     /* 4 texels over 1 pixel: lod 2, the third. The one-pixel quad is centred on a pixel
      * corner, all four of whose neighbouring centres lie on its edges; under the
-     * rasteriser's tie rule the upper-left one is its pixel (it drew all four until
-     * 2026-09-19). */
+     * rasteriser's tie rule the upper-left one is its pixel. */
     glClear(GL_COLOR_BUFFER_BIT);
     QUAD(0.03125f);
     ASSERT_EQ(PX(15, 15), 0x000000ffu);
     ASSERT_EQ(PX(16, 16), 0x00000000u);
 
-    /* **Incomplete draws untextured.** A second level of the wrong size breaks the
+    /* Incomplete draws untextured. A second level of the wrong size breaks the
      * chain, and the quad takes the plain vertex colour - white - as it would on any
      * GL. */
     glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue);
@@ -5136,7 +4799,7 @@ static void test_gl_mipmaps_completeness_and_filtering(void) {
     QUAD(0.5f);
     ASSERT_EQ(PX(16, 16), 0x00ff0000u);
 
-    /* **Nothing bound means the default texture.** Uploaded with no bind, drawn with no
+    /* Nothing bound means the default texture. Uploaded with no bind, drawn with no
      * bind. */
     glBindTexture(GL_TEXTURE_2D, 0);
     const GLubyte yellow[4] = {255, 255, 0, 255};
@@ -5164,11 +4827,10 @@ static void test_gl_mipmaps_completeness_and_filtering(void) {
     ASSERT_EQ(PX(16, 16), 0x00ffffffu);
     glDisable(GL_TEXTURE_2D);
 
-    /* **Perspective-correct interpolation.** Black at the bottom with w = 1, white at
+    /* Perspective-correct interpolation. Black at the bottom with w = 1, white at
      * the top with w = 3, filling the screen. The middle row is NDC y = 0, which in
      * clip space is a quarter of the way up the edge ((-1 + 4t) / (1 + 2t) = 0 at t =
-     * 1/4): colour 0.25, about 64. Affine interpolation, which this was, gives the
-     * screen halfway point's 128. */
+     * 1/4): colour 0.25, about 64. Affine interpolation would give 128. */
     glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS);
     glColor3f(0.0f, 0.0f, 0.0f);
@@ -5201,12 +4863,9 @@ static void test_gl_mipmaps_completeness_and_filtering(void) {
     oops_display_close(disp);
 }
 
-/* Evaluators: every number here is the Bezier arithmetic worked by hand.
- *
- * The first drawing check is the one that tells a Bezier curve from a curve *through*
- * its control points: the quadratic below has its middle control point at y = 0.5, and
- * the curve's middle is at y = 0 - so the point lands on the centre row, not a quarter
- * of the way up.
+/* Evaluators, against Bezier arithmetic worked by hand. The quadratic's middle control
+ * point is at y = 0.5 and its curve's middle at y = 0, which tells a Bezier curve from
+ * one through its control points.
  */
 static void test_gl_evaluators(void) {
     const int W = 32, H = 32;
@@ -5287,7 +4946,7 @@ static void test_gl_evaluators(void) {
     ASSERT_EQ(PX(16, 16), 0x00ffffffu); /* (0, 0): the curve's middle */
     ASSERT_EQ(PX(16, 8), 0u);           /* not the middle control point */
 
-    /* **An evaluated colour is that vertex's only.** Order 2 from red to green: u = 2
+    /* An evaluated colour is that vertex's only. Order 2 from red to green: u = 2
      * is red, and the current colour is still white afterwards. */
     const GLfloat red_green[8] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f};
     glMap1f(GL_MAP1_COLOR_4, 2.0f, 4.0f, 4, 2, red_green);
@@ -5301,8 +4960,7 @@ static void test_gl_evaluators(void) {
     ASSERT_TRUE(fv[0] == 1.0f && fv[1] == 1.0f && fv[2] == 1.0f);
     glDisable(GL_MAP1_COLOR_4);
 
-    /* **GL_MAP1_VERTEX_4 wins over _3, and is projected.** (-1, 0, 0, 2) is (-0.5, 0).
-     */
+    /* GL_MAP1_VERTEX_4 wins over _3, and is projected: (-1, 0, 0, 2) is (-0.5, 0). */
     const GLfloat rational[8] = {-1.0f, 0.0f, 0.0f, 2.0f, 0.5f, 0.0f, 0.0f, 1.0f};
     glMap1f(GL_MAP1_VERTEX_4, 0.0f, 1.0f, 4, 2, rational);
     glEnable(GL_MAP1_VERTEX_4);
@@ -5370,7 +5028,7 @@ static void test_gl_evaluators(void) {
     ASSERT_EQ(PX(12, 20), 0u);
     ASSERT_EQ(PX(20, 12), 0u);
 
-    /* **GL_AUTO_NORMAL** lights the patch with its own normal, du x dv = +z, facing the
+    /* GL_AUTO_NORMAL lights the patch with its own normal, du x dv = +z, facing the
      * default light; the current normal, pointing away, is left as it was. Turning the
      * u domain round turns the normal round with it. */
     glEnable(GL_LIGHTING);
@@ -5397,7 +5055,7 @@ static void test_gl_evaluators(void) {
     glDisable(GL_LIGHTING);
     glDisable(GL_LIGHT0);
 
-    /* **The highest texture-coordinate map wins.** Order-1 maps are constants: s = 0.25
+    /* The highest texture-coordinate map wins. Order-1 maps are constants: s = 0.25
      * from _COORD_1 would sample the red texel, s = 0.75 from _COORD_2 the green one.
      */
     const GLubyte texels[8] = {255, 0, 0, 255, 0, 255, 0, 255};
@@ -5425,7 +5083,7 @@ static void test_gl_evaluators(void) {
     glDisable(GL_TEXTURE_2D);
     glDeleteTextures(1, &tex);
 
-    /* **A list keeps the points it was compiled with**, and GL_COMPILE changes nothing
+    /* A list keeps the points it was compiled with, and GL_COMPILE changes nothing
      * until it is called. The mesh is compiled too, and draws when the list runs. */
     GLfloat moving[12];
     for (int i = 0; i < 12; i++)
@@ -5554,7 +5212,7 @@ static void test_gl_selection_and_feedback(void) {
     glGetIntegerv(GL_RENDER_MODE, iv);
     ASSERT_EQ((GLenum)iv[0], (GLenum)GL_RENDER);
 
-    /* **Nothing is drawn in GL_SELECT, glClear included.** */
+    /* Nothing is drawn in GL_SELECT, glClear included. */
     glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -5603,7 +5261,7 @@ static void test_gl_selection_and_feedback(void) {
     glGetIntegerv(GL_NAME_STACK_DEPTH, iv); /* leaving GL_SELECT empties the stack */
     ASSERT_EQ(iv[0], 0);
 
-    /* **A culled polygon is no hit**; lines, points and a valid raster position are
+    /* A culled polygon is no hit; lines, points and a valid raster position are
      * hits; names nest, bottom first. */
     glRenderMode(GL_SELECT);
     glInitNames();
@@ -5642,7 +5300,7 @@ static void test_gl_selection_and_feedback(void) {
     ASSERT_EQ(sel[11], 1073741824u);
     ASSERT_EQ(sel[14], 8u);
 
-    /* **The pick matrix**: a 4x4 pixel box around window (8, 8) - the lower left
+    /* The pick matrix: a 4x4 pixel box around window (8, 8) - the lower left
      * quarter - picks the quad there and not the one in the upper right. */
     GLint vp[4];
     glGetIntegerv(GL_VIEWPORT, vp);
@@ -5678,7 +5336,7 @@ static void test_gl_selection_and_feedback(void) {
     ASSERT_EQ(sel[3], 21u);
     glDeleteLists(named, 1);
 
-    /* **Overflow**: as much as fits is written, and glRenderMode answers -1. */
+    /* Overflow: as much as fits is written, and glRenderMode answers -1. */
     GLuint small[3] = {0, 0, 0};
     glSelectBuffer(3, small);
     glRenderMode(GL_SELECT);
@@ -5893,7 +5551,7 @@ static void test_gl_pixel_transfer_and_maps(void) {
     ASSERT_FLOAT_NEAR(map[0], 0.0f, 0.0f);
     ASSERT_FLOAT_NEAR(map[1], 9.0f, 0.0f); /* one entry, and only one written */
 
-    /* **glDrawPixels**: red halved, green biased away. */
+    /* glDrawPixels: red halved, green biased away. */
     glRasterPos2f(0.0f, 0.0f);
     glPixelTransferf(GL_RED_SCALE, 0.5f);
     glPixelTransferf(GL_GREEN_BIAS, -1.0f);
@@ -5902,7 +5560,7 @@ static void test_gl_pixel_transfer_and_maps(void) {
     ASSERT_EQ(RP(), 0x008000ffu);
     glPixelTransferf(GL_GREEN_BIAS, 0.0f);
 
-    /* **glReadPixels** applies it too: white read back with red halved. */
+    /* glReadPixels applies it too: white read back with red halved. */
     glPixelTransferf(GL_RED_SCALE, 1.0f);
     glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -5912,7 +5570,7 @@ static void test_gl_pixel_transfer_and_maps(void) {
     ASSERT_EQ(px[0], 128);
     ASSERT_EQ(px[1], 255);
 
-    /* **A texture copy is transferred once**, not once reading and again uploading:
+    /* A texture copy is transferred once, not once reading and again uploading:
      * 128, not 64. */
     GLuint tex = 0;
     glGenTextures(1, &tex);
@@ -5924,7 +5582,7 @@ static void test_gl_pixel_transfer_and_maps(void) {
     ASSERT_EQ(px[0], 128);
     ASSERT_EQ(px[1], 255);
 
-    /* **An upload**: red scaled to nothing on the way in, so the texture is cyan. */
+    /* An upload: red scaled to nothing on the way in, so the texture is cyan. */
     glPixelTransferf(GL_RED_SCALE, 0.0f);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
     glPixelTransferf(GL_RED_SCALE, 1.0f);
@@ -5934,7 +5592,7 @@ static void test_gl_pixel_transfer_and_maps(void) {
     ASSERT_EQ(px[2], 255);
     glDeleteTextures(1, &tex);
 
-    /* **glCopyPixels**: the white at (16, 16) copied one to the right with blue biased
+    /* glCopyPixels: the white at (16, 16) copied one to the right with blue biased
      * off. */
     glPixelTransferf(GL_BLUE_BIAS, -1.0f);
     glRasterPos2f(1.0f / 16.0f, 0.0f); /* window (17, 16) */
@@ -5942,7 +5600,7 @@ static void test_gl_pixel_transfer_and_maps(void) {
     ASSERT_EQ(fb[15 * W + 17] & 0x00ffffffu, 0x00ffff00u);
     glPixelTransferf(GL_BLUE_BIAS, 0.0f);
 
-    /* **GL_MAP_COLOR**: red through a two-entry inverting table, the others through
+    /* GL_MAP_COLOR: red through a two-entry inverting table, the others through
      * identity - magenta becomes blue. Every map starts as a single 0, so leaving one
      * unset would zero it. */
     const GLfloat invert[2] = {1.0f, 0.0f}, identity[2] = {0.0f, 1.0f};
@@ -5959,7 +5617,7 @@ static void test_gl_pixel_transfer_and_maps(void) {
     ASSERT_EQ(RP(), 0x000000ffu);
     glPixelTransferi(GL_MAP_COLOR, GL_FALSE);
 
-    /* **Luminance read from colour is R + G + B**: pure blue is 255, not 0. */
+    /* Luminance read from colour is R + G + B: pure blue is 255, not 0. */
     glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     GLubyte lum = 7;
@@ -6037,8 +5695,7 @@ static void test_gl_pixel_transfer_and_maps(void) {
     glGetPixelMapfv(GL_PIXEL_MAP_A_TO_A, map);
     ASSERT_FLOAT_NEAR(map[0], 1.0f, 0.0f);
 
-    /* **A list keeps the map it was compiled with**, and applies nothing until it runs.
-     */
+    /* A list keeps the map it was compiled with, and applies nothing until it runs. */
     GLfloat moving[2] = {0.25f, 0.75f};
     const GLuint list = glGenLists(1);
     glNewList(list, GL_COMPILE);
@@ -6120,7 +5777,7 @@ static void test_gl_line_and_polygon_stipple(void) {
     ASSERT_TRUE(!LIT(8));
     ASSERT_TRUE(!LIT(31));
 
-    /* **The count carries across a strip and starts again for each separate line.**
+    /* The count carries across a strip and starts again for each separate line.
      * 0x00ff at factor 1 is eight on, eight off; the joint is at column 12. Carried on,
      * column 13 is s = 13, an off bit; started again it is s = 1, an on one. */
     glLineStipple(1, 0x00ff);
@@ -6166,7 +5823,7 @@ static void test_gl_line_and_polygon_stipple(void) {
     ASSERT_EQ(iv, 0x1234);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **The polygon stipple**: a checkerboard, the mask's first row the window's bottom
+    /* The polygon stipple: a checkerboard, the mask's first row the window's bottom
      * row, its first byte's top bit column 0. Unpacked at an alignment of 8, so each
      * row's last four bytes are padding that must not be read. */
     GLubyte mask[32 * 8];
@@ -6222,7 +5879,7 @@ static void test_gl_line_and_polygon_stipple(void) {
     glGetIntegerv(GL_LINE_STIPPLE_PATTERN, &iv);
     ASSERT_EQ(iv, 0x1234);
 
-    /* **A list keeps the mask it was compiled with.** */
+    /* A list keeps the mask it was compiled with. */
     const GLuint list = glGenLists(1);
     glNewList(list, GL_COMPILE);
     glPolygonStipple(ones);
@@ -6274,7 +5931,7 @@ static void test_gl_accumulation_buffer(void) {
     glGetFloatv(GL_ACCUM_CLEAR_VALUE, cv);
     ASSERT_TRUE(cv[0] == 0.0f && cv[3] == 0.0f);
 
-    /* **Two frames, half each**: red and blue make half-red, half-blue. */
+    /* Two frames, half each: red and blue make half-red, half-blue. */
     glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_ACCUM_BUFFER_BIT);
     glAccum(GL_ACCUM, 0.5f);
@@ -6298,7 +5955,7 @@ static void test_gl_accumulation_buffer(void) {
     glAccum(GL_RETURN, 4.0f);
     ASSERT_EQ(PX(5, 5), 0x00ffffffu);
 
-    /* **The colour mask applies to GL_RETURN**: green stays as the colour buffer had
+    /* The colour mask applies to GL_RETURN: green stays as the colour buffer had
      * it. */
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -6307,9 +5964,8 @@ static void test_gl_accumulation_buffer(void) {
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     ASSERT_EQ(PX(5, 5), 0x00ff00ffu);
 
-    /* **Past full scale it clamps, it does not wrap.** White loaded, then white added
-     * again: the sum is 2, held at 1 - where 16-bit arithmetic that wrapped would come
-     * back near -1, black. */
+    /* Past full scale it clamps, it does not wrap: white loaded, then white added
+     * again, is held at 1 rather than wrapping near -1, black. */
     glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glAccum(GL_LOAD, 1.0f);
@@ -6319,7 +5975,7 @@ static void test_gl_accumulation_buffer(void) {
     glAccum(GL_RETURN, 1.0f);
     ASSERT_EQ(PX(5, 5), 0x00ffffffu);
 
-    /* **The scissor box bounds a clear and an operation**: only the left half is
+    /* The scissor box bounds a clear and an operation: only the left half is
      * cleared to white. The window's left half is framebuffer columns 0..15. */
     glClearAccum(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_ACCUM_BUFFER_BIT);
@@ -6367,8 +6023,8 @@ static void test_gl_accumulation_buffer(void) {
     oops_display_close(disp);
 }
 
-/* glClear through the scissor box and the write masks - all of which it ignored until
- * 2026-09-19 - and unmoved by any per-fragment state it is not subject to. */
+/* glClear keeps to the scissor box and the write masks, and is unmoved by any
+ * per-fragment state it is not subject to. */
 static void test_gl_clear_keeps_to_scissor_and_masks(void) {
     const int W = 32, H = 32;
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
@@ -6386,7 +6042,7 @@ static void test_gl_clear_keeps_to_scissor_and_masks(void) {
     ASSERT_EQ(PX(4, 27), 0x00ff0000u);
     ASSERT_EQ(PX(20, 11), 0x00ff0000u);
 
-    /* **The scissor box**: green and depth 0.25 in the lower-left 16x16 only. */
+    /* The scissor box: green and depth 0.25 in the lower-left 16x16 only. */
     glEnable(GL_SCISSOR_TEST);
     glScissor(0, 0, 16, 16);
     glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
@@ -6398,7 +6054,7 @@ static void test_gl_clear_keeps_to_scissor_and_masks(void) {
     ASSERT_FLOAT_NEAR(DEPTH(4, 27), 0.25f, 1e-6f);
     ASSERT_FLOAT_NEAR(DEPTH(20, 11), 1.0f, 1e-6f);
 
-    /* **The colour mask**: blue written, red kept. */
+    /* The colour mask: blue written, red kept. */
     glColorMask(GL_FALSE, GL_TRUE, GL_TRUE, GL_TRUE);
     glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -6406,14 +6062,14 @@ static void test_gl_clear_keeps_to_scissor_and_masks(void) {
     ASSERT_EQ(PX(20, 11), 0x00ff00ffu);
     ASSERT_EQ(PX(4, 27), 0x000000ffu); /* green cleared to 0 - it was not masked */
 
-    /* **The depth mask** drops the depth clear. */
+    /* The depth mask drops the depth clear. */
     glDepthMask(GL_FALSE);
     glClearDepth(0.5);
     glClear(GL_DEPTH_BUFFER_BIT);
     glDepthMask(GL_TRUE);
     ASSERT_FLOAT_NEAR(DEPTH(20, 11), 1.0f, 1e-6f);
 
-    /* **None of the per-fragment state a clear is not subject to touches it** -
+    /* None of the per-fragment state a clear is not subject to touches it:
      * blending, an alpha test that rejects everything, a clip plane that cuts the whole
      * window, a depth test that would fail, culling of the quad's winding, a texture -
      * and all of it is back afterwards, with the matrices, viewport and depth range the
@@ -6542,7 +6198,7 @@ static void test_gl_texture_3d(void) {
     glGetIntegerv(GL_TEXTURE_BINDING_3D, &iv);
     ASSERT_EQ((GLuint)iv, t3);
 
-    /* **r picks the slice.** And a 2D texture enabled alongside - blue - loses to the
+    /* r picks the slice, and a 2D texture enabled alongside - blue - loses to the
      * volume. */
     const GLubyte blue[4] = {0, 0, 255, 255};
     GLuint t2 = 0;
@@ -6562,7 +6218,7 @@ static void test_gl_texture_3d(void) {
     glDisable(GL_TEXTURE_2D);
     glEnable(GL_TEXTURE_3D);
 
-    /* **Linear between slices**: r = 0.5 is half red, half green. */
+    /* Linear between slices: r = 0.5 is half red, half green. */
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     DRAW_AT(0.5f, 0.5f, 0.5f);
     uint32_t p = PX(16, 16);
@@ -6570,7 +6226,7 @@ static void test_gl_texture_3d(void) {
     ASSERT_TRUE(((p >> 8) & 0xffu) >= 126u && ((p >> 8) & 0xffu) <= 129u);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-    /* **r wraps by GL_TEXTURE_WRAP_R**: 1.25 repeats to 0.25 (red), or clamps to the
+    /* r wraps by GL_TEXTURE_WRAP_R: 1.25 repeats to 0.25 (red), or clamps to the
      * last slice. */
     DRAW_AT(0.5f, 0.5f, 1.25f);
     ASSERT_EQ(PX(16, 16), 0x00ff0000u);
@@ -6581,7 +6237,7 @@ static void test_gl_texture_3d(void) {
     ASSERT_EQ(PX(16, 16), 0x0000ff00u);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
 
-    /* **The texture matrix moves r too**: 0.25 translated by a half samples the green
+    /* The texture matrix moves r too: 0.25 translated by a half samples the green
      * slice. */
     glMatrixMode(GL_TEXTURE);
     glTranslatef(0.0f, 0.0f, 0.5f);
@@ -6606,7 +6262,7 @@ static void test_gl_texture_3d(void) {
     ASSERT_EQ(back[16 + 2], 255);
     ASSERT_EQ(back[16 + 0], 0);
 
-    /* **GL_UNPACK_IMAGE_HEIGHT**: the caller's slices three rows apart, the third row
+    /* GL_UNPACK_IMAGE_HEIGHT: the caller's slices three rows apart, the third row
      * padding. */
     GLubyte padded[2 * 3 * 2 * 4];
     memset(padded, 7, sizeof(padded));
@@ -6643,7 +6299,7 @@ static void test_gl_texture_3d(void) {
     ASSERT_EQ(back[16], 10);
     glEnable(GL_TEXTURE_3D);
 
-    /* **Completeness counts depth**: a mipmapping filter wants level 1 at 1x1x1.
+    /* Completeness counts depth: a mipmapping filter wants level 1 at 1x1x1.
      * Without it the volume samples as none - the vertex colour, white; with it, level
      * 1's yellow. */
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
@@ -6701,8 +6357,8 @@ static void test_gl_texture_3d(void) {
     /* Refusals. */
     glTexImage3D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-    /* A depth of zero is **not** a refusal since 2026-09-20: it releases the level,
-     * which is what GL says a zero size means. A negative one is still an error. */
+    /* A depth of zero is not a refusal: it releases the level, which is what GL says a
+     * zero size means. A negative one is an error. */
     glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, 0, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 2, 2, -2, 0, GL_RGBA, GL_UNSIGNED_BYTE,
@@ -6748,7 +6404,7 @@ static void test_gl_texture_parameters_and_wrap_modes(void) {
     GLint iv[4] = {0, 0, 0, 0};
     GLfloat fv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-    /* **Values are checked**: a wrap mode or filter GL does not have is refused and
+    /* Values are checked: a wrap mode or filter GL does not have is refused and
      * changes nothing. */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x1234);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
@@ -6761,7 +6417,7 @@ static void test_gl_texture_parameters_and_wrap_modes(void) {
     glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, iv);
     ASSERT_EQ(iv[0], (GLint)GL_LINEAR);
 
-    /* **Priority**: 1 by default, a float, clamped; glPrioritizeTextures sets the same
+    /* Priority: 1 by default, a float, clamped; glPrioritizeTextures sets the same
      * field. */
     glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, fv);
     ASSERT_TRUE(fv[0] == 1.0f);
@@ -6783,7 +6439,7 @@ static void test_gl_texture_parameters_and_wrap_modes(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_RESIDENT, GL_TRUE);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-    /* **Border colour**: four floats, clamped; integers converted by range; refused as
+    /* Border colour: four floats, clamped; integers converted by range; refused as
      * a scalar. */
     const GLfloat wild[4] = {0.25f, 2.0f, -1.0f, 0.5f};
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, wild);
@@ -6797,14 +6453,14 @@ static void test_gl_texture_parameters_and_wrap_modes(void) {
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* An environment colour of 1 read back as an integer is INT_MAX - it overflowed to
+    /* An environment colour of 1 read back as an integer is INT_MAX, not an overflow to
      * INT_MIN. */
     const GLfloat one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, one);
     glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, iv);
     ASSERT_EQ(iv[0], 2147483647);
 
-    /* **The wrap modes, sampled.** A red | green texture across a quad whose s runs
+    /* The wrap modes, sampled. A red | green texture across a quad whose s runs
      * from -1 at the left edge to 2 at the right: pixel x samples s = -1 + 3 (x + 0.5)
      * / 64. Columns 10, 26, 37, 48 and 58 are s = -0.51, 0.24, 0.76, 1.27 and 1.74. */
     const GLubyte rg[8] = {255, 0, 0, 255, 0, 255, 0, 255};
@@ -6909,9 +6565,8 @@ static void test_gl_array_types_and_window_pos(void) {
 #define CENTRE (fb[(H / 2) * W + W / 2] & 0x00ffffffu)
     GLint iv[4] = {0, 0, 0, 0};
 
-    /* **A GL_SHORT position array** - pixel coordinates - with a GL_UNSIGNED_SHORT
-     * colour array, normalised: red. The positions were read as floats before, and drew
-     * nothing. */
+    /* A GL_SHORT position array in pixel coordinates, with a GL_UNSIGNED_SHORT colour
+     * array, normalised: red. */
     static const GLshort sq[8] = {4, 4, 12, 4, 12, 12, 4, 12};
     static const GLushort red16[16] = {65535, 0, 0, 65535, 65535, 0, 0, 65535,
                                        65535, 0, 0, 65535, 65535, 0, 0, 65535};
@@ -6941,7 +6596,7 @@ static void test_gl_array_types_and_window_pos(void) {
     glDrawArrays(GL_QUADS, 0, 4);
     ASSERT_EQ(CENTRE, 0x0000ffu);
 
-    /* **The checks**, each leaving the array as it was. */
+    /* The checks, each leaving the array as it was. */
     glVertexPointer(1, GL_FLOAT, 0, sq);
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
     glVertexPointer(2, GL_UNSIGNED_BYTE, 0, sq);
@@ -6962,7 +6617,7 @@ static void test_gl_array_types_and_window_pos(void) {
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
     glDisableClientState(GL_VERTEX_ARRAY);
 
-    /* **glWindowPos**: the raster position as given, valid, w 1, z through the depth
+    /* glWindowPos: the raster position as given, valid, w 1, z through the depth
      * range. */
     glWindowPos2i(3, 5);
     GLfloat rp[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -7039,9 +6694,8 @@ static void test_gl_secondary_color_and_color_sum(void) {
     GLint iv[4] = {0, 0, 0, 0};
     GLfloat fv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-    /* **The initial state**: (0, 0, 0, 1), the sum off, the array off and three
-     * GL_FLOATs - and the other arrays' sizes and types, which answered 0 until
-     * 2026-09-19. */
+    /* The initial state: (0, 0, 0, 1), the sum off, the array off and three GL_FLOATs,
+     * and the other arrays' sizes and types. */
     glGetFloatv(GL_CURRENT_SECONDARY_COLOR, fv);
     ASSERT_TRUE(fv[0] == 0.0f && fv[1] == 0.0f && fv[2] == 0.0f && fv[3] == 1.0f);
     ASSERT_EQ(glIsEnabled(GL_COLOR_SUM), GL_FALSE);
@@ -7071,7 +6725,7 @@ static void test_gl_secondary_color_and_color_sum(void) {
     glGetFloatv(GL_CURRENT_SECONDARY_COLOR, fv);
     ASSERT_TRUE(fv[0] == 1.0f && fv[1] == -1.0f && fv[2] == 1.0f);
 
-    /* **The sum, unlit**: red plus a blue secondary is red while GL_COLOR_SUM is off,
+    /* The sum, unlit: red plus a blue secondary is red while GL_COLOR_SUM is off,
      * magenta when on. */
     glSecondaryColor3f(0.0f, 0.0f, 1.0f);
     glColor3f(1.0f, 0.0f, 0.0f);
@@ -7085,9 +6739,8 @@ static void test_gl_secondary_color_and_color_sum(void) {
     QUAD();
     ASSERT_EQ(CENTRE, 0xff00ffu);
 
-    /* **After texturing**: white modulated by a red texel is red, and the green
-     * secondary then makes it yellow. Summed before the texture it would be red again.
-     */
+    /* After texturing: white modulated by a red texel is red, and the green secondary
+     * then makes it yellow. Summed before the texture it would be red again. */
     GLuint tex = 0;
     const GLubyte red_texel[4] = {255, 0, 0, 255};
     glGenTextures(1, &tex);
@@ -7103,13 +6756,13 @@ static void test_gl_secondary_color_and_color_sum(void) {
     glDisable(GL_TEXTURE_2D);
     glDeleteTextures(1, &tex);
 
-    /* **Clamped like the primary colour**: a negative secondary adds nothing rather
+    /* Clamped like the primary colour: a negative secondary adds nothing rather
      * than darkening. */
     glSecondaryColor3f(-1.0f, -1.0f, -1.0f);
     QUAD();
     ASSERT_EQ(CENTRE, 0xffffffu);
 
-    /* **Lighting takes the secondary colour over**: under GL_SINGLE_COLOR it is zero
+    /* Lighting takes the secondary colour over: under GL_SINGLE_COLOR it is zero
      * whatever glSecondaryColor said, so the blue below is not added to the dim
      * ambient-lit grey. */
     glSecondaryColor3f(0.0f, 0.0f, 1.0f);
@@ -7121,8 +6774,7 @@ static void test_gl_secondary_color_and_color_sum(void) {
     ASSERT_TRUE(CENTRE != 0u);
     glDisable(GL_LIGHTING);
 
-    /* **Flat shading** takes the provoking vertex's secondary colour: a quad's fourth.
-     */
+    /* Flat shading takes the provoking vertex's secondary colour: a quad's fourth. */
     glShadeModel(GL_FLAT);
     glColor3f(1.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -7137,7 +6789,7 @@ static void test_gl_secondary_color_and_color_sum(void) {
     ASSERT_EQ(CENTRE, 0xff00ffu);
     glShadeModel(GL_SMOOTH);
 
-    /* **The array**: unsigned bytes, normalised, over a red current colour. */
+    /* The array: unsigned bytes, normalised, over a red current colour. */
     static const GLshort sq[8] = {4, 4, 12, 4, 12, 12, 4, 12};
     static const GLubyte blue8[12] = {0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255};
     glEnableClientState(GL_VERTEX_ARRAY);
@@ -7163,7 +6815,7 @@ static void test_gl_secondary_color_and_color_sum(void) {
     glGetIntegerv(GL_SECONDARY_COLOR_ARRAY_SIZE, iv);
     ASSERT_EQ(iv[0], 3);
 
-    /* **Compiled**: the draw records the array's values as glSecondaryColor calls, so
+    /* Compiled: the draw records the array's values as glSecondaryColor calls, so
      * the list replays blue after the array has changed and been switched off. */
     const GLuint list = glGenLists(1);
     glNewList(list, GL_COMPILE);
@@ -7178,7 +6830,7 @@ static void test_gl_secondary_color_and_color_sum(void) {
     glDeleteLists(list, 1);
     glDisableClientState(GL_VERTEX_ARRAY);
 
-    /* **The attribute groups**: the colour with GL_CURRENT_BIT, the sum with GL_FOG_BIT
+    /* The attribute groups: the colour with GL_CURRENT_BIT, the sum with GL_FOG_BIT
      * and with GL_ENABLE_BIT, the array with the client's vertex-array bit. */
     glSecondaryColor3f(0.0f, 1.0f, 0.0f);
     glPushAttrib(GL_CURRENT_BIT);
@@ -7224,8 +6876,7 @@ static void test_gl_fog_coordinates(void) {
     void *ctx_handle = glContextCreate(disp);
     uint32_t *fb = oops_display_get_framebuffer(disp);
     (void)glGetError();
-    /* Centred on the eye, so the eye distance of a small quad in the middle is about 1.
-     */
+    /* Centred on the eye, so a small quad in the middle is about 1 away. */
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glOrtho(-8.0, 8.0, -8.0, 8.0, -1.0, 1.0);
@@ -7269,7 +6920,7 @@ static void test_gl_fog_coordinates(void) {
     glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
     ASSERT_TRUE(((PIX(8, 8) >> 16) & 0xffu) > 0xc0u);
 
-    /* **From the coordinate**: 10 is fully fogged, 0 not at all. */
+    /* From the coordinate: 10 is fully fogged, 0 not at all. */
     glFogi(GL_FOG_COORD_SRC, GL_FOG_COORD);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
@@ -7284,7 +6935,7 @@ static void test_gl_fog_coordinates(void) {
     QUAD();
     ASSERT_EQ(PIX(8, 8), 0xff0000u);
 
-    /* **Interpolated**: 0 on the left edge, 10 on the right - red to blue across. */
+    /* Interpolated: 0 on the left edge, 10 on the right - red to blue across. */
     glBegin(GL_QUADS);
     glFogCoordf(0.0f);
     glVertex2f(-8, -8);
@@ -7303,7 +6954,7 @@ static void test_gl_fog_coordinates(void) {
         ASSERT_TRUE(r > 100 && r < 155 && b > 100 && b < 155);
     }
 
-    /* **The array**: GL_DOUBLE, fully fogged; and the checks - one value of GL_FLOAT or
+    /* The array: GL_DOUBLE, fully fogged; and the checks - one value of GL_FLOAT or
      * GL_DOUBLE. */
     static const GLshort sq[8] = {-8, -8, 8, -8, 8, 8, -8, 8};
     static const GLdouble far4[4] = {10.0, 10.0, 10.0, 10.0};
@@ -7325,7 +6976,7 @@ static void test_gl_fog_coordinates(void) {
     glGetIntegerv(GL_FOG_COORD_ARRAY_TYPE, iv);
     ASSERT_EQ(iv[0], (GLint)GL_DOUBLE);
 
-    /* **Compiled**, from the array and by hand: the values of now replay later. */
+    /* Compiled, from the array and by hand: the values of now replay later. */
     const GLuint list = glGenLists(1);
     glNewList(list, GL_COMPILE);
     glDrawArrays(GL_QUADS, 0, 4);
@@ -7340,7 +6991,7 @@ static void test_gl_fog_coordinates(void) {
     ASSERT_TRUE(fv[0] == 3.0f);
     glDeleteLists(list, 1);
 
-    /* **The raster distance** is the coordinate under GL_FOG_COORD - glRasterPos and
+    /* The raster distance is the coordinate under GL_FOG_COORD - glRasterPos and
      * glWindowPos both - and the eye distance (or glWindowPos's 0) otherwise. */
     glRasterPos2f(4.0f, 3.0f);
     glGetFloatv(GL_CURRENT_RASTER_DISTANCE, fv);
@@ -7360,7 +7011,7 @@ static void test_gl_fog_coordinates(void) {
     glFogi(GL_FOG_COORD_SRC, (GLint)GL_LINEAR);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-    /* **The attribute groups**: the coordinate with GL_CURRENT_BIT, the source with
+    /* The attribute groups: the coordinate with GL_CURRENT_BIT, the source with
      * GL_FOG_BIT (which Mesa's pop leaves out), the array with the client vertex-array
      * bit. */
     glPushAttrib(GL_CURRENT_BIT | GL_FOG_BIT);
@@ -7389,9 +7040,8 @@ static void test_gl_fog_coordinates(void) {
 
 /* Pixel rectangles are fragments: glDrawPixels, glBitmap and glCopyPixels meet the
  * scissor, the alpha, stencil and depth tests, blending, the logic op, the masks, the
- * texture environment and fog. They were written straight into the colour buffer until
- * 2026-09-19. And glCopyPixels reads its whole source first, and the zoom maps pixels
- * to window columns by GL's rule. */
+ * texture environment and fog. glCopyPixels reads its whole source first, and the zoom
+ * maps pixels to window columns by GL's rule. */
 static void test_gl_pixel_rectangles_are_fragments(void) {
     const int W = 16, H = 16;
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
@@ -7417,7 +7067,7 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
     } while (0)
     static const GLubyte ones[4] = {0xf0, 0xf0, 0xf0, 0xf0}; /* a 4x4 bitmap, all set */
 
-    /* **The scissor**: a 4x4 red image at (2, 2), a box from (4, 0) - only its right
+    /* The scissor: a 4x4 red image at (2, 2), a box from (4, 0) - only its right
      * half lands. */
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -7430,7 +7080,7 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
     ASSERT_EQ(PIX(2, 2), 0x000000u);
     ASSERT_EQ(PIX(4, 2), 0xff0000u);
 
-    /* **Blending**: half-alpha red over blue. */
+    /* Blending: half-alpha red over blue. */
     glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     FILL(255, 0, 0, 128);
@@ -7444,7 +7094,7 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
         ASSERT_TRUE((c & 0xffu) > 0x70u && (c & 0xffu) < 0x90u);
     }
 
-    /* **The alpha test** drops the transparent image; **the colour mask** keeps red out
+    /* The alpha test drops the transparent image; the colour mask keeps red out
      * of a white one. */
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -7459,14 +7109,14 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     ASSERT_EQ(PIX(3, 3), 0x00ffffu);
 
-    /* **The logic op**: white XOR cyan is red. */
+    /* The logic op: white XOR cyan is red. */
     glEnable(GL_COLOR_LOGIC_OP);
     glLogicOp(GL_XOR);
     glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
     glDisable(GL_COLOR_LOGIC_OP);
     ASSERT_EQ(PIX(3, 3), 0xff0000u);
 
-    /* **The depth test, at the raster z, and the depth write**: a bitmap behind a
+    /* The depth test, at the raster z, and the depth write: a bitmap behind a
      * cleared 0.5 is dropped, one in front drawn - and its 0.25 then hides a later one
      * at 0.375. */
     glClear(GL_COLOR_BUFFER_BIT);
@@ -7488,7 +7138,7 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
     glDisable(GL_DEPTH_TEST);
     glClearDepth(1.0);
 
-    /* **The stencil test**: a bitmap writes 1 where it lands, and a full-screen red
+    /* The stencil test: a bitmap writes 1 where it lands, and a full-screen red
      * rectangle kept to stencil 1 then fills exactly that square. */
     glClearStencil(0);
     glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
@@ -7506,7 +7156,7 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
     ASSERT_EQ(PIX(9, 9), 0xff0000u);
     ASSERT_EQ(PIX(3, 3), 0x000000u);
 
-    /* **Texturing**, at the raster position's texture coordinate: white modulated by
+    /* Texturing, at the raster position's texture coordinate: white modulated by
      * green. */
     GLuint tex = 0;
     const GLubyte green_texel[4] = {0, 255, 0, 255};
@@ -7525,7 +7175,7 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
     glDeleteTextures(1, &tex);
     ASSERT_EQ(PIX(3, 3), 0x00ff00u);
 
-    /* **Fog**, by the raster distance - here the fog coordinate glWindowPos takes under
+    /* Fog, by the raster distance - here the fog coordinate glWindowPos takes under
      * GL_FOG_COORD: 10 is fully the fog colour. */
     const GLfloat blue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
     glFogfv(GL_FOG_COLOR, blue);
@@ -7541,7 +7191,7 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
     glFogi(GL_FOG_COORD_SRC, GL_FRAGMENT_DEPTH);
     ASSERT_EQ(PIX(3, 3), 0x0000ffu);
 
-    /* **glCopyPixels reads before it writes**: three rows - red, green, blue from the
+    /* glCopyPixels reads before it writes: three rows - red, green, blue from the
      * bottom - and the lower two copied up by one. Row 2 is green, not the red a copy
      * that read its own writes smeared up. */
     glClear(GL_COLOR_BUFFER_BIT);
@@ -7563,7 +7213,7 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     ASSERT_EQ(PIX(5, 0), 0xffff00u);
 
-    /* **A mirrored image lands where GL puts it**: pixel 0 of a zoom of -1 from x 8
+    /* A mirrored image lands where GL puts it: pixel 0 of a zoom of -1 from x 8
      * covers the column whose centre is in [7, 8) - column 7, not 8. */
     glClear(GL_COLOR_BUFFER_BIT);
     img[0] = 255;
@@ -7578,7 +7228,7 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
     ASSERT_EQ(PIX(4, 2), 0xffffffu);
     ASSERT_EQ(PIX(8, 2), 0x000000u);
 
-    /* **A bitmap in a negative raster colour is black**, clamped as a fragment's colour
+    /* A bitmap in a negative raster colour is black, clamped as a fragment's colour
      * is - by glRasterPos, which keeps the colour unclamped (glWindowPos clamps it). */
     glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -7596,27 +7246,13 @@ static void test_gl_pixel_rectangles_are_fragments(void) {
 }
 
 /*
- * **Every CPU pixel operation leaves nothing outstanding.**
+ * Every CPU pixel operation leaves nothing outstanding: the written span grows with
+ * each fragment, and every public operation that writes one ends with it empty.
  *
- * On the scanout path the colour buffer is the display's own memory, mapped
- * write-combined, and a WC store is not ordered against a later load - so the CP's DMA
- * in `gl_hw_flush` can read a store that has not drained. `gl_color_cpu_drain` is the
- * barrier.
- *
- * **It is not why six of gl1-probe's eight hardware failures failed**, though this test
- * was written believing it was. The console returned all eight pixels byte for byte
- * unchanged with the barrier in place, and that is what ruled the ordering out; the
- * cause was `glGetFrameReadbackSampled` handing back the CP's copy as of the last
- * submit, which a CPU pixel operation never produces. The barrier stays because the
- * hazard is real, and this test stays because the bookkeeping under it is the half that
- * rots silently - a new pixel operation that forgets `gl_raster_wrote`, or a fragment
- * path that stops calling `gl_color_cpu_touched`, would leave the span behind and
- * nothing else here would notice.
- *
- * So: the span grows when a fragment is written, and every public operation that writes
- * one ends with it empty. The host build compiles the `sfence` out - a host framebuffer
- * is ordinary memory - so the bookkeeping is all this can check, and it is checked
- * deliberately.
+ * On the scanout path the colour buffer is write-combined display memory, so the CP's
+ * DMA in `gl_hw_flush` can read a store that has not drained; `gl_color_cpu_drain` is
+ * the barrier. The host build compiles the `sfence` out, so the bookkeeping is what
+ * this checks.
  */
 static void test_gl_cpu_pixel_ops_drain_what_they_wrote(void) {
     const int W = 16, H = 16;
@@ -7642,9 +7278,8 @@ static void test_gl_cpu_pixel_ops_drain_what_they_wrote(void) {
     /* A fresh context owes nothing. */
     ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
 
-    /* **The span grows with the fragments written into it.** Driven directly, because
-     * every public entry point drains on its way out and so can never be caught holding
-     * one. */
+    /* The span grows with the fragments written into it. Driven directly, because every
+     * public entry point drains on its way out. */
     gl_pixel_frags_t pf;
     gl_pixel_frags_begin(ctx, &pf);
     const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
@@ -7658,8 +7293,7 @@ static void test_gl_cpu_pixel_ops_drain_what_they_wrote(void) {
     gl_color_cpu_drain(ctx);
     ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
 
-    /* **And each public operation drains its own.** These are the four that write
-     * colour with the CPU, which is the whole of the failing set. */
+    /* Each public operation drains its own: the four that write colour with the CPU. */
     glWindowPos2i(2, 2);
     glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
     ASSERT_TRUE(ctx->cpu_color_lo >= ctx->cpu_color_hi);
@@ -7741,14 +7375,14 @@ static void test_gl_point_parameters_and_multi_draw(void) {
     POINT_AT(-4.0f);
     ASSERT_EQ(LIT(), 64);
 
-    /* **The clamp, unattenuated**: GL_POINT_SIZE_MAX 2 draws the size-8 point as 2
+    /* The clamp, unattenuated: GL_POINT_SIZE_MAX 2 draws the size-8 point as 2
      * pixels a side. */
     glPointParameterf(GL_POINT_SIZE_MAX, 2.0f);
     POINT_AT(-4.0f);
     ASSERT_EQ(LIT(), 4);
     glPointParameterf(GL_POINT_SIZE_MAX, (float)OOPS_GL_MAX_POINT_LINE_SIZE);
 
-    /* **Attenuation**: (0, 0, 1) divides by the distance - 16 at distance 4 is 4 a
+    /* Attenuation: (0, 0, 1) divides by the distance - 16 at distance 4 is 4 a
      * side, at distance 2 is 8 - and GL_POINT_SIZE_MIN holds it from below. */
     const GLfloat quad_atten[3] = {0.0f, 0.0f, 1.0f};
     glPointSize(16.0f);
@@ -7766,7 +7400,7 @@ static void test_gl_point_parameters_and_multi_draw(void) {
         ASSERT_TRUE(iv[0] == 0 && iv[1] == 0 && iv[2] == 1);
     }
 
-    /* **GL_POINT_BIT** saves and restores them; **a list** records them. */
+    /* GL_POINT_BIT saves and restores them; a list records them. */
     glPushAttrib(GL_POINT_BIT);
     const GLint one_atten[3] = {1, 0, 0};
     glPointParameteriv(GL_POINT_DISTANCE_ATTENUATION, one_atten);
@@ -7792,9 +7426,8 @@ static void test_gl_point_parameters_and_multi_draw(void) {
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
     glPointParameterf(GL_POINT_FADE_THRESHOLD_SIZE, -1.0f);
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
-    /* **The sprite origin is a parameter now, not a refusal** (2026-09-22, with
-       GL_POINT_SPRITE itself). Both corners are values and anything else is still an
-       enum error, which is the half of this assertion worth keeping. */
+    /* The sprite origin is a parameter: both corners are values and anything else is an
+       enum error. */
     glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, (GLint)GL_LOWER_LEFT);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glGetFloatv(GL_POINT_SPRITE_COORD_ORIGIN, fv);
@@ -7807,7 +7440,7 @@ static void test_gl_point_parameters_and_multi_draw(void) {
     glPointParameterf(GL_POINT_SIZE_MIN, 0.0f);
     glPointSize(1.0f);
 
-    /* **glMultiDrawArrays**: two 2x2 quads from one array in one call, an empty third
+    /* glMultiDrawArrays: two 2x2 quads from one array in one call, an empty third
      * skipped. */
     static const GLfloat quads[16] = {-8, -8, -6, -8, -6, -6, -8, -6,
                                       6,  6,  8,  6,  8,  8,  6,  8};
@@ -7819,7 +7452,7 @@ static void test_gl_point_parameters_and_multi_draw(void) {
     glMultiDrawArrays(GL_QUADS, firsts, counts, 3);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     ASSERT_EQ(LIT(), 8);
-    /* **Checked before anything is drawn**: a negative count at the end draws neither
+    /* Checked before anything is drawn: a negative count at the end draws neither
      * quad. */
     const GLsizei bad_counts[2] = {4, -1};
     glClear(GL_COLOR_BUFFER_BIT);
@@ -7831,7 +7464,7 @@ static void test_gl_point_parameters_and_multi_draw(void) {
     glMultiDrawArrays((GLenum)0x7fu, firsts, counts, 2);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-    /* **glMultiDrawElements**: the same two quads by index, bytes, and a bad type
+    /* glMultiDrawElements: the same two quads by index, bytes, and a bad type
      * refused. */
     static const GLubyte idx_a[4] = {0, 1, 2, 3}, idx_b[4] = {4, 5, 6, 7};
     const GLvoid *const idx[2] = {idx_a, idx_b};
@@ -7842,7 +7475,7 @@ static void test_gl_point_parameters_and_multi_draw(void) {
     glMultiDrawElements(GL_QUADS, counts, GL_FLOAT, idx, 2);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-    /* **Compiled**: the draws a list records are the arrays' values of now. */
+    /* Compiled: the draws a list records are the arrays' values of now. */
     const GLuint list2 = glGenLists(1);
     glNewList(list2, GL_COMPILE);
     glMultiDrawArrays(GL_QUADS, firsts, counts, 2);
@@ -7892,7 +7525,7 @@ static void test_gl_lod_bias_and_generate_mipmap(void) {
     GLfloat fv[1] = {0.0f};
     GLubyte img[4 * 4 * 4];
 
-    /* **GL_GENERATE_MIPMAP**: set before the upload, a 4x4 base of red columns and blue
+    /* GL_GENERATE_MIPMAP: set before the upload, a 4x4 base of red columns and blue
      * columns gives a 2x2 level of the same and a 1x1 level of their mean - 127.5
      * rounded to even, 128. */
     GLuint tex = 0;
@@ -7936,7 +7569,7 @@ static void test_gl_lod_bias_and_generate_mipmap(void) {
     glVertex2f(1, 2);
     glEnd();
     ASSERT_EQ(PIX(1, 1), 0x800080u);
-    /* **A change to the base regenerates**: all green through glTexSubImage2D. */
+    /* A change to the base regenerates: all green through glTexSubImage2D. */
     for (int i = 0; i < 16; i++) {
         img[i * 4] = 0;
         img[i * 4 + 1] = 255;
@@ -7945,9 +7578,8 @@ static void test_gl_lod_bias_and_generate_mipmap(void) {
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, img);
     glGetTexImage(GL_TEXTURE_2D, 2, GL_RGBA, GL_UNSIGNED_BYTE, got);
     ASSERT_TRUE(got[0] == 0 && got[1] == 255 && got[2] == 0);
-    /* **Not past GL_TEXTURE_MAX_LEVEL**, and not from a level that is not the base:
-     * with the maximum at 1, a new base rebuilds level 1 alone and level 2 stays green.
-     */
+    /* Not past GL_TEXTURE_MAX_LEVEL, and not from a level that is not the base: with
+     * the maximum at 1, a new base rebuilds level 1 alone and level 2 stays green. */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
     for (int i = 0; i < 16; i++) {
         img[i * 4] = 255;
@@ -7962,7 +7594,7 @@ static void test_gl_lod_bias_and_generate_mipmap(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
     glDeleteTextures(1, &tex);
 
-    /* **The level-of-detail bias**: level 0 red, level 1 green, drawn at a level of
+    /* The level-of-detail bias: level 0 red, level 1 green, drawn at a level of
      * detail of about 0 - red; biased by 1 through the texture, green; the unit's -1
      * cancelling it, red again. */
     glGenTextures(1, &tex);
@@ -8002,7 +7634,7 @@ static void test_gl_lod_bias_and_generate_mipmap(void) {
     /* GL_TEXTURE_FILTER_CONTROL has the one parameter. */
     glTexEnvi(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-    /* **GL_TEXTURE_BIT** keeps both. */
+    /* GL_TEXTURE_BIT keeps both. */
     glPushAttrib(GL_TEXTURE_BIT);
     glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, 3.0f);
     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, 3.0f);
@@ -8048,7 +7680,7 @@ static void test_gl_depth_stencil_pixels_and_depth_textures(void) {
     GLfloat zf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     GLubyte sv[4] = {0, 0, 0, 0};
 
-    /* **glReadPixels of depth**, as floats and as unsigned shorts, and through
+    /* glReadPixels of depth, as floats and as unsigned shorts, and through
      * GL_DEPTH_SCALE. */
     glClearDepth(0.25);
     glClear(GL_DEPTH_BUFFER_BIT);
@@ -8066,7 +7698,7 @@ static void test_gl_depth_stencil_pixels_and_depth_textures(void) {
     glReadPixels(3, 3, 1, 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT_5_6_5, &zs);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
 
-    /* **glDrawPixels of depth**: fragments at their own z in the raster colour, through
+    /* glDrawPixels of depth: fragments at their own z in the raster colour, through
      * the depth test - GL_ALWAYS writes each; with the test off no depth is written at
      * all. */
     static const GLfloat zimg[4] = {0.125f, 0.375f, 0.625f, 0.875f};
@@ -8084,7 +7716,7 @@ static void test_gl_depth_stencil_pixels_and_depth_textures(void) {
     glDrawPixels(2, 2, GL_DEPTH_COMPONENT, GL_FLOAT, zmid);
     glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, zf);
     ASSERT_TRUE(zf[0] == 0.125f);
-    /* **glCopyPixels of depth**, to (4, 4): the depth test on again, GL_ALWAYS. */
+    /* glCopyPixels of depth, to (4, 4): the depth test on again, GL_ALWAYS. */
     glEnable(GL_DEPTH_TEST);
     glWindowPos2i(4, 4);
     glCopyPixels(0, 0, 2, 2, GL_DEPTH);
@@ -8094,7 +7726,7 @@ static void test_gl_depth_stencil_pixels_and_depth_textures(void) {
     glDisable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);
 
-    /* **Stencil indices**: drawn straight into the stencil buffer, through the write
+    /* Stencil indices: drawn straight into the stencil buffer, through the write
      * mask and the index offset, read back, and copied. */
     static const GLubyte simg[4] = {1, 2, 3, 4};
     glClearStencil(0);
@@ -8123,7 +7755,7 @@ static void test_gl_depth_stencil_pixels_and_depth_textures(void) {
     glCopyPixels(0, 0, 1, 1, GL_STENCIL_INDEX); /* a format; the buffer is GL_STENCIL */
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-    /* **A depth texture**: 2x1, 0.25 and 0.75, read as luminance - (64, 64, 64) and
+    /* A depth texture: 2x1, 0.25 and 0.75, read as luminance - (64, 64, 64) and
      * (191, ...). */
     GLuint tex = 0;
     glGenTextures(1, &tex);
@@ -8158,7 +7790,7 @@ static void test_gl_depth_stencil_pixels_and_depth_textures(void) {
     DQUAD();
     ASSERT_EQ(PIX(4, 8), 0x404040u);
     ASSERT_EQ(PIX(12, 8), 0xbfbfbfu);
-    /* **The comparison**: r = 0.5 against 0.25 and 0.75 under GL_LEQUAL - 0 where 0.5 >
+    /* The comparison: r = 0.5 against 0.25 and 0.75 under GL_LEQUAL - 0 where 0.5 >
      * 0.25, 1 where 0.5 <= 0.75 - and the other way round under GL_GEQUAL. */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_R_TO_TEXTURE);
     DQUAD();
@@ -8182,7 +7814,7 @@ static void test_gl_depth_stencil_pixels_and_depth_textures(void) {
     ASSERT_TRUE(zf[0] == 0.25f && zf[1] == 0.75f);
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, sv);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
-    /* **Copied from the depth buffer**: glCopyTexImage2D with a depth format reads
+    /* Copied from the depth buffer: glCopyTexImage2D with a depth format reads
      * depth. */
     glClearDepth(0.5);
     glClear(GL_DEPTH_BUFFER_BIT);
@@ -8259,7 +7891,7 @@ static void test_gl_colour_index_images(void) {
     glDrawPixels(2, 1, GL_COLOR_INDEX, GL_UNSIGNED_BYTE, idx);
     ASSERT_EQ(PIX(2, 2), 0x0000ffu);
     ASSERT_EQ(PIX(3, 2), 0xff0000u);
-    /* **Through the offset**, and not the RGBA scale: index 0 + 1 is red, and a red
+    /* Through the offset, and not the RGBA scale: index 0 + 1 is red, and a red
      * scale of 0 leaves it red - the maps stand in for the colour transfer. */
     glPixelTransferi(GL_INDEX_OFFSET, 1);
     glPixelTransferf(GL_RED_SCALE, 0.0f);
@@ -8272,7 +7904,7 @@ static void test_gl_colour_index_images(void) {
     glDrawPixels(1, 1, GL_COLOR_INDEX, GL_SHORT, idx3);
     ASSERT_EQ(PIX(2, 2), 0xff0000u);
 
-    /* **A texture uploaded from indices** is the colours they map to. */
+    /* A texture uploaded from indices is the colours they map to. */
     GLuint tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -8284,7 +7916,7 @@ static void test_gl_colour_index_images(void) {
     ASSERT_TRUE(texels[2] == 255 && texels[0] == 0 && texels[4] == 255 &&
                 texels[6] == 0);
 
-    /* **Never read back**: an RGBA buffer holds no indices, and a texture is no index
+    /* Never read back: an RGBA buffer holds no indices, and a texture is no index
      * format. */
     GLubyte out[4] = {0, 0, 0, 0};
     glReadPixels(0, 0, 1, 1, GL_COLOR_INDEX, GL_UNSIGNED_BYTE, out);
@@ -8295,9 +7927,8 @@ static void test_gl_colour_index_images(void) {
     glDrawPixels(1, 1, GL_COLOR_INDEX, GL_UNSIGNED_SHORT_5_6_5, idx);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
 
-    /* **GL_BITMAP**: an index a bit, most significant first - 1010 0000 is red, blue,
-     * red, blue
-     * - for glDrawPixels, a texture upload and a compiled list; and only for index
+    /* GL_BITMAP: an index a bit, most significant first (1010 0000 is red, blue, red,
+     * blue), for glDrawPixels, a texture upload and a compiled list; and only for index
      * formats. */
     static const GLubyte bits[1] = {0xa0};
     glClear(GL_COLOR_BUFFER_BIT);
@@ -8426,11 +8057,7 @@ static void test_gl_projective_texcoords_divide_per_fragment(void) {
     oops_display_close(disp);
 }
 
-/* **What an audit of the specification's state tables found** (2026-09-19): every name
- * GL 1.5's tables give glGet or glIsEnabled was queried through every getter, and every
- * GL 1.0-1.5 enum in Mesa's headers checked against gl.h. Each gap it turned up is
- * pinned here. */
-/* **The front buffer** (GL 1.0, 4.2.1; since 2026-09-19): a surface of its own beside
+/* The front buffer (GL 1.0, 4.2.1) is a surface of its own beside
  * the back, drawn into, cleared and read by name. GL_FRONT_AND_BACK and GL_LEFT draw
  * into both and read the front (Mesa main/buffers.c:145-170, :209-226). A swap makes it
  * the back's picture, and it waits to be presented while drawn into. The host has no
@@ -8546,6 +8173,8 @@ static void test_gl_front_buffer(void) {
     oops_display_close(disp);
 }
 
+/* Every name GL 1.5's state tables give glGet or glIsEnabled answers through every
+ * getter, and every GL 1.0-1.5 enum in Mesa's headers matches gl.h. */
 static void test_gl_state_table_audit_findings(void) {
     const int W = 8, H = 8;
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
@@ -8557,7 +8186,7 @@ static void test_gl_state_table_audit_findings(void) {
     GLfloat fv[16];
 
     /* Float-valued state through glGetIntegerv: normalised ones mapped linearly
-     * (GL 1.5, 6.1.2), the rest rounded. Every one of these was GL_INVALID_ENUM. */
+     * (GL 1.5, 6.1.2), the rest rounded. */
     glAlphaFunc(GL_GREATER, 0.5f);
     glGetIntegerv(GL_ALPHA_TEST_REF, iv);
     ASSERT_EQ(iv[0], 1073741823);
@@ -8605,7 +8234,7 @@ static void test_gl_state_table_audit_findings(void) {
     ASSERT_TRUE(fv[12] == 1.0f && fv[3] == 0.0f);
     glLoadIdentity();
 
-    /* The ten table names that were not even declared. */
+    /* The remaining state-table names are declared and answered. */
     glGetIntegerv(GL_MAX_LIST_NESTING, iv);
     ASSERT_EQ(iv[0], 64);
     glGetIntegerv(GL_AUX_BUFFERS, iv);
@@ -8634,8 +8263,7 @@ static void test_gl_state_table_audit_findings(void) {
     ASSERT_EQ(iv[0], 0);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* glCallLists' ten types (GL 1.0) - three were accepted. Lists 10 and 11 each set a
-     * colour. */
+    /* glCallLists' ten types (GL 1.0). Lists 10 and 11 each set a colour. */
     glNewList(10, GL_COMPILE);
     glColor3f(1.0f, 0.0f, 0.0f);
     glEndList();
@@ -8712,8 +8340,7 @@ static void test_gl_state_table_audit_findings(void) {
     glDrawBuffer(GL_BACK);
     glReadBuffer(GL_BACK);
 
-    /* GL_CURRENT_BIT carries the raster position (table 6.5), which the push left out.
-     */
+    /* GL_CURRENT_BIT carries the raster position (table 6.5). */
     glRasterPos2f(0.5f, 0.5f);
     glGetFloatv(GL_CURRENT_RASTER_POSITION, fv);
     const float saved_x = fv[0];
@@ -8728,10 +8355,9 @@ static void test_gl_state_table_audit_findings(void) {
     oops_display_close(disp);
 }
 
-/* Two texture-enable fixes that came with the per-unit state (2026-09-19): the drawn
- * clear sets aside every texture target, not just 1D and 2D, and GL_ENABLE_BIT carries
- * the texture generation enables (GL 1.3, table 6.20, "texture/enable"; Mesa
- * main/attrib.c:189-192). */
+/* The drawn clear sets aside every texture target, not just 1D and 2D, and
+ * GL_ENABLE_BIT carries the texture generation enables (GL 1.3, table 6.20,
+ * "texture/enable"; Mesa main/attrib.c:189-192). */
 static void test_gl_drawn_clear_and_enable_bit_cover_every_texture_enable(void) {
     const int W = 8, H = 8;
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, W, H);
@@ -8790,8 +8416,8 @@ static void test_gl_buffer_mapping_and_occlusion_queries(void) {
     glLoadIdentity();
     GLint iv[1] = {0};
 
-    /* **Buffers**: a _READ usage, refused until 2026-09-19; mapped, written through the
-     * pointer, and read back once unmapped. */
+    /* Buffers: a _READ usage, mapped, written through the pointer, and read back once
+     * unmapped. */
     static const GLfloat quad0[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     GLuint buf = 0;
     glGenBuffers(1, &buf);
@@ -8813,7 +8439,7 @@ static void test_gl_buffer_mapping_and_occlusion_queries(void) {
     GLvoid *mp = NULL;
     glGetBufferPointerv(GL_ARRAY_BUFFER, GL_BUFFER_MAP_POINTER, &mp);
     ASSERT_TRUE(mp == (GLvoid *)p);
-    /* **While mapped**: no second map, no update, no read back, no draw from it. */
+    /* While mapped: no second map, no update, no read back, no draw from it. */
     ASSERT_TRUE(glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY) == NULL);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
     glBufferSubData(GL_ARRAY_BUFFER, 0, 4, quad);
@@ -8846,8 +8472,7 @@ static void test_gl_buffer_mapping_and_occlusion_queries(void) {
     ASSERT_EQ(iv[0], GL_FALSE);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **Occlusion queries.** Names from glGenQueries are query objects only once begun.
-     */
+    /* Occlusion queries. Names from glGenQueries are query objects only once begun. */
     GLuint q[2] = {0, 0};
     glGenQueries(2, q);
     ASSERT_TRUE(q[0] != 0u && q[1] != 0u && q[0] != q[1]);
@@ -8872,7 +8497,7 @@ static void test_gl_buffer_mapping_and_occlusion_queries(void) {
     ASSERT_EQ(uv, 16u);
     glDisableClientState(GL_VERTEX_ARRAY);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    /* **Only what passes the depth test**: a quad behind a nearer one counts nothing;
+    /* Only what passes the depth test: a quad behind a nearer one counts nothing;
      * and only what passes the alpha test. */
     glClear(GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
@@ -8903,7 +8528,7 @@ static void test_gl_buffer_mapping_and_occlusion_queries(void) {
     ASSERT_EQ(uv, 0u);
     glDisable(GL_ALPHA_TEST);
     glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-    /* **Pixel rectangles are fragments too**: a 2x2 glDrawPixels, four samples - and a
+    /* Pixel rectangles are fragments too: a 2x2 glDrawPixels, four samples - and a
      * new name at glBeginQuery is made a query object, as a compatibility context
      * allows. */
     static const GLubyte px4[16] = {255, 255, 255, 255, 255, 255, 255, 255,
@@ -8914,7 +8539,7 @@ static void test_gl_buffer_mapping_and_occlusion_queries(void) {
     glEndQuery(GL_SAMPLES_PASSED);
     glGetQueryObjectuiv(50u, GL_QUERY_RESULT, &uv);
     ASSERT_EQ(uv, 4u);
-    /* **Compiled**: the begin and end replay around the draw between them. */
+    /* Compiled: the begin and end replay around the draw between them. */
     const GLuint list = glGenLists(1);
     glNewList(list, GL_COMPILE);
     glBeginQuery(GL_SAMPLES_PASSED, q[0]);
@@ -8987,7 +8612,7 @@ static void test_gl_color_material_writes_the_material(void) {
     glGetMaterialfv(GL_FRONT, GL_SPECULAR, m);
     IS(m, 0.0f, 1.0f, 0.0f);
 
-    /* **Off, the material keeps the last colour it tracked**, and later colours leave
+    /* Off, the material keeps the last colour it tracked, and later colours leave
      * it. */
     glDisable(GL_COLOR_MATERIAL);
     glColor3f(1.0f, 1.0f, 1.0f);
@@ -8997,8 +8622,7 @@ static void test_gl_color_material_writes_the_material(void) {
     glGetMaterialfv(GL_FRONT, GL_DIFFUSE, m);
     IS(m, 0.0f, 1.0f, 0.0f);
 
-    /* **glColorMaterial while on** tracks the new property at once, on its side only.
-     */
+    /* glColorMaterial while on tracks the new property at once, on its side only. */
     glColor3f(1.0f, 0.0f, 1.0f);
     glColorMaterial(GL_FRONT, GL_EMISSION);
     glEnable(GL_COLOR_MATERIAL);
@@ -9053,7 +8677,7 @@ static void test_gl_smooth_points_lines_polygons(void) {
     glGetFloatv(GL_SMOOTH_POINT_SIZE_GRANULARITY, fv);
     ASSERT_TRUE(fv[0] == OOPS_GL_SMOOTH_GRANULARITY);
 
-    /* **A smooth point** of size 6 at the centre, (8, 8) in window pixels: a disc of
+    /* A smooth point of size 6 at the centre, (8, 8) in window pixels: a disc of
      * radius 3. Its centre pixel is covered, one 2.5 across and 0.5 up almost all of
      * it, and the corner of the 6x6 square an aliased point fills - 3.5 away both ways
      * - not at all. */
@@ -9070,7 +8694,7 @@ static void test_gl_smooth_points_lines_polygons(void) {
     ASSERT_EQ(ALPHA(10, 10), 0);
     ASSERT_EQ(ALPHA(4, 7), 0); /* 3.5 from the centre along x: outside */
 
-    /* **A smooth line** 3 wide along y = 8 from x = 2 to 14: rows 7 and 8 lie inside
+    /* A smooth line 3 wide along y = 8 from x = 2 to 14: rows 7 and 8 lie inside
      * it, rows 6 and 9 half inside (their centres 1.5 from the axis, the edge at 1.5);
      * and it stops at its ends - column 1 is outside. */
     glClear(GL_COLOR_BUFFER_BIT);
@@ -9090,7 +8714,7 @@ static void test_gl_smooth_points_lines_polygons(void) {
     ASSERT_EQ(ALPHA(6, 10), 0);
     ASSERT_EQ(ALPHA(1, 7), 0);
 
-    /* **A smooth polygon**, a square from 4.5 to 11.5: its edge columns are half
+    /* A smooth polygon, a square from 4.5 to 11.5: its edge columns are half
      * covered, its inside is whole - along the diagonal where its two triangles meet
      * too, which must not fade. */
     glClear(GL_COLOR_BUFFER_BIT);
@@ -9108,8 +8732,8 @@ static void test_gl_smooth_points_lines_polygons(void) {
     }
     /* A corner pixel is covered a quarter - the two edges' halves multiplied - where
      * both edges are one triangle's: the bottom right and top left of glRectf's quad.
-     * **At the two corners the diagonal leaves, each triangle knows one of the corner's
-     * edges**, and the pixel comes out half covered: the approximation of fading each
+     * At the two corners the diagonal leaves, each triangle knows one of the corner's
+     * edges, and the pixel comes out half covered: the approximation of fading each
      * triangle across its own boundary edges. */
     ASSERT_TRUE(ALPHA(11, 4) > 54 && ALPHA(11, 4) < 74);
     ASSERT_TRUE(ALPHA(4, 11) > 54 && ALPHA(4, 11) < 74);
@@ -9175,13 +8799,13 @@ static void test_gl_texture_combine(void) {
     TEXEL(128, 128, 128, 255);
     DRAW(0.5f, 1.0f, 0.0f, 1.0f);
     RGBA_NEAR(64, 128, 0, 255);
-    /* **GL_RGB_SCALE** doubles it; the alpha has its own scale. */
+    /* GL_RGB_SCALE doubles it; the alpha has its own scale. */
     glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 2.0f);
     DRAW(0.5f, 1.0f, 0.0f, 1.0f);
     RGBA_NEAR(128, 255, 0, 255);
     glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 1.0f);
 
-    /* **GL_ADD_SIGNED**: 0.5 + 0.75 - 0.5. **GL_SUBTRACT**: 1 - 0.25. */
+    /* GL_ADD_SIGNED: 0.5 + 0.75 - 0.5. GL_SUBTRACT: 1 - 0.25. */
     glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_ADD_SIGNED);
     DRAW(0.75f, 0.75f, 0.75f, 1.0f);
     RGBA_NEAR(191, 191, 191, 255);
@@ -9190,7 +8814,7 @@ static void test_gl_texture_combine(void) {
     DRAW(0.25f, 0.25f, 0.25f, 1.0f);
     RGBA_NEAR(191, 191, 191, 255);
 
-    /* **GL_INTERPOLATE**: red texture towards blue fragment by the constant's alpha,
+    /* GL_INTERPOLATE: red texture towards blue fragment by the constant's alpha,
      * 0.25. */
     TEXEL(255, 0, 0, 255);
     const GLfloat k[4] = {0.0f, 0.0f, 0.0f, 0.25f};
@@ -9199,7 +8823,7 @@ static void test_gl_texture_combine(void) {
     DRAW(0.0f, 0.0f, 1.0f, 1.0f);
     RGBA_NEAR(64, 0, 191, 255);
 
-    /* **Operands and sources**: GL_REPLACE of one minus the primary colour; of the
+    /* Operands and sources: GL_REPLACE of one minus the primary colour; of the
      * constant's alpha; the alpha function on its own - GL_REPLACE of the constant
      * alpha. */
     glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
@@ -9218,7 +8842,7 @@ static void test_gl_texture_combine(void) {
     glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA, GL_TEXTURE);
     glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_MODULATE);
 
-    /* **GL_DOT3_RGB**: a +x normal map texel (1, 0.5, 0.5) against a +x light vector in
+    /* GL_DOT3_RGB: a +x normal map texel (1, 0.5, 0.5) against a +x light vector in
      * the primary colour is 4 * 0.25 = 1, white; against +y, 0. GL_DOT3_RGBA puts it in
      * alpha too. */
     TEXEL(255, 128, 128, 255);
@@ -9232,10 +8856,8 @@ static void test_gl_texture_combine(void) {
     DRAW(0.5f, 1.0f, 0.5f, 1.0f);
     RGBA_NEAR(0, 0, 0, 0);
 
-    /* **The checks**: DOT3 is a colour function only; an alpha operand takes no colour;
-     * a source must be one GL names - a unit there is, GL_TEXTURE0 or GL_TEXTURE1
-     * (GL_TEXTURE1 was refused while there was one unit), not GL_TEXTURE2; a scale is
-     * 1, 2 or 4. */
+    /* The checks: DOT3 is a colour function only; an alpha operand takes no colour; a
+     * source must be one GL names, a unit there is; a scale is 1, 2 or 4. */
     glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_DOT3_RGB);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_ALPHA, GL_SRC_COLOR);
@@ -9244,10 +8866,8 @@ static void test_gl_texture_combine(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE1);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
-    /* **One past the last unit, named from the limit rather than written out.** This
-     * asserted GL_TEXTURE2 while there were two units, so raising the count turned a
-     * refusal into a legal source and failed a test that was about the refusal, not
-     * about the number two. */
+    /* One past the last unit, named from the limit so the check survives a change in
+     * the unit count. */
     glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB,
               (GLint)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS));
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
@@ -9259,8 +8879,7 @@ static void test_gl_texture_combine(void) {
     glGetTexEnviv(GL_TEXTURE_ENV, GL_RGB_SCALE, &iv);
     ASSERT_EQ(iv, 1);
 
-    /* **On the attribute stack** with the rest of the environment, and **in a list**.
-     */
+    /* On the attribute stack with the rest of the environment, and in a list. */
     glPushAttrib(GL_TEXTURE_BIT);
     glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_ADD);
     glPopAttrib();
@@ -9329,7 +8948,7 @@ static void test_gl_cube_maps(void) {
     }
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **Refusals**: the cube itself is not an image target, a face not an object
+    /* Refusals: the cube itself is not an image target, a face not an object
      * target, and a face must be square. */
     glTexImage2D(GL_TEXTURE_CUBE_MAP, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                  colours[0]);
@@ -9342,7 +8961,7 @@ static void test_gl_cube_maps(void) {
                  GL_UNSIGNED_BYTE, colours[0]);
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
 
-    /* **Cube complete only with all six**: five faces draw untextured, in the vertex
+    /* Cube complete only with all six: five faces draw untextured, in the vertex
      * colour. */
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
@@ -9363,7 +8982,7 @@ static void test_gl_cube_maps(void) {
     glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL_RGBA, 1, 1, 0, GL_RGBA,
                  GL_UNSIGNED_BYTE, colours[5]);
 
-    /* **The lookup by direction**: the major axis names the face. */
+    /* The lookup by direction: the major axis names the face. */
     DRAW(1.0f, 0.1f, 0.2f);
     ASSERT_EQ(CENTRE, argb[0]);
     DRAW(-1.0f, 0.2f, 0.1f);
@@ -9377,7 +8996,7 @@ static void test_gl_cube_maps(void) {
     DRAW(-0.1f, 0.1f, -1.0f);
     ASSERT_EQ(CENTRE, argb[5]);
 
-    /* **The place on a face**, GL 1.3's table 3.19: on +X, s runs with -z and t with
+    /* The place on a face, GL 1.3's table 3.19: on +X, s runs with -z and t with
      * -y. A 2x2 +X face - red, green over blue, yellow in memory order - at (1, 0.5,
      * -0.5) is s 0.75, t 0.25: the second texel of the first row. The other faces go
      * 2x2 too, to stay complete. */
@@ -9399,7 +9018,7 @@ static void test_gl_cube_maps(void) {
                      GL_RGBA, GL_UNSIGNED_BYTE, colours[f]);
     }
 
-    /* **The generation modes that make directions**: GL_NORMAL_MAP looks up by the
+    /* The generation modes that make directions: GL_NORMAL_MAP looks up by the
      * eye-space normal - (0, 0, -1) is -Z, cyan - and GL_REFLECTION_MAP by the eye
      * vector reflected in it: looking down -z at a face whose normal is +z reflects
      * back up +z, magenta. */
@@ -9430,7 +9049,7 @@ static void test_gl_cube_maps(void) {
     glDisable(GL_TEXTURE_GEN_T);
     glDisable(GL_TEXTURE_GEN_R);
 
-    /* **A cube map outranks 2D**: both enabled, the cube samples. */
+    /* A cube map outranks 2D: both enabled, the cube samples. */
     GLuint flat = 0;
     const GLubyte white[4] = {255, 255, 255, 255};
     glGenTextures(1, &flat);
@@ -9442,7 +9061,7 @@ static void test_gl_cube_maps(void) {
     ASSERT_EQ(CENTRE, argb[2]);
     glDisable(GL_TEXTURE_2D);
 
-    /* **Each face read back and asked about through its own target**, and written by a
+    /* Each face read back and asked about through its own target, and written by a
      * sub-image. */
     GLubyte back[4] = {0, 0, 0, 0};
     glGetTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
@@ -9457,7 +9076,7 @@ static void test_gl_cube_maps(void) {
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **The proxy**: square and within the limit fits; otherwise zeros, no error. */
+    /* The proxy: square and within the limit fits; otherwise zeros, no error. */
     glTexImage2D(GL_PROXY_TEXTURE_CUBE_MAP, 0, GL_RGBA, 64, 64, 0, GL_RGBA,
                  GL_UNSIGNED_BYTE, NULL);
     glGetTexLevelParameteriv(GL_PROXY_TEXTURE_CUBE_MAP, 0, GL_TEXTURE_WIDTH, &iv);
@@ -9468,7 +9087,7 @@ static void test_gl_cube_maps(void) {
     ASSERT_EQ(iv, 0);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **On the attribute stack**: the binding and the enable come back. */
+    /* On the attribute stack: the binding and the enable come back. */
     glPushAttrib(GL_TEXTURE_BIT);
     glDisable(GL_TEXTURE_CUBE_MAP);
     glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
@@ -9534,7 +9153,7 @@ static void test_gl_two_sided_lighting(void) {
         glEnd();                                                                       \
     } while (0)
 
-    /* **The back material**: green emission in front, red behind, no diffuse. One-sided
+    /* The back material: green emission in front, red behind, no diffuse. One-sided
      * lighting lights a back face with the front material. */
     glMaterialfv(GL_FRONT, GL_EMISSION, green);
     glMaterialfv(GL_BACK, GL_EMISSION, red);
@@ -9552,7 +9171,7 @@ static void test_gl_two_sided_lighting(void) {
     ASSERT_EQ(CENTRE, 0x00ff00u);
     glFrontFace(GL_CCW);
 
-    /* **The normal reversed**: a back face whose normal points away from the light is
+    /* The normal reversed: a back face whose normal points away from the light is
      * lit on its visible side - where one-sided lighting leaves it dark. */
     glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, none);
     glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, white);
@@ -9562,9 +9181,8 @@ static void test_gl_two_sided_lighting(void) {
     QUAD(1, -1.0f);
     ASSERT_EQ(CENTRE, 0x000000u);
 
-    /* **glColorMaterial's face**: tracking the back only leaves one-sided lighting -
-     * which lights with the front material - alone. It used to change the front
-     * material whatever it said. */
+    /* glColorMaterial's face: tracking the back only leaves one-sided lighting, which
+     * lights with the front material, alone. */
     glEnable(GL_COLOR_MATERIAL);
     glColorMaterial(GL_BACK, GL_DIFFUSE);
     glColor3f(1.0f, 0.0f, 0.0f);
@@ -9584,7 +9202,7 @@ static void test_gl_two_sided_lighting(void) {
     glColor3f(1.0f, 1.0f, 1.0f);
     glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, white);
 
-    /* **An outline takes its polygon's side**: the back face's outline under GL_LINE is
+    /* An outline takes its polygon's side: the back face's outline under GL_LINE is
      * red, the back emission. A GL_LINES line across the middle is lit from the front
      * whatever way it runs: green. */
     glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, none);
@@ -9699,10 +9317,9 @@ static void test_gl_separate_specular_and_rescale_normal(void) {
         glEnd();                                                                       \
     } while (0)
 
-    /* **Specular only, shininess 0**: (n.h)^0 is 1, a full highlight - which was
-     * skipped. Under a black GL_MODULATE texture it survives only when kept apart:
-     * GL_SEPARATE_SPECULAR_COLOR adds it after texturing; GL_SINGLE_COLOR lets the
-     * texture black it out. */
+    /* Specular only, shininess 0: (n.h)^0 is 1, a full highlight. Under a black
+     * GL_MODULATE texture it survives only when kept apart: GL_SEPARATE_SPECULAR_COLOR
+     * adds it after texturing; GL_SINGLE_COLOR lets the texture black it out. */
     glLightfv(GL_LIGHT0, GL_DIFFUSE, zero);
     glLightfv(GL_LIGHT0, GL_SPECULAR, white);
     glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, zero);
@@ -9729,9 +9346,8 @@ static void test_gl_separate_specular_and_rescale_normal(void) {
     glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SINGLE_COLOR);
     glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, zero);
 
-    /* **A normal lights at its own length** unless GL_NORMALIZE or GL_RESCALE_NORMAL
-     * says otherwise: (0, 0, 2) under a light of diffuse 0.25 is 0.5 - it was
-     * normalised to 0.25. */
+    /* A normal lights at its own length unless GL_NORMALIZE or GL_RESCALE_NORMAL says
+     * otherwise: (0, 0, 2) under a light of diffuse 0.25 is 0.5, not 0.25. */
     const GLfloat quarter[4] = {0.25f, 0.25f, 0.25f, 1.0f};
     glLightfv(GL_LIGHT0, GL_DIFFUSE, quarter);
     glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, white);
@@ -9742,7 +9358,7 @@ static void test_gl_separate_specular_and_rescale_normal(void) {
     ASSERT_EQ(CENTRE, 0x404040u);
     glDisable(GL_NORMALIZE);
 
-    /* **GL_RESCALE_NORMAL** undoes a uniform modelview scale: under glScalef(2) the
+    /* GL_RESCALE_NORMAL undoes a uniform modelview scale: under glScalef(2) the
      * unit normal comes out half as long, a quarter-bright 0.5 * 0.25; rescaled, it is
      * unit again. */
     glLightfv(GL_LIGHT0, GL_DIFFUSE, white);
@@ -9801,8 +9417,7 @@ static void test_gl_texture_lod_parameters(void) {
     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, -1000.0f);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* Level 0 red 4x4, level 1 green 2x2, level 2 blue 1x1 - but only level 0 for now.
-     */
+    /* Level 0 red 4x4, level 1 green 2x2, level 2 blue 1x1; level 0 uploaded first. */
     uint32_t red[16], green[4], blue[1];
     for (int i = 0; i < 16; i++)
         red[i] = 0xff0000ffu; /* bytes R,G,B,A = ff,00,00,ff */
@@ -9837,7 +9452,7 @@ static void test_gl_texture_lod_parameters(void) {
     } while (0)
 #define CENTRE (fb[(H / 2) * W + W / 2] & 0x00ffffffu)
 
-    /* **GL_TEXTURE_MAX_LEVEL makes a short chain complete**: one level and a mipmap
+    /* GL_TEXTURE_MAX_LEVEL makes a short chain complete: one level and a mipmap
      * filter is incomplete - the quad in its own white - until the maximum level says
      * one level is all. */
     QUAD(1.0f);
@@ -9854,7 +9469,7 @@ static void test_gl_texture_lod_parameters(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
     QUAD(16.0f);
     ASSERT_EQ(CENTRE, 0x0000ffu);
-    /* **GL_TEXTURE_MAX_LOD** holds it at level 1, then at level 0. */
+    /* GL_TEXTURE_MAX_LOD holds it at level 1, then at level 0. */
     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 1.0f);
     QUAD(16.0f);
     ASSERT_EQ(CENTRE, 0x00ff00u);
@@ -9862,7 +9477,7 @@ static void test_gl_texture_lod_parameters(void) {
     QUAD(16.0f);
     ASSERT_EQ(CENTRE, 0xff0000u);
     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 1000.0f);
-    /* **GL_TEXTURE_MIN_LOD** makes a magnified quad minify, from level 1. */
+    /* GL_TEXTURE_MIN_LOD makes a magnified quad minify, from level 1. */
     QUAD(1.0f);
     ASSERT_EQ(CENTRE, 0xff0000u);
     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, 1.0f);
@@ -9870,7 +9485,7 @@ static void test_gl_texture_lod_parameters(void) {
     ASSERT_EQ(CENTRE, 0x00ff00u);
     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, -1000.0f);
 
-    /* **GL_TEXTURE_BASE_LEVEL** is where sampling starts: a magnified quad is level 1's
+    /* GL_TEXTURE_BASE_LEVEL is where sampling starts: a magnified quad is level 1's
      * green, level 2's blue - and a base level with no image is incomplete. */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
     QUAD(1.0f);
@@ -9896,8 +9511,7 @@ static void test_gl_texture_lod_parameters(void) {
 #undef CENTRE
 #undef QUAD
 
-    /* **GL_TEXTURE_BIT carries the bound texture's parameters**, not only the binding.
-     */
+    /* GL_TEXTURE_BIT carries the bound texture's parameters, not only the binding. */
     glPushAttrib(GL_TEXTURE_BIT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 2);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
@@ -9940,7 +9554,7 @@ static void test_gl_internal_formats_and_proxies(void) {
     ASSERT_TRUE(NEAR2((p)[0], r) && NEAR2((p)[1], g) && NEAR2((p)[2], b) &&            \
                 NEAR2((p)[3], a))
 
-    /* **What each keeps**, read back as GL_RGBA: luminance and intensity in red alone,
+    /* What each keeps, read back as GL_RGBA: luminance and intensity in red alone,
      * alpha 1 but for GL_LUMINANCE_ALPHA (Mesa, main/texgetimage.c:289-301). */
     const GLubyte src[4] = {10, 20, 30, 40};
     struct {
@@ -9976,7 +9590,7 @@ static void test_gl_internal_formats_and_proxies(void) {
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, out);
     ASSERT_TRUE(out[0] == 99 && out[1] == 0 && out[2] == 0 && out[3] == 255);
 
-    /* **The queries**: the format as named, a generic compressed one as its base
+    /* The queries: the format as named, a generic compressed one as its base
      * format, and eight bits for each component the base format keeps. */
     glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE8_ALPHA8, 1, 1, 0, GL_RGBA,
                  GL_UNSIGNED_BYTE, src);
@@ -10001,7 +9615,7 @@ static void test_gl_internal_formats_and_proxies(void) {
     ASSERT_EQ(iv, (GLint)GL_RGBA);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **The environment**, per base format: a full-screen quad, read at the centre. */
+    /* The environment, per base format: a full-screen quad, read at the centre. */
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);
@@ -10035,14 +9649,13 @@ static void test_gl_internal_formats_and_proxies(void) {
     /* Intensity is all four. */
     DRAW_READ(GL_INTENSITY, GL_MODULATE, 1.0f, 1.0f, 1.0f, 1.0f);
     RGBA_NEAR(out, 128, 128, 128, 128);
-    /* GL_ADD: colour added and alpha multiplied - but for intensity, alpha added too.
-     */
+    /* GL_ADD: colour added and alpha multiplied, but for intensity alpha added too. */
     DRAW_READ(GL_RGBA, GL_ADD, 0.25f, 0.0f, 1.0f, 1.0f);
     RGBA_NEAR(out, 192, 128, 255, 128);
     DRAW_READ(GL_INTENSITY, GL_ADD, 0.0f, 0.0f, 0.0f, 0.25f);
     RGBA_NEAR(out, 128, 128, 128, 192);
-    /* GL_BLEND: the fragment towards the environment colour by the texel - which was
-     * drawn as GL_MODULATE until 2026-09-19. Intensity blends alpha the same way. */
+    /* GL_BLEND: the fragment towards the environment colour by the texel. Intensity
+     * blends alpha the same way. */
     const GLfloat env[4] = {0.0f, 0.0f, 1.0f, 0.0f};
     glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, env);
     DRAW_READ(GL_RGBA, GL_BLEND, 1.0f, 0.0f, 0.0f, 1.0f);
@@ -10061,15 +9674,14 @@ static void test_gl_internal_formats_and_proxies(void) {
     RGBA_NEAR(out, 191, 64, 64, 64);
 #undef DRAW_READ
 
-    /* A mode GL does not have is refused and changes nothing. (GL_COMBINE was the
-     * example until the combiner landed - test_gl_texture_combine.) */
+    /* A mode GL does not have is refused and changes nothing. */
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, 0x1234);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &iv);
     ASSERT_EQ(iv, (GLint)GL_MODULATE);
 
-    /* **A mipmapped texture is one format**: level 1 as RGB under an RGBA base is
+    /* A mipmapped texture is one format: level 1 as RGB under an RGBA base is
      * incomplete, and the quad draws in its own colour. */
     const GLubyte red4[16] = {255, 0, 0, 255, 255, 0, 0, 255,
                               255, 0, 0, 255, 255, 0, 0, 255};
@@ -10087,7 +9699,7 @@ static void test_gl_internal_formats_and_proxies(void) {
     glDisable(GL_TEXTURE_2D);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **Refusals**: an internal format GL 1.x does not have is a value error; a border
+    /* Refusals: an internal format GL 1.x does not have is a value error; a border
      * too. A copy refuses the legacy 1 to 4, as an enum error. */
     glTexImage2D(GL_TEXTURE_2D, 0, 0x1234, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
@@ -10102,7 +9714,7 @@ static void test_gl_internal_formats_and_proxies(void) {
     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &iv);
     ASSERT_EQ(iv, (GLint)GL_LUMINANCE);
 
-    /* **Proxies**: a size that fits is reported, one that does not is zeros and no
+    /* Proxies: a size that fits is reported, one that does not is zeros and no
      * error. Nothing is allocated - the bound texture keeps its image. */
     glTexImage2D(GL_PROXY_TEXTURE_2D, 0, GL_RGBA8, 64, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                  NULL);
@@ -10194,7 +9806,7 @@ static void test_gl_pixel_types_and_store(void) {
     glGetIntegerv(GL_UNPACK_SKIP_ROWS, &iv);
     ASSERT_EQ(iv, 0);
 
-    /* **Packed types**: the format's first component in the top bits, or the bottom for
+    /* Packed types: the format's first component in the top bits, or the bottom for
      * _REV. */
     const GLushort r565 = 0xF800u, r565rev = 0x001Fu, rgba4 = 0xF00Fu,
                    bgra1555rev = 0x801Fu;
@@ -10219,7 +9831,7 @@ static void test_gl_pixel_types_and_store(void) {
     UP(GL_RGB, GL_UNSIGNED_BYTE_3_3_2, &b332);
     RGBA_IS(255, 0, 0, 255);
 
-    /* **Plain types**: unsigned over 2^b - 1, signed as (2c + 1) / (2^b - 1) and
+    /* Plain types: unsigned over 2^b - 1, signed as (2c + 1) / (2^b - 1) and
      * clamped. */
     const GLushort us[4] = {65535u, 32768u, 0u, 65535u};
     UP(GL_RGBA, GL_UNSIGNED_SHORT, us);
@@ -10237,7 +9849,7 @@ static void test_gl_pixel_types_and_store(void) {
     UP(GL_RGBA, GL_FLOAT, fs);
     RGBA_IS(64, 255, 0, 255);
 
-    /* **Single-channel formats**: the rest is 0, alpha 1. */
+    /* Single-channel formats: the rest is 0, alpha 1. */
     const GLubyte one = 200u;
     UP(GL_RED, GL_UNSIGNED_BYTE, &one);
     RGBA_IS(200, 0, 0, 255);
@@ -10246,7 +9858,7 @@ static void test_gl_pixel_types_and_store(void) {
     UP(GL_BLUE, GL_UNSIGNED_BYTE, &one);
     RGBA_IS(0, 0, 200, 255);
 
-    /* **Swap bytes**: R stored as bytes 00 FF is 0xFF00 read natively and 0x00FF
+    /* Swap bytes: R stored as bytes 00 FF is 0xFF00 read natively and 0x00FF
      * swapped. */
     const GLubyte swap_src[8] = {0x00, 0xFF, 0, 0, 0, 0, 0xFF, 0xFF};
     UP(GL_RGBA, GL_UNSIGNED_SHORT, swap_src);
@@ -10256,7 +9868,7 @@ static void test_gl_pixel_types_and_store(void) {
     ASSERT_EQ(out[0], 1);
     glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
 
-    /* **Skips**: the texel at (1, 1) of a 3x3 image, rows three pixels long. */
+    /* Skips: the texel at (1, 1) of a 3x3 image, rows three pixels long. */
     GLubyte img[3 * 3 * 4];
     for (int i = 0; i < 9; i++) {
         img[i * 4] = (GLubyte)(i * 10);
@@ -10294,7 +9906,7 @@ static void test_gl_pixel_types_and_store(void) {
     glGetIntegerv(GL_PACK_SWAP_BYTES, &iv);
     ASSERT_EQ(iv, 0);
 
-    /* **The pack side**: A=44 R=11 G=22 B=33 everywhere, read as packed types, floats,
+    /* The pack side: A=44 R=11 G=22 B=33 everywhere, read as packed types, floats,
      * through a skip and with bytes swapped. */
     for (int i = 0; i < W * H; i++)
         fb[i] = 0x44112233u;
@@ -10312,10 +9924,8 @@ static void test_gl_pixel_types_and_store(void) {
     GLushort p565 = 0;
     glReadPixels(0, 0, 1, 1, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, &p565);
     ASSERT_EQ(p565, 0xF800u);
-    /* Four bytes of slack past the pixel, left at 0xcd: a skip moves where the pixel
-     * lands, it does not widen what is written. Sized to exactly the twelve bytes the
-     * skip and the pixel need, this is correct but a pack that ran long would have
-     * nowhere to land and nothing to fail on. */
+    /* Four bytes of slack past the pixel, left at 0xcd, so a pack that ran long past
+     * the twelve bytes the skip and the pixel need has somewhere to show. */
     GLubyte skipped[16];
     memset(skipped, 0xcd, sizeof(skipped));
     glPixelStorei(GL_PACK_SKIP_PIXELS, 2);
@@ -10329,7 +9939,7 @@ static void test_gl_pixel_types_and_store(void) {
     ASSERT_EQ(sred[0], 32767); /* ((2^16 - 1) * 1 - 1) / 2 */
     ASSERT_EQ(sred[1], 0); /* 0 packs to -1/2: toward zero, as Mesa's FLOAT_TO_SHORT */
 
-    /* **GL_UNPACK_LSB_FIRST** turns a bitmap byte round: 0x01 is the leftmost pixel. */
+    /* GL_UNPACK_LSB_FIRST turns a bitmap byte round: 0x01 is the leftmost pixel. */
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);
@@ -10450,13 +10060,9 @@ static void test_gl_texture_matrix_and_raster_vertex(void) {
     oops_display_close(disp);
 }
 
-/* Points and lines, drawn as triangles.
- *
- * The geometry engine will not take a one- or two-vertex primitive - measured, five
- * sweeps, one of them on this stage. So a line is a screen-width quad and a point is a
- * square. What has to be checked is that the *width is in screen space*: an expansion
- * done in object or eye space gives a line that thins with distance, which passes any
- * test drawn at a single depth.
+/* Points and lines are drawn as triangles, with their width in screen space. The
+ * geometry engine will not take a one- or two-vertex primitive, so a line is a quad and
+ * a point a square.
  */
 static void test_gl_points_and_lines_expand_to_triangles(void) {
     const int W = 64, H = 64;
@@ -10490,10 +10096,8 @@ static void test_gl_points_and_lines_expand_to_triangles(void) {
             thin++;
     ASSERT_TRUE(thin > 0);
 
-    /* **Wider means more pixels, and roughly proportionally.** This is the assertion
-     * that fails for an expansion done in the wrong space or with the perpendicular in
-     * NDC rather than pixels - a 64x64 viewport hides the aspect error, so the ratio is
-     * what is checked. */
+    /* Wider means more pixels, roughly proportionally, which fails for an expansion in
+     * the wrong space. */
     glClear(GL_COLOR_BUFFER_BIT);
     glLineWidth(6.0f);
     glBegin(GL_LINES);
@@ -10548,8 +10152,8 @@ static void test_gl_points_and_lines_expand_to_triangles(void) {
             big++;
     ASSERT_TRUE(big > small * 4);
 
-    /* **A loop closes and a strip does not**, which is the whole difference between
-     * them: three vertices give two segments as a strip and three as a loop. */
+    /* A loop closes and a strip does not: three vertices give two segments as a strip
+     * and three as a loop. */
     glLineWidth(1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_LINE_STRIP);
@@ -10622,14 +10226,9 @@ static void test_gl_points_and_lines_expand_to_triangles(void) {
     oops_display_close(disp);
 }
 
-/* Compressed textures: none supported, and the whole point is that this is said out
- * loud.
- *
- * The specification allows an empty set of compressed formats. A program using them is
- * supposed to query the count first, so answering 0 is what sends it down its
- * uncompressed path; a program that does not query gets an error it can read. What it
- * must never get is a call to address zero, which is what an absent entry point gives
- * under this link.
+/* Compressed textures: the format count is 0, which the specification allows, and the
+ * entry points exist and refuse with an error rather than being absent, which under
+ * this link is a call to address zero.
  */
 static void test_gl_compressed_textures_are_refused_not_absent(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 32, 32);
@@ -10675,8 +10274,7 @@ static void test_gl_compressed_textures_are_refused_not_absent(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glGetCompressedTexImage(GL_TEXTURE_2D, 0, back);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
-    /* A target that names no image - GL_TEXTURE_CUBE_MAP, whose images are its faces.
-     * (GL_TEXTURE_3D was the example until 3D textures landed.) */
+    /* A target that names no image: GL_TEXTURE_CUBE_MAP, whose images are its faces. */
     glGetCompressedTexImage(GL_TEXTURE_CUBE_MAP, 0, back);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
@@ -10693,12 +10291,8 @@ static void test_gl_compressed_textures_are_refused_not_absent(void) {
     oops_display_close(disp);
 }
 
-/* GL_TEXTURE_1D is a target, not a shape.
- *
- * Both bindings are live at once, each has its own enable, and 2D wins when both are
- * on. An implementation that treated 1D as "a 2D texture of height 1" would pass a test
- * that only ever uses one of them - so this keeps both bound with different contents
- * and checks which one a draw actually samples.
+/* GL_TEXTURE_1D is its own binding point: both bindings are live at once with different
+ * contents, each has its own enable, and 2D wins when both are on.
  */
 static void test_gl_texture_1d_is_its_own_binding_point(void) {
     const int W = 32, H = 32;
@@ -10734,7 +10328,7 @@ static void test_gl_texture_1d_is_its_own_binding_point(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **Both bindings are live**, and each reports its own. */
+    /* Both bindings are live, and each reports its own. */
     GLint b1 = 0, b2 = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_1D, &b1);
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &b2);
@@ -10757,8 +10351,7 @@ static void test_gl_texture_1d_is_its_own_binding_point(void) {
     glRectf(-0.8f, -0.8f, 0.8f, 0.8f);
     ASSERT_EQ(fb[(H / 2) * W + (W / 2)] & 0x00ffffffu, 0x000000ffu);
 
-    /* **Both enabled: the higher dimensionality wins**, so blue. This is the assertion
-     * an implementation that collapsed the two bindings could not pass. */
+    /* Both enabled: the higher dimensionality wins, so blue. */
     glEnable(GL_TEXTURE_1D);
     glClear(GL_COLOR_BUFFER_BIT);
     glRectf(-0.8f, -0.8f, 0.8f, 0.8f);
@@ -10771,7 +10364,7 @@ static void test_gl_texture_1d_is_its_own_binding_point(void) {
     ASSERT_EQ(fb[(H / 2) * W + (W / 2)] & 0x00ffffffu, 0x00ff0000u);
     glDisable(GL_TEXTURE_1D);
 
-    /* **An object belongs to the target it was first bound to.** */
+    /* An object belongs to the target it was first bound to. */
     glBindTexture(GL_TEXTURE_2D, t1);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
     glBindTexture(GL_TEXTURE_1D, t2);
@@ -10800,12 +10393,8 @@ static void test_gl_texture_1d_is_its_own_binding_point(void) {
     oops_display_close(disp);
 }
 
-/* Raster position, glDrawPixels and glBitmap.
- *
- * Three behaviours here are invisible in a "did it draw something" check and each
- * breaks a real program: an invalid raster position must draw **nothing** rather than
- * clamping to the edge, glBitmap must **move** the position or a string of glyphs piles
- * up on the first one, and the bitmap rows are most-significant-bit first.
+/* Raster position, glDrawPixels and glBitmap: an invalid raster position draws nothing,
+ * glBitmap moves the position, and bitmap rows are most-significant-bit first.
  */
 static void test_gl_raster_position_and_pixel_ops(void) {
     const int W = 32, H = 32;
@@ -10846,7 +10435,7 @@ static void test_gl_raster_position_and_pixel_ops(void) {
                   0x000000ffu); /* blue one row up */
     }
 
-    /* **An invalid position draws nothing.** Put the raster position off the far side
+    /* An invalid position draws nothing. Put the raster position off the far side
      * of the clip volume and draw: the framebuffer must not change anywhere. */
     glClear(GL_COLOR_BUFFER_BIT);
     glRasterPos2f(5.0f, 5.0f); /* outside the clip volume */
@@ -10881,7 +10470,7 @@ static void test_gl_raster_position_and_pixel_ops(void) {
         ASSERT_EQ(fb[row * W + bx + 2] & 0x00ffffffu, 0x0000ff00u); /* bit 5 set */
     }
 
-    /* **The move happened**, which is what lays out a string. */
+    /* The position moved, which is what lays out a string. */
     GLfloat after[4];
     glGetFloatv(GL_CURRENT_RASTER_POSITION, after);
     ASSERT_TRUE(after[0] > before[0] + 9.0f && after[0] < before[0] + 11.0f);
@@ -10908,9 +10497,8 @@ static void test_gl_raster_position_and_pixel_ops(void) {
                   0x00ff0000u); /* red, not blue */
     }
 
-    /* Refusals: a format GL 1.x does not have - GL 3.0's GL_DEPTH_STENCIL; GL_FLOAT and
-     * then GL_COLOR_INDEX were the example until each converted - and a negative
-     * extent. */
+    /* Refusals: a format GL 1.x does not have (GL 3.0's GL_DEPTH_STENCIL) and a
+     * negative extent. */
     glDrawPixels(2, 2, (GLenum)0x84F9u /* GL_DEPTH_STENCIL */, GL_UNSIGNED_BYTE, px2);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glDrawPixels(-1, 2, GL_RGBA, GL_UNSIGNED_BYTE, px2);
@@ -10922,13 +10510,8 @@ static void test_gl_raster_position_and_pixel_ops(void) {
     oops_display_close(disp);
 }
 
-/* Stencil: the test, the three operations, and the two orderings that go wrong
- * silently.
- *
- * The buffer is written **even when the stencil test fails** - that is how a mask gets
- * built in the first place - and a fragment the **alpha test** discards must not touch
- * stencil at all. Both are invisible in a simple pass/fail check and both break every
- * technique stencil exists for, so each gets its own assertion.
+/* Stencil: the test and the three operations. The buffer is written even when the
+ * stencil test fails, and a fragment the alpha test discards does not touch stencil.
  */
 static void test_gl_stencil_test_and_operations(void) {
     const int W = 32, H = 32;
@@ -10986,7 +10569,7 @@ static void test_gl_stencil_test_and_operations(void) {
     ASSERT_TRUE(lit_left > 50);
     ASSERT_EQ(lit_right, 0);
 
-    /* **The fail operation writes.** Stencil is 0 on the right, the test demands 1, so
+    /* The fail operation writes. Stencil is 0 on the right, the test demands 1, so
      * every fragment there fails - and GL_INCR on the fail path must still raise it
      * to 1. */
     glStencilFunc(GL_EQUAL, 1, 0xff);
@@ -11004,7 +10587,7 @@ static void test_gl_stencil_test_and_operations(void) {
     glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
     ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 255u);
 
-    /* The write mask gates the write, and it masks the **result**: GL_ZERO under mask
+    /* The write mask gates the write, and it masks the result: GL_ZERO under mask
      * 0x0f clears only the low four bits. */
     glStencilFunc(GL_ALWAYS, 0xff, 0xff);
     glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
@@ -11017,19 +10600,15 @@ static void test_gl_stencil_test_and_operations(void) {
     ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0xf0u);
     glStencilMask(0xff);
 
-    /* **A mask of zero makes every stencil write a no-op**, which is the state a
-     * program leaves behind when it masks stencil off and forgets. */
+    /* A mask of zero makes every stencil write a no-op. */
     glStencilMask(0x00);
     glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
     glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
     ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0xf0u);
 
-    /* **And it gates a clear too.** This asserted the opposite until 2026-09-19 - that
-     * glClear ignores the stencil write mask - and GL applies every buffer's write mask
-     * to a clear; Mesa clears a masked stencil buffer through a quad whose stencil
-     * writemask is the program's (state_tracker/st_cb_clear.c, clear_with_quad). Masked
-     * off, the clear changes nothing; masked to the low half, it changes the low half.
-     */
+    /* It gates a clear too: GL applies every buffer's write mask to a clear (Mesa
+     * state_tracker/st_cb_clear.c, clear_with_quad). Masked off, the clear changes
+     * nothing; masked to the low half, it changes the low half. */
     glClearStencil(0x11);
     glClear(GL_STENCIL_BUFFER_BIT);
     ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0xf0u);
@@ -11040,7 +10619,7 @@ static void test_gl_stencil_test_and_operations(void) {
     glClear(GL_STENCIL_BUFFER_BIT);
     ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0x11u);
 
-    /* **Alpha test comes first.** A fragment alpha discards must not reach stencil at
+    /* Alpha test comes first. A fragment alpha discards must not reach stencil at
      * all - not even the fail operation. With alpha rejecting everything, the buffer
      * must not move. */
     glClearStencil(0x05);
@@ -11053,16 +10632,16 @@ static void test_gl_stencil_test_and_operations(void) {
     glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
     ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0x05u);
 
-    /* With alpha passing, the same draw does bump it - so the check above was the
-     * ordering and not simply a draw that never happened. */
+    /* With alpha passing, the same draw does bump it, so the check above tests the
+     * ordering. */
     glColor4f(0.0f, 1.0f, 0.0f, 0.75f);
     glRectf(-1.0f, -1.0f, 1.0f, 1.0f);
     ASSERT_EQ(ctx->stencil_buffer[(H / 2) * W + (W / 4)], 0x06u);
     glDisable(GL_ALPHA_TEST);
 
-    /* **GL 1.4's wrapping operations** (refused until 2026-09-19): from 255
-     * GL_INCR_WRAP goes round to 0 and GL_DECR_WRAP back to 255, where GL_INCR holds at
-     * the end. The function is still GL_NEVER, so each is the fail operation. */
+    /* GL 1.4's wrapping operations: from 255 GL_INCR_WRAP goes round to 0 and
+     * GL_DECR_WRAP back to 255, where GL_INCR holds at the end. The function is
+     * GL_NEVER, so each is the fail operation. */
     glClearStencil(0xff);
     glClear(GL_STENCIL_BUFFER_BIT);
     glStencilOp(GL_INCR_WRAP, GL_KEEP, GL_KEEP);
@@ -11088,12 +10667,7 @@ static void test_gl_stencil_test_and_operations(void) {
 }
 
 /* User clip planes cut geometry, and the plane is fixed in eye space when it is
- * specified.
- *
- * The fixture draws a full-viewport rectangle and cuts it with the plane x >= 0, then
- * counts how much of each half survives. Counting rather than sampling one pixel,
- * because a clip plane that does nothing and a clip plane that discards everything both
- * pass a single-point check depending where the point is.
+ * specified. Each half of a full-viewport rectangle is counted, not sampled.
  */
 static void test_gl_clip_planes_cut_geometry(void) {
     const int W = 64, H = 64;
@@ -11152,8 +10726,7 @@ static void test_gl_clip_planes_cut_geometry(void) {
     ASSERT_EQ(left_after, 0);
     ASSERT_TRUE(right_after > 100);
 
-    /* Disabling brings it back - the plane is still stored, the enable is what decides.
-     */
+    /* Disabling brings it back: the plane is still stored, the enable decides. */
     glDisable(GL_CLIP_PLANE0);
     glClear(GL_COLOR_BUFFER_BIT);
     glRectf(-0.9f, -0.9f, 0.9f, 0.9f);
@@ -11167,22 +10740,14 @@ static void test_gl_clip_planes_cut_geometry(void) {
     ASSERT_TRUE(left_again > 100);
 
     /* glGetClipPlane returns the eye-space plane, which for an identity modelview is
-     * what went in. Specified under a translation it is not, which is the point of the
-     * next block. */
+     * what went in. */
     GLdouble got[4] = {9.0, 9.0, 9.0, 9.0};
     glGetClipPlane(GL_CLIP_PLANE0, got);
     ASSERT_TRUE(got[0] == 1.0 && got[1] == 0.0 && got[2] == 0.0 && got[3] == 0.0);
 
-    /* **Fixed at specification.**
-     *
-     * Specify "keep x >= 0" while the modelview is translated +0.5 in x. An object
-     * point at x_o = 0 sits at x_e = 0.5, so the plane in eye space is x_e >= 0.5 -
-     * stored as (1, 0, 0, -0.5), because the equation is p.xyz . v + p.w >= 0.
-     *
-     * Then put the modelview back to the identity and draw across the boundary. The
-     * half below eye x = 0.5 is cut. An implementation that stored the caller's numbers
-     * unchanged would keep the whole rectangle, because (1,0,0,0) passes everything
-     * with x >= 0. */
+    /* Fixed at specification. "Keep x >= 0" under a +0.5 x translation is x_e >= 0.5 in
+     * eye space, stored as (1, 0, 0, -0.5). Drawn under the identity, the half below
+     * eye x = 0.5 is cut. */
     glLoadIdentity();
     glTranslatef(0.5f, 0.0f, 0.0f);
     glClipPlane(GL_CLIP_PLANE1, keep_positive_x);
@@ -11223,8 +10788,7 @@ static void test_gl_clip_planes_cut_geometry(void) {
     oops_display_close(disp);
 }
 
-/* The 4x4 inverse, checked against the one property that matters: M * M^-1 is the
- * identity. */
+/* The 4x4 inverse round-trips: M * M^-1 is the identity. */
 static void test_gl_mat4_invert_round_trips(void) {
     gl_mat4_t m, inv, prod;
     mat4_identity(&m);
@@ -11232,12 +10796,9 @@ static void test_gl_mat4_invert_round_trips(void) {
     for (int i = 0; i < 16; i++)
         ASSERT_TRUE(inv.m[i] == m.m[i]);
 
-    /* A translate-rotate-scale composition, which is what a modelview normally is.
-     *
-     * **mat4_translate and its siblings post-multiply onto `out`**, the way
-     * glTranslatef composes onto the current matrix - they do not build a fresh matrix.
-     * Starting from anything other than the identity here silently tests a different
-     * matrix than the one written down. */
+    /* A translate-rotate-scale composition. mat4_translate and its siblings
+     * post-multiply onto `out`, as glTranslatef does, so this starts from the
+     * identity. */
     mat4_identity(&m);
     mat4_translate(&m, 3.0f, -4.0f, 5.0f);
     mat4_rotate(&m, 37.0f, 0.3f, 0.5f, 0.8f);
@@ -11254,7 +10815,7 @@ static void test_gl_mat4_invert_round_trips(void) {
     }
 
     /* A singular matrix is refused rather than filled with infinities, and the caller's
-     * buffer is left as it was - a stale answer beats a poisoned one. */
+     * buffer is left as it was. */
     mat4_identity(&m);
     mat4_scale(&m, 1.0f, 0.0f, 1.0f); /* a flattened axis: determinant zero */
     gl_mat4_t before;
@@ -11265,10 +10826,9 @@ static void test_gl_mat4_invert_round_trips(void) {
         ASSERT_TRUE(out.m[i] == before.m[i]);
 }
 
-/* Two texture units' state (GL 1.3; one unit until 2026-09-19, which GL 1.3 does not
- * allow - section 2.6). Each server call acts on the active unit, each client-array
- * call on the client active unit, glTexCoord on unit 0 always, and the attribute groups
- * and lists carry all of it. */
+/* Two texture units' state, GL 1.3's minimum (section 2.6). Each server call acts on
+ * the active unit, each client-array call on the client active unit, glTexCoord on unit
+ * 0 always, and the attribute groups and lists carry all of it. */
 static void test_gl_multitexture_state_is_per_unit(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -11304,13 +10864,12 @@ static void test_gl_multitexture_state_is_per_unit(void) {
     ASSERT_TRUE(ctx->cur_texcoord[1][2] == 3.0f && ctx->cur_texcoord[1][3] == 2.0f);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* A unit past the maximum is refused and writes nothing - a refusal that still
-     * wrote some unit would be worse than none. Null vectors are ignored rather than
-     * dereferenced. */
+    /* A unit past the maximum is refused and writes nothing. Null vectors are ignored
+     * rather than dereferenced. */
     glMultiTexCoord2f((GLenum)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS), 9.0f, 9.0f);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     ASSERT_TRUE(ctx->cur_texcoord[0][0] == 0.5f && ctx->cur_texcoord[1][0] == 1.0f);
-    /* **glActiveTexture goes as far as the image units**, not the fixed-function
+    /* glActiveTexture goes as far as the image units, not the fixed-function
      * stages: it selects a binding a sampler may name. The coordinate calls above stop
      * at the stage count. */
     glActiveTexture((GLenum)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_IMAGE_UNITS));
@@ -11411,7 +10970,7 @@ static void test_gl_multitexture_state_is_per_unit(void) {
     oops_display_close(disp);
 }
 
-/* **Two units drawing** - the software rasteriser applies unit 0's environment to the
+/* Two units drawing: the software rasteriser applies unit 0's environment to the
  * fragment's colour and unit 1's to what unit 0 left, each unit sampling its own
  * coordinate (current, array, after its own texture matrix), and GL_COMBINE telling
  * GL_PREVIOUS, GL_PRIMARY_COLOR and GL 1.4's GL_TEXTURE0 apart. 8x8 target, one quad
@@ -11509,8 +11068,7 @@ static void test_gl_two_texture_units_draw(void) {
 
     /* GL_COMBINE on unit 1, fragment colour 0.5 grey, unit 0 now modulating red: unit 0
      * leaves (0.5, 0, 0). GL_REPLACE of GL_PREVIOUS is that; of GL_PRIMARY_COLOR the
-     * grey; of GL 1.4's GL_TEXTURE0 unit 0's texel, red. With one unit these three were
-     * indistinguishable. */
+     * grey; of GL 1.4's GL_TEXTURE0 unit 0's texel, red. */
     glActiveTexture(GL_TEXTURE0);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     glActiveTexture(GL_TEXTURE1);
@@ -11527,8 +11085,8 @@ static void test_gl_two_texture_units_draw(void) {
     glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE0);
     QUAD();
     ASSERT_EQ(CENTRE(), 0xff0000u);
-    /* A crossbar source naming a unit past the last is refused - the last, from the
-     * limit. */
+    /* A crossbar source naming a unit past the last, taken from the limit, is refused.
+     */
     glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB,
               (GLint)(GL_TEXTURE0 + OOPS_GL_MAX_TEXTURE_UNITS));
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
@@ -11546,6 +11104,9 @@ static void test_gl_two_texture_units_draw(void) {
     oops_display_close(disp);
 }
 
+/* Integer colours and normals are normalised onto [-1,1] or [0,1]; integer positions
+ * and texture coordinates are the value as given. Each rule is asserted at its
+ * endpoint. */
 static void test_gl_integer_spellings_normalise_only_what_should_be(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -11559,7 +11120,7 @@ static void test_gl_integer_spellings_normalise_only_what_should_be(void) {
     glColor4s(32767, -32768, 32767, -32768);
     ASSERT_TRUE(ctx->cur_color[0] == 1.0f && ctx->cur_color[1] == -1.0f);
 
-    /* Unsigned types put 0 on 0 and the maximum exactly on 1 - 255 divides, it does not
+    /* Unsigned types put 0 on 0 and the maximum exactly on 1: 255 divides, it does not
      * shift. */
     glColor4ub(255, 0, 255, 0);
     ASSERT_TRUE(ctx->cur_color[0] == 1.0f && ctx->cur_color[1] == 0.0f);
@@ -11568,8 +11129,7 @@ static void test_gl_integer_spellings_normalise_only_what_should_be(void) {
     ASSERT_TRUE(ctx->cur_color[0] == 1.0f && ctx->cur_color[1] == 0.0f);
 
     /* A three-component colour sets alpha to 1.0 exactly, not to the converted maximum
-     * of its own argument type - the two agree for ubyte and disagree for everything
-     * signed. */
+     * of its own argument type, which differs for signed types. */
     glColor4f(0.0f, 0.0f, 0.0f, 0.0f);
     glColor3b(127, 127, 127);
     ASSERT_TRUE(ctx->cur_color[3] == 1.0f);
@@ -11577,18 +11137,15 @@ static void test_gl_integer_spellings_normalise_only_what_should_be(void) {
     glColor3i(0, 0, 0);
     ASSERT_TRUE(ctx->cur_color[3] == 1.0f);
 
-    /* Normals normalise like colours, **not** like positions: this is the mix-up that
-     * produces a lit scene which is merely wrong. glNormal3b(127,..) is the axis;
-     * glNormal3f(127,..) would be a normal 127 units long. */
+    /* Normals normalise like colours, not like positions: glNormal3b(127,..) is the
+     * axis, where glNormal3f(127,..) would be a normal 127 units long. */
     glNormal3b(127, 0, 0);
     ASSERT_TRUE(ctx->cur_normal[0] == 1.0f);
     ASSERT_TRUE(ctx->cur_normal[1] < 0.01f && ctx->cur_normal[1] > 0.0f);
     glNormal3s(0, 32767, 0);
     ASSERT_TRUE(ctx->cur_normal[1] == 1.0f);
 
-    /* Positions do not convert. glVertex3i(1,2,3) is the point (1,2,3) - if this ever
-     * reads as near-zero, an integer position has been put through a colour conversion.
-     */
+    /* Positions do not convert: glVertex3i(1,2,3) is the point (1,2,3). */
     glBegin(GL_TRIANGLES);
     glVertex3i(1, 2, 3);
     glVertex3s(4, 5, 6);
@@ -11604,9 +11161,8 @@ static void test_gl_integer_spellings_normalise_only_what_should_be(void) {
     ASSERT_TRUE(ctx->cur_texcoord[0][0] == 3.0f && ctx->cur_texcoord[0][1] == 4.0f);
     ASSERT_TRUE(ctx->cur_texcoord[0][2] == 0.0f && ctx->cur_texcoord[0][3] == 1.0f);
 
-    /* q is a projective divide, not a fourth coordinate to ignore - kept with the
-     * vertex, undivided, for the rasteriser to divide per fragment (the vertex divided
-     * until 2026-09-19); the current coordinate keeps what was passed, which is what
+    /* q is a projective divide, kept with the vertex undivided for the rasteriser to
+     * divide per fragment; the current coordinate keeps what was passed, which is what
      * GL_CURRENT_TEXTURE_COORDS reports. */
     glTexCoord4f(2.0f, 4.0f, 6.0f, 2.0f);
     ASSERT_TRUE(ctx->cur_texcoord[0][0] == 2.0f && ctx->cur_texcoord[0][1] == 4.0f);
@@ -11648,6 +11204,9 @@ static void test_gl_integer_spellings_normalise_only_what_should_be(void) {
     oops_display_close(disp);
 }
 
+/* Every C-type and arity spelling of an attribute reaches the value it should produce.
+ * Every fixture uses a different number in each component, so writing the first
+ * argument three times fails. */
 static void test_gl_every_spelling_reaches_the_same_state(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -11671,9 +11230,8 @@ static void test_gl_every_spelling_reaches_the_same_state(void) {
     glColor4dv(c4);
     ASSERT_TRUE(ctx->cur_color[0] == 0.75f && ctx->cur_color[3] == 0.125f);
 
-    /* **255 must land on exactly 1.0.** A shift by 8 instead of a divide by 255 leaves
-     * full white one step short of white - invisible on its own, wrong in a blend, and
-     * the reason this is asserted for equality rather than nearness. */
+    /* 255 lands on exactly 1.0, asserted for equality: a shift by 8 instead of a divide
+     * by 255 leaves white one step short. */
     glColor3ub(255, 0, 128);
     ASSERT_TRUE(ctx->cur_color[0] == 1.0f && ctx->cur_color[1] == 0.0f &&
                 ctx->cur_color[3] == 1.0f);
@@ -11713,9 +11271,8 @@ static void test_gl_every_spelling_reaches_the_same_state(void) {
     glTexCoord2iv(t2i);
     ASSERT_TRUE(ctx->cur_texcoord[0][0] == 5.0f && ctx->cur_texcoord[0][1] == 9.0f);
 
-    /* Vertices, read out of the immediate-mode buffer. The two-coordinate forms must
-     * also set z to 0 and w to 1 rather than leaving whatever the previous vertex had.
-     */
+    /* Vertices, read out of the immediate-mode buffer. The two-coordinate forms set z
+     * to 0 and w to 1 rather than keeping the previous vertex's. */
     glBegin(GL_TRIANGLES);
     glVertex3d(0.125, 0.25, 0.5);
     glVertex2d(0.75, 0.875);
@@ -11767,9 +11324,8 @@ static void test_gl_every_spelling_reaches_the_same_state(void) {
     oops_display_close(disp);
 }
 
-/* The double matrix spellings. The trap is glLoadMatrixd: casting the pointer instead
- * of narrowing element by element reads eight doubles as sixteen floats, which is noise
- * - so the fixture is sixteen *distinct* values and every one is checked. */
+/* The double matrix forms narrow element by element rather than casting the pointer;
+ * the fixture is sixteen distinct values, every one checked. */
 static void test_gl_double_matrix_forms_narrow_element_by_element(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -11814,8 +11370,7 @@ static void test_gl_double_matrix_forms_narrow_element_by_element(void) {
         memcmp(&chain_d, &ctx->modelview_stack[ctx->modelview_depth], sizeof chain_d),
         0);
 
-    /* And the chain is not the identity, so the comparison above has something in it.
-     */
+    /* The chain is not the identity, so the comparison above has something in it. */
     glLoadIdentity();
     ASSERT_TRUE(memcmp(&chain_d, &ctx->modelview_stack[ctx->modelview_depth],
                        sizeof chain_d) != 0);
@@ -11829,22 +11384,16 @@ static void test_gl_double_matrix_forms_narrow_element_by_element(void) {
     oops_display_close(disp);
 }
 
-/* **The query family, and the trap is how many elements it writes.**
- *
- * The caller sizes its buffer from the pname, so a query that writes four values into
- * the `GLint[1]` a program allocated for GL_DEPTH_FUNC corrupts whatever sits after it
- * - and does so only for the pnames nobody happened to test. Every single-valued query
- * below is therefore given a buffer with a **guard element after it** that must still
- * hold its sentinel.
+/* Queries write exactly as many elements as their pname has, and refuse pnames they do
+ * not answer. Every buffer has a guard element after it that must keep its sentinel.
  */
 static void test_gl_queries_report_and_refuse(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx_handle = glContextCreate(disp);
     (void)glGetError();
 
-    /* The limits a program reads to size its own work. Zero here makes a correct
-     * program give up before it draws anything, which is why these are asserted against
-     * the real capacities rather than merely "not an error". */
+    /* The limits a program reads to size its own work, asserted against the real
+     * capacities. */
     GLint iv[18];
     const GLint GUARD = 0x5eed;
 
@@ -11914,10 +11463,8 @@ static void test_gl_queries_report_and_refuse(void) {
     glPopClientAttrib();
     glPopAttrib();
 
-    /* The float side, including the matrices. Three elements for a normal, and the
-     * fourth must be untouched - GL_CURRENT_NORMAL is the one query in this port that
-     * is neither 1, 2, 4 nor 16 wide, so it is the one a single hardcoded width gets
-     * wrong. */
+    /* The float side, including the matrices. Three elements for a normal and the
+     * fourth untouched: GL_CURRENT_NORMAL is neither 1, 2, 4 nor 16 wide. */
     GLfloat fv[18];
     const GLfloat FGUARD = -12345.0f;
     glNormal3f(0.25f, 0.5f, 0.75f);
@@ -11950,9 +11497,8 @@ static void test_gl_queries_report_and_refuse(void) {
     ASSERT_TRUE(fv[0] == (GLfloat)GL_GEQUAL && fv[1] == FGUARD);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* Doubles go through the float table, so they agree by construction - but the
-     * widths have to survive the trip, which is what the guard after the matrix checks.
-     */
+    /* Doubles go through the float table; the guard after the matrix checks the widths
+     * survive the trip. */
     GLdouble dv[18];
     dv[16] = -1.0;
     glGetDoublev(GL_MODELVIEW_MATRIX, dv);
@@ -11963,15 +11509,13 @@ static void test_gl_queries_report_and_refuse(void) {
     dv[1] = -1.0;
     glGetDoublev(GL_DEPTH_FUNC, dv);
     ASSERT_TRUE(dv[0] == (GLdouble)GL_GEQUAL && dv[1] == -1.0);
-    /* Three, which is the width a single hardcoded number gets wrong. Only the double
-     * form consults the width table - glGetFloatv answers this pname from its own loop
-     * - so this is the assertion that holds the table honest. */
+    /* Three. Only the double form consults the width table (glGetFloatv answers this
+     * pname from its own loop), so this checks the table. */
     dv[3] = -1.0;
     glGetDoublev(GL_CURRENT_NORMAL, dv);
     ASSERT_TRUE(dv[0] == 0.25 && dv[1] == 0.5 && dv[2] == 0.75 && dv[3] == -1.0);
 
-    /* **glIsEnabled must answer from the same list glEnable accepts.** These two were
-     * absent, so a capability that had just been switched on read back as off. */
+    /* glIsEnabled answers from the same list glEnable accepts. */
     glEnable(GL_ALPHA_TEST);
     ASSERT_EQ(glIsEnabled(GL_ALPHA_TEST), GL_TRUE);
     glEnable(GL_POLYGON_OFFSET_FILL);
@@ -11980,8 +11524,8 @@ static void test_gl_queries_report_and_refuse(void) {
     ASSERT_EQ(glIsEnabled(GL_ALPHA_TEST), GL_FALSE);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* Booleans: a mask is not an enable. Forwarding GL_COLOR_WRITEMASK to glIsEnabled
-     * reported all four channels off while all four were on. */
+    /* Booleans: a mask is not an enable, so GL_COLOR_WRITEMASK is not forwarded to
+     * glIsEnabled. */
     GLboolean bv[5];
     glColorMask(GL_TRUE, GL_FALSE, GL_TRUE, GL_FALSE);
     bv[4] = 42;
@@ -12006,9 +11550,8 @@ static void test_gl_queries_report_and_refuse(void) {
     glDisable(GL_BLEND);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **Refused, not ignored.** A pname nothing here answers must raise rather than
-     * leave the caller's buffer as it found it - the sentinel proves the buffer was not
-     * touched, and the error proves the caller can tell. */
+    /* Refused, not ignored: a pname nothing here answers raises an error and leaves the
+     * buffer's sentinel untouched. */
     iv[0] = GUARD;
     glGetIntegerv(0x8000u /* GL_FOG_HINT: real GL, absent here */, iv);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
@@ -12040,14 +11583,8 @@ static void test_gl_queries_report_and_refuse(void) {
     oops_display_close(disp);
 }
 
-/* **glGetTexImage does not flip, and glReadPixels does.**
- *
- * They look like the same operation and share the conversion, which is exactly why this
- * is asserted rather than assumed: glReadPixels turns the framebuffer over because GL's
- * window origin is the bottom-left corner, and a texture has no window. Row 0 of a
- * texture image is row 0 of what was uploaded. Reusing glReadPixels' loop here would
- * have been the tidy-looking mistake, so the fixture makes the two orientations
- * different pictures.
+/* glGetTexImage does not flip, where glReadPixels does: a texture has no window origin,
+ * so row 0 of its image is row 0 of what was uploaded.
  */
 static void test_gl_get_tex_image_reads_back_unflipped(void) {
     enum { W = 4, H = 3 };
@@ -12081,8 +11618,7 @@ static void test_gl_get_tex_image_reads_back_unflipped(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     ASSERT_EQ(memcmp(back, src, sizeof src), 0);
 
-    /* And the fixture would notice a flip: reversing the rows is a different picture.
-     */
+    /* The fixture would notice a flip: reversing the rows is a different picture. */
     GLubyte flipped[W * H * 4];
     for (int row = 0; row < H; row++) {
         memcpy(flipped + (size_t)row * W * 4u, src + (size_t)(H - 1 - row) * W * 4u,
@@ -12101,9 +11637,7 @@ static void test_gl_get_tex_image_reads_back_unflipped(void) {
         ASSERT_EQ(rgb[i * 3 + 2], src[i * 4 + 2]);
     }
 
-    /* GL_BGRA swaps red and blue. The fixture has r != b in every texel, so a packer
-     * that forwarded the channels unchanged fails here rather than passing on a grey
-     * image. */
+    /* GL_BGRA swaps red and blue; the fixture has r != b in every texel. */
     GLubyte bgra[W * H * 4];
     glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra);
     for (int i = 0; i < W * H; i++) {
@@ -12114,10 +11648,8 @@ static void test_gl_get_tex_image_reads_back_unflipped(void) {
 
     /* Refusals: a target this does not have, a format it cannot convert, and a query
      * with no image under it. */
-    /* GL_TEXTURE_1D used to be the example here, then GL_TEXTURE_3D; both are real
-     * targets now. GL_TEXTURE_CUBE_MAP is a real texture too, but not an image target -
-     * a cube's images are its six faces, each read through its own - so it is refused
-     * here as GL says it is. */
+    /* GL_TEXTURE_CUBE_MAP is a texture but not an image target: a cube's images are its
+     * six faces, each read through its own. */
     glGetTexImage(GL_TEXTURE_CUBE_MAP, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glGetTexImage(GL_TEXTURE_2D, 0, (GLenum)0x1900u /* GL_COLOR_INDEX */,
@@ -12138,9 +11670,7 @@ static void test_gl_get_tex_image_reads_back_unflipped(void) {
     oops_display_close(disp);
 }
 
-/* The per-object queries, each read back against the setter that wrote it. A query
- * answering from anywhere but the field its setter writes is how glIsEnabled came to
- * disagree with glEnable, so every one of these sets first and asks afterwards. */
+/* Each per-object query reads back what its setter wrote. */
 static void test_gl_per_object_queries_match_their_setters(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -12163,9 +11693,7 @@ static void test_gl_per_object_queries_match_their_setters(void) {
     ASSERT_EQ(iv[1], GUARD);
     glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, iv);
     ASSERT_EQ(iv[0], (GLint)GL_NEAREST);
-    /* Untouched, so still the default a fresh object was given - and that default has
-     * to be the one gl_find_or_create_texture actually assigns, not a plausible-looking
-     * other one. */
+    /* Untouched, so the default gl_find_or_create_texture assigns. */
     glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, iv);
     ASSERT_EQ(iv[0], (GLint)GL_REPEAT);
     glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, fv);
@@ -12179,9 +11707,8 @@ static void test_gl_per_object_queries_match_their_setters(void) {
     ASSERT_EQ(iv[0], 8);
     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, iv);
     ASSERT_EQ(iv[0], 4);
-    /* **What was asked for**, as Mesa reports it, now that the internal format means
-     * something: GL_RGB went in and is kept as RGB - alpha 1 however it was uploaded.
-     * This reported GL_RGBA while every texture was RGBA. */
+    /* What was asked for, as Mesa reports it: GL_RGB went in and is kept as RGB, alpha
+     * 1 however it was uploaded. */
     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, iv);
     ASSERT_EQ(iv[0], (GLint)GL_RGB);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
@@ -12203,9 +11730,8 @@ static void test_gl_per_object_queries_match_their_setters(void) {
     ASSERT_TRUE(fv[0] == 0.75f);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **Eye coordinates**, which is the question GL asks. glLightfv puts the position
-     * through the modelview matrix on the way in, so a translated modelview means the
-     * value read back is deliberately not the one passed. */
+    /* Eye coordinates: glLightfv puts the position through the modelview on the way in,
+     * so under a translation the value read back is not the one passed. */
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
@@ -12262,17 +11788,9 @@ static void test_gl_per_object_queries_match_their_setters(void) {
     oops_display_close(disp);
 }
 
-/* **glInterleavedArrays: fourteen formats, each with its own offsets.**
- *
- * The offsets in the implementation were checked against Mesa's
- * `_mesa_get_interleaved_layout` rather than derived, so what this test is for is the
- * arithmetic *around* them - the default stride, and which arrays end up enabled. The
- * formats below are chosen to cover every array being present, a byte colour, and
- * formats that leave arrays out.
- *
- * Note the C4UB alignment rule is not observable here: four bytes rounded up to a
- * 4-byte float is four bytes. It is written out in the source anyway, but no assertion
- * can pin it down on this platform and none below pretends to.
+/* glInterleavedArrays sets the pointers, default stride and enables its format names
+ * (offsets from Mesa's `_mesa_get_interleaved_layout`). The C4UB alignment rule is not
+ * observable here: four bytes rounded to a 4-byte float is four bytes.
  */
 static void test_gl_interleaved_arrays_sets_the_pointers_the_spec_names(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
@@ -12312,9 +11830,8 @@ static void test_gl_interleaved_arrays_sets_the_pointers_the_spec_names(void) {
     ASSERT_EQ(ctx->array_vertex.stride, (GLsizei)(6 * f));
     ASSERT_EQ(ctx->array_normal.enabled, GL_FALSE);
 
-    /* **The arrays a format does not name are disabled, not left alone.** The normal
-     * array was on a moment ago; after a format without one it must be off, or the draw
-     * keeps reading normals through a pointer nothing set for this buffer. */
+    /* The arrays a format does not name are disabled, not left alone: the normal array
+     * was on, and after a format without one it is off. */
     glInterleavedArrays(GL_C3F_V3F, 0, buf);
     ASSERT_EQ(ctx->array_normal.enabled, GL_FALSE);
     ASSERT_EQ(ctx->array_texcoord[0].enabled, GL_FALSE);
@@ -12357,20 +11874,9 @@ static void test_gl_interleaved_arrays_sets_the_pointers_the_spec_names(void) {
     oops_display_close(disp);
 }
 
-/* **Buffer objects, and the design decision worth testing is *when* the address is
- * worked out.**
- *
- * An array remembers the buffer's *name*, not an address. Resolving at glVertexPointer
- * time would be simpler and would work right up until a program called glBufferData
- * again - which is an ordinary thing to do every frame - and then read through a freed
- * pointer. The test below forces a reallocation between specifying the pointer and
- * drawing, and makes the second allocation much larger so it cannot land back on the
- * first address and pass by luck.
- *
- * The other trap is that `pointer` becomes a byte *offset* when a buffer is bound, and
- * offset zero is a legitimate value that arrives as NULL - which the array reader's old
- * "is the pointer non-null" guard would have read as "no array bound" and silently
- * drawn defaults.
+/* A buffer-backed array keeps the buffer's name and resolves its address at draw time,
+ * so a glBufferData between pointer and draw is honoured. With a buffer bound `pointer`
+ * is a byte offset, and offset zero arrives as NULL.
  */
 static void test_gl_buffer_objects_resolve_at_draw_time(void) {
     enum { W = 64, H = 64 };
@@ -12398,8 +11904,7 @@ static void test_gl_buffer_objects_resolve_at_draw_time(void) {
 
     static uint32_t want_a[W * H], want_b[W * H], got[W * H];
 
-    /* The reference pictures, drawn from client memory through the path that already
-     * worked. */
+    /* The reference pictures, drawn from client memory. */
     glEnableClientState(GL_VERTEX_ARRAY);
     glVertexPointer(3, GL_FLOAT, 0, tri_a);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -12412,8 +11917,7 @@ static void test_gl_buffer_objects_resolve_at_draw_time(void) {
     ASSERT_TRUE(memcmp(want_a, want_b, sizeof want_a) != 0); /* the fixtures differ */
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* Now the same thing out of a buffer object, at offset zero - the NULL that means
-     * zero. */
+    /* The same out of a buffer object, at offset zero: the NULL that means zero. */
     GLuint vbo = 0;
     glGenBuffers(1, &vbo);
     ASSERT_TRUE(vbo != 0u);
@@ -12428,11 +11932,8 @@ static void test_gl_buffer_objects_resolve_at_draw_time(void) {
     ASSERT_EQ(memcmp(got, want_a, sizeof got), 0);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **The reallocation.** glBufferData respecifies the store; the pointer was set
-     * before this happened and is not set again. A far larger allocation makes reuse of
-     * the old address implausible, so an implementation that captured the address at
-     * glVertexPointer time reads freed memory here rather than passing by coincidence.
-     */
+    /* The reallocation: glBufferData respecifies the store after the pointer was set.
+     * The far larger allocation makes reuse of the old address implausible. */
     static GLfloat big[9 + 4096];
     memcpy(big, tri_b, sizeof tri_b);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof big, big, GL_DYNAMIC_DRAW);
@@ -12441,9 +11942,8 @@ static void test_gl_buffer_objects_resolve_at_draw_time(void) {
     memcpy(got, fb, sizeof got);
     ASSERT_EQ(memcmp(got, want_b, sizeof got), 0);
 
-    /* A non-zero offset reaches into the buffer. tri_b sits at the start of `big`, so
-     * putting tri_a one triangle further in and pointing there must draw tri_a again.
-     */
+    /* A non-zero offset reaches into the buffer: tri_a one triangle in, pointed at,
+     * draws tri_a again. */
     glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)sizeof tri_a, (GLsizeiptr)sizeof tri_a,
                     tri_a);
     glVertexPointer(3, GL_FLOAT, 0, (const GLvoid *)(uintptr_t)sizeof tri_a);
@@ -12462,7 +11962,7 @@ static void test_gl_buffer_objects_resolve_at_draw_time(void) {
     glGetIntegerv(GL_ARRAY_BUFFER_BINDING, iv);
     ASSERT_EQ(iv[0], (GLint)vbo);
 
-    /* **The binding at pointer-specification time is what the array keeps**, so two
+    /* The binding at pointer-specification time is what the array keeps, so two
      * arrays can read from two different buffers at once. */
     GLuint second = 0;
     glGenBuffers(1, &second);
@@ -12481,7 +11981,7 @@ static void test_gl_buffer_objects_resolve_at_draw_time(void) {
     glDrawArrays(GL_TRIANGLES, 0, 3);
     ASSERT_EQ(memcmp(fb, want_a, sizeof want_a), 0);
 
-    /* **Deleting a bound buffer reverts the binding to 0**, or the next glBufferData
+    /* Deleting a bound buffer reverts the binding to 0, or the next glBufferData
      * looks up a name nothing owns. */
     glBindBuffer(GL_ARRAY_BUFFER, second);
     glDeleteBuffers(1, &second);
@@ -12599,10 +12099,8 @@ static void test_gl_element_array_buffer_draws_from_its_offsets(void) {
     oops_display_close(disp);
 }
 
-/* **glArrayElement is the bridge between the two ways of feeding geometry**, so the
- * thing to check is that it really reads the arrays rather than the current attributes
- * - and that a *disabled* array still falls back to the current one, which is the half
- * that is easy to lose.
+/* glArrayElement reads the enabled arrays rather than the current attributes, and a
+ * disabled array falls back to the current one.
  */
 static void test_gl_array_element_pulls_from_the_enabled_arrays(void) {
     enum { W = 64, H = 64 };
@@ -12652,9 +12150,8 @@ static void test_gl_array_element_pulls_from_the_enabled_arrays(void) {
     ASSERT_EQ(memcmp(fb, want, sizeof want), 0);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* It really read the vertex array: element 1 is a different corner, so swapping one
-     * index must change the picture. Without this the comparison above passes against
-     * an implementation that ignored the index entirely. */
+    /* It read the vertex array: element 1 is a different corner, so swapping one index
+     * changes the picture. */
     glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_TRIANGLES);
     glArrayElement(0);
@@ -12663,7 +12160,7 @@ static void test_gl_array_element_pulls_from_the_enabled_arrays(void) {
     glEnd();
     ASSERT_TRUE(memcmp(fb, want, sizeof want) != 0);
 
-    /* **A disabled array falls back to the current attribute.** With the colour array
+    /* A disabled array falls back to the current attribute. With the colour array
      * off, every vertex takes the current colour - so this is a flat triangle, not the
      * interpolated one. */
     glDisableClientState(GL_COLOR_ARRAY);
@@ -12701,13 +12198,8 @@ static void test_gl_array_element_pulls_from_the_enabled_arrays(void) {
     oops_display_close(disp);
 }
 
-/* **An integer colour is not an integer cast.**
- *
- * glLightiv maps a colour component across the whole signed range onto [-1, 1], so
- * INT_MAX means 1.0 - while a position or an attenuation is an ordinary cast. Casting a
- * colour instead would make every integer colour astronomically out of range and light
- * the scene pure white, which looks like a lighting bug anywhere but here. The rule is
- * Mesa's INT_TO_FLOAT.
+/* glLightiv maps an integer colour across the signed range onto [-1, 1] (Mesa's
+ * INT_TO_FLOAT), so INT_MAX is 1.0, while a position or an attenuation is a plain cast.
  */
 static void test_gl_integer_lighting_forms_convert_colours_by_range(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
@@ -12728,7 +12220,7 @@ static void test_gl_integer_lighting_forms_convert_colours_by_range(void) {
     glGetLightfv(GL_LIGHT1, GL_DIFFUSE, fv);
     ASSERT_TRUE(fv[0] > -0.0001f && fv[0] < 0.0001f);
 
-    /* **A position is a plain cast**, so 3 means 3.0 and not something near zero. */
+    /* A position is a plain cast, so 3 means 3.0 and not something near zero. */
     const GLint pos[4] = {3, 4, 5, 1};
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
@@ -12756,9 +12248,8 @@ static void test_gl_integer_lighting_forms_convert_colours_by_range(void) {
     oops_display_close(disp);
 }
 
-/* **Transposing is not reversing.** `out[c*4+r] = in[r*4+c]`; walking the input
- * backwards is a different operation that happens to agree on a symmetric matrix, so
- * the fixture here is deliberately asymmetric in both directions. */
+/* The transpose-matrix forms transpose, `out[c*4+r] = in[r*4+c]`, rather than reverse;
+ * the fixture is asymmetric in both directions. */
 static void test_gl_transpose_matrix_forms_transpose(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -12813,9 +12304,8 @@ static void test_gl_transpose_matrix_forms_transpose(void) {
     oops_display_close(disp);
 }
 
-/* Residency: everything that exists is resident, and a name that does not exist is an
- * error rather than a "no" - a program asking about a texture it does not own has a
- * bug. */
+/* Everything that exists is resident, and a name that does not exist is an error
+ * rather than a "no". */
 static void test_gl_texture_residency_is_honest(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -12862,14 +12352,8 @@ static void test_gl_texture_residency_is_honest(void) {
     oops_display_close(disp);
 }
 
-/* The texture-environment completions, the hint, and the buffer selectors - three small
- * families whose common thread is **refusing what does not exist rather than accepting
- * it quietly**.
- *
- * The bug this starts from is real: glTexEnvfv returned clean having done nothing for a
- * target or pname it did not keep, while its own sibling glTexEnvi refused the same
- * arguments. Two spellings of one call disagreeing about what is an error is worse than
- * either answer.
+/* glTexEnv, glHint and the buffer selectors refuse what does not exist rather than
+ * accept it quietly, and every spelling of one call agrees on what is an error.
  */
 static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
@@ -12894,9 +12378,8 @@ static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void
     ASSERT_TRUE(fv[0] == 0.125f && fv[3] == 0.75f && fv[4] == -1.0f);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **An integer environment colour converts by range, like a light's.** INT_MAX
-     * is 1.0, not 2147483647.0 - a cast would put the colour astronomically out of
-     * range. */
+    /* An integer environment colour converts by range, like a light's: INT_MAX is 1.0,
+     * not 2147483647.0. */
     const GLint icol[4] = {2147483647, 0, 2147483647, 0};
     glTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, icol);
     glGetTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, fv);
@@ -12909,8 +12392,7 @@ static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void
     ASSERT_EQ(iv[0], (GLint)GL_MODULATE);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* **The vector form refuses what the scalar form refuses.** This is the regression:
-     * it used to return clean. */
+    /* The vector form refuses what the scalar form refuses. */
     glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_WRAP_S, col);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glTexEnvfv(0x2301u /* GL_TEXTURE_FILTER_CONTROL */, GL_TEXTURE_ENV_MODE, col);
@@ -12918,9 +12400,8 @@ static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void
     glGetTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_WRAP_S, fv);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
 
-    /* The hints: each target is kept and reported. The fog and line-smooth hints were
-     * refused here until 2026-09-19, while this drew no fog and no lines; it draws
-     * both, and a hint is a preference an implementation may ignore but not reject. */
+    /* The hints: each target is kept and reported. A hint is a preference an
+     * implementation may ignore but not reject. */
     glGetIntegerv(GL_PERSPECTIVE_CORRECTION_HINT, iv);
     ASSERT_EQ(iv[0], (GLint)GL_DONT_CARE); /* the specification's default */
     glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);
@@ -12940,8 +12421,7 @@ static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void
     /* A target that is no hint is still refused. */
     glHint(GL_TEXTURE_2D, GL_NICEST);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
-    /* A mode that is not a hint mode is refused before the target is even considered.
-     */
+    /* A mode that is not a hint mode is refused before the target is considered. */
     glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_TRIANGLES);
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glGetIntegerv(GL_PERSPECTIVE_CORRECTION_HINT, iv);
@@ -12949,9 +12429,7 @@ static void test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent(void
 
     /* GL_BACK names the back buffer. The right buffers name buffers this mono visual
      * does not have, so they are GL_INVALID_OPERATION, the refusal of a buffer that
-     * cannot be used (GL_INVALID_ENUM until 2026-09-19). The front was refused the same
-     * way until that evening, when it became a surface of its own -
-     * test_gl_front_buffer. */
+     * cannot be used. The front is a surface of its own (test_gl_front_buffer). */
     glDrawBuffer(GL_BACK);
     glReadBuffer(GL_BACK);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
@@ -12999,12 +12477,8 @@ static int glsl_lex_all(const char *src, glsl_token_t *toks, int max) {
     return n;
 }
 
-/* **Maximal munch, and keyword matching that is whole-word.**
- *
- * These are the two things a hand-written lexer gets wrong. `>=` must be one token, not
- * `>` then `=`; and `floatx` must be an identifier, not the keyword `float` followed by
- * `x`. The second is the nastier of the two because the program still lexes - it just
- * produces a syntax error pointing at something that was never wrong.
+/* The lexer munches maximally (`>=` is one token) and matches keywords as whole words
+ * (`floatx` is an identifier).
  */
 static void test_glsl_lexer_munches_maximally_and_matches_whole_words(void) {
     glsl_token_t t[32];
@@ -13032,8 +12506,7 @@ static void test_glsl_lexer_munches_maximally_and_matches_whole_words(void) {
     ASSERT_EQ(t[17].type, GLSL_TOK_OR_OR);
     ASSERT_EQ(t[18].type, GLSL_TOK_XOR_XOR);
 
-    /* `++` with no space is one token; separated it is two. A lexer that did not munch
-     * maximally would give the same answer for both. */
+    /* `++` with no space is one token; separated it is two. */
     n = glsl_lex_all("++", t, 32);
     ASSERT_EQ(n, 1);
     ASSERT_EQ(t[0].type, GLSL_TOK_INC);
@@ -13042,7 +12515,7 @@ static void test_glsl_lexer_munches_maximally_and_matches_whole_words(void) {
     ASSERT_EQ(t[0].type, GLSL_TOK_PLUS);
     ASSERT_EQ(t[1].type, GLSL_TOK_PLUS);
 
-    /* **Whole-word keywords.** Each of these has a keyword as a strict prefix. */
+    /* Whole-word keywords. Each of these has a keyword as a strict prefix. */
     n = glsl_lex_all("float floatx xfloat in inout input int2", t, 32);
     ASSERT_EQ(n, 7);
     ASSERT_EQ(t[0].type, GLSL_TOK_KW_FLOAT);
@@ -13079,9 +12552,8 @@ static void test_glsl_lexer_reads_the_number_forms(void) {
     /* Case-folded: 0X1F is the same number as 0x1f. */
     ASSERT_TRUE(t[3].value == 31.0);
 
-    /* **Floats without a dot, and floats with nothing after one.** `1e5` has no dot and
-     * is a float; `1.` has nothing after the dot and is still a float. A lexer deciding
-     * on the presence of a `.` gets both wrong. */
+    /* Floats without a dot, and floats with nothing after one: `1e5` and `1.` are both
+     * floats. */
     n = glsl_lex_all("1.0 1. .5 1e5 1.5E-3 2e+2", t, 16);
     ASSERT_EQ(n, 6);
     for (int i = 0; i < 6; i++)
@@ -13113,9 +12585,8 @@ static void test_glsl_lexer_reads_the_number_forms(void) {
     ASSERT_EQ(t[0].type, GLSL_TOK_ERROR);
 }
 
-/* **Line and column survive comments**, which is the whole reason trivia is skipped
- * through the same advance() that counts newlines. A diagnostic after a twenty-line
- * block comment naming line 1 is worse than no diagnostic. */
+/* Line and column survive comments: trivia is skipped through the same advance() that
+ * counts newlines. */
 static void test_glsl_lexer_keeps_position_through_trivia(void) {
     glsl_token_t t[16];
 
@@ -13145,9 +12616,8 @@ static void test_glsl_lexer_keeps_position_through_trivia(void) {
     ASSERT_EQ(n, 1);
     ASSERT_EQ(t[0].column, 5);
 
-    /* **An unterminated block comment is refused**, not treated as running to end of
-     * file - otherwise it silently swallows the program and the parser blames the last
-     * line. */
+    /* An unterminated block comment is refused, not treated as running to end of file.
+     */
     n = glsl_lex_all("a /* never closed", t, 16);
     ASSERT_EQ(n, 2);
     ASSERT_EQ(t[0].type, GLSL_TOK_IDENTIFIER);
@@ -13155,8 +12625,7 @@ static void test_glsl_lexer_keeps_position_through_trivia(void) {
     ASSERT_TRUE(t[1].error != NULL);
 }
 
-/* A whole small shader, to show the pieces work together rather than only in isolation.
- */
+/* A whole small shader lexes, the pieces working together. */
 static void test_glsl_lexer_reads_a_small_shader(void) {
     static const char *src = "#version 110\n"
                              "uniform mat4 mvp;\n"
@@ -13194,9 +12663,8 @@ static void test_glsl_lexer_reads_a_small_shader(void) {
 
     ASSERT_EQ(errors, 0);
     ASSERT_TRUE(saw_hash && saw_uniform && saw_varying && saw_mat4 && saw_vec4);
-    /* `gl_Position` is an identifier here - the built-ins are the semantic stage's
-     * business, and a lexer that special-cased them would be deciding something it
-     * cannot see. */
+    /* `gl_Position` is an identifier here: the built-ins are the semantic stage's
+     * business. */
     ASSERT_TRUE(idents >= 6);
     ASSERT_TRUE(count > 40);
 
@@ -13213,10 +12681,8 @@ static void test_glsl_lexer_reads_a_small_shader(void) {
  * The GLSL expression parser
  * ------------------------------------------------------------------------- */
 
-/* Renders a tree **fully parenthesised**, so precedence and associativity are readable
- * in the expected string rather than inferred from node counts. `1+2*3` must print as
- * `(1+(2*3))`, and an implementation that got the precedence backwards prints
- * `((1+2)*3)` - which is the whole assertion, visible at a glance. */
+/* Renders a tree fully parenthesised, so precedence and associativity are readable in
+ * the expected string: `1+2*3` prints as `(1+(2*3))`. */
 static const char *glsl_op_text(glsl_token_type_t op) {
     switch (op) {
     case GLSL_TOK_PLUS:
@@ -13365,9 +12831,8 @@ static void glsl_print(const glsl_ast_t *ast, int32_t at, char *buf, size_t cap,
         break;
     }
 
-    /* Statements and declarations. Printed as s-expressions, which keeps the nesting
-     * explicit
-     * - an `else` attached to the wrong `if` is visible in the string. */
+    /* Statements and declarations, printed as s-expressions so the nesting is
+     * explicit. */
     case GLSL_NODE_COMPOUND:
         PUT("{");
         for (int32_t s = n->a; s != GLSL_NODE_UNIT && s != GLSL_NO_NODE;
@@ -13540,10 +13005,8 @@ static const char *glsl_parse_to_string(const char *src, const char **err) {
     return buf;
 }
 
-/* **Precedence, one level against the next.** Every adjacent pair in the ladder is
- * checked in the direction that would be wrong if the levels were swapped or one were
- * missing - a missing level does not raise an error, it silently reassociates
- * everything around it. */
+/* The parser binds by precedence: every adjacent pair of levels is checked in the
+ * direction a swapped or missing level would get wrong. */
 static void test_glsl_parser_binds_by_precedence(void) {
     const char *err;
     const char *s;
@@ -13594,14 +13057,12 @@ static void test_glsl_parser_binds_by_precedence(void) {
     ASSERT_TRUE(s != NULL && strcmp(s, "((1+2)*3)") == 0);
 }
 
-/* **Associativity. Getting this backwards still parses every program** - it just
- * computes a different answer, which is why it is asserted rather than assumed. */
+/* The parser associates each operator the right way. */
 static void test_glsl_parser_associates_correctly(void) {
     const char *err;
     const char *s;
 
-    /* Left-associative: subtraction and division are the ones where it is observable.
-     */
+    /* Left-associative: subtraction and division are where it is observable. */
     s = glsl_parse_to_string("a-b-c", &err);
     ASSERT_TRUE(s != NULL && strcmp(s, "((a-b)-c)") == 0);
     s = glsl_parse_to_string("a/b/c", &err);
@@ -13622,8 +13083,7 @@ static void test_glsl_parser_associates_correctly(void) {
     ASSERT_TRUE(s != NULL && strcmp(s, "(!(!a))") == 0);
 }
 
-/* Postfix chains, which are where a real shader spends its syntax: `mvp *
- * vec4(pos, 1.0)` and `v.xy[0]++`. */
+/* The parser reads postfix chains: `mvp * vec4(pos, 1.0)` and `v.xy[0]++`. */
 static void test_glsl_parser_reads_postfix_chains(void) {
     const char *err;
     const char *s;
@@ -13637,10 +13097,8 @@ static void test_glsl_parser_reads_postfix_chains(void) {
     s = glsl_parse_to_string("f(a)", &err);
     ASSERT_TRUE(s != NULL && strcmp(s, "(f(a))") == 0);
 
-    /* **A comma inside an argument list separates arguments**; it is not the sequence
-     * operator. Parsing the list with the full expression parser would make `f(a,b)` a
-     * one-argument call whose argument is `(a,b)` - which type-checks differently and
-     * is very hard to see. */
+    /* A comma inside an argument list separates arguments; it is not the sequence
+     * operator. */
     s = glsl_parse_to_string("f(a,b,c)", &err);
     ASSERT_TRUE(s != NULL && strcmp(s, "(f(a,b,c))") == 0);
     s = glsl_parse_to_string("f((a,b))", &err);
@@ -13665,8 +13123,7 @@ static void test_glsl_parser_reads_postfix_chains(void) {
     ASSERT_TRUE(s != NULL && strcmp(s, "(-(a++))") == 0);
 }
 
-/* Errors: refused with a reason and a position, rather than a tree that is wrong in a
- * way nothing downstream would notice. */
+/* Malformed input is refused with a reason and a position. */
 static void test_glsl_parser_refuses_malformed_input(void) {
     const char *err = NULL;
 
@@ -13725,12 +13182,9 @@ static const char *glsl_unit_to_string(const char *src, const char **err) {
 }
 
 /*
- * **`struct`, which the grammar could not see before 2026-09-24.**
- *
- * `S s;` and `s * t;` differ only in whether `S` names a type, which no lookahead
- * settles - so the parser keeps the names it has seen and `starts_declaration` asks
- * that list. These assert both halves: that a definition is recognised, and that a
- * variable *of* it afterwards is read as a declaration rather than as an expression.
+ * Struct definitions parse, and a variable of the struct afterwards is a declaration.
+ * `S s;` and `s * t;` differ only in whether `S` names a type, so the parser keeps the
+ * names it has seen and `starts_declaration` asks that list.
  */
 static void test_glsl_parses_structs(void) {
     const char *err = NULL;
@@ -13745,8 +13199,7 @@ static void test_glsl_parses_structs(void) {
     ASSERT_TRUE(s != NULL &&
                 strcmp(s, "(unit (struct S (decl a) (decl b) (decl c)))") == 0);
 
-    /* **A variable of it, which is the case the name list exists for.** Without it `S
-     * s;` parses as an expression statement and the declaration vanishes. */
+    /* A variable of it, the case the name list exists for. */
     s = glsl_unit_to_string("struct S { float a; }; S s;", &err);
     ASSERT_TRUE(s != NULL && strcmp(s, "(unit (struct S (decl a)) (decl s))") == 0);
 
@@ -13806,12 +13259,8 @@ static const char *glsl_stmt_to_string(const char *src, const char **err) {
     return buf;
 }
 
-/* **The dangling else, which is the one thing every statement parser is asked about.**
- *
- * `if (a) if (b) x; else y;` - the `else` belongs to the *inner* `if`. Both readings
- * parse the whole program, and the wrong one silently runs `y` under conditions the
- * author did not write. Taking the `else` greedily as soon as the then-branch finishes
- * is what produces the right answer, and the rendered tree shows which happened.
+/* A dangling `else` binds to the nearest `if`: in `if (a) if (b) x; else y;` it
+ * belongs to the inner one.
  */
 static void test_glsl_parser_binds_else_to_the_nearest_if(void) {
     const char *err;
@@ -13830,6 +13279,7 @@ static void test_glsl_parser_binds_else_to_the_nearest_if(void) {
     ASSERT_TRUE(s != NULL && strcmp(s, "(if a x;)") == 0);
 }
 
+/* The parser reads every statement form. */
 static void test_glsl_parser_reads_statements(void) {
     const char *err;
     const char *s;
@@ -13874,10 +13324,8 @@ static void test_glsl_parser_reads_statements(void) {
                 NULL); /* no semicolon */
 }
 
-/* **Every declarator carries the shared type**, and a comma in a declaration separates
- * declarators rather than acting as the sequence operator. `float a = 1, b = 2;` is two
- * declarations; parsing the initialiser with the full expression parser makes it one,
- * with `b` swallowed into `a`'s initialiser. */
+/* Every declarator carries the shared type, and a comma in a declaration separates
+ * declarators: `float a = 1, b = 2;` is two declarations. */
 static void test_glsl_parser_reads_declarations(void) {
     const char *err;
     const char *s;
@@ -13891,11 +13339,8 @@ static void test_glsl_parser_reads_declarations(void) {
     s = glsl_unit_to_string("float a = 1.0, b = 2.0;", &err);
     ASSERT_TRUE(s != NULL && strcmp(s, "(unit (decl a=1.0) (decl b=2.0))") == 0);
 
-    /* **Three, not two.** The first declarator's initialiser is parsed at a different
-     * call site from the rest, so two declarators cannot tell whether the *list* parser
-     * uses the comma correctly - a mutation making it use the full expression parser
-     * passed the two-declarator case unchanged. With three, `b`'s initialiser would
-     * swallow `, c = 3.0`. */
+    /* Three, not two: the first declarator's initialiser is parsed at a different call
+     * site, so only a third shows whether the list parser handles the comma. */
     s = glsl_unit_to_string("float a = 1.0, b = 2.0, c = 3.0;", &err);
     ASSERT_TRUE(s != NULL);
     ASSERT_TRUE(strcmp(s, "(unit (decl a=1.0) (decl b=2.0) (decl c=3.0))") == 0);
@@ -13922,10 +13367,8 @@ static void test_glsl_parser_reads_declarations(void) {
     ASSERT_TRUE(s != NULL &&
                 strcmp(s, "(unit (fn f((param x),(param y)) {(return x)}))") == 0);
 
-    /* **A declarator list at the top level must not break the unit's own chain.** Both
-     * use `sibling`, so the unit has to walk to the tail rather than assume the node it
-     * just got is the last one - otherwise `float a, b;` followed by anything loses the
-     * rest of the file. */
+    /* A declarator list at the top level keeps the unit's chain: both use `sibling`, so
+     * the unit walks to the tail. */
     s = glsl_unit_to_string("float a, b; void main() {}", &err);
     ASSERT_TRUE(s != NULL);
     ASSERT_TRUE(strcmp(s, "(unit (decl a) (decl b) (fn main() {}))") == 0);
@@ -13934,9 +13377,7 @@ static void test_glsl_parser_reads_declarations(void) {
     ASSERT_TRUE(glsl_unit_to_string("float;", &err) == NULL);
     ASSERT_TRUE(glsl_unit_to_string("uniform;", &err) == NULL);
     ASSERT_TRUE(glsl_unit_to_string("void main() { ", &err) == NULL);
-    /* The preprocessor is refused by name, not skipped - skipping would silently ignore
-     * a
-     * `#version` and compile something the program did not write. */
+    /* A directive reaching the parser is refused by name, not skipped. */
     ASSERT_TRUE(glsl_unit_to_string("#version 110\nvoid main(){}", &err) == NULL);
     ASSERT_TRUE(err != NULL);
 }
@@ -13996,6 +13437,7 @@ static const char *glsl_pp_to_string(const char *src, const char **err, int *ver
     return buf;
 }
 
+/* The preprocessor records `#version` and expands object-like macros. */
 static void test_glsl_preprocessor_expands_and_records(void) {
     const char *err;
     int version = 0;
@@ -14019,7 +13461,7 @@ static void test_glsl_preprocessor_expands_and_records(void) {
     s = glsl_pp_to_string("#define E\nfloat E a;", &err, &version);
     ASSERT_TRUE(s != NULL && strcmp(s, "float a ;") == 0);
 
-    /* **`#define A A` must not loop.** A macro is not expanded while its own expansion
+    /* `#define A A` does not loop. A macro is not expanded while its own expansion
      * is being consumed, so this yields the identifier once. */
     s = glsl_pp_to_string("#define A A\nA;", &err, &version);
     ASSERT_TRUE(s != NULL && strcmp(s, "A ;") == 0);
@@ -14039,9 +13481,8 @@ static void test_glsl_preprocessor_expands_and_records(void) {
     ASSERT_TRUE(s != NULL && strcmp(s, "2 ;") == 0);
 }
 
-/* **Skipping still has to parse the directives.** Inside a false branch the tokens go,
- * but the conditionals do not - otherwise nested `#ifdef`s pair with the wrong `#endif`
- * and the error surfaces hundreds of lines later as a brace mismatch. */
+/* Conditionals nest: inside a false branch the tokens go but the directives are still
+ * parsed, so nested `#ifdef`s pair with the right `#endif`. */
 static void test_glsl_preprocessor_nests_conditionals(void) {
     const char *err;
     const char *s;
@@ -14062,9 +13503,7 @@ static void test_glsl_preprocessor_nests_conditionals(void) {
     s = glsl_pp_to_string("#ifdef A\none;\n#else\ntwo;\n#endif\n", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "two ;") == 0);
 
-    /* **The nesting case.** The inner `#endif` must close the inner `#ifdef`, leaving
-     * `after` outside both. A skipper that ran to the first `#endif` would emit `after`
-     * inside the dark region, or drop it entirely. */
+    /* The inner `#endif` closes the inner `#ifdef`, leaving `after` outside both. */
     s = glsl_pp_to_string("#ifdef OFF\n"
                           "  #ifdef ALSO_OFF\n"
                           "    deep;\n"
@@ -14088,9 +13527,8 @@ static void test_glsl_preprocessor_nests_conditionals(void) {
                           &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "a ; c ;") == 0);
 
-    /* **A branch inside a dark region stays dark however its own condition reads.**
-     * `ON` is defined, so a naive implementation would light `b` up inside a region
-     * that is off. */
+    /* A branch inside a dark region stays dark however its own condition reads: `ON` is
+     * defined, and `b` stays off. */
     s = glsl_pp_to_string("#define ON\n"
                           "#ifdef OFF\n"
                           "  #ifdef ON\n"
@@ -14118,15 +13556,13 @@ static void test_glsl_preprocessor_nests_conditionals(void) {
     ASSERT_TRUE(s != NULL && strcmp(s, "N ;") == 0);
 }
 
-/* Refusals. A directive this does not implement is named rather than skipped: a skipped
- * `#extension` compiles a shader that asked for something it did not get. */
+/* A directive this does not implement is refused by name rather than skipped. */
 static void test_glsl_preprocessor_refuses_by_name(void) {
     const char *err = NULL;
 
-    /* **`#extension ... : require` is the one spelling that must still fail**, because
-     * this front end implements no extensions and `require` is the word that says a
-     * shader will not work without one. `enable`, `warn` and `disable` ask for nothing
-     * that cannot be given. */
+    /* `#extension ... : require` fails, because this front end implements no
+     * extensions; `enable`, `warn` and `disable` ask for nothing that cannot be given.
+     */
     ASSERT_TRUE(glsl_pp_to_string("#extension GL_ARB_foo : require\n", &err, NULL) ==
                 NULL);
     ASSERT_TRUE(err != NULL);
@@ -14141,10 +13577,8 @@ static void test_glsl_preprocessor_refuses_by_name(void) {
     ASSERT_TRUE(glsl_pp_to_string("#error something went wrong\n", &err, NULL) == NULL);
     ASSERT_TRUE(err != NULL);
 
-    /* **The `(` must be adjacent to the name.** `#define F (x)` is object-like with a
-     * body that starts with a parenthesis; `#define F(x)` takes an argument. The two
-     * differ by one space and by everything else, and reading one as the other expands
-     * to something that compiles and is wrong. */
+    /* The `(` must be adjacent to the name: `#define F (x)` is object-like with a body
+     * that starts with a parenthesis; `#define F(x)` takes an argument. */
     const char *s = glsl_pp_to_string("#define F (x)\nF;", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "( x ) ;") == 0);
 
@@ -14171,8 +13605,7 @@ static void test_glsl_preprocessor_refuses_by_name(void) {
 }
 
 /*
- * **Function-like macros**, which this front end refused until 2026-09-24. The two that
- * matter beyond plain substitution are nesting inside arguments, and a bare name that
+ * Function-like macros expand, including nesting inside arguments and a bare name that
  * is not a call.
  */
 static void test_glsl_preprocessor_function_like_macros(void) {
@@ -14190,9 +13623,8 @@ static void test_glsl_preprocessor_function_like_macros(void) {
     s = glsl_pp_to_string("#define FIRST(a,b) a\nFIRST(p,q);", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "p ;") == 0);
 
-    /* **Commas inside nested parentheses are not separators.** `F(g(a,b), c)` is two
-     * arguments, not three - the mistake that makes a working macro wrong rather than
-     * failing. */
+    /* Commas inside nested parentheses are not separators: `F(g(a,b), c)` is two
+     * arguments, not three. */
     s = glsl_pp_to_string("#define SECOND(a,b) b\nSECOND(g(1,2),z);", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "z ;") == 0);
 
@@ -14200,7 +13632,7 @@ static void test_glsl_preprocessor_function_like_macros(void) {
     s = glsl_pp_to_string("#define NOW() 5\nNOW();", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "5 ;") == 0);
 
-    /* **A bare name is not a call and is emitted unchanged**, which is what lets a
+    /* A bare name is not a call and is emitted unchanged, which lets a
      * macro share a name with something that is not being called here. */
     s = glsl_pp_to_string("#define F(x) x\nF;", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "F ;") == 0);
@@ -14224,8 +13656,8 @@ static void test_glsl_preprocessor_function_like_macros(void) {
     ASSERT_TRUE(s != NULL &&
                 strcmp(s, "no ;") == 0); /* not a call, so an undefined name: 0 */
 
-    /* **Arity is checked**, because padding or dropping silently expands to something
-     * that compiles. */
+    /* Arity is checked, because padding or dropping silently expands to something that
+     * compiles. */
     ASSERT_TRUE(glsl_pp_to_string("#define ADD(a,b) a+b\nADD(1);", &err, NULL) == NULL);
     ASSERT_TRUE(glsl_pp_to_string("#define ADD(a,b) a+b\nADD(1,2,3);", &err, NULL) ==
                 NULL);
@@ -14238,9 +13670,8 @@ static void test_glsl_preprocessor_function_like_macros(void) {
 }
 
 /*
- * **`#if`, which is the directive a real shader reaches for and this front end refused
- * until 2026-09-24.** The three passes are what these assert: `defined` before
- * expansion, macros after it, and an undefined name left over is 0.
+ * `#if` evaluates in three passes: `defined` before expansion, macros after it, and an
+ * undefined name left over is 0.
  */
 static void test_glsl_preprocessor_evaluates_if(void) {
     const char *err = NULL;
@@ -14263,7 +13694,7 @@ static void test_glsl_preprocessor_evaluates_if(void) {
     s = glsl_pp_to_string("#if 1 ? 0 : 1\nyes;\n#else\nno;\n#endif", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "no ;") == 0);
 
-    /* `defined`, both spellings, and **before expansion**: `defined A` asks whether A
+    /* `defined`, both spellings, and before expansion: `defined A` asks whether A
      * is a macro, it does not expand A and ask about the result. */
     s = glsl_pp_to_string("#define A 0\n#if defined A\nyes;\n#endif", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
@@ -14279,9 +13710,8 @@ static void test_glsl_preprocessor_evaluates_if(void) {
     s = glsl_pp_to_string("#if NEVER_SET\nyes;\n#else\nno;\n#endif", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "no ;") == 0);
 
-    /* `__VERSION__` is predefined, because `#if __VERSION__ >= 120` is the commonest
-     * use there is and an undefined name would be 0 - quietly taking the other branch.
-     */
+    /* `__VERSION__` is predefined; undefined, `#if __VERSION__ >= 120` would quietly
+     * read 0. */
     s = glsl_pp_to_string(
         "#version 120\n#if __VERSION__ >= 120\nyes;\n#else\nno;\n#endif", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "yes ;") == 0);
@@ -14302,17 +13732,15 @@ static void test_glsl_preprocessor_evaluates_if(void) {
     s = glsl_pp_to_string("#if 0\n#if 1\na;\n#endif\n#else\nb;\n#endif", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "b ;") == 0);
 
-    /* **A dark arm's expression is never evaluated.** It may divide by zero or name a
-     * macro that only exists in the other arm; failing the compile on an expression
-     * nobody asked for would be wrong. */
+    /* A dark arm's expression is never evaluated: it may divide by zero or name a macro
+     * that only exists in the other arm. */
     s = glsl_pp_to_string("#if 1\na;\n#elif 1/0\nb;\n#endif", &err, NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "a ;") == 0);
     s = glsl_pp_to_string("#ifdef OFF\n#if 1/0\na;\n#endif\n#endif\nafter;", &err,
                           NULL);
     ASSERT_TRUE(s != NULL && strcmp(s, "after ;") == 0);
 
-    /* What it refuses, and each one for a reason a wrong answer would otherwise hide.
-     */
+    /* What it refuses. */
     ASSERT_TRUE(glsl_pp_to_string("#if\nx;\n#endif", &err, NULL) ==
                 NULL); /* no expression */
     ASSERT_TRUE(glsl_pp_to_string("#if 1/0\nx;\n#endif", &err, NULL) ==
@@ -14329,9 +13757,7 @@ static void test_glsl_preprocessor_evaluates_if(void) {
     ASSERT_TRUE(glsl_pp_to_string("#if defined(A\nx;\n#endif", &err, NULL) == NULL);
     ASSERT_TRUE(err != NULL);
 
-    /* **`<<` is refused rather than read as two `<`.** GLSL 1.10 has no shift token, so
-     * `1 << 2` would otherwise evaluate as `(1 < (< 2))` - nonsense that still produces
-     * a number and still picks a branch. */
+    /* `<<` is refused rather than read as two `<`: GLSL 1.10 has no shift token. */
     ASSERT_TRUE(glsl_pp_to_string("#if (1 << 2) == 4\nx;\n#endif", &err, NULL) == NULL);
     ASSERT_TRUE(err != NULL);
     /* A genuine `<` is untouched by that guard. */
@@ -14379,7 +13805,7 @@ static glsl_type_t glsl_expr_type(const char *expr, const char **err) {
     return t;
 }
 
-/* **GLSL's operators are not C's, and the differences are the point.** */
+/* Sema types GLSL's operators by GLSL's rules, not C's. */
 static void test_glsl_sema_types_the_operators(void) {
     const char *err;
 
@@ -14389,9 +13815,8 @@ static void test_glsl_sema_types_the_operators(void) {
     ASSERT_EQ(glsl_expr_type("f*v3", &err), GLSL_TYPE_VEC3);
     ASSERT_EQ(glsl_expr_type("v3+v3", &err), GLSL_TYPE_VEC3);
 
-    /* **`mat * vec` is a transform, not a component-wise multiply**: mat4*vec4 is a
-     * vec4, and mat4*vec3 has dimensions that do not meet. A component-wise
-     * implementation would accept the second and produce a plausible, wrong type. */
+    /* `mat * vec` is a transform, not a component-wise multiply: mat4*vec4 is a vec4,
+     * and mat4*vec3 has dimensions that do not meet. */
     ASSERT_EQ(glsl_expr_type("m4*v4", &err), GLSL_TYPE_VEC4);
     ASSERT_EQ(glsl_expr_type("v4*m4", &err), GLSL_TYPE_VEC4);
     ASSERT_EQ(glsl_expr_type("m3*v3", &err), GLSL_TYPE_VEC3);
@@ -14400,9 +13825,7 @@ static void test_glsl_sema_types_the_operators(void) {
     ASSERT_EQ(glsl_expr_type("m4*m3", &err), GLSL_TYPE_ERROR);
     ASSERT_EQ(glsl_expr_type("m4*m4", &err), GLSL_TYPE_MAT4);
 
-    /* **No implicit conversion between int and float.** This is the rule that most
-     * separates GLSL from C, and accepting it would pick a type the author did not
-     * write. */
+    /* No implicit conversion between int and float. */
     ASSERT_EQ(glsl_expr_type("i+f", &err), GLSL_TYPE_ERROR);
     ASSERT_TRUE(err != NULL);
     ASSERT_EQ(glsl_expr_type("v3*i", &err), GLSL_TYPE_ERROR);
@@ -14451,8 +13874,8 @@ static void test_glsl_sema_types_the_operators(void) {
     ASSERT_TRUE(err != NULL);
 }
 
-/* **Swizzles: the three vocabularies may not be mixed, and a component past the end is
- * an error.** `v.xg` is the typo that compiles in a careless implementation. */
+/* Swizzles: the three vocabularies may not be mixed (`v.xg`), and a component past the
+ * end is an error. */
 static void test_glsl_sema_checks_swizzles(void) {
     const char *err;
 
@@ -14468,13 +13891,12 @@ static void test_glsl_sema_checks_swizzles(void) {
     ASSERT_EQ(glsl_expr_type("v4.rgb", &err), GLSL_TYPE_VEC3);
     ASSERT_EQ(glsl_expr_type("v4.stpq", &err), GLSL_TYPE_VEC4);
 
-    /* **Mixing them is refused.** */
+    /* Mixing them is refused. */
     ASSERT_EQ(glsl_expr_type("v4.xg", &err), GLSL_TYPE_ERROR);
     ASSERT_TRUE(err != NULL);
     ASSERT_EQ(glsl_expr_type("v4.rs", &err), GLSL_TYPE_ERROR);
 
-    /* **Past the end of the operand.** `.w` on a vec3 is the one that otherwise reads
-     * whatever sits after the vector. */
+    /* Past the end of the operand: `.w` on a vec3. */
     ASSERT_EQ(glsl_expr_type("v3.w", &err), GLSL_TYPE_ERROR);
     ASSERT_TRUE(err != NULL);
     ASSERT_EQ(glsl_expr_type("v2.z", &err), GLSL_TYPE_ERROR);
@@ -14491,9 +13913,8 @@ static void test_glsl_sema_checks_swizzles(void) {
     ASSERT_EQ(glsl_expr_type("bv3.x", &err), GLSL_TYPE_BOOL);
 }
 
-/* **Constructors count components, not arguments.** `vec4(v3, 1.0)` is two arguments
- * and four components; `vec4(1.0)` is one of each and fills. Counting arguments rejects
- * the first. */
+/* Constructors count components, not arguments: `vec4(v3, 1.0)` is two arguments and
+ * four components; `vec4(1.0)` is one of each and fills. */
 static void test_glsl_sema_checks_constructors(void) {
     const char *err;
 
@@ -14531,13 +13952,9 @@ static const char *glsl_unit_sema_error(const char *src) {
 }
 
 /*
- * **What sema knows about a struct**: its members, their types, and where each one
- * sits.
- *
- * The layout asserted here is the contract both back ends read - the interpreter
- * indexes a float array with these offsets and the code generator adds them to a
- * register base - so a change that moves a member has to change this test, which is the
- * point of asserting the numbers rather than only that a member exists.
+ * Sema records a struct's members, their types and their offsets. The offsets are the
+ * layout both back ends read: the interpreter indexes a float array with them and the
+ * code generator adds them to a register base.
  */
 static void test_glsl_sema_structs(void) {
     ASSERT_TRUE(glsl_unit_sema_error(
@@ -14564,14 +13981,12 @@ static void test_glsl_sema_structs(void) {
     ASSERT_EQ(g_glsl_sema.structs[1].components, 4);
     ASSERT_EQ(g_glsl_sema.structs[1].member[1].offset, 3);
 
-    /* **A member read has the member's type**, which is how `.` stops being a swizzle.
-     */
+    /* A member read has the member's type, which is how `.` stops being a swizzle. */
     ASSERT_TRUE(glsl_unit_sema_error(
                     "struct S { float a; vec3 b; };\n"
                     "void main() { S s; float f = s.a; vec3 v = s.b; }") == NULL);
 
-    /* And a swizzle of a member still works, because the base of that one is a vector.
-     */
+    /* A swizzle of a member still works, because its base is a vector. */
     ASSERT_TRUE(glsl_unit_sema_error(
                     "struct S { vec3 b; };\nvoid main() { S s; float f = s.b.x; }") ==
                 NULL);
@@ -14593,9 +14008,8 @@ static void test_glsl_sema_structs(void) {
 }
 
 /*
- * **A struct's constructor is stricter than any built-in one.** `vec4(1.0)` fills and
- * `vec4(v3, 1.0)` gathers; a struct takes one argument per member, in order, each
- * assignable to that member - no filling, no gathering, no truncation.
+ * A struct constructor takes one argument per member, in order, each assignable to that
+ * member: no filling, no gathering, no truncation.
  */
 static void test_glsl_sema_struct_constructors(void) {
     ASSERT_TRUE(glsl_unit_sema_error("struct S { float a; vec3 b; };\nvoid main() { S "
@@ -14620,8 +14034,7 @@ static void test_glsl_sema_struct_constructors(void) {
                                      "S bump(S v) { return S(v.a + 1.0); }\n"
                                      "void main() { S s = bump(S(1.0)); }") == NULL);
 
-    /* **Arity is exact in both directions**, because neither filling nor dropping is a
-     * thing a struct constructor does. */
+    /* Arity is exact in both directions. */
     ASSERT_TRUE(glsl_unit_sema_error(
                     "struct S { float a; vec3 b; };\nvoid main() { S s = S(1.0); }") !=
                 NULL);
@@ -14643,19 +14056,19 @@ static void test_glsl_sema_struct_constructors(void) {
                     "void main() { A x = A(1.0); B y = B(1.0); bool e = (x == y); }") !=
                 NULL);
 
-    /* **A struct with an array member has no constructor**, because GLSL 1.10 has no
-     * array-valued expression to pass for one. Saying so beats accepting an argument
-     * that fills only the first element. */
+    /* A struct with an array member has no constructor, because GLSL 1.10 has no
+     * array-valued expression to pass for one. */
     ASSERT_TRUE(glsl_unit_sema_error(
                     "struct S { float a[2]; };\nvoid main() { S s = S(1.0); }") !=
                 NULL);
 }
 
+/* Scopes reject redeclaration, allow shadowing, and drop names when they close. */
 static void test_glsl_sema_scopes_and_shadowing(void) {
     glsl_sema_init(&g_glsl_sema, &g_glsl_ast);
 
     ASSERT_EQ(glsl_declare(&g_glsl_sema, "x", 1, GLSL_TYPE_FLOAT, GL_FALSE), GL_TRUE);
-    /* **Redeclaration in the same scope is an error.** */
+    /* Redeclaration in the same scope is an error. */
     ASSERT_EQ(glsl_declare(&g_glsl_sema, "x", 1, GLSL_TYPE_INT, GL_FALSE), GL_FALSE);
     ASSERT_TRUE(g_glsl_sema.error != NULL);
 
@@ -14668,8 +14081,7 @@ static void test_glsl_sema_scopes_and_shadowing(void) {
     ASSERT_TRUE(g_glsl_sema.error == NULL);
     ASSERT_EQ(g_glsl_sema.count, 2);
 
-    /* **Leaving the block drops it**, or the name stays visible after its scope closed.
-     */
+    /* Leaving the block drops the name. */
     glsl_scope_pop(&g_glsl_sema);
     ASSERT_EQ(g_glsl_sema.count, 1);
     ASSERT_EQ(g_glsl_sema.symbols[0].type, GLSL_TYPE_FLOAT);
@@ -14698,8 +14110,7 @@ static const char *glsl_check_shader(const char *src) {
     return NULL;
 }
 
-/* **L-values: what may be written to.** The obvious cases are not the interesting ones.
- */
+/* Sema checks what may be written to. */
 static void test_glsl_sema_checks_lvalues(void) {
     /* A plain local, a component, an indexed element: all writable. */
     ASSERT_TRUE(glsl_check_shader("void main(){ float a; a = 1.0; }") == NULL);
@@ -14709,9 +14120,7 @@ static void test_glsl_sema_checks_lvalues(void) {
     ASSERT_TRUE(glsl_check_shader("void main(){ float a; a += 1.0; ++a; a++; }") ==
                 NULL);
 
-    /* **A swizzle that repeats a component is not assignable** - two values, one place.
-     * This is the one an implementation that merely checks "is it a field selection"
-     * gets wrong. */
+    /* A swizzle that repeats a component is not assignable: two values, one place. */
     ASSERT_TRUE(glsl_check_shader("void main(){ vec3 v; v.xx = vec2(1.0); }") != NULL);
 
     /* A literal and a call result cannot be written to. */
@@ -14719,9 +14128,8 @@ static void test_glsl_sema_checks_lvalues(void) {
     ASSERT_TRUE(glsl_check_shader("void main(){ vec3(1.0) = vec3(2.0); }") != NULL);
     ASSERT_TRUE(glsl_check_shader("void main(){ float a; (a+1.0) = 2.0; }") != NULL);
 
-    /* **A uniform, an attribute and a const are read-only.** Syntactically an l-value,
-     * and not one semantically - which needs the storage qualifier, not the shape of
-     * the expression. */
+    /* A uniform, an attribute and a const are read-only, which takes the storage
+     * qualifier, not the shape of the expression. */
     ASSERT_TRUE(glsl_check_shader("uniform float u; void main(){ u = 1.0; }") != NULL);
     ASSERT_TRUE(glsl_check_shader("attribute vec3 p; void main(){ p = vec3(1.0); }") !=
                 NULL);
@@ -14738,8 +14146,9 @@ static void test_glsl_sema_checks_lvalues(void) {
     ASSERT_TRUE(glsl_check_shader("uniform float u; void main(){ ++u; }") != NULL);
 }
 
+/* Sema checks conditions, loop control, loop scopes and initialisers. */
 static void test_glsl_sema_checks_statements(void) {
-    /* **A condition must be a bool.** GLSL does not take "non-zero is true" from C. */
+    /* A condition must be a bool; GLSL does not take "non-zero is true" from C. */
     ASSERT_TRUE(glsl_check_shader("void main(){ if (true) ; }") == NULL);
     ASSERT_TRUE(glsl_check_shader("void main(){ int i; if (i) ; }") != NULL);
     ASSERT_TRUE(glsl_check_shader("void main(){ float f; while (f) ; }") != NULL);
@@ -14747,8 +14156,7 @@ static void test_glsl_sema_checks_statements(void) {
     ASSERT_TRUE(glsl_check_shader("void main(){ int i; for (i=0; i<3; ++i) ; }") ==
                 NULL);
 
-    /* **`break` and `continue` need a loop.** The parser cannot tell; it has no idea
-     * where it is. */
+    /* `break` and `continue` need a loop, which the parser cannot tell. */
     ASSERT_TRUE(glsl_check_shader("void main(){ break; }") != NULL);
     ASSERT_TRUE(glsl_check_shader("void main(){ continue; }") != NULL);
     ASSERT_TRUE(glsl_check_shader("void main(){ while (true) break; }") == NULL);
@@ -14764,7 +14172,7 @@ static void test_glsl_sema_checks_statements(void) {
     ASSERT_TRUE(glsl_check_shader("float f(){ return 1; }") !=
                 NULL); /* int is not float */
 
-    /* **A `for` init declares into the loop's own scope**, so two loops in a row do not
+    /* A `for` init declares into the loop's own scope, so two loops in a row do not
      * collide and `i` does not leak out. */
     ASSERT_TRUE(
         glsl_check_shader(
@@ -14773,10 +14181,8 @@ static void test_glsl_sema_checks_statements(void) {
     ASSERT_TRUE(glsl_check_shader("void main(){ for (int i=0; i<3; ++i) ; i = 1; }") !=
                 NULL);
 
-    /* **A declarator chain inside a block must not be spliced over.** `float a, b;` is
-     * two DECL nodes on the same `sibling` field the statement list uses, so a compound
-     * that assumes the node it just parsed is the last one overwrites the second
-     * declarator and `b` never exists. Only a *use* of `b` afterwards notices. */
+    /* A declarator chain inside a block is not spliced over: `float a, b;` is two DECL
+     * nodes on the `sibling` field the statement list uses. A use of `b` shows it. */
     ASSERT_TRUE(glsl_check_shader("void main(){ float a, b; b = 1.0; }") == NULL);
     ASSERT_TRUE(glsl_check_shader("void main(){ float a, b, c; c = 1.0; a = c; }") ==
                 NULL);
@@ -14786,7 +14192,7 @@ static void test_glsl_sema_checks_statements(void) {
     ASSERT_TRUE(glsl_check_shader("void main(){ { float a; } a = 1.0; }") != NULL);
     ASSERT_TRUE(glsl_check_shader("void main(){ float a; float a; }") != NULL);
 
-    /* An initialiser must match, and is typed *before* the name exists - so `float x =
+    /* An initialiser must match, and is typed before the name exists - so `float x =
      * x;` is an error rather than a variable initialised from itself. */
     ASSERT_TRUE(glsl_check_shader("void main(){ vec3 v = vec3(1.0); }") == NULL);
     ASSERT_TRUE(glsl_check_shader("void main(){ vec3 v = 1.0; }") != NULL);
@@ -14794,6 +14200,7 @@ static void test_glsl_sema_checks_statements(void) {
     ASSERT_TRUE(glsl_check_shader("void main(){ void v; }") != NULL);
 }
 
+/* Calls are checked against the recorded signature, in any definition order. */
 static void test_glsl_sema_checks_functions(void) {
     /* Arity and argument types against the recorded signature. */
     ASSERT_TRUE(
@@ -14812,9 +14219,8 @@ static void test_glsl_sema_checks_functions(void) {
             "float sq(float x){ return x*x; } void main(){ float a; a = sq(2); }") !=
         NULL);
 
-    /* **A function may be called before it is defined**, because every top-level name
-     * is declared in a first pass. Otherwise a shader would compile or not depending on
-     * the order somebody happened to write its functions in. */
+    /* A function may be called before it is defined, because every top-level name is
+     * declared in a first pass. */
     ASSERT_TRUE(glsl_check_shader("void main(){ float a; a = later(1.0); } float "
                                   "later(float x){ return x; }") == NULL);
 
@@ -14834,7 +14240,7 @@ static void test_glsl_sema_checks_functions(void) {
     ASSERT_TRUE(glsl_check_shader("void main(){ float a; a = a(1.0); }") != NULL);
 }
 
-/* The shader the parser test reads, now type-checked end to end. */
+/* The shader the parser test reads type-checks end to end. */
 static void test_glsl_sema_accepts_a_real_shader(void) {
     const char *err =
         glsl_check_shader("uniform mat4 mvp;\n"
@@ -14859,19 +14265,9 @@ static void test_glsl_sema_accepts_a_real_shader(void) {
  * The GLSL back end: RDNA2 instruction encoding
  * ------------------------------------------------------------------------- */
 
-/* **Every expected word here came out of a real assembler**, not out of my head:
- *
- *     clang -target amdgcn-amd-amdhsa -mcpu=gfx1030 -c tools/shader/gl2-transform.s -o
- * /tmp/t.o objdump -s -j .text /tmp/t.o
- *
- * That matters more than usual because a wrong instruction encoding **cannot fail
- * loudly**. It assembles into the payload, the hardware decodes it as some other
- * instruction, and the result is a wrong frame rather than a stopped build. Asserting
- * against words the encoder itself produced would prove only that it is consistent with
- * itself.
- *
- * The independent cross-check is `s_endpgm` = 0xbf810000: clang produces it, and it is
- * also the word every hand-written shader already in this repository ends with.
+/* The encoder emits the words the assembler produces for `tools/shader/gl2-transform.s`
+ * (`clang -target amdgcn-amd-amdhsa -mcpu=gfx1030`, then `objdump -s -j .text`).
+ * `s_endpgm` = 0xbf810000 also ends every hand-written shader in this repository.
  */
 static void test_glsl_emit_matches_the_assembler(void) {
     static uint32_t words[64];
@@ -14905,10 +14301,8 @@ static void test_glsl_emit_matches_the_assembler(void) {
     glsl_emit_add_f32(&c, 4, 8, 4);
     ASSERT_EQ(words[0], 0x06080908u);
 
-    /* **The two constant forms, which encode differently.** 1.0 is an inline constant
-     * and costs one word; anything else is src0 = 255 with a literal dword after it and
-     * costs two. Emitting a literal where an inline constant exists is a silent size
-     * regression in a shader whose budget is instruction count. */
+    /* The two constant forms: 1.0 is an inline constant and costs one word; anything
+     * else is src0 = 255 with a literal dword after it and costs two. */
     glsl_code_init(&c, words, 64);
     glsl_emit_mov_imm(&c, 12, 0x3f800000u); /* v_mov_b32 v12, 1.0 */
     ASSERT_EQ(c.count, 1u);
@@ -14925,9 +14319,8 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(c.count, 1u);
     ASSERT_EQ(words[0], 0x7e1e0280u);
 
-    /* **Subtraction, and its operand order.** VOP2 subtracts vsrc1 from src0, and
-     * opcode 5 is `v_subrev_f32` with the order reversed - so both a swapped operand
-     * and an off-by-one opcode produce the negation of the right answer, silently. */
+    /* Subtraction and its operand order: VOP2 subtracts vsrc1 from src0, and opcode 5
+     * is `v_subrev_f32` with the order reversed. */
     glsl_code_init(&c, words, 64);
     glsl_emit_sub_f32(&c, 4, 8, 9); /* v_sub_f32 v4, v8, v9 */
     ASSERT_EQ(c.count, 1u);
@@ -14950,18 +14343,15 @@ static void test_glsl_emit_matches_the_assembler(void) {
     glsl_emit_endpgm(&c);
     ASSERT_EQ(words[0], 0xbf810000u);
 
-    /* **A VGPR source is biased by 256.** Encoding the bare number names an SGPR
-     * instead, which is a shader that runs and computes rubbish rather than one that
-     * faults. */
+    /* A VGPR source is biased by 256; the bare number names an SGPR. */
     ASSERT_EQ(glsl_vgpr(0), 256u);
     ASSERT_EQ(glsl_vgpr(8), 264u);
     /* And an SGPR is its own number, at the bottom of the same nine-bit space. */
     ASSERT_EQ(glsl_sgpr(4), 4u);
 
-    /* **Scalar memory, which is how a uniform reaches a compiled shader.** All five
-     * widths, three destinations and three offsets: the width *is* the opcode and the
-     * five are consecutive, so one example would not have separated that field from
-     * anything beside it. Words from `tools/shader/gl2-fragment.s`. */
+    /* Scalar memory, how a uniform reaches a compiled shader. All five widths, three
+     * destinations and three offsets: the width is the opcode and the five are
+     * consecutive. Words from `tools/shader/gl2-fragment.s`. */
     glsl_code_init(&c, words, 64);
     glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORD, 4u, 0u, 0x0u);
     glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORD, 4u, 0u, 0x10u);
@@ -14973,9 +14363,8 @@ static void test_glsl_emit_matches_the_assembler(void) {
     glsl_emit_s_load(&c, GLSL_SMEM_LOAD_DWORDX16, 16u, 0u, 0x0u);
     glsl_emit_s_waitcnt_lgkm(&c);
     ASSERT_EQ(words[0], 0xf4000100u); /* s_load_dword s4, s[0:1], 0x0 */
-    ASSERT_EQ(words[1],
-              0xfa000000u); /* **soffset is SGPR_NULL and not s0**, which would be the
-                             * address's own low half added to itself */
+    ASSERT_EQ(words[1], 0xfa000000u); /* soffset is SGPR_NULL and not s0, which would be
+                                       * the address's own low half added to itself */
     ASSERT_EQ(words[2], 0xf4000100u);
     ASSERT_EQ(words[3],
               0xfa000010u); /* the offset, and only the offset, in the second dword */
@@ -14987,7 +14376,7 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(words[12], 0xf40c0300u); /* x8 into s[12:19] ... */
     ASSERT_EQ(words[13], 0xfa000020u); /* ... at +0x20 */
     ASSERT_EQ(words[14], 0xf4100400u); /* x16 */
-    /* **0xc07f, not zero**: the counters this does not wait on are held at their
+    /* 0xc07f, not zero: the counters this does not wait on are held at their
      * maximum, and a zero there would wait for every outstanding memory and export
      * operation as well. */
     ASSERT_EQ(words[16], 0xbf8cc07fu); /* s_waitcnt lgkmcnt(0) */
@@ -15002,9 +14391,8 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(words[1], 0x10080a04u); /* v_mul_f32_e32 v4, s4, v5 */
     ASSERT_EQ(words[2], 0x06080a0cu); /* v_add_f32_e32 v4, s12, v5 */
 
-    /* **Control flow, which on this machine is the exec mask and not a branch.** Two
-     * destinations for each form, because the register number sits in a different field
-     * in SOP1 than in SOP2 and one example would not have told them apart. */
+    /* Control flow through the exec mask. Two destinations for each form, because the
+     * register number sits in a different field in SOP1 than in SOP2. */
     glsl_code_init(&c, words, 64);
     glsl_emit_exec_save_and_vcc(&c, 4u);
     glsl_emit_exec_save_and_vcc(&c, 15u);
@@ -15017,7 +14405,7 @@ static void test_glsl_emit_matches_the_assembler(void) {
     glsl_emit_exec_clear(&c);
     ASSERT_EQ(words[0], 0xbe843c6au); /* s_and_saveexec_b32 s4, vcc_lo */
     ASSERT_EQ(words[1], 0xbe8f3c6au); /* s_and_saveexec_b32 s15, vcc_lo */
-    /* `s_andn2_b32 d, a, b` is `a & ~b`, so the **saved** mask is ssrc0 and the one to
+    /* `s_andn2_b32 d, a, b` is `a & ~b`, so the saved mask is ssrc0 and the one to
      * remove is ssrc1. The other way round computes lanes that were never running. */
     ASSERT_EQ(words[2], 0x8a7e7e04u); /* s_andn2_b32 exec_lo, s4, exec_lo */
     ASSERT_EQ(words[3], 0x8a7e7e0fu); /* s_andn2_b32 exec_lo, s15, exec_lo */
@@ -15029,7 +14417,7 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(words[7], 0xbefe030fu); /* s_mov_b32 exec_lo, s15 */
     ASSERT_EQ(words[8], 0xbefe0380u); /* s_mov_b32 exec_lo, 0 */
 
-    /* **The comparing sample**, which differs from the plain one in its opcode and its
+    /* The comparing sample, which differs from the plain one in its opcode and its
      * mask: a comparison returns one value where a texel returns four. Words from
      * `tools/shader/tex-shadow.s`, where `image_sample_c v4, v[16:18], s[4:11],
      * s[12:15] dmask:0x1 dim:SQ_RSRC_IMG_2D` assembles to 0xf0a00108 0x00610410 -
@@ -15040,25 +14428,19 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(words[0], 0xf0a00108u);
     ASSERT_EQ(words[1], 0x00610410u);
 
-    /* **The biased sample**, which differs from the plain one in its opcode alone - the
+    /* The biased sample, which differs from the plain one in its opcode alone: the
      * address run is one register longer but `vaddr` names only its first. clang 21 for
      * gfx1030 assembles `image_sample_b v[4:7], v[16:18], s[8:15], s[16:19] dmask:0xf
      * dim:SQ_RSRC_IMG_2D` to 0xf0940f08 0x00820410, against the plain sample's
-     * 0xf0800f08 with the same operands.
-     *
-     * Pinned here because an opcode is the one field where being wrong is silent: the
-     * instruction still assembles, still samples, and returns a texel from a level
-     * nobody asked for. */
+     * 0xf0800f08 with the same operands. */
     glsl_code_init(&c, words, 64);
     glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE_B, GLSL_IMG_DIM_2D, 4u, 16u, 8u, 16u);
     ASSERT_EQ(words[0], 0xf0940f08u);
     ASSERT_EQ(words[1], 0x00820410u);
 
-    /* **The cube face selection**, which is the only VOP3 this back end emits. Words
-     * from `tools/shader/tex-cube.s`, whose four instructions all take the same three
-     * sources - so the second dword is identical across them and the opcode is the
-     * whole difference, which is exactly the shape an off-by-one in the opcode table
-     * would hide in. */
+    /* The cube face selection, the only VOP3 this back end emits. Words from
+     * `tools/shader/tex-cube.s`, whose four instructions take the same three sources,
+     * so the opcode is the whole difference. */
     glsl_code_init(&c, words, 64);
     glsl_emit_vop3(&c, GLSL_VOP3_CUBEID_F32, 19u, GLSL_VOP3_VGPR(16u),
                    GLSL_VOP3_VGPR(17u), GLSL_VOP3_VGPR(18u));
@@ -15078,15 +14460,9 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(words[6], 0xd5470016u); /* v_cubema_f32 v22, ... */
     ASSERT_EQ(words[7], 0x044a2310u);
 
-    /* **Branches, which only a loop needs.** The layout below is
-     * `tools/shader/branch.s` instruction for instruction, so every word here is one
-     * clang produced rather than one this encoder and this test agree about.
-     *
-     * The offsets are the point. `simm16` counts from the word *after* the branch, so
-     * the jump back over a single instruction is -2 and not -1, and the three forward
-     * jumps to the same label are +4, +3 and +2 rather than all the same. An encoder
-     * off by one here emits a loop that re-enters itself one instruction in - which
-     * does not draw wrongly, it hangs. */
+    /* Branches, laid out as `tools/shader/branch.s` instruction for instruction.
+     * `simm16` counts from the word after the branch, so the jump back over one
+     * instruction is -2, and the three forward jumps to one label are +4, +3 and +2. */
     glsl_code_init(&c, words, 64);
     {
         const uint32_t loop_top = glsl_code_here(&c);
@@ -15113,10 +14489,8 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(words[3], 0xbf850003u); /* s_cbranch_scc1 loop_exit */
     ASSERT_EQ(words[4], 0xbf820002u); /* s_branch loop_exit */
 
-    /* **The trip guard**, which is what makes a real backward branch safe to emit at
-     * all: a counter in an SGPR that ends the loop whatever the lanes are doing. A GLSL
-     * condition that never goes false is a bug in the shader; without this it is a
-     * wedged GPU. */
+    /* The trip guard: a counter in an SGPR that ends the loop whatever the lanes are
+     * doing, so a condition that never goes false cannot wedge the GPU. */
     glsl_code_init(&c, words, 64);
     glsl_emit_sop1(&c, GLSL_SOP1_MOV_B32, 20u,
                    128u); /* 128 is the scalar inline constant 0 */
@@ -15131,7 +14505,7 @@ static void test_glsl_emit_matches_the_assembler(void) {
     /* Both sides of the scalar inline boundary. 0..64 encode as operands 128..192; 65
      * does not exist in that table and has to spill to a literal. Taking the inline
      * path for 65 would compare the counter against operand 193, which is the inline
-     * constant **-4.0**. */
+     * constant -4.0. */
     glsl_code_init(&c, words, 64);
     glsl_emit_s_cmp_ge_u32_imm(&c, 20u, 64u);
     glsl_emit_s_cmp_ge_u32_imm(&c, 20u, 65u);
@@ -15140,12 +14514,8 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(words[2], 0x00000041u);
     ASSERT_EQ(glsl_code_here(&c), 3u);
 
-    /* **A patch into an overflowed buffer reports rather than lies.** `count` stopped
-     * advancing at the capacity, so the distance from the branch to "here" is not the
-     * distance the hardware would see; filling it in anyway would produce a stream that
-     * branches into the middle of something. The caller has a failed compile by this
-     * point either way - this is what stops it being a failed compile that also emits a
-     * plausible jump. */
+    /* A patch into an overflowed buffer reports failure: `count` stopped advancing at
+     * the capacity, so the distance to "here" is not what the hardware would see. */
     glsl_code_init(&c, words, 4);
     {
         const uint32_t fix = glsl_emit_branch_fwd(&c, GLSL_SOPP_BRANCH);
@@ -15159,10 +14529,9 @@ static void test_glsl_emit_matches_the_assembler(void) {
                   0xbf820000u); /* left as emitted, not patched to a wrong offset */
     }
 
-    /* **Sampling a texture.** Two destinations, two coordinate pairs, two descriptor
-     * sets and all four dimensions, because each of those is its own field and one
-     * example would not have told them apart. Words from `tools/shader/gl2-fragment.s`.
-     */
+    /* Sampling a texture: two destinations, two coordinate pairs, two descriptor sets
+     * and all four dimensions, each its own field. Words from
+     * `tools/shader/gl2-fragment.s`. */
     glsl_code_init(&c, words, 64);
     glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_2D, 4u, 2u, 4u, 12u);
     glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE, GLSL_IMG_DIM_2D, 8u, 4u, 4u, 12u);
@@ -15172,9 +14541,7 @@ static void test_glsl_emit_matches_the_assembler(void) {
               0xf0800f08u); /* image_sample v[4:7], v[2:3], s[4:11], s[12:15] */
     ASSERT_EQ(words[1], 0x00610402u);
     ASSERT_EQ(words[3], 0x00610804u); /* v[8:11], v[4:5] */
-    /* **The descriptor operands are SGPR numbers over four**, so s16/s24 encode as 4
-     * and 6. A register number written in straight names a descriptor four times
-     * further up the file. */
+    /* The descriptor operands are SGPR numbers over four: s16/s24 encode as 4 and 6. */
     ASSERT_EQ(words[5], 0x00c40804u); /* s[16:23], s[24:27] */
     ASSERT_EQ(words[7], 0x00610c14u); /* v[12:15], v[20:21] */
 
@@ -15188,10 +14555,9 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(words[0], 0xf0800f00u); /* dim 1D */
     ASSERT_EQ(words[2], 0xf0800f10u); /* dim 3D */
     ASSERT_EQ(words[4], 0xf0800f18u); /* dim CUBE */
-    /* **The cross-check for this whole family.** `tex-prolog.s` records the sample the
-     * textured pixel shader used to carry as `0xf09c0f08 0x00610402`, and the wait
-     * after it as `0xbf8c3f70` - both from a different assembly run, years of this
-     * file's history apart. */
+    /* A cross-check from a separate assembly: `tex-prolog.s` records a textured pixel
+     * shader's sample as `0xf09c0f08 0x00610402` and the wait after it as
+     * `0xbf8c3f70`. */
     glsl_code_init(&c, words, 64);
     glsl_emit_image_sample(&c, GLSL_MIMG_SAMPLE_LZ, GLSL_IMG_DIM_2D, 4u, 2u, 4u, 12u);
     glsl_emit_s_waitcnt_vm(&c);
@@ -15207,16 +14573,15 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(words[1], 0xbe9c037eu); /* s_mov_b32 s28, exec_lo */
     ASSERT_EQ(words[2], 0xbea8037eu); /* s_mov_b32 s40, exec_lo */
 
-    /* **The cross-check that the SOP2 fields are right rather than merely
-     * self-consistent**: this exact word is already in the tree behind glAlphaFunc and
-     * the polygon stipple, and it comes out of the same encoder as the four above. */
+    /* A cross-check of the SOP2 fields: this word is also in the tree behind
+     * glAlphaFunc and the polygon stipple. */
     glsl_code_init(&c, words, 64);
     glsl_emit_sop2(&c, GLSL_SOP2_AND_B32, GLSL_SREG_EXEC_LO, GLSL_SREG_EXEC_LO,
                    GLSL_SREG_VCC_LO);
     ASSERT_EQ(words[0], 0x877e6a7eu); /* s_and_b32 exec_lo, exec_lo, vcc_lo */
 
-    /* **Overflow is recorded, not wrapped.** A truncated shader is a valid instruction
-     * stream that stops in the middle, which the GPU will happily execute. */
+    /* Overflow is recorded, not wrapped: a truncated shader is a valid instruction
+     * stream the GPU would execute. */
     static uint32_t tiny[2];
     glsl_code_init(&c, tiny, 2);
     glsl_emit_mov(&c, 1, 2);
@@ -15227,15 +14592,8 @@ static void test_glsl_emit_matches_the_assembler(void) {
     ASSERT_EQ(c.count, 2u); /* nothing written past the end */
 }
 
-/* `mat4 * vec4` - what a vertex shader is mostly made of, and where column-major
- * matters.
- *
- * GL lays a matrix out as four columns end to end, so the product is
- * `col0*v.x + col1*v.y + col2*v.z + col3*v.w`. Treating the block as rows transposes
- * it, and
- * **a transposed model-view matrix still draws a cube** - just the wrong way round,
- * which is a bug that survives a screenshot. So the test reads the register numbers
- * back out of the encoded words rather than trusting the shape.
+/* `mat4 * vec4` is column-major: `col0*v.x + col1*v.y + col2*v.z + col3*v.w`, checked
+ * by reading the register numbers back out of the encoded words.
  */
 static void test_glsl_emit_mat4_is_column_major(void) {
     static uint32_t words[64];
@@ -15254,7 +14612,7 @@ static void test_glsl_emit_mat4_is_column_major(void) {
 #define SRC0(w) ((w) & 0x1ffu)
 
     /* The first four are multiplies against v.x, and their matrix operands must be the
-     * *first column* - v8, v9, v10, v11 - not the first row, which would be v8, v12,
+     * first column - v8, v9, v10, v11 - not the first row, which would be v8, v12,
      * v16, v20. */
     for (uint32_t row = 0; row < 4u; row++) {
         ASSERT_EQ(OPC(words[row]), GLSL_VOP2_MUL_F32);
@@ -15273,9 +14631,7 @@ static void test_glsl_emit_mat4_is_column_major(void) {
         ASSERT_EQ(SRC1(w), 5u); /* v.y */
     }
 
-    /* And the last column against v.w, which is the one an implementation that stopped
-     * at three columns would leave out - the translation, so the cube would be at the
-     * origin. */
+    /* The last column, the translation, against v.w. */
     for (uint32_t row = 0; row < 4u; row++) {
         const uint32_t w = words[12u + row];
         ASSERT_EQ(OPC(w), GLSL_VOP2_FMAC_F32);
@@ -15290,35 +14646,13 @@ static void test_glsl_emit_mat4_is_column_major(void) {
 }
 
 /*
- * **A title holding GL in function pointers gets them from here, and a NULL is a jump
- * to zero.**
- *
- * `oops_gl_get_proc_address` answered NULL for everything until 2026-09-22, on the
- * reasoning that a statically linked payload has every entry point already bound.
- * Neverball showed what that misses: its `share/glext.c` fills `glGenBuffers_` from the
- * *string* `"glGenBuffersARB"`, so the linker never saw the name and had nothing to
- * bind. The pointer stayed NULL, the first mesh it loaded called through it, and the
- * console faulted at `rip = 0` inside `sol_load_full`.
- *
- * These are the names Neverball actually asks for, which is why they are named one at a
- * time rather than swept: the resolution of one of them is the difference between a
- * port that runs and a port that faults, and a sweep would not say which.
+ * `oops_gl_get_proc_address` resolves entry points by name. A title that fills function
+ * pointers from strings such as `"glGenBuffersARB"` calls address zero on a NULL.
  */
 static void test_gl_proc_address_resolves_entry_points_by_name(void) {
-    /*
-     * **Every name in the list, checked against the function it names.** The test walks
-     * `OOPS_GL_PROC_LIST` rather than a copy of it, so the two cannot disagree: a row
-     * added to the table is a row checked here, and a row whose spelling is wrong does
-     * not compile in either place. What it cannot catch is an extension added to `gl.h`
-     * and never added to the list - that is the one thing the list asks a person to
-     * remember.
-     *
-     * This is worth more than it looks. The resolution of any single one of these is
-     * the difference between a port that runs and a port that faults at `rip = 0`,
-     * which is how Neverball failed twice: once because this answered NULL for
-     * everything by design, and once because the answer came from a symbol table the
-     * console does not map.
-     */
+    /* Every name in `OOPS_GL_PROC_LIST` resolves to the function it names. The test
+     * walks the list itself, so a row added is a row checked; an extension added to
+     * `gl.h` but not to the list is not caught. */
 #define CHECK_CORE(fn) ASSERT_EQ(oops_gl_get_proc_address(#fn), (void *)fn);
 #define CHECK_SUFFIXED(fn, s)                                                          \
     ASSERT_EQ(oops_gl_get_proc_address(#fn #s), (void *)fn##s);
@@ -15333,9 +14667,8 @@ static void test_gl_proc_address_resolves_entry_points_by_name(void) {
     ASSERT_EQ(oops_gl_get_proc_address("glGenBuffersARB"), (void *)glGenBuffersARB);
     ASSERT_EQ(oops_gl_get_proc_address("glGenBuffers"), (void *)glGenBuffers);
 
-    /* A GL name this GL does not have is NULL, which is what a program probing for an
-     * extension it can do without is asking; Neverball asks for these two and takes no
-     * for an answer. */
+    /* A GL name this GL does not have is NULL, the answer a program probing for an
+     * optional extension expects. */
     ASSERT_EQ(oops_gl_get_proc_address("glCreateShaderObjectARB"), NULL);
     ASSERT_EQ(oops_gl_get_proc_address("glStringMarkerGREMEDY"), NULL);
 
@@ -15349,12 +14682,8 @@ static void test_gl_proc_address_resolves_entry_points_by_name(void) {
 }
 
 /*
- * `CB_BLEND0_CONTROL`, which the hardware path used to write as a constant.
- *
- * The constant was `0x00002504`. Its two colour factors were right - 4 and 5, GL's
- * default `SRC_ALPHA` / `ONE_MINUS_SRC_ALPHA` - and **`ENABLE`, bit 30, was clear**, so
- * the colour block was handed the right factors and never told to blend. It also set
- * bit 13, where the register has no field. Field positions and both enums are from
+ * `CB_BLEND0_CONTROL` carries the GL blend state: the enable (bit 30), both factors and
+ * the equation. Field positions and enums are from
  * `oops-mesa/mesa/src/amd/registers/gfx103.json` and its `gfx10.json` base.
  */
 static void test_gl_blend_control_carries_the_gl_state(void) {
@@ -15370,13 +14699,11 @@ static void test_gl_blend_control_carries_the_gl_state(void) {
 #define BDST(v) (((v) >> 8) & 0x1fu)
 #define BEN(v) (((v) >> 30) & 0x1u)
 
-    /* Disabled is zero, which is also what it was before. */
+    /* Disabled is zero. */
     glDisable(GL_BLEND);
     ASSERT_EQ(gl_compute_cb_blend_control(c), 0u);
 
-    /* **Enabled must actually set ENABLE.** This is the whole bug: the old constant did
-     * not, so nothing the rest of this test checks would have reached the colour block
-     * anyway. */
+    /* Enabled sets ENABLE; without it no other field reaches the colour block. */
     glEnable(GL_BLEND);
     uint32_t v = gl_compute_cb_blend_control(c);
     ASSERT_EQ(BEN(v), 1u);
@@ -15385,13 +14712,12 @@ static void test_gl_blend_control_carries_the_gl_state(void) {
     ASSERT_EQ((v >> 13) & 0x7u, 0u);
 
     /* The default factors are GL's own, GL_ONE and GL_ZERO (Mesa
-     * main/blend.c:1148-1151). This used to assert SRC_ALPHA / ONE_MINUS_SRC_ALPHA,
-     * which was oops-gl's default and nobody else's. */
+     * main/blend.c:1148-1151). */
     ASSERT_EQ(BSRC(v), 1u);  /* BLEND_ONE */
     ASSERT_EQ(BDST(v), 0u);  /* BLEND_ZERO */
     ASSERT_EQ(BCOMB(v), 0u); /* COMB_DST_PLUS_SRC, GL_FUNC_ADD */
 
-    /* The pair the old constant carried still decodes to what it had right. */
+    /* SRC_ALPHA / ONE_MINUS_SRC_ALPHA encode as 4 and 5. */
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     v = gl_compute_cb_blend_control(c);
     ASSERT_EQ(BSRC(v), 4u); /* BLEND_SRC_ALPHA */
@@ -15408,7 +14734,7 @@ static void test_gl_blend_control_carries_the_gl_state(void) {
     ASSERT_EQ(BSRC(v), 8u); /* BLEND_DST_COLOR */
     ASSERT_EQ(BDST(v), 7u); /* BLEND_ONE_MINUS_DST_ALPHA */
 
-    /* **The two subtractions are different registers values and not interchangeable.**
+    /* The two subtractions are different register values.
      * GL's FUNC_SUBTRACT is src - dst (COMB_SRC_MINUS_DST, 1); REVERSE_SUBTRACT is dst
      * - src (COMB_DST_MINUS_SRC, 4). Swapping them negates every blended pixel. */
     glBlendEquation(GL_FUNC_SUBTRACT);
@@ -15449,8 +14775,8 @@ static uint32_t g_gen_words[256];
 static glsl_code_t g_gen_code;
 
 /*
- * Parses `expr`, types it, and generates it - with the fixture names given **fixed
- * register homes in a fixed order**, so every expected register number below is
+ * Parses `expr`, types it, and generates it - with the fixture names given fixed
+ * register homes in a fixed order, so every expected register number below is
  * arithmetic rather than a guess: f at v0, v3 at v1..v3, v4 at v4..v7, m4 at v8..v23.
  * Temporaries therefore start at v24.
  */
@@ -15480,12 +14806,10 @@ static glsl_value_t glsl_gen_of(const char *expr) {
     return glsl_gen_expression(&g_glsl_gen, root);
 }
 
-/* **The shapes an operator turns into, and the ones it must refuse.** */
+/* Each arithmetic operator selects the instruction shape its operand types need. */
 static void test_glsl_gen_selects_arithmetic(void) {
     /* A scalar against a vector broadcasts: three multiplies, all reading the same
-     * scalar register, each writing its own component. A generator that indexed the
-     * scalar too would read v0, v1, v2 - which are the scalar and then two components
-     * of an unrelated variable. */
+     * scalar register, each writing its own component. */
     glsl_value_t r = glsl_gen_of("v3*f");
     ASSERT_TRUE(g_glsl_gen.error == NULL);
     ASSERT_EQ(r.count, 3);
@@ -15497,7 +14821,7 @@ static void test_glsl_gen_selects_arithmetic(void) {
         ASSERT_EQ(GSRC1(g_gen_words[i]), 0u); /* f, the same register each time */
     }
 
-    /* The same the other way round, which is the same meaning and **not** the same
+    /* The same the other way round, which is the same meaning and not the same
      * encoding: VOP2 has one biased source and one bare one, so the operands are not
      * interchangeable. */
     r = glsl_gen_of("f*v3");
@@ -15523,9 +14847,7 @@ static void test_glsl_gen_selects_arithmetic(void) {
     ASSERT_EQ(GOPC(g_gen_words[0]), GLSL_VOP2_SUB_F32);
     ASSERT_EQ(GSRC0(g_gen_words[0]), 128u); /* the inline zero, not a register */
 
-    /* `mat4 * vec4` is a transform, not sixteen component-wise multiplies - and the
-     * widths do not match, so the component-wise reading is not merely unsupported, it
-     * is wrong. */
+    /* `mat4 * vec4` is a transform, not sixteen component-wise multiplies. */
     r = glsl_gen_of("m4*v4");
     ASSERT_TRUE(g_glsl_gen.error == NULL);
     ASSERT_EQ(r.count, 4);
@@ -15569,10 +14891,8 @@ static void test_glsl_gen_selects_swizzles_and_constructors(void) {
     ASSERT_EQ(r.count, 4);
     ASSERT_EQ(g_gen_code.count, 5u); /* the literal, then four broadcasts */
 
-    /* ...but **fills a matrix's diagonal**, which is a different rule. `mat4(1.0)` is
-     * the identity, not a matrix of ones - and a matrix of ones transforms every vertex
-     * to the same point, which is a black screen on hardware and nothing at all on the
-     * host. */
+    /* A scalar fills a matrix's diagonal: `mat4(1.0)` is the identity, not a matrix of
+     * ones. */
     r = glsl_gen_of("mat4(1.0)");
     ASSERT_TRUE(g_glsl_gen.error == NULL);
     ASSERT_EQ(r.count, 16);
@@ -15587,65 +14907,49 @@ static void test_glsl_gen_selects_swizzles_and_constructors(void) {
 }
 
 /*
- * **What it refuses, which is the part that keeps it honest.**
- *
- * Every one of these parses and type-checks. A generator that emitted *something* for
- * them would produce a shader that runs and computes the wrong thing, on hardware, with
- * nothing on the host to show for it. Refusing is not a gap to be filled in later so
- * much as the behaviour: an instruction whose encoding has not been read out of an
- * assembler does not get guessed.
+ * The generator refuses what it cannot encode, though each case parses and type-checks:
+ * an instruction whose encoding has not been read out of an assembler is not guessed.
  */
 static void test_glsl_gen_refuses_what_it_cannot_encode(void) {
     /* Integer arithmetic through the float instructions would be silently wrong. */
     glsl_gen_of("iv3+iv3");
     ASSERT_TRUE(g_glsl_gen.error != NULL);
 
-    /* An **ordering** comparison of two vectors: GLSL spells that `lessThan`, and the
+    /* An ordering comparison of two vectors: GLSL spells that `lessThan`, and the
      * answer is a bvec, which is a per-component bool and not the single one this has a
      * register shape for. */
     glsl_gen_of("v3<v3");
     ASSERT_TRUE(g_glsl_gen.error != NULL);
 
-    /* **A matrix with a vector that is not its width.** `m4 * v4` is a product and `m4
-     * * f` is a broadcast; `m4 * v3` is neither, and treating it as componentwise would
-     * compute something that is not a product at all rather than say so. `m4 * m4` is
-     * generated now - n of the matrix-vector products, one per column. */
+    /* A matrix with a vector that is not its width: `m4 * v3` is neither a product nor
+     * a broadcast. `m4 * m4` is generated as one matrix-vector product per column. */
     glsl_gen_of("m4*m4");
     ASSERT_TRUE(g_glsl_gen.error == NULL);
     glsl_gen_of("m4*v3");
     ASSERT_TRUE(g_glsl_gen.error != NULL);
 
-    /* **`atan` is generated now, and the reason is whose polynomial it is.** There is
-     * still no instruction for it; what changed is that the coefficients are not
-     * somebody's choice made here but the ones `oops_atan2f` already ships, which is
-     * what the software rasteriser answers every `atan` in this SDK through. The two
-     * paths compute one function rather than two that agree - see the lowering in
-     * `glsl_gen.c`. */
+    /* `atan` is generated with the coefficients `oops_atan2f` ships, so both paths
+     * compute one function (see the lowering in `glsl_gen.c`). */
     glsl_gen_of("atan(f)");
     ASSERT_TRUE(g_glsl_gen.error == NULL);
     glsl_gen_of("asin(f)");
     ASSERT_TRUE(g_glsl_gen.error == NULL);
 
-    /* A texture lookup needs descriptors handed to the shader, which the compiled path
-     * has not wired up. Refused on the name before the arguments are looked at, which
-     * is why this needs no sampler in the fixture. */
+    /* A texture lookup needs descriptors handed to the shader, which this path does not
+     * take. Refused on the name before the arguments, so the fixture needs no sampler.
+     */
     glsl_gen_of("texture2D(v3, v3)");
     ASSERT_TRUE(g_glsl_gen.error != NULL);
 
-    /* There is still no call mechanism, so a user-defined function is refused rather
-     * than quietly inlined - and the message says so rather than naming a built-in. */
+    /* With no call mechanism a user-defined function is refused rather than inlined,
+     * and the message says so rather than naming a built-in. */
     glsl_gen_of("notAFunction(f)");
     ASSERT_TRUE(g_glsl_gen.error != NULL);
 }
 
 /*
- * **What it now generates that it used to refuse**, each with the reason the refusal
- * lifted.
- *
- * A refusal is evidence of discipline only while the thing is genuinely unencodable;
- * once the opcode is pinned, leaving the refusal in place is just a shader that will
- * not compile. These are the four that moved, and the test is here so the boundary
- * between the two lists is written down rather than remembered.
+ * The generator selects swizzle writes, compound assignments, comparisons and boolean
+ * operators, whose opcodes are pinned.
  */
 static void test_glsl_gen_selects_what_the_opcodes_now_allow(void) {
     /* `/` is `v_rcp_f32` and `v_mul_f32`, both in `tools/shader/gl2-fragment.s`. */
@@ -15661,12 +14965,12 @@ static void test_glsl_gen_selects_what_the_opcodes_now_allow(void) {
     glsl_gen_of("v4.xy = v4.zw");
     ASSERT_TRUE(g_glsl_gen.error == NULL);
 
-    /* And a compound assignment is one instruction a component, the destination being
+    /* A compound assignment is one instruction a component, the destination being
      * its own first operand. */
     glsl_gen_of("v3 *= f");
     ASSERT_TRUE(g_glsl_gen.error == NULL);
 
-    /* **A bool is a float that is 0.0 or 1.0**, so a comparison is `v_cmp` into `vcc`
+    /* A bool is a float that is 0.0 or 1.0, so a comparison is `v_cmp` into `vcc`
      * and a `v_cndmask` straight back out of it - and `&&`, `||` and `!` are then
      * `min`, `max` and `1 - x` with no comparison at all. */
     glsl_gen_of("f<f");
@@ -15680,7 +14984,7 @@ static void test_glsl_gen_selects_what_the_opcodes_now_allow(void) {
     glsl_gen_of("f<f ? v3 : v3");
     ASSERT_TRUE(g_glsl_gen.error == NULL);
 
-    /* **`min` is only the same as `&&` while the right side does nothing.** When it
+    /* `min` is only the same as `&&` while the right side does nothing. When it
      * assigns, the right side runs under a narrowed `exec` instead - the lanes the left
      * operand has not already decided for - and the difference is visible in the words:
      * a `s_and_saveexec_b32` appears where the pure form has none. */
@@ -15753,20 +15057,9 @@ static void test_glsl_gen_allocates_registers_for_statements(void) {
 #undef GSRC0
 #undef GV1OP
 
-/* **The eight descriptor words had no test at all.** They are what the sampler is told
- * about a texture - where it starts, how wide it is, how far apart its rows are - and
- * every one of them is arithmetic that runs identically on a host. Until now the only
- * way to find out what a texture's descriptor came out as was to put a build on the
- * console and read a log, which is both slow and only available when the console is.
- *
- * The widths are the ones a real port produces: 97 of Neverball's 292 images have a
- * width that is not a multiple of 64, and its `back/` strips - the ones that draw the
- * corrupted background - are 4 and 16 pixels wide. 64 is here as the control, being the
- * width at which the custom pitch is supposed to go quiet.
- *
- * The field encodings are checked against Mesa's, which is the reference implementation
- * for this silicon: WIDTH_LO is two bits at bit 30 of word 1 and WIDTH_HI fourteen at
- * bit 0 of word 2
+/* A texture's eight descriptor words describe its image: base, size and row pitch, for
+ * widths that are and are not multiples of 64. Fields follow Mesa: WIDTH_LO is two bits
+ * at bit 30 of word 1 and WIDTH_HI fourteen at bit 0 of word 2
  * (`S_00A004_WIDTH_LO`/`S_00A008_WIDTH_HI`, ac_descriptors.c:519-522), and the custom
  * pitch is `DEPTH(pitch - 1) | PITCH_MSB((pitch - 1) >> 13)`
  * (`ac_set_mutable_tex_desc_fields`, :707-712). */
@@ -15819,8 +15112,7 @@ static void test_gl_texture_descriptor_describes_the_image_it_was_given(void) {
         ASSERT_EQ(got_h, (uint32_t)h);
 
         /* WORD5 PERF_MOD, which Mesa writes as 4 for every gfx10 texture it builds
-         * (`S_00A014_PERF_MOD(4)`, ac_descriptors.c:543) and this wrote as 0 until the
-         * comparison was made. */
+         * (`S_00A014_PERF_MOD(4)`, ac_descriptors.c:543). */
         ASSERT_EQ((stored->img_desc[5] >> 20) & 7u, 4u);
 
         /* WORD4. Inert when the rows are exactly as wide as the image, the pitch
@@ -15832,10 +15124,7 @@ static void test_gl_texture_descriptor_describes_the_image_it_was_given(void) {
             ASSERT_EQ(stored->img_desc[4], 0u);
         }
 
-        /* And the bytes are where the descriptor says they are - row y at `pitch`
-         * texels, not `w`. A texture whose rows were written at width stride while the
-         * sampler reads them at pitch stride is exactly the skewed, banded surface a
-         * wrong pitch draws. */
+        /* The bytes are where the descriptor says: row y at `pitch` texels, not `w`. */
         const GLubyte *p = (const GLubyte *)stored->pixels;
         for (GLsizei y = 0; y < h; y++) {
             const GLubyte *row = p + ((size_t)y * (size_t)stored->pitch) * 4u;
@@ -15855,12 +15144,8 @@ static void test_gl_texture_descriptor_describes_the_image_it_was_given(void) {
     oops_display_close(disp);
 }
 
-/* **A three-byte source read as four is a colour cast, not a crash.** Neverball's level
- * art arrives as PNGs, many of them 24-bit, while its text arrives from the font
- * rasteriser as RGBA - so a GL_RGB expansion that lost a byte somewhere would corrupt
- * exactly the textures that look wrong on the console and spare exactly the one that
- * looks right. That is a specific enough story to be worth refuting rather than
- * believing, and it refutes on a host. */
+/* A GL_RGB upload expands each three-byte texel to opaque RGBA without losing or
+ * shifting a byte. */
 static void test_gl_rgb_upload_expands_to_opaque_rgba(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 320, 240);
     void *ctx_handle = glContextCreate(disp);
@@ -15885,8 +15170,8 @@ static void test_gl_rgb_upload_expands_to_opaque_rgba(void) {
         ASSERT_EQ(p[i * 4 + 0], rgb[i * 3 + 0]);
         ASSERT_EQ(p[i * 4 + 1], rgb[i * 3 + 1]);
         ASSERT_EQ(p[i * 4 + 2], rgb[i * 3 + 2]);
-        /* Alpha is 1 for a base format with no alpha of its own (GL 2.1, table 3.15). A
-         * zero here is an invisible texture under GL_MODULATE with blending on. */
+        /* Alpha is 1 for a base format with no alpha of its own (GL 2.1, table 3.15).
+         */
         ASSERT_EQ(p[i * 4 + 3], 255);
     }
 

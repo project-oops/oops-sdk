@@ -1,7 +1,9 @@
 /*
- * Freestanding Syscall Trampoline Implementation.
+ * Freestanding syscall trampoline.
  *
- * Calls syscall instruction inside libkernel text segment.
+ * `sys_call` calls the `syscall` instruction inside libkernel's `getpid` stub, found
+ * through the payload arguments when they are valid and at a fixed address otherwise.
+ * A set carry flag turns the result into a negative errno.
  */
 
 #include "oops/syscall.h"
@@ -54,8 +56,8 @@ int sys_call_init(const payload_args_t *args) {
 #endif
     }
 
-    /* Callable check: a title loader hands off a struct where offset 0 is 0x2 (D324).
-     * Refuse anything that is not a canonical callable address. */
+    /* Callable check: a title entry hands off a struct where offset 0 is 0x2
+     * (obscene#D324). Refuse anything that is not a canonical callable address. */
     unsigned long dlsym_addr = (unsigned long)args->sys_dynlib_dlsym;
     if (dlsym_addr < 0x10000UL || dlsym_addr >= 0x0000800000000000UL) {
 #ifndef OOPS_HOST_BUILD

@@ -3,19 +3,11 @@
  *
  * Turns GLSL 1.10 source into tokens. It owns no memory - every token points into the
  * source the caller supplied - and it never stops: an error is a token, so a compiler
- * built on this can report several problems in one pass instead of the first one and
- * nothing else.
+ * built on this can report several problems in one pass.
  *
- * # Two things a hand-written lexer usually gets wrong
- *
- * **Maximal munch.** `>=` is one token and not `>` followed by `=`; `++` is not `+ +`.
- * Every operator that is a prefix of a longer one has to test for the longer one first,
- * which is why the operator switch below looks repetitive rather than clever.
- *
- * **Keyword matching is exact.** `float` is a keyword and `floatx` is an identifier.
- * Matching by prefix would make the second one lex as a keyword followed by an
- * identifier, and the resulting syntax error would point at the wrong thing entirely.
- * The identifier is scanned to its full length first and *then* compared, whole.
+ * Operators use maximal munch: `>=` is one token, not `>` then `=`. Keywords match
+ * whole words: an identifier is scanned to its full length and then compared, so
+ * `floatx` is an identifier and not `float` followed by `x`.
  */
 
 #include "glsl_internal.h"
@@ -48,12 +40,9 @@ static char peek(const glsl_lexer_t *lx, size_t ahead) {
     return at < lx->length ? lx->src[at] : '\0';
 }
 
-/* One character forward, keeping the line and column honest.
- *
- * **A newline is counted here and nowhere else.** Comments and whitespace advance
- * through this same function precisely so that a diagnostic after a twenty-line block
- * comment still names the right line - tracking lines only in the token scanner is how
- * that goes wrong. */
+/* One character forward, keeping the line and column. A newline is counted here and
+ * nowhere else; comments and whitespace advance through this same function, so a
+ * diagnostic after a block comment names the right line. */
 static char advance(glsl_lexer_t *lx) {
     if (lx->pos >= lx->length)
         return '\0';
@@ -82,16 +71,10 @@ static const char *skip_trivia(glsl_lexer_t *lx) {
             advance(lx); /* '*' */
             for (;;) {
                 if (lx->pos >= lx->length) {
-                    /* **This is the loop's only exit when the comment never closes**,
-                     * as well as the diagnostic. `advance` returns '\0' without moving
-                     * once the source is exhausted, so without this test the scan spins
-                     * forever rather than reaching the end - removing it hangs the
-                     * build rather than failing it.
-                     *
-                     * The diagnostic matters too: an unterminated comment otherwise
-                     * swallows the rest of the program, and the error a parser reports
-                     * is "unexpected end of input" pointing at the last line rather
-                     * than at the comment that ate it. */
+                    /* The loop's only exit when the comment never closes: `advance`
+                     * does not move once the source is exhausted, so without this test
+                     * the scan spins forever. The diagnostic names the comment rather
+                     * than the end of input. */
                     return "unterminated block comment";
                 }
                 if (peek(lx, 0) == '*' && peek(lx, 1) == '/') {
@@ -159,10 +142,9 @@ static glsl_token_type_t keyword_of(const char *text, size_t n) {
         {"mat2", GLSL_TOK_KW_MAT2},
         {"mat3", GLSL_TOK_KW_MAT3},
         {"mat4", GLSL_TOK_KW_MAT4},
-        /* **1.20's non-square matrices, and the long spellings of the square ones.**
-         * `mat2x2` is `mat2` - the same type under a second name the language also
-         * gives it - so it lexes to the same token rather than to one of its own. The
-         * parser then has one case per type and not one per spelling. */
+        /* 1.20's non-square matrices, and the long spellings of the square ones.
+         * `mat2x2` is the same type as `mat2`, so it lexes to the same token and the
+         * parser has one case per type rather than one per spelling. */
         {"mat2x2", GLSL_TOK_KW_MAT2},
         {"mat3x3", GLSL_TOK_KW_MAT3},
         {"mat4x4", GLSL_TOK_KW_MAT4},
@@ -178,14 +160,9 @@ static glsl_token_type_t keyword_of(const char *text, size_t n) {
         {"samplerCube", GLSL_TOK_KW_SAMPLERCUBE},
         {"sampler1DShadow", GLSL_TOK_KW_SAMPLER1DSHADOW},
         {"sampler2DShadow", GLSL_TOK_KW_SAMPLER2DSHADOW},
-        /* **GLSL 1.20's two new qualifiers**, recognised whatever the shader's version.
-         *
-         * They are not 1.10 keywords, so a 1.10 shader could in principle use one as a
-         * variable name - and every implementation anyone would port against reserves
-         * them anyway, so a shader that did would already be unportable. Recognising
-         * them always is one table rather than a version-dependent one, and the parser
-         * refuses them by name in a 1.10 shader, which is a better diagnostic than
-         * "syntax error" either way. */
+        /* GLSL 1.20's two new qualifiers, recognised whatever the shader's version.
+         * Other implementations reserve them in 1.10 too, so one table serves every
+         * version; the parser refuses them by name in a 1.10 shader. */
         {"invariant", GLSL_TOK_KW_INVARIANT},
         {"centroid", GLSL_TOK_KW_CENTROID},
         /* ES 1.00's precision words, recognised whatever the version for the same
@@ -196,7 +173,7 @@ static glsl_token_type_t keyword_of(const char *text, size_t n) {
         {"lowp", GLSL_TOK_KW_LOWP},
         {"mediump", GLSL_TOK_KW_MEDIUMP},
         {"highp", GLSL_TOK_KW_HIGHP},
-        /* Reserved by GLSL 1.10. Named so a program using one is told *which* word it
+        /* Reserved by GLSL 1.10. Named so a program using one is told which word it
          * may not use, instead of meeting a syntax error somewhere downstream. */
         {"asm", GLSL_TOK_KW_RESERVED},
         {"class", GLSL_TOK_KW_RESERVED},
@@ -237,13 +214,9 @@ static glsl_token_type_t keyword_of(const char *text, size_t n) {
     return GLSL_TOK_IDENTIFIER;
 }
 
-/* A number, which is where GLSL's grammar is fussiest.
- *
- * `1`, `017`, `0x1f` are integers; `1.0`, `1.`, `.5`, `1e5`, `1.5E-3` are floats. **The
- * distinction is made by what the scan actually found**, not by looking for a `.` up
- * front: `1e5` has no dot and is a float, and `1.` has nothing after the dot and still
- * is one.
- */
+/* A number. `1`, `017`, `0x1f` are integers; `1.0`, `1.`, `.5`, `1e5`, `1.5E-3` are
+ * floats. The distinction comes from what the scan found, not from looking for a `.`
+ * up front: `1e5` has no dot and is a float. */
 static void scan_number(glsl_lexer_t *lx, glsl_token_t *out) {
     GLboolean is_float = GL_FALSE;
 
@@ -285,10 +258,8 @@ static void scan_number(glsl_lexer_t *lx, glsl_token_t *out) {
     }
 
     if (peek(lx, 0) == 'e' || peek(lx, 0) == 'E') {
-        /* Only an exponent if something follows it that can be one. `1einvalid` is `1`
-         * then the identifier `einvalid`, which is a syntax error later rather than a
-         * lexing error now - consuming the `e` regardless would turn it into a
-         * confusing one. */
+        /* Only an exponent if something follows it that can be one; otherwise the `e`
+         * is left for the check below, which names the real problem. */
         char after = peek(lx, 1);
         char after2 = peek(lx, 2);
         if (is_digit(after) || ((after == '+' || after == '-') && is_digit(after2))) {
@@ -313,10 +284,8 @@ static void scan_number(glsl_lexer_t *lx, glsl_token_t *out) {
         }
     }
 
-    /* **A number cannot be followed straight into an identifier.** `123abc` is not
-     * `123` then `abc`: the specification has no such juxtaposition, and lexing it as
-     * two tokens produces a syntax error that blames `abc`. Caught here, where the text
-     * is still to hand. */
+    /* A number cannot run straight into an identifier: `123abc` is an error here, not
+     * `123` then `abc`, which would produce a syntax error blaming `abc`. */
     if (is_ident_start(peek(lx, 0))) {
         out->type = GLSL_TOK_ERROR;
         out->error = "identifier immediately after a numeric constant";

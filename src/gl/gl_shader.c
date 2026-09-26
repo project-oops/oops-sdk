@@ -5,33 +5,12 @@
  * This file is the object model: names, attachment, deletion, the uniform and attribute
  * queries, and the generic vertex attribute arrays.
  *
- * # One name space, and names that are never reused
- *
- * `glCreateShader` and `glCreateProgram` draw from one counter, because the
- * specification gives shader and program objects a single name space (GL 2.0, 2.15.1).
- * The counter only goes up: within a context a name is used once and never again, so a
- * stale name held past a delete finds nothing rather than whatever later took the slot.
- * That costs nothing - a context that creates four billion shader objects has other
- * problems - and it turns a class of use-after-delete into GL_INVALID_VALUE.
- *
- * # Deletion is deferred and is observable
- *
- * `glDeleteShader` on a shader that a program still has attached, and `glDeleteProgram`
- * on the program in use, do not delete: they set a flag, the object keeps working, and
- * it goes when the last reference does. Two behaviours make that visible and both are
- * implemented, because an implementation with only one of them passes a test that has
- * only one of them:
- *
- *   - `glIsShader` answers GL_FALSE from the moment the flag is set - the object is no
- * longer a shader as far as the API is concerned.
- *   - `glGetShaderiv(GL_DELETE_STATUS)` still answers, and answers GL_TRUE. A query on
- * a name `glIsShader` denies is not an error, which is the part that surprises people.
- *
- * # What is not here
- *
- * Nothing in GL 2.0 is compiled into a display list: the specification lists these
- * calls among those executed immediately (2.15.1 and the list in 5.4), so none of them
- * goes through the recorder.
+ * Shaders and programs share one name space (GL 2.0, 2.15.1), drawn from one counter
+ * that only goes up, so a stale name finds nothing rather than a later object.
+ * Deleting an attached shader or the program in use sets a flag and the object goes
+ * with its last reference; meanwhile `glIsShader` answers GL_FALSE and
+ * `glGetShaderiv(GL_DELETE_STATUS)` answers GL_TRUE without error. None of these calls
+ * goes through the display-list recorder (2.15.1 and the list in 5.4).
  */
 
 #include "gl_internal.h"
@@ -59,22 +38,12 @@ static GLboolean str_eq_n(const char *a, const char *b, size_t n) {
 }
 
 /*
- * **The context, only if it has claimed GL 2.0.**
- *
- * Every entry point in this file is 2.0's, and a context has the entry points its
- * version defines and no others - so each of them gates itself on the line it already
- * had, by asking for the context through here instead of through `gl_get_ctx`. NULL
- * comes back for a context that has claimed less, with GL_INVALID_OPERATION already
- * recorded, and every function below already returns its failure value for a null
- * context: 0 for a name, -1 for a location, GL_FALSE for a predicate.
- *
- * One accessor rather than a check per function, because a check per function is a
- * check somebody forgets to add to the next one.
- *
- * **The internal helpers below take their context as a parameter and are not gated**:
- * the draw path calls `gl_active_program` on every triangle and `glContextDestroy`
- * calls `gl_free_all_shaders` whatever the version, and neither is an entry point a
- * program can reach.
+ * The context, only if it has claimed GL 2.0. Every entry point here gets its context
+ * through this, so a context of a lower version gets NULL with GL_INVALID_OPERATION
+ * recorded, and each function returns its failure value (0 for a name, -1 for a
+ * location, GL_FALSE for a predicate). The internal helpers take their context as a
+ * parameter and are not gated: the draw path and `glContextDestroy` call them whatever
+ * the version.
  */
 static gl_context_t *gl2_ctx(void) {
     gl_context_t *ctx = gl_get_ctx();
@@ -112,10 +81,9 @@ gl_program_object_t *gl_active_program(gl_context_t *ctx) {
     return (p && p->linked) ? p : (gl_program_object_t *)0;
 }
 
-/* The next name, from the counter both tables share. **Making any object is what turns
- * the generic attribute fetch on** - see `gl2_used`: a context that never creates one
- * is a fixed-function context and should not pay per vertex for a pipeline it does not
- * use. */
+/* The next name, from the counter both tables share. Making any object turns the
+ * generic attribute fetch on (`gl2_used`), so a fixed-function context does not pay for
+ * it per vertex. */
 static GLuint next_name(gl_context_t *ctx) {
     if (ctx->gl2_next_name == 0u)
         ctx->gl2_next_name = 1u;
@@ -211,10 +179,9 @@ void gl_free_all_shaders(gl_context_t *ctx) {
  * Writing a string back to a caller
  *
  * `glGetShaderInfoLog` and its three relatives all take `bufSize` and `length` and all
- * mean the same thing by them: **at most `bufSize` bytes are written including the
- * terminator**, and `length` receives what was written *not* counting it. A `bufSize`
- * of 0 writes nothing at all, not even the terminator, which is what lets a caller pass
- * a null buffer to measure first.
+ * mean the same thing by them: at most `bufSize` bytes are written including the
+ * terminator, and `length` receives what was written not counting it. A `bufSize` of 0
+ * writes nothing, not even the terminator, so a caller may pass a null buffer.
  * ------------------------------------------------------------------------- */
 
 static void return_string(const char *src, GLsizei bufSize, GLsizei *length,
@@ -258,9 +225,8 @@ GLuint glCreateShader(GLenum type) {
         s->info_log[0] = '\0';
         return s->name;
     }
-    /* **Zero, with GL_OUT_OF_MEMORY.** The specification's answer for a creation that
-     * cannot be served, and the one a caller checks for. Returning a name from a table
-     * that is full would be worse in every way. */
+    /* Zero, with GL_OUT_OF_MEMORY: the specification's answer for a creation that
+     * cannot be served. */
     gl_record_error(ctx, GL_OUT_OF_MEMORY);
     return 0u;
 }
@@ -277,8 +243,7 @@ void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
     gl_shader_object_t *s = gl_find_shader(ctx, shader);
     if (!s) {
         /* A name that is a program rather than a shader is GL_INVALID_OPERATION; one
-         * that is neither is GL_INVALID_VALUE. The distinction is the specification's
-         * and it is what tells a caller whether it has the wrong object or a dead name.
+         * that is neither is GL_INVALID_VALUE, as the specification distinguishes them.
          */
         gl_record_error(ctx, gl_find_program(ctx, shader) ? GL_INVALID_OPERATION
                                                           : GL_INVALID_VALUE);
@@ -289,10 +254,9 @@ void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
         return;
     }
 
-    /* **The strings are concatenated, not stored as a list.** GL keeps them as given
-     * and `glGetShaderSource` returns the concatenation, which is the only form
-     * anything reads - so joining once here beats joining on every query. A `length`
-     * entry that is negative, or a null `length`, means that string is NUL-terminated.
+    /* The strings are stored concatenated, the only form anything reads
+     * (`glGetShaderSource` returns it). A negative `length` entry, or a null `length`,
+     * means that string is NUL-terminated.
      */
     size_t total = 0;
     for (GLsizei i = 0; i < count; i++) {
@@ -319,9 +283,8 @@ void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
     gl_heap_free(s->source);
     s->source = joined;
     s->source_len = at;
-    /* New source un-compiles the object. The specification does not say so in as many
-     * words, and every implementation does it: a GL_COMPILE_STATUS left over from the
-     * previous source would be a lie about text that no longer exists. */
+    /* New source un-compiles the object, as every implementation does, so
+     * GL_COMPILE_STATUS never describes replaced text. */
     s->compiled = GL_FALSE;
     gl_glsl_unit_release(s->unit);
     s->unit = (glsl_unit_t *)0;
@@ -344,9 +307,8 @@ void glCompileShader(GLuint shader) {
     s->info_log[0] = '\0';
 
     if (!s->source) {
-        /* **No source is a failed compile, not an error.** `glCompileShader` has no way
-         * to report one, and GL_COMPILE_STATUS plus a log is exactly the channel that
-         * exists. */
+        /* No source is a failed compile, not an error: GL_COMPILE_STATUS and the log
+         * are the channel `glCompileShader` has. */
         oops_snprintf(s->info_log, sizeof(s->info_log), "no source has been given");
         return;
     }
@@ -398,8 +360,8 @@ void glGetShaderiv(GLuint shader, GLenum pname, GLint *params) {
     case GL_COMPILE_STATUS:
         *params = s->compiled ? GL_TRUE : GL_FALSE;
         break;
-    /* **The length includes the terminator**, and is 0 when there is no log at all - so
-     * a caller sizing a buffer from it is right either way. The same for the source. */
+    /* The length includes the terminator, and is 0 when there is no log at all. The
+     * same for the source. */
     case GL_INFO_LOG_LENGTH:
         *params = s->info_log[0] ? (GLint)(str_len(s->info_log) + 1u) : 0;
         break;
@@ -529,9 +491,8 @@ void glLinkProgram(GLuint program) {
         return;
     }
 
-    /* **Every attached shader must have compiled.** A link that quietly ignored an
-     * uncompiled stage would produce a program that runs with the fixed-function half
-     * in its place - the wrong picture, from a call that reported success. */
+    /* Every attached shader must have compiled, or the link fails rather than running
+     * the fixed-function stage in its place. */
     glsl_unit_t *vs = (glsl_unit_t *)0;
     glsl_unit_t *fs = (glsl_unit_t *)0;
     for (int i = 0; i < p->attached_count; i++) {
@@ -572,8 +533,7 @@ void glUseProgram(GLuint program) {
     }
     if (!p->linked) {
         /* A program that has not linked cannot be made current, and the one already
-         * current is left alone - so a failed relink does not silently drop the caller
-         * back to the fixed-function pipeline mid-frame. */
+         * current is left alone. */
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
@@ -597,11 +557,9 @@ void glValidateProgram(GLuint program) {
         oops_snprintf(p->info_log, sizeof(p->info_log), "the program has not linked");
         return;
     }
-    /* **What validation is actually for**: whether the program could run *against the
-     * state set right now*. The one thing that can be wrong here is a sampler pointing
-     * at a unit whose bound texture is the wrong target - the specification's own
-     * example - so that is what is checked, rather than answering GL_TRUE and meaning
-     * nothing by it. */
+    /* Whether the program could run against the current state. The check is a sampler
+     * pointing at a unit whose bound texture is the wrong target, the specification's
+     * own example. */
     p->validated = GL_TRUE;
     for (int i = 0; i < p->uniform_count; i++) {
         const gl_uniform_t *u = &p->uniforms[i];
@@ -684,15 +642,9 @@ void glGetProgramiv(GLuint program, GLenum pname, GLint *params) {
     case GL_ACTIVE_ATTRIBUTES:
         *params = p->attrib_count;
         break;
-    /* **oops-gl's own, not OpenGL's**: what the console back end made of the fragment
-     * stage.
-     *
-     * A program that links is not necessarily a program that draws here - the back end
-     * compiles the fragment shader to gfx1030 or refuses it, and a refused one fails
-     * the *draw* with GL_INVALID_OPERATION rather than falling back. There is nothing
-     * in GL that asks about that, so a title that wants to say why its screen is black
-     * before it is black asks these. Zero words is a refusal, and
-     * `glGetProgramHardwareLog` says why. */
+    /* oops-gl's own queries: what the console back end made of the fragment stage. A
+     * refused fragment shader fails the draw with GL_INVALID_OPERATION; zero words is a
+     * refusal, and `glGetProgramHardwareLog` says why. */
     case GL_PROGRAM_HW_PS_WORDS:
         *params = (GLint)p->hw_ps_words;
         break;
@@ -707,8 +659,7 @@ void glGetProgramiv(GLuint program, GLenum pname, GLint *params) {
         break;
     case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
         /* The longest name plus its terminator, over the active uniforms - 0 when there
-         * are none, which is what a caller sizing one buffer for the whole enumeration
-         * needs. */
+         * are none. */
         size_t longest = 0;
         for (int i = 0; i < p->uniform_count; i++) {
             const size_t n = str_len(p->uniforms[i].name);
@@ -752,18 +703,9 @@ void glGetProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei *length,
     return_string(p->info_log, bufSize, length, infoLog);
 }
 
-/* **Why the console back end would not generate for this program**, which is a
- * different question from why it would not link and so needs a different log.
- *
- * A program can link perfectly and still have no console code: `glsl_ps.c` refuses a
- * fragment shader it has no verified instruction for, by name, and the draw then fails
- * rather than running the fixed-function instruments in its place. `GL_INFO_LOG_LENGTH`
- * and the log beside it are the specification's, are about linking, and are empty in
- * that case - so this is the one that says "only texture2D is generated" or "this
- * shader needs 152 registers".
- *
- * Empty when the program has console code, or when it has no fragment stage at all (for
- * which the fixed-function pixel shader runs and there is nothing to refuse). */
+/* Why the console back end would not generate code for this program, separate from the
+ * link log: a linked program's fragment shader can still be refused by `glsl_ps.c`, and
+ * the draw then fails. Empty when the program has console code or no fragment stage. */
 void glGetProgramHardwareLog(GLuint program, GLsizei bufSize, GLsizei *length,
                              GLchar *infoLog) {
     gl_context_t *ctx = gl2_ctx();
@@ -811,10 +753,8 @@ void glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei *count,
  * Uniforms
  * ------------------------------------------------------------------------- */
 
-/* `name`, `name[0]` and `name[3]` all name a location. The bracketed form is what a
- * caller stepping an array writes, and the specification requires the unbracketed name
- * to mean element zero - so both are parsed here rather than the caller being asked to
- * know which. */
+/* `name`, `name[0]` and `name[3]` all name a location; the specification makes the
+ * unbracketed name element zero. */
 static GLint uniform_location_of(const gl_program_object_t *p, const char *name) {
     if (!name)
         return -1;
@@ -911,9 +851,8 @@ void glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei *
 }
 
 /* How many floats one element of a uniform type holds, and which family it belongs to.
- * The families decide which `glUniform` may set it: the specification requires the
- * command to match the declared type, and a `glUniform1f` on an `int` is the mismatch
- * that otherwise writes a plausible value nothing reads. */
+ * The families decide which `glUniform` may set it, since the specification requires
+ * the command to match the declared type. */
 static int type_floats(GLenum t) {
     switch (t) {
     case GL_FLOAT:
@@ -1026,16 +965,11 @@ static void type_matrix_shape(GLenum t, int *cols, int *rows) {
  * whether it is an `i` form, and `matrix_type` the GL enum the matrix forms name - 0
  * for the rest.
  *
- * **The matrix check is by type and not by float count**, because
- * `glUniformMatrix2x3fv` and `glUniformMatrix3x2fv` both carry six floats: comparing
- * the counts would let either command set either uniform and transpose the value of one
- * of them. The specification requires the command to match the declared type exactly,
- * and here that is the whole of the check.
+ * The matrix check is by type, not float count: `glUniformMatrix2x3fv` and
+ * `glUniformMatrix3x2fv` both carry six floats.
  *
- * Returns the destination to write `count` elements into, or NULL when the call should
- * do nothing - which is both the error cases and **a location of -1, which is defined
- * to be ignored silently** so that a program need not branch on a uniform the linker
- * removed. */
+ * Returns the destination to write `count` elements into, or NULL when the call does
+ * nothing: the error cases, and a location of -1, which is ignored silently. */
 static float *uniform_dest(GLint location, int comps, GLboolean integer,
                            GLenum matrix_type, GLsizei count, int *out_elements) {
     gl_context_t *ctx = gl2_ctx();
@@ -1069,9 +1003,7 @@ static float *uniform_dest(GLint location, int comps, GLboolean integer,
             gl_record_error(ctx, GL_INVALID_OPERATION);
             return (float *)0;
         }
-        /* A sampler takes only the integer forms - setting one with a float would be a
-         * unit number that is nearly an integer. A bool takes either, which is the
-         * specification's one deliberate looseness here. */
+        /* A sampler takes only the integer forms; a bool takes either. */
         if (type_is_sampler(u->type) && !integer) {
             gl_record_error(ctx, GL_INVALID_OPERATION);
             return (float *)0;
@@ -1092,8 +1024,7 @@ static float *uniform_dest(GLint location, int comps, GLboolean integer,
     }
 
     /* `count` over 1 on something that is not an array is an error; past the end of an
-     * array, the excess is ignored, which is the specification's asymmetry and not an
-     * oversight. */
+     * array, the excess is ignored, as the specification says. */
     if (count > 1 && u->size == 1) {
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return (float *)0;
@@ -1185,15 +1116,10 @@ void glUniform4iv(GLint location, GLsizei count, const GLint *v) {
     uniform_write_i(location, 4, count, v);
 }
 
-/* The matrices. **Stored column-major whatever the caller passed**, because that is
- * what the shading language's `mat4 * vec4` reads and what `gl_ModelViewMatrix` already
- * is - so `transpose` is applied here, once, rather than every time the value is used.
- *
- * **`transpose` on a non-square matrix reads a different shape than it writes.** The
- * source of a transposed `mat2x3` is three columns of two - it is the `mat3x2` whose
- * transpose this is - so the read stride is the destination's column count and not its
- * row count. Written with one dimension, as this was while every matrix was square, the
- * transposed form walks off the end. */
+/* The matrices, stored column-major whatever the caller passed, as the shading
+ * language reads them, so `transpose` is applied once here. The source of a transposed
+ * `mat2x3` is three columns of two, so the read stride is the destination's column
+ * count, not its row count. */
 static void uniform_write_matrix(GLint location, GLenum type, GLsizei count,
                                  GLboolean transpose, const GLfloat *v) {
     int cols = 0, rows = 0;
@@ -1348,8 +1274,8 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean norm
     a->stride = stride;
     a->pointer = pointer;
     a->normalized = normalized;
-    /* The buffer bound now, by name - so a `glBufferData` that reallocates the store
-     * later is followed, which is the same rule the named arrays follow. */
+    /* The buffer bound now, by name, so a later `glBufferData` that reallocates the
+     * store is followed, as for the named arrays. */
     a->buffer = ctx->bound_array_buffer;
 }
 
@@ -1390,9 +1316,7 @@ void glBindAttribLocation(GLuint program, GLuint index, const GLchar *name) {
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
-    /* Re-binding a name replaces its entry rather than adding a second, so a caller
-     * that binds the same attribute twice gets the later answer and not an undefined
-     * one. */
+    /* Re-binding a name replaces its entry, so the later binding wins. */
     for (int i = 0; i < p->binding_count; i++) {
         if (str_len(p->bindings[i].name) == len &&
             str_eq_n(p->bindings[i].name, name, len)) {
@@ -1560,10 +1484,8 @@ void glVertexAttrib4f(GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w) 
     c[3] = w;
 }
 
-/* **The defaults are (0, 0, 0, 1), so the short forms fill and do not leave.** A
- * `glVertexAttrib2f` gives z = 0 and w = 1 rather than keeping whatever a previous
- * `glVertexAttrib4f` left there, which is the specification's rule and the one that
- * makes a two-component attribute behave the same however it was last set. */
+/* The short forms fill the missing components from (0, 0, 0, 1): `glVertexAttrib2f`
+ * gives z = 0 and w = 1 whatever was set before, as the specification says. */
 void glVertexAttrib1f(GLuint index, GLfloat x) {
     glVertexAttrib4f(index, x, 0.0f, 0.0f, 1.0f);
 }
@@ -1648,10 +1570,8 @@ void glVertexAttrib4sv(GLuint i, const GLshort *v) {
         glVertexAttrib4s(i, v[0], v[1], v[2], v[3]);
 }
 
-/* **The plain integer forms convert; the `N` forms scale.**
- * `glVertexAttrib4ubv({255,...})` gives 255.0, and `glVertexAttrib4Nubv` of the same
- * bytes gives 1.0 - which is the whole difference between them and the one people reach
- * for the wrong one over. */
+/* The plain integer forms convert; the `N` forms scale:
+ * `glVertexAttrib4ubv({255,...})` gives 255.0, `glVertexAttrib4Nubv` gives 1.0. */
 void glVertexAttrib4bv(GLuint i, const GLbyte *v) {
     if (v)
         glVertexAttrib4f(i, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]);
@@ -1673,9 +1593,8 @@ void glVertexAttrib4usv(GLuint i, const GLushort *v) {
         glVertexAttrib4f(i, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]);
 }
 
-/* The signed normalisations divide by the type's largest **positive** value, so -128 of
- * a byte maps just past -1 and is clamped to it - the specification's rule (2.0,
- * table 2.9), and the reason this is not simply a divide by 128. */
+/* The signed normalisations divide by the type's largest positive value, so -128 of a
+ * byte maps just past -1 and is clamped to it (GL 2.0, table 2.9). */
 static GLfloat norm_b(GLbyte v) {
     const GLfloat f = (GLfloat)v / 127.0f;
     return f < -1.0f ? -1.0f : f;

@@ -1,28 +1,15 @@
 /*
  * oops-gl: the attribute stack
  *
- * `glPushAttrib` saves the state its mask names and `glPopAttrib` puts it back. Older
- * GL code leans on this heavily - a routine that changes state politely brackets itself
- * with a push and a pop - and its absence does not merely render differently: **state
- * leaks out of the routine that set it** and everything drawn afterwards is wrong, in a
- * way that looks like a bug somewhere else entirely.
- *
- * # Save everything, restore what the mask names
+ * `glPushAttrib` saves the state its mask names and `glPopAttrib` puts it back.
  *
  * A push copies all of the state below regardless of the mask, and records the mask;
- * the pop puts back only the groups the mask named. Saving selectively would be a
- * little cheaper and a lot easier to get subtly wrong - a field saved under one bit and
- * restored under another is the kind of mistake that only shows up in the one program
- * that uses both.
+ * the pop puts back only the groups the mask named. Saving everything keeps a field
+ * from being saved under one bit and restored under another.
  *
- * # What is not covered, and why that is an error
- *
- * Every GL 1.x group now exists here - the last, the accumulation buffer, landed on
- * 2026-09-19. A bit outside them names nothing and is refused with GL_INVALID_ENUM
- * rather than quietly ignored. Until each group landed a push naming it was refused the
- * same way: a program that pushes a group is relying on getting that state back, and
- * returning without it would be a silent lie of exactly the kind a push-and-pop exists
- * to prevent.
+ * Every GL 1.x group exists. A bit outside them names nothing and is refused with
+ * GL_INVALID_ENUM rather than ignored, since a program that pushes a group relies on
+ * getting that state back.
  */
 
 #include "gl_internal.h"
@@ -48,14 +35,9 @@ void glPushAttrib(GLbitfield mask) {
     if (!ctx)
         return;
 
-    /* GL_ALL_ATTRIB_BITS is the common call and names groups this does not have.
-     * Narrowed to what exists rather than refused, because refusing it would make the
-     * most ordinary use of this function fail - and unlike a program naming
-     * GL_STENCIL_BUFFER_BIT deliberately, a program saying "all" is asking for whatever
-     * there is. */
-    /* Either spelling of "all": the Khronos 0xFFFFFFFF, or GL 1.0's 0x000FFFFF that
-     * this header carried until 2026-09-19 - a program built against either must not be
-     * refused. */
+    /* "All" names bits beyond the defined groups, so it is narrowed to what exists
+     * rather than refused. Both spellings count: the Khronos 0xFFFFFFFF and GL 1.0's
+     * 0x000FFFFF. */
     if (mask == GL_ALL_ATTRIB_BITS || mask == 0x000FFFFFu) {
         mask = GL_ATTRIB_SUPPORTED;
     }
@@ -331,11 +313,9 @@ void glPopAttrib(void) {
         ctx->cur_fog_coord = e->cur_fog_coord;
     }
 
-    /* **The enables belong to more than one bit.** GL_ENABLE_BIT carries all of them,
-     * and each buffer bit also carries the enable for its own feature - so
-     * GL_DEPTH_BUFFER_BIT restores the depth-test enable even without GL_ENABLE_BIT.
-     * Getting this wrong gives a pop that restores a depth function while leaving the
-     * test off. */
+    /* The enables belong to more than one bit. GL_ENABLE_BIT carries all of them, and
+     * each buffer bit also carries the enable for its own feature - so
+     * GL_DEPTH_BUFFER_BIT restores the depth-test enable even without GL_ENABLE_BIT. */
     const GLboolean all_enables = (GLboolean)((mask & GL_ENABLE_BIT) != 0u);
     if (all_enables || (mask & GL_DEPTH_BUFFER_BIT))
         ctx->cap_depth_test = e->cap_depth_test;
@@ -462,10 +442,8 @@ void glPopAttrib(void) {
     if (all_enables || (mask & GL_FOG_BIT)) {
         ctx->cap_fog = e->cap_fog;
         /* GL_COLOR_SUM too: the GL 1.4 state table puts it in the fog and enable
-         * groups, and Mesa's glEnable names the same two (main/enable.c:1084-1085).
-         * Mesa then saves it with the fog group and never restores it
-         * (main/attrib.c:858-866 has no line for it, and the enable group has no field)
-         * - a gap this does not copy. */
+         * groups (Mesa main/enable.c:1084-1085). Mesa saves it but does not restore it
+         * (main/attrib.c:858-866); this restores it. */
         ctx->cap_color_sum = e->cap_color_sum;
     }
     if (mask & GL_FOG_BIT) {
@@ -504,8 +482,7 @@ void glPopAttrib(void) {
     if (all_enables || (mask & GL_TEXTURE_BIT)) {
         /* Every unit's target enables and generation enables - the texture group's and
          * the enable group's both (GL 1.3, table 6.20: "texture/enable"), which is
-         * where Mesa saves them (main/attrib.c:189-192, restored :486-510). The
-         * generation enables came back with GL_TEXTURE_BIT only until 2026-09-19. */
+         * where Mesa saves them (main/attrib.c:189-192, restored :486-510). */
         for (GLuint u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
             gl_tex_unit_t *tu = &ctx->tex_unit[u];
             const gl_tex_unit_t *s = &e->tex_units[u];
@@ -577,13 +554,11 @@ void glPopAttrib(void) {
         ctx->mat_back = e->mat_back;
         for (int i = 0; i < 4; i++)
             ctx->light_model_ambient[i] = e->light_model_ambient[i];
-        /* The rest of the light model - the local viewer was never saved, so a pop left
-         * it as the popped-over code had set it. */
+        /* The rest of the light model. */
         ctx->light_model_local_viewer = e->light_model_local_viewer;
         ctx->light_model_color_control = e->light_model_color_control;
         ctx->light_model_two_side = e->light_model_two_side;
-        /* glColorMaterial's face and property, GL_LIGHTING_BIT's too and never saved
-         * before. */
+        /* glColorMaterial's face and property are GL_LIGHTING_BIT's too. */
         ctx->color_material_face = e->color_material_face;
         ctx->color_material_mode = e->color_material_mode;
     }
@@ -597,15 +572,10 @@ void glPopAttrib(void) {
             tu->bound_texture_3d = s->bound_texture_3d;
             tu->bound_texture_cube = s->bound_texture_cube;
             /* GL_COORD_REPLACE is per unit and part of the texture environment, so it
-               belongs to this group rather than to GL_POINT_BIT beside the sprite
-               enable. The save above copies the whole unit and so already had it;
-               without this the pop kept whatever the pushed code left set. */
+               belongs to this group rather than to GL_POINT_BIT. */
             tu->coord_replace = s->coord_replace;
-            /* **The bound textures' own parameters come back too**, as Mesa restores
-             * them - this restored the bindings alone until 2026-09-19, so a routine
-             * that pushed GL_TEXTURE_BIT, set GL_CLAMP on the caller's texture and
-             * popped left the caller's texture clamped. A texture deleted in between is
-             * not brought back. */
+            /* The bound textures' own parameters come back too, as Mesa restores them.
+             * A texture deleted in between is not brought back. */
             for (int i = 0; i < 4; i++) {
                 if (e->tex_param_id[u][i] == 0u)
                     continue;
@@ -666,9 +636,7 @@ void glPopAttrib(void) {
         ctx->vp_h = e->vp_h;
         ctx->depth_near = e->depth_near;
         ctx->depth_far = e->depth_far;
-        /* Neither was flagged, so a pop inside a frame left the hardware on the
-         * pushed-over viewport and depth range until the next frame began - the scissor
-         * arm below always set its flag and this one never did. */
+        /* Flagged so a pop inside a frame reaches the next draw. */
         ctx->hw_vport_dirty = GL_TRUE;
         ctx->hw_depth_range_dirty = GL_TRUE;
     }
@@ -697,14 +665,8 @@ void glPopAttrib(void) {
 /* -------------------------------------------------------------------------
  * The client attribute stack
  *
- * Two groups, both of which live in this process rather than in a register: the array
- * pointers and the pixel-store modes. It is a second stack rather than a second mask on
- * the first one because the specification makes them independent - a helper that pushes
- * client state and a caller that pushed server state must not pop each other's frames.
- *
- * Unlike glPushAttrib there is nothing here to refuse: the two bits the specification
- * defines are both groups this has. GL_CLIENT_ALL_ATTRIB_BITS therefore needs no
- * narrowing.
+ * Two groups: the array pointers and the pixel-store modes. A separate stack, because
+ * the specification makes client and server pushes independent.
  * ------------------------------------------------------------------------- */
 
 #define GL_CLIENT_ATTRIB_SUPPORTED                                                     \
@@ -718,9 +680,7 @@ void glPushClientAttrib(GLbitfield mask) {
     if (mask == GL_CLIENT_ALL_ATTRIB_BITS) {
         mask = GL_CLIENT_ATTRIB_SUPPORTED;
     }
-    /* A bit outside the two the specification defines names nothing at all, so this is
-     * an enum error rather than the "state this port lacks" refusal glPushAttrib makes.
-     */
+    /* A bit outside the two the specification defines names nothing. */
     if ((mask & ~(GLbitfield)GL_CLIENT_ATTRIB_SUPPORTED) != 0u) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
@@ -774,11 +734,8 @@ void glPopClientAttrib(void) {
     const gl_client_attrib_entry_t *e =
         &ctx->client_attrib_stack[--ctx->client_attrib_depth];
 
-    /* **The enable travels with the pointer.** GL_CLIENT_VERTEX_ARRAY_BIT covers
-     * glEnableClientState as well as glVertexPointer, and restoring one without the
-     * other would leave an array enabled with a pointer that was never set for it - a
-     * dangling read rather than a wrong picture. `gl_client_array_t` holds both, so
-     * copying the struct keeps them together by construction. */
+    /* The enable travels with the pointer: GL_CLIENT_VERTEX_ARRAY_BIT covers both, and
+     * `gl_client_array_t` holds both, so copying the struct keeps them together. */
     if (e->mask & GL_CLIENT_VERTEX_ARRAY_BIT) {
         ctx->array_vertex = e->array_vertex;
         ctx->array_color = e->array_color;

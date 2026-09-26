@@ -1,10 +1,13 @@
+/*
+ * A self-contained PNG decoder for 8-bit RGB and RGBA images: an RFC 1951 inflater,
+ * the five scanline filters, and a nearest-neighbour resample into ARGB pixels.
+ */
 #include "oops/draw.h"
 #include "oops/heap.h"
 #include "oops/system.h"
 #include <stddef.h>
 #include <stdint.h>
 
-/* Helper memory functions */
 static void png_memset(void *p, int v, size_t n) {
     uint8_t *b = (uint8_t *)p;
     for (size_t i = 0; i < n; i++)
@@ -18,7 +21,6 @@ static void png_memcpy(void *dst, const void *src, size_t n) {
         d[i] = s[i];
 }
 
-/* Big-endian 32-bit integer reader */
 static uint32_t read_be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
            (uint32_t)p[3];

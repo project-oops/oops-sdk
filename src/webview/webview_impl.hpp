@@ -11,6 +11,8 @@
 #include <vector>
 #include <memory>
 
+// The webview's state, shared by webview.cpp, dom_bridge.cpp and host_env.cpp. The JS
+// context's opaque points at it.
 struct oops_webview {
     oops_js_t *js;
     oops_html_t *html;

@@ -2,14 +2,12 @@
  * <semaphore.h> - POSIX unnamed semaphores, over the kernel semaphores in
  * <oops/thread.h>.
  *
- * **Real, unlike <pthread.h> beside it.** A semaphore exists to block one thread until
- * another posts, and a no-op `sem_wait` returns at once and lets the waiter run on data
- * the poster has not finished writing - the failure is a race, not an error. OpenAL
- * Soft is the first consumer: its mixer thread sleeps on one until the device asks for
- * more samples.
+ * These are real semaphores, not no-ops: a `sem_wait` that returned at once would let
+ * the waiter run on data the poster has not finished writing (OpenAL Soft's mixer
+ * thread sleeps on one until the device asks for more samples).
  *
  * Header-only, because every operation is one call. `sem_t` is `oops_sem_t`, so it can
- * live wherever the program puts it - OpenAL Soft makes it a class member.
+ * live wherever the program puts it, a class member included.
  *
  * Unnamed semaphores only: `sem_open` and friends name a semaphore in a namespace
  * shared between processes, and a payload is one process. `pshared` is accepted and
@@ -69,10 +67,10 @@ static inline int sem_wait(sem_t *sem) {
     return 0;
 }
 
-/* **`EAGAIN` is the expected failure, not an error**: it is how a caller learns the
- * count was zero. The kernel's poll does not distinguish "zero" from "bad handle", so
- * both read as EAGAIN; a bad handle has already failed `sem_init` or been destroyed,
- * which POSIX leaves undefined. */
+/* `EAGAIN` is the expected failure: it is how a caller learns the count was zero. The
+ * kernel's poll does not distinguish zero from a bad handle, so both read as EAGAIN; a
+ * bad handle is one that failed `sem_init` or was destroyed, which POSIX leaves
+ * undefined. */
 static inline int sem_trywait(sem_t *sem) {
     if (oops_sem_poll(sem, 1) != 0) {
         errno = EAGAIN;

@@ -1,3 +1,4 @@
+/* The whole SDK in one include. */
 #ifndef OOPS_H
 #define OOPS_H
 

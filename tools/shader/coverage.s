@@ -1,22 +1,19 @@
 .text
-// Antialiasing's coverage in the untextured pixel shader (since 2026-09-20): the fragment's
-// alpha weighted by how much of the pixel the primitive covers, and the fragments it does not
-// cover at all killed.
+// Antialiasing's coverage in the untextured pixel shader: the fragment's alpha weighted by how
+// much of the pixel the primitive covers, and the fragments it does not cover at all killed.
 //
-// **The geometry arrives interpolated, not computed here.** GL's coverage for a smooth point is
-// `r + 1/2 - |p - c|` clamped to [0, 1], and for a smooth line `w/2 + 1/2 - |across|` - so what
-// the shader needs is the fragment's offset from the primitive's centre line, and that offset is
-// *linear across the quad the CPU widened the primitive into*. So the CPU puts the offset at each
-// corner into the texture-coordinate parameter's x and y, and `r + 1/2` (or `w/2 + 1/2`) into its
-// w, and the interpolator does the rest. A line sets y to zero, which makes sqrt(x*x + y*y) the
-// absolute value of the across distance - so one form serves both.
+// The geometry arrives interpolated. GL's coverage for a smooth point is `r + 1/2 - |p - c|`
+// clamped to [0, 1], and for a smooth line `w/2 + 1/2 - |across|`, so the shader needs the
+// fragment's offset from the primitive's centre, which is linear across the quad the CPU widened
+// the primitive into. The CPU puts the offset at each corner into the texture-coordinate
+// parameter's x and y, and `r + 1/2` (or `w/2 + 1/2`) into its w. A line sets y to zero, which
+// makes sqrt(x*x + y*y) the absolute across distance, so one form serves both.
 //
-// That parameter is free because **this is the untextured shader**: attr1.x, .y and .w are the
+// That parameter is free because this is the untextured shader: attr1.x, .y and .w are the
 // texture coordinate and its q, which a draw with no texture does not read. attr1.z is fog's
-// factor and is left alone. A *textured* smooth primitive has no free interpolant and is still
-// drawn aliased, which the log says once.
+// factor and is left alone. The textured shader uses `coverage-tex.s`.
 //
-// **The kill matches the software rasteriser's.** gl_draw.c drops a fragment whose coverage is
+// The kill matches the software rasteriser's. gl_draw.c drops a fragment whose coverage is
 // not greater than zero rather than blending nothing, so the depth buffer does not take a write
 // from a pixel the primitive misses. `v_cmp_lt_f32` and `s_and_b32 exec_lo` are the same two
 // instructions the alpha test and the polygon stipple use for their own discards.

@@ -4,6 +4,10 @@
 #include "src/input/pad_layout.h"
 #include "tests/test_common.h"
 
+/* Unit tests for pad, keyboard and mouse input. On host no device resolves, so these
+ * pin argument checks, honest unavailability and the raw pad record mapping. */
+
+/* The button masks sit at the driver's bit positions. */
 static void test_input_button_bitmasks(void) {
     ASSERT_EQ(OOPS_BUTTON_CROSS, 1u << 14);
     ASSERT_EQ(OOPS_BUTTON_CIRCLE, 1u << 13);
@@ -26,6 +30,7 @@ static void test_input_init_is_consistent(void) {
     oops_input_close();
 }
 
+/* Polling a bad port or into a NULL state fails without faulting. */
 static void test_input_poll_bounds(void) {
     oops_pad_state_t state;
     /* Uninitialized or unattached port returns non-zero error without faulting */
@@ -37,12 +42,14 @@ static void test_input_poll_bounds(void) {
     ASSERT_NE(rc, 0);
 }
 
+/* Rumble and lightbar refuse an invalid port. */
 static void test_input_rumble_and_lightbar(void) {
     /* Invalid port rejection */
     ASSERT_NE(oops_input_set_rumble(-1, 100, 100), 0);
     ASSERT_NE(oops_input_set_lightbar(10, 255, 0, 0), 0);
 }
 
+/* Motion polling and orientation reset refuse an invalid port. */
 static void test_input_motion_telemetry(void) {
     oops_pad_state_t state;
     for (size_t i = 0; i < sizeof(state); i++)
@@ -88,20 +95,10 @@ static void test_input_trigger_contract(void) {
 }
 
 /*
- * Keyboard: with no platform symbols on host, availability is honestly false, init
- * reports unavailable and keeps reporting it, and the read says **why** rather than
- * fabricating zero events.
- *
- * This asserted `OOPS_KEYBOARD_ELAYOUT` until 2026-09-22, when the record layout
- * stopped being unconfirmed (`src/input/keyboard.c:28` carries the evidence). `ELAYOUT`
- * now means what it always should have: the fields are a guess. On this host the honest
- * answer is `EUNAVAIL` - nothing resolved - and a test that still expected `ELAYOUT`
- * would be asserting a refusal rather than a contract, which is how the old gate
- * outlived its reason.
- *
- * The distinction is the point of having both codes: a caller can tell "no reader" from
- * "no keys", and now also from "cannot parse". Zero events stays reserved for a
- * keyboard that is present and idle.
+ * Keyboard: with no platform symbols on host, availability is false, init reports
+ * unavailable and keeps reporting it, and the read returns `EUNAVAIL` rather than zero
+ * events. A caller can tell "no reader" (`EUNAVAIL`) from "cannot parse" (`ELAYOUT`)
+ * from "no keys"; zero events is reserved for a keyboard that is present and idle.
  */
 static void test_input_keyboard_contract(void) {
     ASSERT_EQ(oops_keyboard_available(), 0);
@@ -120,9 +117,8 @@ static void test_input_keyboard_contract(void) {
 }
 
 /*
- * `oops_input_poll` folds the keyboard in on port 0 and must stay honest when there is
- * neither. With nothing resolved on host it still fails, rather than succeeding with a
- * zeroed state because a keyboard path was consulted.
+ * `oops_input_poll` folds the keyboard in on port 0. With neither device resolved it
+ * fails, rather than succeeding with a zeroed state because a keyboard was consulted.
  */
 static void test_input_poll_keyboard_fold(void) {
     oops_pad_state_t st;

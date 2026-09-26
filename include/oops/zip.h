@@ -1,3 +1,6 @@
+/*
+ * ZIP archive extraction, from a file or from memory, onto the filesystem.
+ */
 #ifndef OOPS_ZIP_H
 #define OOPS_ZIP_H
 

@@ -1,9 +1,7 @@
 // Branch and scalar-loop words for the GL2 back end's real loops.
 //
-// Until now oops-gl had no backward branch at all: every `for` was unrolled, and a loop the
-// unroller could not finish was refused at compile time. That is safe but it is not GLSL. A real
-// loop needs three things this file pins down - an unconditional branch, a branch taken when the
-// exec mask has gone empty, and the scalar compare/decrement that drives the trip guard.
+// A real loop needs three things this file pins down - an unconditional branch, a branch taken
+// when the exec mask has gone empty, and the scalar compare/decrement that drives the trip guard.
 //
 // The offsets matter as much as the opcodes. `simm16` is a *signed word count relative to the
 // instruction after the branch*, so a branch to itself is -1, not 0, and the sign lives in a
@@ -39,10 +37,9 @@ loop_top:
 loop_exit:
 
 // --- the trip guard's arithmetic ---------------------------------------------------------
-// A counter in an SGPR, incremented once per trip and compared against a ceiling. This is the
-// part that makes a real loop safe to emit: a condition that never goes false still terminates,
-// because the guard fires regardless of what the lanes are doing. A shader that hangs does not
-// draw a wrong frame - it takes the GPU with it.
+// A counter in an SGPR, incremented once per trip and compared against a ceiling. A condition
+// that never goes false still terminates, because the guard fires regardless of what the lanes
+// are doing; a shader that hangs takes the GPU with it.
 	s_mov_b32 s20, 0
 	s_add_u32 s20, s20, 1
 	s_cmp_ge_u32 s20, 0x100

@@ -1,14 +1,16 @@
+/*
+ * USB mouse input through libSceMouse. Open and availability are real; the read
+ * refuses with OOPS_MOUSE_ELAYOUT because the platform record is unmeasured.
+ */
 #include "oops/mouse.h"
 #include "oops/sysmodule.h"
 #include "oops/system.h"
 #include <stddef.h>
 
 /*
- * Platform symbols from libSceMouse and libSceUserService.
- *
- * Confirmed on 12.40 by obSCEne 101-input-ext: libSceMouse loads and all four
- * entry points resolve in the app context, none in the eboot or payload
- * contexts, which the weak binding reports as unavailable rather than guessing.
+ * Platform symbols from libSceMouse and libSceUserService. On 12.40 (obSCEne probe
+ * 101-input-ext) all four mouse entry points resolve in the app context and none in
+ * the eboot or payload contexts, which the weak binding reports as unavailable.
  */
 __attribute__((weak)) int sceMouseInit(void);
 __attribute__((weak)) int sceMouseOpen(int userId, int type, int index,
@@ -19,13 +21,11 @@ __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
 /*
- * The platform mouse record. Documented at 40 bytes and still unconfirmed:
- * the 12.40 capture called sceMouseRead with no mouse attached and it wrote
- * nothing, so no extent was measured. A run with a mouse plugged in is the
- * capture that lands this; 0 keeps the read refusing with OOPS_MOUSE_ELAYOUT.
- * When the obSCEne capture lands: set the size, define the record beside it,
- * and translate it in oops_mouse_read - the only place that reads it. The
- * batched read strides by this size, so it must be exact, not oversized.
+ * The platform mouse record, documented at 40 bytes and unconfirmed: with no
+ * mouse attached sceMouseRead writes nothing, so no extent is measured. 0 keeps
+ * the read refusing with OOPS_MOUSE_ELAYOUT. With a capture, the size is set here,
+ * the record defined beside it, and translated in oops_mouse_read. The batched
+ * read strides by this size, so it must be exact, not oversized.
  */
 #define OOPS_MOUSE_RECORD_BYTES 0
 
@@ -89,9 +89,9 @@ int oops_mouse_read(oops_mouse_state_t *out_samples, unsigned int max_samples) {
     if (!out_samples || max_samples == 0) {
         return OOPS_MOUSE_EPARAM;
     }
-    /* Capture-gated: a distinct code rather than zero samples, so a caller can
-     * tell "no motion" from "no reader". Checked before the handle because it is
-     * true on every firmware. */
+    /* A distinct code rather than zero samples, so a caller can tell "no motion"
+     * from "no reader". Checked before the handle because it holds on every
+     * firmware. */
     if (OOPS_MOUSE_RECORD_BYTES == 0) {
         return OOPS_MOUSE_ELAYOUT;
     }
@@ -99,7 +99,7 @@ int oops_mouse_read(oops_mouse_state_t *out_samples, unsigned int max_samples) {
         return OOPS_MOUSE_EUNAVAIL;
     }
     oops_log_trace("MOUSE", "mouse read: max_samples=%u", max_samples);
-    /* The translation from the platform record lands here with the capture. */
+    /* The translation from the platform record belongs here. */
     return 0;
 }
 

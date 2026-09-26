@@ -9,22 +9,14 @@ extern "C" {
 #endif
 
 /*
- * USB keyboard input (libSceKeyboard).
+ * USB keyboard input (libSceKeyboard): key-transition events in OOPS's own shape, and
+ * a mapping of keys to pad buttons.
  *
- * A homebrew UI beyond a gamepad needs real key events. This binds the keyboard
- * device and exposes a timestamped key-transition queue in OOPS's own shape.
- *
- * # State of this subsystem, honestly
- *
- * obSCEne's 101-input-ext measured it on 12.40. The library and its four entry
- * points resolve in the app context; in the eboot and payload contexts the
- * library loads but nothing in it resolves, so a payload cannot reach the
- * keyboard on this firmware, and availability below says so honestly. A read
- * writes a 96-byte record, so the size is confirmed; what the bytes mean is
- * not, because no keyboard was attached. The read path is therefore
- * capture-gated and refuses with OOPS_KEYBOARD_ELAYOUT rather than parse a
- * record whose fields are a guess - a distinct code, not zero events, so a
- * caller can tell "no keys" from "no reader".
+ * The library and its entry points resolve in the app context on 12.40 (obSCEne probe
+ * 101-input-ext); in the eboot and payload contexts nothing in it resolves, so a
+ * payload cannot reach the keyboard, and `oops_keyboard_available` says so. A read
+ * writes a 96-byte record. Its key, connection and interception fields are confirmed
+ * by an application using them; the modifier field is not, and is reported as zero.
  */
 
 enum {
@@ -62,30 +54,23 @@ typedef struct oops_key_event {
 #define OOPS_MAX_KEY_EVENTS 32
 
 /*
- * **How much the input layer says about what it delivers**, on the SDK's own scale.
+ * How much the input layer logs about what it delivers.
  *
- * The level is an `oops_log_level_t` from `oops/system.h` - `OOPS_LOG_NONE`, `_ERROR`,
- * `_WARN`,
- * `_INFO`, `_DEBUG`, `_TRACE` - taken as an `int` so this header need not include that
- * one. `OOPS_LOG_INFO` is the default and covers open, close and failures: the lines
- * that matter when input does not work at all.
+ * The level is an `oops_log_level_t` from `oops/system.h` (`OOPS_LOG_NONE` through
+ * `OOPS_LOG_TRACE`), taken as an `int` so this header need not include that one.
+ * `OOPS_LOG_INFO` is the default and covers open, close and failures.
  *
  * `OOPS_LOG_DEBUG` adds every key transition handed to the caller, with its usage code
- * and its modifiers. A held key is silent but a typed sentence is two lines a
- * character, so it is not a level to leave on; it is the level to reach for when what
- * the title receives and what the player pressed have stopped agreeing. That is not
- * hypothetical - a handle is opened per keyboard index, and when the second index
- * mirrored the first every press was delivered twice, which from above this layer is
- * indistinguishable from a player pressing twice and left no trace in any log.
+ * and modifiers: two lines a typed character, for when what the title receives and
+ * what the player pressed disagree (a duplicated press is invisible above this layer).
  */
 void oops_input_set_log_level(int level);
 int oops_input_get_log_level(void);
 
 /*
- * Open the keyboard for the signed-in user. 0 on success,
- * OOPS_KEYBOARD_EUNAVAIL when the library or the user is absent, otherwise the
- * platform's own negative code from the open. The result is remembered and
- * repeated by later calls until oops_keyboard_close().
+ * Open the keyboard for the signed-in user. 0 when at least one handle is open,
+ * OOPS_KEYBOARD_EUNAVAIL when the library, its entry points or a keyboard are
+ * absent. A later call opens any handle that is not yet open.
  */
 int oops_keyboard_init(void);
 
@@ -94,18 +79,16 @@ int oops_keyboard_init(void);
 int oops_keyboard_available(void);
 
 /*
- * Drain up to `max_events` (cap OOPS_MAX_KEY_EVENTS) key transitions, oldest
- * first, and return the count. Negative is one of the codes above.
- *
- * NOTE: capture-gated. The platform key-record layout is unconfirmed, so this
- * returns OOPS_KEYBOARD_ELAYOUT until the obSCEne capture lands, never a
- * fabricated count.
+ * Drain up to `max_events` (cap OOPS_MAX_KEY_EVENTS) key transitions, releases
+ * before presses, and return the count; 0 when nothing changed or the change does not
+ * fit (it is reported whole on a later call). Negative is one of the codes above.
+ * Modifiers are 0 and timestamps are 0.
  */
 int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events);
 
 /*
- * Read active keycodes directly and map directional and action keys to
- * OOPS_BUTTON_* bitmask. Returns 0 if keyboard is unattached or no keys held.
+ * Read the held keys and map directional and action keys to an OOPS_BUTTON_*
+ * bitmask. Returns 0 when no keyboard is attached or no mapped key is held.
  */
 uint32_t oops_keyboard_poll_buttons(void);
 

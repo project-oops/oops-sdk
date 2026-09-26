@@ -2,25 +2,17 @@
  * header-check: this SDK's GL headers compiled beside a real `GL/glext.h`.
  *
  * A hosted title - one built against the Mesa sysroot - includes `<GL/gl.h>` from here
- * **and** Mesa's own `<GL/glext.h>`, because it drives both. That is the only place the
- * two meet, and two kinds of mistake only show up there:
+ * and Mesa's own `<GL/glext.h>`. Two kinds of mistake only show up where they meet:
  *
- *  - **a macro redefined with a different token sequence**, which is a diagnostic under
- *    `-Werror` even when the value is identical. Every extension spelling this header
- * adds is a name `glext.h` also defines, so `#define GL_TEXTURE_3D_EXT GL_TEXTURE_3D`
- * breaks the build while `#define GL_TEXTURE_3D_EXT 0x806F` does not;
- *  - **a declaration that conflicts**, which no amount of agreement on values will
- * hide. `glTexImage3DEXT` takes a `GLenum` internal format and the core `glTexImage3D`
- * takes a `GLint`; declaring the extension's with the core's type compiles alone and
- * fails here.
- *
- * Both of those landed on 2026-09-20, in the same change, and were found by an app
- * failing to build rather than by anything that was looking. This looks.
+ *  - a macro redefined with a different token sequence, a diagnostic under `-Werror`
+ *    even when the value is identical: `#define GL_TEXTURE_3D_EXT GL_TEXTURE_3D` breaks
+ *    the build while `#define GL_TEXTURE_3D_EXT 0x806F` does not;
+ *  - a conflicting declaration: `glTexImage3DEXT` takes a `GLenum` internal format
+ *    and the core `glTexImage3D` a `GLint`, so the core's type compiles alone and
+ *    fails here.
  *
  * `build.sh` compiles this twice: once with the SDK's headers alone, and once with
- * `glext.h` ahead of them when a sibling `oops-mesa` checkout has one. The second is
- * skipped with a line saying so when it does not - a check that looks like it ran and
- * did not is worse than none.
+ * `glext.h` when a sibling `oops-mesa` checkout has one, saying so when it skips.
  */
 #include "GL/gl.h"
 #include "GL/glu.h"

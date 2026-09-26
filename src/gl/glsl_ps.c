@@ -1,56 +1,18 @@
 /*
  * oops-gl: a GLSL fragment shader compiled into a gfx1030 pixel shader
  *
- * The first half of GL 2.0's console back end, and the half that is actually a
- * compiler.
+ * The vertex stage is not compiled: the hardware vertex shader is a passthrough
+ * (`tools/shader/vs-param3.s`), and a GL 2.0 vertex shader runs on the CPU in
+ * `glsl_exec.c`, writing the same vertex the fixed-function path writes.
  *
- * # Why the vertex stage is not here
+ * A compiled pixel shader interpolates the varyings (`v_interp` pairs), runs the body,
+ * moves the colour into v4..v7 and exports it. Encodings come from
+ * `tools/shader/gl2-fragment.s`; `test_glsl_ps_compiles_a_fragment_shader` asserts
+ * them. v0 and v1 hold the barycentrics and v4..v7 are the export registers, so
+ * allocation starts at v8.
  *
- * **It does not need to be.** oops-gl's hardware vertex shader is a passthrough: the
- * CPU builds each vertex - transformed into clip space, with its colour and texture
- * coordinates already computed - and the shader loads it from the vertex buffer and
- * exports it. `tools/shader/ vs-param3.s` is the whole of it, and `exp pos0 v2, v3, v4,
- * v5` exports the position exactly as it was loaded.
- *
- * So a GL 2.0 vertex shader runs where every other vertex computation in this library
- * runs: on the CPU, in `glsl_exec.c`. It writes `gl_Position` and its varyings into the
- * same vertex the fixed-function path writes, and the same passthrough shader carries
- * them. There is nothing for a vertex-shader compiler to do that the interpreter is not
- * already doing correctly.
- *
- * The fragment stage is different, because **the fragment stage is the hardware**. A
- * pixel shader runs per fragment on the GPU and there is no CPU standing in for it on
- * the console path. That is what this compiles.
- *
- * # What a compiled pixel shader looks like
- *
- * Three parts, and only the middle depends on the GLSL:
- *
- *     v_interp_p1_f32 / v_interp_p2_f32 ...   the varyings, one pair per component
- *     <the body>                              whatever the shader computes
- *     v_mov_b32 v4..v7                        the colour into the export registers
- *     exp mrt0 v4, v5, v6, v7 done vm
- *     s_endpgm
- *
- * Every encoding comes from `tools/shader/gl2-fragment.s`, assembled by clang, and
- * `test_glsl_ps_compiles_a_fragment_shader` asserts the words. **A wrong encoding in a
- * compiler is wrong in every shader it ever emits**, which is why that file exists.
- *
- * # The register convention, which is the hardware's and not ours
- *
- * `v0` and `v1` hold the barycentrics the rasteriser wrote, and every `v_interp` reads
- * them. `v4` through `v7` are what the existing pixel shaders export from, and this
- * keeps that so the export instruction is the same one. The allocator therefore starts
- * at `v8`: a compiler that handed out `v0` would have the shader compute over the
- * coordinates it was given.
- *
- * # The limit that is the hardware's
- *
- * Four parameters, sixteen floats. The pipeline exports two, three or four of them -
- * `hw_params` in the draw path - and a fifth has never run on this part
- * (`REQ-20260921T1210Z-4f16`). A program whose varyings need more than sixteen floats
- * is refused here with that number in the message, rather than compiled into a shader
- * that reads a parameter the vertex stage never exported.
+ * Varyings are limited to four parameters, sixteen floats: the pipeline exports two to
+ * four (`hw_params` in the draw path), and a program needing more is refused.
  */
 
 #include "glsl_internal.h"
@@ -63,59 +25,31 @@
 /* Four parameters of four components, which is what the vertex stage can export. */
 #define GL_PS_MAX_PARAM_FLOATS 16
 
-/* **What the frame's stage table allocated for the pixel stage.**
+/* What the frame's stage table allocates for the pixel stage.
  * `SPI_SHADER_PGM_RSRC1_PS` is 0x000c0010 in `gl_hw_begin_frame`'s table, and its VGPRS
- * field - bits 5:0 - is 0x10; wave32 allocates `(VGPRS + 1) * 8` registers, so 136. A
- * shader that touched `v136` would be reading and writing outside its own allocation,
- * which on this part is another wave's file: not a wrong pixel but a wrong pixel
- * somewhere else, in a draw that has nothing to do with this one.
- *
- * Raising RSRC1 for a hungry shader is the other way to do this and is a measurement
- * away - the register is written once a frame and the value has never been anything but
- * the one above. */
+ * field (bits 5:0) is 0x10; wave32 allocates `(VGPRS + 1) * 8` registers, so 136. A
+ * register past that is another wave's. */
 #define GL_PS_MAX_VGPRS 136u
 
-/* **Where the uniform block lands in the scalar file.** s0 and s1 are the block's own
- * address, the texture descriptors take s4..s51 and the mask registers s52..s64 -
- * `glsl_internal.h` has the map. s72 is the first multiple of four clear of all of it
- * and of the draw constants, and a multiple of four is what a scalar load of four
- * dwords or more needs; the loads march on by sixteen from here, so every one of them
- * lands on one too. Thirty-two floats from s72 ends at s103, two below the s105 this
- * part allows. */
+/* Where the uniform window lands in the scalar file. `glsl_internal.h` has the map
+ * below it; s72 is the first multiple of four clear of it and of the draw constants,
+ * as a scalar load of four dwords or more needs. Thirty-two floats from s72 end at
+ * s103, below the s105 this part allows. */
 #define GL_PS_UNIFORM_SGPR_BASE 72u
 
-/* **How many floats of the block are resident at once**, which is a staging size and no
- * longer a budget. The block carries `OOPS_GL_GL2_UNIFORM_FLOATS`; this is what fits
- * above the loop masks and below the 106-register ceiling.
- *
- * A uniform is moved into a VGPR at the top of the shader and read from there for the
- * rest of it, so these registers are free again the moment that move retires. The
- * prologue therefore **slides this window along the block**, one pass per 32 floats,
- * and a program's pool is not bounded by the scalar file at all - only by the VGPRs the
- * uniforms it names cost, one each.
- *
- * It is 32 and not 16 so that no uniform can straddle two passes: a pass starts at a
- * uniform's offset rounded down to sixteen, nothing in the language is wider than a
- * `mat4`'s sixteen floats, and `15 + 16` is under 32. Sixteen is the load's own
- * granularity - the block is walked by `s_load_dwordx16`, whose destination has to be
- * four-aligned. */
+/* How many floats of the block are resident at once: a staging size, not a budget. A
+ * uniform is moved into a VGPR at the top of the shader, so the prologue slides this
+ * window along the block, one pass per 32 floats (see `ps_load_uniforms`). The block
+ * is walked by `s_load_dwordx16`, whose destination must be four-aligned. */
 #define GL_PS_UNIFORM_WINDOW_FLOATS 32
 
-/* **The draw's own constants**, loaded into s68..s71 - the last 4-aligned group below
- * the uniforms and above the exec masks, which end at s64. Four dwords, so a 4-aligned
- * destination is what the load needs and s68 is one. */
+/* The draw's own constants, loaded into s68..s71: the last 4-aligned group below the
+ * uniforms and above the loop masks. */
 #define GL_PS_DRAWCONST_SGPR_BASE 68u
 
-/*
- * **The top of the scalar map, continued from `glsl_internal.h`.** That file asserts
- * the ranges it owns end below `GLSL_GEN_LOOP_SGPR_BASE`; these two are above them and
- * are the last things in the file, so this is where the map meets the 106-register
- * ceiling.
- *
- * It is a separate assertion only because the two halves are declared in different
- * files. It is one map, and the reason both halves exist is that checking part of it
- * let the loop masks sit inside the sampler descriptors for a commit.
- */
+/* The top of the scalar map, continued from `glsl_internal.h`, which asserts the ranges
+ * it owns. The draw constants and the uniform window sit above them and meet the
+ * 106-register ceiling here. */
 typedef char gl_ps_sgpr_map_fits
     [(GLSL_GEN_LOOP_SGPR_BASE +
               (unsigned)GLSL_GEN_MAX_LOOP_DEPTH * GLSL_GEN_LOOP_SGPR_COUNT <=
@@ -124,27 +58,22 @@ typedef char gl_ps_sgpr_map_fits
       GL_PS_DRAWCONST_SGPR_BASE + (unsigned)OOPS_GL_GL2_DRAWCONST_FLOATS <=
           GL_PS_UNIFORM_SGPR_BASE &&
       GL_PS_UNIFORM_SGPR_BASE % 4u == 0u &&
-      /* The *window*, not the block: only this much is ever resident. */
+      /* The window, not the block: only this much is ever resident. */
       GL_PS_UNIFORM_WINDOW_FLOATS % 16 == 0 &&
       GL_PS_UNIFORM_SGPR_BASE + (unsigned)GL_PS_UNIFORM_WINDOW_FLOATS <= 106u)
          ? 1
          : -1];
 
-/* **Where the hardware puts the fragment's window position**, when `SPI_PS_INPUT_ENA`
- * asks for it. The VGPRs are packed in the order Mesa enumerates them
+/* Where the hardware puts the fragment's window position when `SPI_PS_INPUT_ENA` asks
+ * for it. The VGPRs are packed in the order Mesa enumerates them
  * (`ac_get_fs_input_vgpr_cnt`, `ac_shader_util.c`): the perspective-centre barycentrics
- * take v0 and v1, and x, y, z and w follow one register each. The payload's polygon
- * stipple reads the same pair at v2 and v3 with `ENA` 0x302, which is the in-tree
- * confirmation of the order.
- *
- * These are read in the prologue and copied into registers of their own, so nothing
- * downstream depends on the layout - the same treatment a uniform gets, and for the
- * same reason. */
+ * take v0 and v1, and x, y, z and w follow. The payload's polygon stipple reads the
+ * same pair at v2 and v3 with `ENA` 0x302. The prologue copies them into registers of
+ * their own. */
 #define GL_PS_FRAGPOS_VGPR 2u
 
-/* `SPI_PS_INPUT_ENA` bits, from `R_0286CC_SPI_PS_INPUT_ENA` for gfx103 - not
- * `R_02865C`, which is that register only from gfx12 and is `SPI_PS_INPUT_CNTL_6` here.
- */
+/* `SPI_PS_INPUT_ENA` bits, from `R_0286CC_SPI_PS_INPUT_ENA` for gfx103; `R_02865C` is
+ * that register only from gfx12 and is `SPI_PS_INPUT_CNTL_6` here. */
 #define GL_PS_INPUT_PERSP_CENTER 0x00000002u
 #define GL_PS_INPUT_POS_XYZW 0x00000f00u
 #define GL_PS_INPUT_FRONT_FACE 0x00001000u
@@ -169,22 +98,16 @@ static glsl_type_t type_from_gl(GLenum t) {
         return GLSL_TYPE_VEC3;
     case GL_FLOAT_VEC4:
         return GLSL_TYPE_VEC4;
-    /* **An `int` or `bool` uniform is carried as the float it already is.** The
-     * program's value pool has one representation for every uniform (`gl_internal.h`
-     * says why), so `glUniform1i(ortho, 1)` has already become 1.0f before this sees it
-     * - and a shader that reads such a uniform reads it through `bool()` or a
-     * comparison, both of which work on that float unchanged. Integer *arithmetic* on
-     * it is still refused: the type stays `int` here, and the generator has no verified
-     * instruction for it. */
+    /* An `int` or `bool` uniform is carried as a float: the value pool has one
+     * representation for every uniform (`gl_internal.h`), so `glUniform1i(u, 1)` is
+     * already 1.0f. The type stays `int`, and the generator refuses integer arithmetic
+     * on it. */
     case GL_INT:
         return GLSL_TYPE_INT;
     case GL_BOOL:
         return GLSL_TYPE_BOOL;
-    /* And their vectors, which are the same argument N times over: an `ivec4` is four
-     * floats in the pool and four registers here, exactly as a `vec4` is, and
-     * `vec4(color)` is the conversion the constructor already does componentwise. Left
-     * out while the scalars were added, which is why SuperTuxKart's `coloredquad.frag`
-     * - one `uniform ivec4` and one divide - was the shader that did not generate. */
+    /* And their vectors: an `ivec4` is four floats in the pool and four registers here,
+     * as a `vec4` is. */
     case GL_INT_VEC2:
         return GLSL_TYPE_IVEC2;
     case GL_INT_VEC3:
@@ -197,17 +120,9 @@ static glsl_type_t type_from_gl(GLenum t) {
         return GLSL_TYPE_BVEC3;
     case GL_BOOL_VEC4:
         return GLSL_TYPE_BVEC4;
-    /* **A matrix uniform, which needed nothing but this.** The generator already stores
-     * a matrix as `cols * rows` consecutive registers column-major and already
-     * multiplies one by a vector at any shape - `glsl_emit_mat_mul_vec_cr` takes both
-     * dimensions as arguments and the square and `mat4` forms are wrappers on it - so
-     * the whole of the gap was that this function had no case and the uniform was
-     * refused before reaching any of it. The non-square six arrived the same way, for
-     * the same reason.
-     *
-     * The value pool holds a matrix column-major, which is the order
-     * `glUniformMatrix*fv` writes without `transpose` and the order the registers are
-     * read in, so the copy into VGPRs below stays one float at a time with no
+    /* Matrices. The generator stores one as `cols * rows` consecutive registers,
+     * column-major, and the value pool holds it the same way (the order
+     * `glUniformMatrix*fv` writes without `transpose`), so the copy into VGPRs needs no
      * reordering. */
     case GL_FLOAT_MAT2:
         return GLSL_TYPE_MAT2;
@@ -232,30 +147,9 @@ static glsl_type_t type_from_gl(GLenum t) {
     }
 }
 
-/* Whether this unit declares `name` as a uniform of its own.
- *
- * **The program's uniform pool is both stages' uniforms together**, which is what lets
- * one `mat4 mvp` be one uniform - so the pool holds names this shader never mentions.
- * They are loaded into SGPRs regardless, because the block is copied whole and a scalar
- * load is cheap; what they must not cost is a **VGPR each**, and a vertex-only `mat4`
- * would cost sixteen. */
-/* **Does this shader name it anywhere?** A built-in is not declared, so there is no
- * declaration list to walk and the question is about the whole body. The AST is a flat
- * array, so this reads every node once rather than walking the tree - which also means
- * a mention inside a branch the generator will never take still counts, and that is the
- * right answer: the prologue has to be emitted before anything knows which branches
- * there are. */
-/* **Whether this unit can throw a fragment away.**
- *
- * Not `glsl_unit_mentions("discard")`: that walks the identifiers, and `discard` is a
- * keyword - it parses to a statement node and never to a name, so the search would look
- * in the one place it cannot be and answer no every time. The node kind is the only
- * thing that says it.
- *
- * Every `discard` in the unit counts, including ones in functions `main` never calls.
- * That over-reports, and the cost of over-reporting is early Z given up on a draw that
- * did not need to - while under-reporting is a depth block that never hears about the
- * kill. */
+/* Whether this unit can throw a fragment away, by node kind: `discard` is a keyword,
+ * not an identifier. Every `discard` counts, including ones in functions `main` never
+ * calls; over-reporting only gives up early Z. */
 GLboolean glsl_unit_discards(const glsl_unit_t *u) {
     if (!u)
         return GL_FALSE;
@@ -266,6 +160,9 @@ GLboolean glsl_unit_discards(const glsl_unit_t *u) {
     return GL_FALSE;
 }
 
+/* Whether this shader names `name` anywhere, for built-ins, which have no declaration
+ * to find. Every node is read once, so a mention in a branch never taken still counts:
+ * the prologue is emitted before the branches are known. */
 GLboolean glsl_unit_mentions(const glsl_unit_t *u, const char *name, size_t len) {
     if (!u)
         return GL_FALSE;
@@ -286,6 +183,8 @@ GLboolean glsl_unit_mentions(const glsl_unit_t *u, const char *name, size_t len)
     return GL_FALSE;
 }
 
+/* Whether this unit declares `name` as a uniform of its own. The program's pool holds
+ * both stages' uniforms, and one this shader never names must not cost it VGPRs. */
 static GLboolean unit_declares_uniform(const glsl_unit_t *u, const char *name,
                                        size_t len) {
     if (!u || u->root == GLSL_NO_NODE)
@@ -379,10 +278,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     }
     const glsl_unit_t *fs = p->fs;
     if (!fs) {
-        /* A program with only a vertex shader leaves the fixed-function fragment stage
-         * to run, and that stage is already in the payload - so there is nothing to
-         * compile and this is not a failure. The caller distinguishes them by
-         * `out_count` being zero. */
+        /* A program with only a vertex shader runs the payload's fixed-function
+         * fragment stage: not a failure, and `out_count` stays zero. */
         return GL_TRUE;
     }
     if (p->varying_floats > GL_PS_MAX_PARAM_FLOATS) {
@@ -392,8 +289,7 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         return GL_FALSE;
     }
 
-    /* Both of these are over a hundred kilobytes - the node arena and the symbol table
-     * - which is more than a freestanding thread's stack should be asked for. */
+    /* On the heap: both are too large for a freestanding thread's stack. */
     glsl_sema_t *sema = (glsl_sema_t *)gl_heap_alloc(sizeof(glsl_sema_t));
     glsl_gen_t *gen = (glsl_gen_t *)gl_heap_alloc(sizeof(glsl_gen_t));
     if (!sema || !gen) {
@@ -407,32 +303,20 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     glsl_code_t *const code = &code_buf;
     glsl_code_init(code, words, capacity);
 
-    /* The semantic stage is rebuilt rather than kept from the compile: it is scoped, so
-     * what survived `glsl_check_unit` is the globals, and the generator asks it for the
-     * type of every operand as it walks `main`. Cheaper to redo than to keep a hundred
-     * kilobytes per shader object alive for it. */
+    /* The semantic stage is rebuilt rather than kept from the compile; the generator
+     * asks it for the type of every operand as it walks `main`. */
     glsl_sema_init(sema, (glsl_ast_t *)&fs->ast);
     sema->stage = GL_FRAGMENT_SHADER;
     sema->version = fs->version ? fs->version : 110;
-    /* **The unit's struct table, back into this fresh symbol table**, for the same
-     * reason its functions are re-declared below: this sema is built here and never ran
-     * `glsl_check_unit`, so it knows nothing the compile worked out. The generator asks
-     * it for a struct's size and its members' positions, and the unit is the authority
-     * - that table was copied out of the pass that computed the layout, so the code
-     * generator and the interpreter read the same numbers rather than each deriving
-     * their own. */
+    /* The unit's struct table, back into this fresh sema, which never ran
+     * `glsl_check_unit`. The generator and the interpreter read the same layout. */
     sema->struct_count = fs->struct_count;
     for (int i = 0; i < fs->struct_count; i++)
         sema->structs[i] = fs->structs[i];
     GLboolean ok = glsl_declare_builtins(sema, GL_FRAGMENT_SHADER);
 
-    /* **The unit's own functions, back into the table.** `glsl_check_unit` recorded
-     * them during the compile and this symbol table is a fresh one, so without this a
-     * call to a function the shader defines has no signature to be typed against - and
-     * the generator, which asks this table for the type of every operand, cannot tell
-     * what a helper returns. It read as "only float, vec and mat constructor arguments
-     * are generated" the first time a helper's result was passed to `vec4`, which is a
-     * message about the wrong thing entirely. */
+    /* The unit's own functions, back into the table, so a call to a helper the shader
+     * defines has a signature to be typed against. */
     if (ok) {
         for (int32_t d = fs->ast.nodes[fs->root].a; d != GLSL_NO_NODE;
              d = fs->ast.nodes[d].sibling) {
@@ -454,23 +338,17 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     if (ok)
         ok = ps_declare_samplers(p, fs, gen, log, log_size);
 
-    /* **Whether this shader is handed the block at all**, which decides two things
-     * together and so is decided once: the scalar loads below, and how many user SGPRs
-     * the draw configures - which in turn is where the SPI puts the primitive mask. The
-     * draw path reads the answer back off the program (`hw_ps_user_sgprs`) rather than
-     * working it out a second time, so the shader and the register that feeds it cannot
-     * come to different conclusions. */
-    /* **`gl_FragCoord` needs the block too**, for the viewport height that flips its y
-     * - so it joins the two things that already decide whether this shader is handed
-     * one. */
+    /* Whether this shader is handed the block decides both the scalar loads and how
+     * many user SGPRs the draw configures, which is where the SPI puts the primitive
+     * mask. The draw path reads it back off the program (`hw_ps_user_sgprs`).
+     * `gl_FragCoord` needs the block for the viewport height that flips its y. */
     const int tex_sets = p->hw_tex_sets;
     const GLboolean wants_fragcoord = glsl_unit_mentions(fs, "gl_FragCoord", 12u);
     /* `gl_FrontFacing` needs no block - the SPI hands it over in a register of its own.
      */
     const GLboolean wants_frontfacing = glsl_unit_mentions(fs, "gl_FrontFacing", 14u);
-    /* **`gl_FragDepth` needs the window position too**, for the interpolated z it
-     * starts at - so it asks for the same registers `gl_FragCoord` does, and a shader
-     * naming either gets them. */
+    /* `gl_FragDepth` needs the window position too, for the interpolated z it starts
+     * at. */
     const GLboolean wants_fragdepth = glsl_unit_mentions(fs, "gl_FragDepth", 12u);
     const GLboolean wants_fragdata = glsl_unit_mentions(fs, "gl_FragData", 11u);
     const GLboolean takes_block =
@@ -480,12 +358,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
         GL_PS_INPUT_PERSP_CENTER |
         ((wants_fragcoord || wants_fragdepth) ? GL_PS_INPUT_POS_XYZW : 0u) |
         (wants_frontfacing ? GL_PS_INPUT_FRONT_FACE : 0u);
-    /* **Where the front-face register lands, which depends on what else was asked
-     * for.** The SPI packs the enabled inputs in the order Mesa enumerates them, so the
-     * face follows the position when the position is there and sits straight after the
-     * barycentrics when it is not. Computed rather than fixed, because pinning it would
-     * mean asking for four registers of window position that the shader never reads
-     * just to keep this one in place. */
+    /* The SPI packs the enabled inputs in Mesa's order, so the front-face register
+     * follows the position when that is enabled and the barycentrics when it is not. */
     const uint32_t frontface_vgpr =
         GL_PS_FRAGPOS_VGPR + ((wants_fragcoord || wants_fragdepth) ? 4u : 0u);
 
@@ -525,9 +399,8 @@ GLboolean gl_program_compile_fragment(const gl_program_object_t *p, uint32_t *wo
     if (ok) {
         if (out_count)
             *out_count = code->count;
-        /* What the shader's resource register has to reserve. The high-water mark is
-         * what the allocator ever held live, and the export registers sit below it - so
-         * it is the whole of the file this shader touches. */
+        /* What the shader's resource register has to reserve: the allocator's
+         * high-water mark, which lies above the export registers. */
         if (out_vgprs)
             *out_vgprs = gen->high_water;
         if (out_user_sgprs)
@@ -554,9 +427,8 @@ static GLboolean ps_declare_samplers(const gl_program_object_t *p,
      * texture unit's descriptors at 0x00 and 0x40, this program's whole value pool at
      * 0x80.
      *
-     * **The samplers are found first**, because whether this shader samples decides
-     * whether it runs in whole-quad mode - and that has to be emitted before any of the
-     * body, by which time finding out would be too late.
+     * The samplers are found first, because whether this shader samples decides
+     * whether it runs in whole-quad mode, which is emitted before the body.
      * --------------------------------------------------------------------- */
     const int tex_sets = p->hw_tex_sets;
     for (int s = 0; ok && s < tex_sets; s++) {
@@ -579,11 +451,8 @@ static GLboolean ps_declare_samplers(const gl_program_object_t *p,
             ok = GL_FALSE;
         }
     }
-    /* A sampler the linker could not give a set to - because there were more than the
-     * draw carries, or because it is not a 2D one - is named here rather than at the
-     * lookup. The lookup's message would be about the function; this one is about the
-     * declaration, and a shader declaring a `samplerCube` was never going to sample it
-     * with `texture2D`. */
+    /* A sampler the linker could not give a set to is named here, at its declaration,
+     * rather than at the lookup. */
     for (int i = 0; ok && i < p->uniform_count; i++) {
         const gl_uniform_t *u = &p->uniforms[i];
         if (!gl_type_is_sampler(u->type))
@@ -631,16 +500,14 @@ static GLboolean ps_emit_prologue(const glsl_unit_t *fs, glsl_gen_t *gen,
                                   GLboolean takes_block, GLboolean wants_fragcoord,
                                   uint32_t user_sgprs) {
     GLboolean ok = GL_TRUE;
-    /* **`m0` first, because every interpolation reads it** - and because a shader that
-     * skips it still runs, still exports, and draws a surface speckled with another
-     * primitive's parameters. See `glsl_emit_s_mov_m0`. The mask sits just past the
-     * user data: s2 with the block, s0 without. */
+    /* `m0` first, because every interpolation reads it; without it a shader reads
+     * another primitive's parameters. See `glsl_emit_s_mov_m0`. The mask sits just past
+     * the user data: s2 with the block, s0 without. */
     if (ok)
         glsl_emit_s_mov_m0(code, user_sgprs);
 
-    /* **One wait covers every load below**, because `lgkmcnt(0)` waits for all of them
-     * and not for one. Leaving it out is not a slower shader but a wrong one: obSCEne's
-     * `-6c0d` ran exactly that arm and the shader read all zeros. */
+    /* One wait covers every load below, because `lgkmcnt(0)` waits for all of them.
+     * Without it the shader reads zeros. */
     if (ok && takes_block) {
         for (int s = 0; s < tex_sets; s++) {
             const uint32_t base =
@@ -649,10 +516,9 @@ static GLboolean ps_emit_prologue(const glsl_unit_t *fs, glsl_gen_t *gen,
             glsl_emit_s_load(code, GLSL_SMEM_LOAD_DWORDX8, base, 0u, at);
             glsl_emit_s_load(code, GLSL_SMEM_LOAD_DWORDX4, base + 8u, 0u, at + 32u);
         }
-        /* The uniforms are **not** loaded here. They go in below, a window at a time,
-         * beside the moves that read them - see the pass loop. The descriptors have to
-         * stay resident for the whole shader because a sample reads them wherever it
-         * is; a uniform does not, because it is in a VGPR from the top. */
+        /* The uniforms are not loaded here but a window at a time in
+         * `ps_load_uniforms`. The descriptors stay resident for the whole shader,
+         * because a sample reads them wherever it is. */
         /* The draw's constants, under the one wait below with everything else. */
         if (wants_fragcoord) {
             glsl_emit_s_load(code, GLSL_SMEM_LOAD_DWORDX4, GL_PS_DRAWCONST_SGPR_BASE,
@@ -661,39 +527,20 @@ static GLboolean ps_emit_prologue(const glsl_unit_t *fs, glsl_gen_t *gen,
         glsl_emit_s_waitcnt_lgkm(code);
     }
 
-    /* **Whole-quad mode, if this shader samples**, and from here rather than from just
-     * before the lookup: `image_sample` takes its level of detail from how the
-     * coordinate changes across the 2x2 quad, so every step that *produced* that
-     * coordinate has to have run in the helper lanes too - which means the
-     * interpolation below and whatever the body does to it. The live mask is kept and
-     * put back before the export. */
-    /* **A derivative needs whole-quad mode too**, and for the same reason a sample
-     * does: it reads the lane next door, and in a lane the primitive does not cover
-     * there is a value there only because WQM kept that lane running. Decided from the
-     * source rather than from generation, because the mode has to be entered before any
-     * of the body runs and by then it would be too late to find out. */
+    /* Whole-quad mode if this shader samples or takes a derivative, entered here rather
+     * than just before the lookup: the level of detail comes from how the coordinate
+     * changes across the 2x2 quad, so every step that produced it must run in the
+     * helper lanes too. Decided from the source, since the mode is entered before the
+     * body. */
     if (ok &&
         (glsl_unit_mentions(fs, "dFdx", 4u) || glsl_unit_mentions(fs, "dFdy", 4u) ||
          glsl_unit_mentions(fs, "fwidth", 6u))) {
         gen->wqm = GL_TRUE;
     }
-    /*
-     * **The live mask is kept for every shader, not only one that samples.**
-     *
-     * It used to be whole-quad mode's alone: save `exec`, widen to the quad, restore
-     * before the export so helper lanes do not reach it. That is still what it does
-     * there, but the mask it holds is more general than that - **the lanes that should
-     * reach the export** - and two other things need exactly that.
-     *
-     * `discard` takes a lane out of it, so a discarded lane cannot be handed back by
-     * the restore. And a `return` in `main` does *not*, which is what makes an early
-     * return work: the lane stops executing the body and still exports whatever
-     * `gl_FragColor` held when it left.
-     *
-     * The cost is one scalar move at each end of every shader. Making it conditional is
-     * what made a `return` in `main` impossible to generate, because the mask it needed
-     * was only there for shaders that happened to sample.
-     */
+    /* The live mask - the lanes that should reach the export - is kept for every
+     * shader. Whole-quad mode restores it before the export; `discard` takes a lane out
+     * of it; a `return` in `main` does not, so a lane that returns early still exports
+     * what `gl_FragColor` held. */
     if (ok) {
         glsl_emit_exec_save(code, GLSL_GEN_LIVE_SGPR);
         if (gen->wqm)
@@ -708,42 +555,14 @@ static GLboolean ps_load_uniforms(const gl_program_object_t *p, const glsl_unit_
                                   glsl_gen_t *gen, glsl_code_t *code, char *log,
                                   size_t log_size) {
     GLboolean ok = GL_TRUE;
-    /*
-     * **The uniforms, a window at a time.**
+    /* Each uniform this shader names is moved into a VGPR of its own and declared like
+     * any other input, so the generator has one register class. The scalar registers
+     * that carried it are then free, so the window slides: each pass loads 32 floats of
+     * the block, waits, and moves that range into the registers reserved for it.
      *
-     * Each uniform this shader actually names is moved into a VGPR of its own and
-     * declared like any other input, so the rest of the generator sees a variable and
-     * needs no notion of an SGPR at all. That costs one register and one instruction a
-     * float; the alternative - teaching every operand path that a value might live in
-     * an SGPR - would buy those back at the price of a second register class in a back
-     * end that has one.
-     *
-     * **Which is what makes the scalar window a staging area and not a budget.** A
-     * uniform is in a VGPR from here to the end of the shader, so the scalar registers
-     * that carried it are free the moment the move is done. They used to be loaded once
-     * in the prologue and held for the whole shader, which capped a shader at
-     * `GL_PS_UNIFORM_WINDOW_FLOATS` floats of *span*
-     * - and mesa-demos' `CH11-toyball.frag` and `convolution.frag`, at 48 and 64, were
-     * refused for wanting more of a 64-float block than 32 scalar registers could hold
-     * at once.
-     *
-     * So the window slides. Each pass loads 32 floats of the block, waits, and moves
-     * the floats of that range into the registers already reserved for them; the next
-     * pass reloads the same scalar registers from further along. The cost is one extra
-     * `s_waitcnt` per pass; what it buys is that the scalar file stops bounding the
-     * pool at all.
-     *
-     * **Which is why the two halves below are separate loops.** Every uniform is given
-     * its registers first, and only then is the block walked and copied a float at a
-     * time. Placing whole uniforms inside a pass instead would cap one at the window's
-     * width, and `vec4 KernelValue[9]` is 36 floats - it does not fit a 32-float window
-     * and does not need to, because nothing about a copy requires the whole of a
-     * uniform to arrive at once.
-     *
-     * What bounds a shader now is VGPRs - one per uniform float, against the 136 the
-     * stage table reserves - which is the honest limit and the one the allocator
-     * already reports.
-     */
+     * Registers are assigned to every uniform first and the block is copied a float at
+     * a time after, so a uniform wider than the window (`vec4 KernelValue[9]`, 36
+     * floats) may span passes. What bounds a shader is VGPRs, one per uniform float. */
     struct {
         int at;
         int floats;
@@ -761,8 +580,8 @@ static GLboolean ps_load_uniforms(const gl_program_object_t *p, const glsl_unit_
             continue; /* its descriptors are in the scalar file */
         const glsl_type_t t = type_from_gl(u->type);
         if (t == GLSL_TYPE_ERROR) {
-            /* A type `type_from_gl` does not carry. Named rather than silently skipped,
-             * because a skipped uniform reads as zero and draws. */
+            /* A type `type_from_gl` does not carry. Refused, since a skipped uniform
+             * would read as zero. */
             oops_snprintf(
                 log, log_size,
                 "uniform '%s' is not a float, a float vector or a matrix, and the "
@@ -772,13 +591,9 @@ static GLboolean ps_load_uniforms(const gl_program_object_t *p, const glsl_unit_
             break;
         }
         const int size = (u->size > 0) ? u->size : 1;
-        /* **An array of uniforms is a run of registers, which is what `gl_TexCoord[]`
-         * already is.** The elements lie end to end and `gen_index_of` slices the run
-         * by a constant index - so a `uniform vec2 Offset[9]` read inside an unrolled
-         * loop resolves element by element, which is exactly how mesa-demos'
-         * `convolution.frag` writes it. An index that is *not* constant is still
-         * refused, there and here alike: there is no addressable memory behind a run of
-         * VGPRs. */
+        /* An array of uniforms is a run of registers, as `gl_TexCoord[]` is;
+         * `gen_index_of` slices it by a constant index. A non-constant index is
+         * refused: there is no addressable memory behind a run of VGPRs. */
         const glsl_value_t home =
             (size > 1) ? glsl_gen_declare_input_array(gen, u->name, ulen, t, size)
                        : glsl_gen_declare_input(gen, u->name, ulen, t);
@@ -794,9 +609,7 @@ static GLboolean ps_load_uniforms(const gl_program_object_t *p, const glsl_unit_
             break;
         }
         resident[resident_count].at = u->offset;
-        /* The array form hands back the whole run, the scalar form one element - and
-         * `floats` is per element either way, so this is the one place the two are
-         * reconciled. */
+        /* `floats` is per element, so the whole run is `floats * size`. */
         resident[resident_count].floats = u->floats * size;
         resident[resident_count].home = home.base;
         resident_count++;
@@ -821,10 +634,8 @@ static GLboolean ps_load_uniforms(const gl_program_object_t *p, const glsl_unit_
         }
         glsl_emit_s_waitcnt_lgkm(code);
 
-        /* **Relative to this pass's base**, because `s72` holds float `base` of the
-         * block and not float 0. Reading the pool's absolute offset here is what would
-         * make a windowed load return a different uniform's value rather than an error.
-         */
+        /* Relative to this pass's base: `s72` holds float `base` of the block, not
+         * float 0. */
         for (int r = 0; r < resident_count; r++) {
             for (int c = 0; c < resident[r].floats; c++) {
                 const int at = resident[r].at + c;
@@ -846,19 +657,10 @@ static GLboolean ps_declare_window_inputs(glsl_gen_t *gen, glsl_code_t *code,
                                           uint32_t frontface_vgpr, char *log,
                                           size_t log_size) {
     GLboolean ok = GL_TRUE;
-    /* **`gl_FragCoord`, copied out of the registers the SPI filled and into the
-     * allocator's.**
-     *
-     * x, z and w are the hardware's values. **y is not**: GL measures `gl_FragCoord.y`
-     * from the bottom of the window and the hardware hands down the row from the top,
-     * so this is `height - y`. The payload's polygon stipple is the in-tree witness -
-     * `gl_ps_patch_stipple` rotates its mask for the window height precisely because
-     * the two count opposite ways, and a shader that skipped the flip would draw every
-     * gradient upside down.
-     *
-     * Copied rather than used where they lie, because v4 and v5 are also the export
-     * registers: the epilogue writes them last, so reading them in place would work and
-     * would be one reordering away from not working. */
+    /* `gl_FragCoord`, copied out of the registers the SPI filled. x, z and w are the
+     * hardware's values; y is `height - y`, because GL measures it from the bottom of
+     * the window and the hardware from the top (`gl_ps_patch_stipple` rotates its mask
+     * for the same reason). Copied because v4 and v5 are also export registers. */
     if (ok && wants_fragcoord) {
         const glsl_value_t fc =
             glsl_gen_declare_input(gen, "gl_FragCoord", 12u, GLSL_TYPE_VEC4);
@@ -869,11 +671,9 @@ static GLboolean ps_declare_window_inputs(glsl_gen_t *gen, glsl_code_t *code,
             ok = GL_FALSE;
         } else {
             glsl_emit_mov(code, fc.base + 0u, GL_PS_FRAGPOS_VGPR + 0u);
-            /* **`v_sub_f32` straight**, not through `glsl_emit_sub_f32`: that helper
-             * puts its first operand through `glsl_vgpr`, and this one is a scalar
-             * register. VOP2's `src0` is the nine-bit operand field that takes either,
-             * while `vsrc1` is a VGPR number and nothing else - so the height has to be
-             * the first operand, which is also the order the subtraction wants. */
+            /* `v_sub_f32` directly, not `glsl_emit_sub_f32`, which biases its first
+             * operand as a VGPR: the height is an SGPR, and only `src0` can name one.
+             */
             glsl_emit_vop2(
                 code, GLSL_VOP2_SUB_F32, fc.base + 1u,
                 glsl_sgpr(GL_PS_DRAWCONST_SGPR_BASE + OOPS_GL_GL2_DC_TARGET_H),
@@ -883,15 +683,9 @@ static GLboolean ps_declare_window_inputs(glsl_gen_t *gen, glsl_code_t *code,
         }
     }
 
-    /* **`gl_FrontFacing`, which is a sign and not a flag.** The SPI hands over a float
-     * that is positive for a front-facing primitive - Mesa lowers `load_front_face` as
-     * `fgt(reg, 0)` and `load_front_face_fsign` as the register itself, which is what
-     * says it is a float and not a zero/one integer. A back end that treated it as a
-     * boolean directly would read a negative number as true and answer "front" for
-     * every fragment.
-     *
-     * A bool here is a float 0.0 or 1.0 like any other, so this is the same
-     * compare-and-select the language's own comparisons use. */
+    /* `gl_FrontFacing` is a sign, not a flag: the SPI hands over a float that is
+     * positive for a front-facing primitive (Mesa lowers `load_front_face` as
+     * `fgt(reg, 0)`). A bool here is 0.0 or 1.0, so this is a compare-and-select. */
     if (ok && wants_frontfacing) {
         const glsl_value_t ff =
             glsl_gen_declare_input(gen, "gl_FrontFacing", 14u, GLSL_TYPE_BOOL);
@@ -923,13 +717,9 @@ static GLboolean ps_interpolate_inputs(const gl_program_object_t *p, glsl_gen_t 
                                        glsl_code_t *code, char *log, size_t log_size) {
     GLboolean ok = GL_TRUE;
     /* ---------------------------------------------------------------------
-     * The prologue: every varying interpolated into registers of its own.
-     *
-     * **The allocator's order and the interpolation's order have to agree**, which is
-     * why the value comes back from `glsl_gen_declare_input` and the interp pair is
-     * emitted into exactly the registers it named. Emitting into a register computed
-     * separately would work until the first shader whose varyings were declared in a
-     * different order from the linker's table.
+     * Every varying interpolated into registers of its own: the interp pair writes
+     * exactly the registers `glsl_gen_declare_input` returned, so the allocator and the
+     * interpolation agree.
      * --------------------------------------------------------------------- */
     for (int i = 0; ok && i < p->varying_count; i++) {
         const gl_varying_t *v = &p->varyings[i];
@@ -952,24 +742,16 @@ static GLboolean ps_interpolate_inputs(const gl_program_object_t *p, glsl_gen_t 
             break;
         }
         for (int c = 0; c < home.count; c++) {
-            /* The linker laid the varyings out as a flat block of floats; the hardware
-             * carries them as four-component parameters. So float `n` of the block is
-             * component `n % 4` of parameter `n / 4`, and the two layouts are the same
-             * thing counted differently. */
+            /* The linker laid the varyings out as a flat block of floats; float `n` is
+             * component `n % 4` of parameter `n / 4`. */
             const int slot = v->offset + c;
             glsl_emit_interp_pair(code, home.base + (uint32_t)c, (uint32_t)(slot / 4),
                                   (uint32_t)(slot % 4));
         }
     }
 
-    /* **`gl_Color`, interpolated from the parameter the linker set aside for it.**
-     *
-     * The fixed-function colour is not a user varying and owns no slot until a fragment
-     * shader asks for one, so `hw_color_param` is where it ended up - the first
-     * parameter past the user's when there is a vertex shader, and parameter 0 when
-     * there is not, because the fixed-function vertex path has always written it there.
-     * The two cases differ, which is why the number comes from the link and is not
-     * worked out again here. */
+    /* `gl_Color`, from the parameter the linker set aside (`hw_color_param`): past the
+     * user's varyings with a vertex shader, parameter 0 without one. */
     if (ok && p->hw_color_param >= 0) {
         const glsl_value_t home =
             glsl_gen_declare_input(gen, "gl_Color", 8u, GLSL_TYPE_VEC4);
@@ -985,12 +767,8 @@ static GLboolean ps_interpolate_inputs(const gl_program_object_t *p, glsl_gen_t 
         }
     }
 
-    /* **`gl_TexCoord[]`, the same way and one parameter an element.** It is an array,
-     * so the run of registers is `OOPS_GL_MAX_TEXTURE_UNITS` vec4s end to end and a
-     * constant index into it is a slice - which is what a fragment shader writes,
-     * `gl_TexCoord[0].st` and no other shape. The parameter each element sits in comes
-     * from the link for the reason `gl_Color`'s does: the draw fills that slot and this
-     * reads it, and the two cannot each decide. */
+    /* `gl_TexCoord[]`, one parameter an element from `hw_texcoord_param`: a run of
+     * `OOPS_GL_MAX_TEXTURE_UNITS` vec4s that a constant index slices. */
     if (ok && p->hw_texcoord_param >= 0) {
         const glsl_value_t home = glsl_gen_declare_input_array(
             gen, "gl_TexCoord", 11u, GLSL_TYPE_VEC4, OOPS_GL_MAX_TEXTURE_UNITS);
@@ -1010,27 +788,11 @@ static GLboolean ps_interpolate_inputs(const gl_program_object_t *p, glsl_gen_t 
         }
     }
 
-    /*
-     * **`gl_PointCoord`, interpolated from the texture parameter** (since 2026-09-23).
-     *
-     * It is texture coordinate 0's interpolant - the point expansion writes the sprite
-     * coordinate into `tc[0]`, the vertex assembly copies that unit's set into the
-     * texture parameter, and the part's own name for the same substitution is
-     * `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`.
-     *
-     * **Parameter 1, and the link is what makes that a constant rather than a guess.**
-     * A program reading `gl_PointCoord` is refused if it has a vertex shader, so the
-     * vertex always takes the fixed-function layout - position, then the colour at
-     * parameter 0, then the texture parameter at 1 (`gl_draw.c`'s `memcpy(v + 32,
-     * uvs[k], 16)`). With a vertex shader the parameters are the program's own varyings
-     * and 1 would mean something else entirely, which is exactly why that case is not
-     * allowed to reach here.
-     *
-     * Without this the front end knew the name, the interpreter had a value for it and
-     * the linker had an opinion about it, and the console had no register - which is
-     * what the hardware said, in as many words: "this name has no register". The host
-     * passed throughout, because the host *is* the interpreter.
-     */
+    /* `gl_PointCoord`, texture coordinate 0's interpolant: the point expansion writes
+     * the sprite coordinate into `tc[0]` (the part's own mechanism is
+     * `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`). The linker refuses it alongside a vertex
+     * shader, so the vertex has the fixed-function layout and the texture parameter is
+     * 1 (`gl_draw.c`'s `memcpy(v + 32, uvs[k], 16)`). */
     if (ok && p->hw_reads_point_coord) {
         const glsl_value_t home =
             glsl_gen_declare_input(gen, "gl_PointCoord", 13u, GLSL_TYPE_VEC2);
@@ -1057,19 +819,11 @@ static GLboolean ps_declare_globals_outputs(const glsl_unit_t *fs, glsl_gen_t *g
     /* ---------------------------------------------------------------------
      * The shader's own globals - `const float pi = 3.14159;` and the rest.
      *
-     * These are ordinary declarations that happen to sit outside `main`, so they are
-     * generated by the same arm that generates a local: a home, the initialiser into
-     * it, the name declared. **In source order**, which is what lets one `const` be
-     * written in terms of an earlier one.
+     * Generated by the same arm as a local, in source order, so one `const` may be
+     * written in terms of an earlier one. A `const` is not folded: that would need a
+     * second constant evaluator beside `glsl_exec.c`'s, able to disagree with it.
      *
-     * A `const` is not folded. It could be - every initialiser here is a constant
-     * expression by definition - and folding would save a register and a move each. It
-     * is not done because the semantic stage does not evaluate constant expressions
-     * today, so folding would mean a second evaluator beside `glsl_exec.c`'s, able to
-     * disagree with it. A move is cheaper than that.
-     *
-     * Uniforms, varyings and attributes are skipped: each has its own arm above, and
-     * generating them here would declare the name twice.
+     * Uniforms, varyings and attributes are skipped; each has its own arm above.
      * --------------------------------------------------------------------- */
     if (ok && fs->root != GLSL_NO_NODE) {
         for (int32_t d = fs->ast.nodes[fs->root].a; ok && d != GLSL_NO_NODE;
@@ -1092,20 +846,9 @@ static GLboolean ps_declare_globals_outputs(const glsl_unit_t *fs, glsl_gen_t *g
         }
     }
 
-    /* `gl_FragColor` is a variable like any other and is moved into the export
-     * registers at the end. Pinning it to v4 instead would save four moves and would
-     * mean every temporary the body allocated had to dodge it.
-     *
-     * **`gl_FragData[0]` is the same buffer under GLSL 1.10's other name**, and a
-     * shader writes one or the other (1.10, 7.2). The front end has carried it as a
-     * one-element array since the built-in table was written and the interpreter
-     * exports from it; only this path had no registers for it, so a shader spelling its
-     * output that way compiled, ran on the software reference, and was refused for the
-     * console with "this name has no register".
-     *
-     * One element because there is one draw buffer, which is what makes
-     * `gl_FragData[1]` a front-end refusal about the array's length rather than
-     * something to check here. */
+    /* `gl_FragColor` is a variable like any other, moved into the export registers at
+     * the end. `gl_FragData[0]` is the same buffer under GLSL 1.10's other name (1.10,
+     * 7.2), a one-element array because there is one draw buffer. */
     if (ok) {
         const glsl_value_t colour =
             glsl_gen_declare_input(gen, "gl_FragColor", 12u, GLSL_TYPE_VEC4);
@@ -1127,15 +870,9 @@ static GLboolean ps_declare_globals_outputs(const glsl_unit_t *fs, glsl_gen_t *g
         }
     }
 
-    /* **`gl_FragDepth` is the same thing for depth**, declared only for a shader that
-     * names it so nothing is charged for a register or an export it never uses.
-     *
-     * Seeded with the interpolated depth rather than left as whatever the allocator
-     * held. GLSL says a shader that writes it on one path and not another leaves the
-     * value undefined on the other, and `glsl_exec.c` carries `gl_FragCoord.z` there -
-     * so this reads the same value, which is the one arrangement where the two paths
-     * agree about a shader the language does not pin down. It needs the window position
-     * for that, which is why the mention enables it. */
+    /* `gl_FragDepth`, declared only for a shader that names it, and seeded with the
+     * interpolated z. GLSL leaves an unwritten path undefined; `glsl_exec.c` carries
+     * `gl_FragCoord.z` there too, so the two paths agree. */
     if (ok && wants_fragdepth) {
         const glsl_value_t depth =
             glsl_gen_declare_input(gen, "gl_FragDepth", 12u, GLSL_TYPE_FLOAT);
@@ -1180,18 +917,15 @@ static GLboolean ps_gen_main(const glsl_unit_t *fs, glsl_gen_t *gen, char *log,
     return ok;
 }
 
-/* The epilogue: the live mask back, the exports, and room for a second colour export.
- */
+/* The epilogue: the live mask back, the exports, and room for a second colour
+ * export. */
 static GLboolean ps_emit_epilogue(glsl_gen_t *gen, glsl_code_t *code,
                                   GLboolean wants_fragdata, GLboolean wants_fragdepth,
                                   char *log, size_t log_size) {
     GLboolean ok = GL_TRUE;
     if (ok) {
-        /* **Whichever name this shader wrote.** They are the same buffer, so exporting
-         * from `gl_FragData[0]` where the shader used it is the whole of the difference
-         * - and a shader that named neither still exports `gl_FragColor`, which holds
-         * whatever the allocator had, exactly as one that declared it and never
-         * assigned does. */
+        /* Whichever name this shader wrote. A shader that named neither exports
+         * `gl_FragColor` unassigned. */
         const char *out_name = wants_fragdata ? "gl_FragData" : "gl_FragColor";
         const size_t out_len = wants_fragdata ? 11u : 12u;
         glsl_value_t colour;
@@ -1200,23 +934,17 @@ static GLboolean ps_emit_epilogue(glsl_gen_t *gen, glsl_code_t *code,
                            "the fragment colour did not survive to the export", 0, 0);
             ok = GL_FALSE;
         } else {
-            /* **Back to the lanes that should export**, which does three things at
-             * once: it leaves whole-quad mode, so helper lanes on for a sample's
-             * derivatives do not put fragments on screen the primitive does not cover;
-             * it keeps a discarded lane out, because `discard` took it out of this
-             * mask; and it brings back a lane that returned early from `main`, which is
-             * still supposed to export what it had. */
+            /* Back to the lanes that should export: this leaves whole-quad mode, keeps
+             * discarded lanes out, and brings back lanes that returned early from
+             * `main`. */
             glsl_emit_exec_restore(code, GLSL_GEN_LIVE_SGPR);
             for (uint32_t i = 0; i < 4u; i++) {
-                /* A move onto itself would be a wasted instruction rather than a wrong
-                 * one, and the export registers are below everything the allocator
-                 * hands out - so this never is one, and the check is left out rather
-                 * than written and never taken. */
+                /* Never a move onto itself: the export registers lie below everything
+                 * the allocator hands out. */
                 glsl_emit_mov(code, GL_PS_EXPORT_BASE + i, colour.base + i);
             }
-            /* **The depth goes first, because the colour export is the one that says
-             * `done`.** Two exports both claiming to be the last is a shader that does
-             * not retire. */
+            /* The depth goes first, because the colour export is the one that says
+             * `done`. */
             if (wants_fragdepth) {
                 glsl_value_t depth;
                 if (glsl_gen_lookup(gen, "gl_FragDepth", 12u, &depth) &&
@@ -1230,26 +958,14 @@ static GLboolean ps_emit_epilogue(glsl_gen_t *gen, glsl_code_t *code,
             }
             glsl_emit_export_mrt0(code, GL_PS_EXPORT_BASE);
             glsl_emit_endpgm(code);
-            /*
-             * **Room for a second export, so a draw into two colour buffers can have
-             * one.**
-             *
-             * These five words are byte-identical to `gl_ps_export_words(GL_FALSE)`'s
-             * first five, and the two `s_nop`s take the tail to `GL_PS_EXPORT_WORDS` -
-             * which is what lets the draw path write the two-target form over it in
-             * place when `fb_also` is bound, exactly as it already does for the
-             * payload's fixed-function shaders.
-             *
-             * Without the room, `glDrawBuffer(GL_FRONT_AND_BACK)` under a compiled
-             * program set `CB_SHADER_MASK` to 0xff and `SPI_SHADER_COL_FORMAT` to 0x44
-             * - telling the colour block to expect two exports - while the shader made
-             * one. gl2-probe's `two-draw-buffers` measured the consequence as a front
-             * buffer holding exactly its pre-draw colour: not a wrong blend, an absent
-             * write.
-             *
-             * Nothing runs after `s_endpgm`, so on a one-target draw these are never
-             * reached.
-             */
+            /* Room for a second export, for a draw into two colour buffers. These five
+             * words match `gl_ps_export_words(GL_FALSE)`'s first five, and the two
+             * `s_nop`s take the tail to `GL_PS_EXPORT_WORDS`, so the draw path can
+             * write the two-target form over it in place when `fb_also` is bound, as it
+             * does for the payload's fixed-function shaders. That form is what
+             * `CB_SHADER_MASK` 0xff and `SPI_SHADER_COL_FORMAT` 0x44 expect
+             * (gl2-probe's `two-draw-buffers`). On a one-target draw nothing runs after
+             * `s_endpgm`. */
             glsl_emit_nop(code);
             glsl_emit_nop(code);
         }

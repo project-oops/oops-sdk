@@ -1,8 +1,7 @@
 /*
- * Freestanding Syscall Trampoline Interface.
- *
- * Routes syscalls through libkernel's registered syscall trampoline to satisfy
- * Prospero's direct-syscall mitigation (PPRBUG-22859).
+ * Freestanding syscalls: FreeBSD syscall numbers, and `sys_call`, which routes them
+ * through libkernel's registered syscall trampoline because Prospero refuses direct
+ * syscalls from other code (PPRBUG-22859).
  */
 
 #ifndef OOPS_SYSCALL_H
@@ -35,15 +34,9 @@
 #define SYS_setsockopt 105
 #define SYS_getdents 272
 /*
- * `rename` and the wall clock (2026-09-22). FreeBSD's numbers, like every other entry
- * in this table - 128 and 232 are `rename` and `clock_gettime` in
- * `sys/kern/syscalls.master`, and the kernel here is FreeBSD-derived, which is the same
- * reason `SYS_open` is 5 and `SYS_mkdir` 136.
- *
- * `clock_gettime` is what makes a *calendar* possible. Everything in `<libc/time.h>`
- * until now was built on `sceKernelGetProcessTimeCounter`, which counts from process
- * start - fine for frame timing, useless for a date, and the reason that header used to
- * say a port should not try.
+ * FreeBSD's numbers, like every entry in this table: 128 and 232 are `rename` and
+ * `clock_gettime` in `sys/kern/syscalls.master`. `clock_gettime` gives the wall clock
+ * a calendar needs; `sceKernelGetProcessTimeCounter` counts from process start.
  */
 #define SYS_rename 128
 #define SYS_clock_gettime 232
@@ -56,9 +49,14 @@
 extern "C" {
 #endif
 
+/* Locates libkernel's syscall trampoline, using the payload's arguments when given.
+ * 0 on success. `sys_call` locates it on first use if this was not called. */
 int sys_call_init(const payload_args_t *args);
+/* Issues syscall `num` through the trampoline and returns its result. */
 long sys_call(long num, long a1, long a2, long a3, long a4, long a5, long a6);
+/* The errno of the last failed syscall. */
 int sys_get_errno(void);
+/* Accepted and ignored: every syscall goes through the trampoline. */
 void sys_enable_direct(int enable);
 
 #ifdef __cplusplus

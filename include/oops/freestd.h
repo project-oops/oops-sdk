@@ -62,19 +62,18 @@ size_t obs_format_hex(char *dest, uint64_t value);
 void obs_compute_nid(const char *name, char out_nid[12]);
 
 /*
- * **The pieces a parser and a depth sort are built out of** (2026-09-20), here rather
- * than in `src/system/libc.c` because that file is target-only and promises to be
- * nothing but a rename - so an algorithm living there could not be tested at all.
- * `<libc/string.h>`'s `strspn`, `strtok_r` and their kin, and `<libc/stdlib.h>`'s
- * `qsort` and `bsearch`, are one-line wrappers over these.
+ * The pieces a parser and a depth sort are built from, here rather than in
+ * `src/system/libc.c` because that file is target-only and holds only renames, so an
+ * algorithm there could not be tested on the host. `<libc/string.h>`'s `strspn`,
+ * `strtok_r` and their kin, and `<libc/stdlib.h>`'s `qsort` and `bsearch`, are
+ * one-line wrappers over these.
  */
 size_t obs_strspn(const char *s, const char *accept);
 size_t obs_strcspn(const char *s, const char *reject);
 char *obs_strpbrk(const char *s, const char *accept);
 char *obs_strtok_r(char *s, const char *delim, char **save);
-/* `qsort`'s contract, with `qsort`'s guarantees: not stable, and the ordering of equal
- * elements is whatever the partition left. The stack is bounded at log2(count) frames -
- * see the comment on the definition for why that is not an optimisation. */
+/* `qsort`'s contract: not stable, so equal elements end in whatever order the partition
+ * left. The stack is bounded at log2(count) frames (see the definition). */
 void obs_qsort(void *base, size_t count, size_t size,
                int (*compare)(const void *, const void *));
 void *obs_bsearch(const void *key, const void *base, size_t count, size_t size,
@@ -86,8 +85,8 @@ int oops_vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
 int oops_snprintf(char *buf, size_t size, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
-/* `<libc/stdio.h>`'s `sscanf` and `vsscanf` - `src/system/scanf.c`, which says why an
- * asset loader needs them and what the conversion does not promise. */
+/* `<libc/stdio.h>`'s `sscanf` and `vsscanf`, defined in `src/system/scanf.c`, which
+ * says what the conversion does not promise. */
 int obs_vsscanf(const char *s, const char *fmt, va_list args);
 int obs_sscanf(const char *s, const char *fmt, ...)
     __attribute__((format(scanf, 2, 3)));

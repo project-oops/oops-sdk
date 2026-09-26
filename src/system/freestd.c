@@ -1,920 +1,973 @@
 /*
- * Freestanding standard helper implementations.
+ * Freestanding standard helpers: string and memory operations, a `vsnprintf`, the NID
+ * hash, and the compiler-rt 128-bit division routines a `-nostdlib` link needs.
  *
- * Factored out of runtime.c so both the probe and injector/payload layers
- * can use string formatting and memory operations without cross-linking.
+ * Kept apart from runtime.c so the probe and the payload layers share them without
+ * linking each other. The `obs_` names build on the host too, so tests run them.
  */
 
 #include "oops/freestd.h"
 #include "oops/krw.h"
 
 size_t obs_strlen(const char *s) {
-  size_t n = 0;
-  while (s != NULL && s[n] != '\0') {
-    n++;
-  }
-  return n;
+    size_t n = 0;
+    while (s != NULL && s[n] != '\0') {
+        n++;
+    }
+    return n;
 }
 
 int obs_strcmp(const char *s1, const char *s2) {
-  if (s1 == NULL && s2 == NULL) {
-    return 0;
-  }
-  if (s1 == NULL) {
-    return -1;
-  }
-  if (s2 == NULL) {
-    return 1;
-  }
-  while (*s1 != '\0' && *s1 == *s2) {
-    s1++;
-    s2++;
-  }
-  return (int)((unsigned char)*s1 - (unsigned char)*s2);
+    if (s1 == NULL && s2 == NULL) {
+        return 0;
+    }
+    if (s1 == NULL) {
+        return -1;
+    }
+    if (s2 == NULL) {
+        return 1;
+    }
+    while (*s1 != '\0' && *s1 == *s2) {
+        s1++;
+        s2++;
+    }
+    return (int)((unsigned char)*s1 - (unsigned char)*s2);
 }
 
 int obs_strncmp(const char *s1, const char *s2, size_t n) {
-  if (n == 0) {
-    return 0;
-  }
-  if (s1 == NULL && s2 == NULL) {
-    return 0;
-  }
-  if (s1 == NULL) {
-    return -1;
-  }
-  if (s2 == NULL) {
-    return 1;
-  }
-  for (size_t i = 0; i < n; i++) {
-    if (s1[i] != s2[i] || s1[i] == '\0' || s2[i] == '\0') {
-      return (int)((unsigned char)s1[i] - (unsigned char)s2[i]);
+    if (n == 0) {
+        return 0;
     }
-  }
-  return 0;
+    if (s1 == NULL && s2 == NULL) {
+        return 0;
+    }
+    if (s1 == NULL) {
+        return -1;
+    }
+    if (s2 == NULL) {
+        return 1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (s1[i] != s2[i] || s1[i] == '\0' || s2[i] == '\0') {
+            return (int)((unsigned char)s1[i] - (unsigned char)s2[i]);
+        }
+    }
+    return 0;
 }
 
 char *obs_strncpy(char *dest, const char *src, size_t n) {
-  if (dest == NULL || src == NULL || n == 0) {
+    if (dest == NULL || src == NULL || n == 0) {
+        return dest;
+    }
+    size_t i = 0;
+    for (; i < n && src[i] != '\0'; i++) {
+        dest[i] = src[i];
+    }
+    for (; i < n; i++) {
+        dest[i] = '\0';
+    }
     return dest;
-  }
-  size_t i = 0;
-  for (; i < n && src[i] != '\0'; i++) {
-    dest[i] = src[i];
-  }
-  for (; i < n; i++) {
-    dest[i] = '\0';
-  }
-  return dest;
 }
 
 char *obs_strstr(const char *haystack, const char *needle) {
-  if (!haystack || !needle) {
+    if (!haystack || !needle) {
+        return NULL;
+    }
+    if (*needle == '\0') {
+        return (char *)(uintptr_t)haystack;
+    }
+    for (; *haystack != '\0'; haystack++) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h != '\0' && *n != '\0' && *h == *n) {
+            h++;
+            n++;
+        }
+        if (*n == '\0') {
+            return (char *)(uintptr_t)haystack;
+        }
+    }
     return NULL;
-  }
-  if (*needle == '\0') {
-    return (char *)(uintptr_t)haystack;
-  }
-  for (; *haystack != '\0'; haystack++) {
-    const char *h = haystack;
-    const char *n = needle;
-    while (*h != '\0' && *n != '\0' && *h == *n) {
-      h++;
-      n++;
-    }
-    if (*n == '\0') {
-      return (char *)(uintptr_t)haystack;
-    }
-  }
-  return NULL;
 }
 
 size_t obs_format_u64(char *dest, uint64_t value) {
-  char scratch[OBS_NUM_MAX];
-  size_t n = 0;
-  if (value == 0) {
-    dest[0] = '0';
-    return 1;
-  }
-  while (value > 0 && n < sizeof(scratch)) {
-    scratch[n++] = (char)('0' + (value % 10u));
-    value /= 10u;
-  }
-  for (size_t i = 0; i < n; i++) {
-    dest[i] = scratch[n - 1 - i];
-  }
-  return n;
+    char scratch[OBS_NUM_MAX];
+    size_t n = 0;
+    if (value == 0) {
+        dest[0] = '0';
+        return 1;
+    }
+    while (value > 0 && n < sizeof(scratch)) {
+        scratch[n++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+    for (size_t i = 0; i < n; i++) {
+        dest[i] = scratch[n - 1 - i];
+    }
+    return n;
 }
 
 size_t obs_format_i64(char *dest, int64_t value) {
-  if (value < 0) {
-    dest[0] = '-';
-    uint64_t magnitude = ~(uint64_t)value + 1u;
-    return 1 + obs_format_u64(dest + 1, magnitude);
-  }
-  return obs_format_u64(dest, (uint64_t)value);
+    if (value < 0) {
+        dest[0] = '-';
+        uint64_t magnitude = ~(uint64_t)value + 1u;
+        return 1 + obs_format_u64(dest + 1, magnitude);
+    }
+    return obs_format_u64(dest, (uint64_t)value);
 }
 
 size_t obs_format_hex(char *dest, uint64_t value) {
-  static const char digits[] = "0123456789abcdef";
-  char scratch[OBS_NUM_MAX];
-  size_t n = 0;
-  dest[0] = '0';
-  dest[1] = 'x';
-  if (value == 0) {
-    dest[2] = '0';
-    return 3;
-  }
-  while (value > 0 && n < sizeof(scratch)) {
-    scratch[n++] = digits[value & 0xfu];
-    value >>= 4;
-  }
-  for (size_t i = 0; i < n; i++) {
-    dest[2 + i] = scratch[n - 1 - i];
-  }
-  return 2 + n;
+    static const char digits[] = "0123456789abcdef";
+    char scratch[OBS_NUM_MAX];
+    size_t n = 0;
+    dest[0] = '0';
+    dest[1] = 'x';
+    if (value == 0) {
+        dest[2] = '0';
+        return 3;
+    }
+    while (value > 0 && n < sizeof(scratch)) {
+        scratch[n++] = digits[value & 0xfu];
+        value >>= 4;
+    }
+    for (size_t i = 0; i < n; i++) {
+        dest[2 + i] = scratch[n - 1 - i];
+    }
+    return 2 + n;
 }
 
 #if !defined(OBSCENE_HOST_BUILD) && !defined(OOPS_HOST_BUILD)
 void *memset(void *dest, int value, size_t len) {
-  unsigned char *d = (unsigned char *)dest;
-  for (size_t i = 0; i < len; i++) {
-    d[i] = (unsigned char)value;
-  }
-  return dest;
+    unsigned char *d = (unsigned char *)dest;
+    for (size_t i = 0; i < len; i++) {
+        d[i] = (unsigned char)value;
+    }
+    return dest;
 }
 
 void *memcpy(void *dest, const void *src, size_t len) {
-  unsigned char *d = (unsigned char *)dest;
-  const unsigned char *s = (const unsigned char *)src;
-  for (size_t i = 0; i < len; i++) {
-    d[i] = s[i];
-  }
-  return dest;
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+    for (size_t i = 0; i < len; i++) {
+        d[i] = s[i];
+    }
+    return dest;
 }
 
 int memcmp(const void *s1, const void *s2, size_t len) {
-  const unsigned char *p1 = (const unsigned char *)s1;
-  const unsigned char *p2 = (const unsigned char *)s2;
-  for (size_t i = 0; i < len; i++) {
-    if (p1[i] != p2[i]) {
-      return (int)(p1[i] - p2[i]);
+    const unsigned char *p1 = (const unsigned char *)s1;
+    const unsigned char *p2 = (const unsigned char *)s2;
+    for (size_t i = 0; i < len; i++) {
+        if (p1[i] != p2[i]) {
+            return (int)(p1[i] - p2[i]);
+        }
     }
-  }
-  return 0;
+    return 0;
 }
 #endif
 
 static inline uint32_t sha1_rol(uint32_t val, int bits) {
-  return (val << bits) | (val >> (32 - bits));
+    return (val << bits) | (val >> (32 - bits));
 }
 
 static void sha1_transform(uint32_t state[5], const uint8_t block[64]) {
-  uint32_t w[80];
-  for (int i = 0; i < 16; i++) {
-    w[i] = ((uint32_t)block[i * 4] << 24) | ((uint32_t)block[i * 4 + 1] << 16) |
-           ((uint32_t)block[i * 4 + 2] << 8) | ((uint32_t)block[i * 4 + 3]);
-  }
-  for (int i = 16; i < 80; i++) {
-    w[i] = sha1_rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
-  }
-  uint32_t a = state[0], b = state[1], c = state[2], d = state[3], e = state[4];
-  for (int i = 0; i < 80; i++) {
-    uint32_t f, k;
-    if (i < 20) {
-      f = (b & c) | ((~b) & d);
-      k = 0x5A827999;
-    } else if (i < 40) {
-      f = b ^ c ^ d;
-      k = 0x6ED9EBA1;
-    } else if (i < 60) {
-      f = (b & c) | (b & d) | (c & d);
-      k = 0x8F1BBCDC;
-    } else {
-      f = b ^ c ^ d;
-      k = 0xCA62C1D6;
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)block[i * 4] << 24) | ((uint32_t)block[i * 4 + 1] << 16) |
+               ((uint32_t)block[i * 4 + 2] << 8) | ((uint32_t)block[i * 4 + 3]);
     }
-    uint32_t temp = sha1_rol(a, 5) + f + e + k + w[i];
-    e = d;
-    d = c;
-    c = sha1_rol(b, 30);
-    b = a;
-    a = temp;
-  }
-  state[0] += a;
-  state[1] += b;
-  state[2] += c;
-  state[3] += d;
-  state[4] += e;
+    for (int i = 16; i < 80; i++) {
+        w[i] = sha1_rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    }
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3], e = state[4];
+    for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if (i < 20) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5A827999;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDC;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6;
+        }
+        uint32_t temp = sha1_rol(a, 5) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = sha1_rol(b, 30);
+        b = a;
+        a = temp;
+    }
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
 }
 
 void obs_compute_nid(const char *name, char out_nid[12]) {
-  static const uint8_t suffix[16] = {0x51, 0x8d, 0x64, 0xa6, 0x35, 0xde,
-                                     0xd8, 0xc1, 0xe6, 0xb0, 0x39, 0xb1,
-                                     0xc3, 0xe5, 0x52, 0x30};
-  static const char alphabet[65] =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+    static const uint8_t suffix[16] = {0x51, 0x8d, 0x64, 0xa6, 0x35, 0xde, 0xd8, 0xc1,
+                                       0xe6, 0xb0, 0x39, 0xb1, 0xc3, 0xe5, 0x52, 0x30};
+    static const char alphabet[65] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
 
-  uint32_t state[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476,
-                       0xC3D2E1F0};
-  uint8_t buffer[128];
-  for (size_t i = 0; i < sizeof(buffer); i++)
-    buffer[i] = 0;
+    uint32_t state[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+    uint8_t buffer[128];
+    for (size_t i = 0; i < sizeof(buffer); i++)
+        buffer[i] = 0;
 
-  size_t name_len = obs_strlen(name);
-  size_t total_len = name_len + sizeof(suffix);
+    size_t name_len = obs_strlen(name);
+    size_t total_len = name_len + sizeof(suffix);
 
-  size_t buf_pos = 0;
-  while (buf_pos < name_len && buf_pos < 100) {
-    buffer[buf_pos] = (uint8_t)name[buf_pos];
-    buf_pos++;
-  }
-  for (size_t i = 0; i < sizeof(suffix); i++) {
-    buffer[buf_pos++] = suffix[i];
-  }
+    size_t buf_pos = 0;
+    while (buf_pos < name_len && buf_pos < 100) {
+        buffer[buf_pos] = (uint8_t)name[buf_pos];
+        buf_pos++;
+    }
+    for (size_t i = 0; i < sizeof(suffix); i++) {
+        buffer[buf_pos++] = suffix[i];
+    }
 
-  buffer[buf_pos++] = 0x80;
-  size_t block_len = ((buf_pos + 8 + 63) / 64) * 64;
-  uint64_t bit_len = (uint64_t)total_len * 8;
-  buffer[block_len - 8] = (uint8_t)(bit_len >> 56);
-  buffer[block_len - 7] = (uint8_t)(bit_len >> 48);
-  buffer[block_len - 6] = (uint8_t)(bit_len >> 40);
-  buffer[block_len - 5] = (uint8_t)(bit_len >> 32);
-  buffer[block_len - 4] = (uint8_t)(bit_len >> 24);
-  buffer[block_len - 3] = (uint8_t)(bit_len >> 16);
-  buffer[block_len - 2] = (uint8_t)(bit_len >> 8);
-  buffer[block_len - 1] = (uint8_t)(bit_len);
+    buffer[buf_pos++] = 0x80;
+    size_t block_len = ((buf_pos + 8 + 63) / 64) * 64;
+    uint64_t bit_len = (uint64_t)total_len * 8;
+    buffer[block_len - 8] = (uint8_t)(bit_len >> 56);
+    buffer[block_len - 7] = (uint8_t)(bit_len >> 48);
+    buffer[block_len - 6] = (uint8_t)(bit_len >> 40);
+    buffer[block_len - 5] = (uint8_t)(bit_len >> 32);
+    buffer[block_len - 4] = (uint8_t)(bit_len >> 24);
+    buffer[block_len - 3] = (uint8_t)(bit_len >> 16);
+    buffer[block_len - 2] = (uint8_t)(bit_len >> 8);
+    buffer[block_len - 1] = (uint8_t)(bit_len);
 
-  for (size_t i = 0; i < block_len; i += 64) {
-    sha1_transform(state, buffer + i);
-  }
+    for (size_t i = 0; i < block_len; i += 64) {
+        sha1_transform(state, buffer + i);
+    }
 
-  uint8_t digest8[8];
-  digest8[0] = (uint8_t)(state[0] >> 24);
-  digest8[1] = (uint8_t)(state[0] >> 16);
-  digest8[2] = (uint8_t)(state[0] >> 8);
-  digest8[3] = (uint8_t)(state[0]);
-  digest8[4] = (uint8_t)(state[1] >> 24);
-  digest8[5] = (uint8_t)(state[1] >> 16);
-  digest8[6] = (uint8_t)(state[1] >> 8);
-  digest8[7] = (uint8_t)(state[1]);
+    uint8_t digest8[8];
+    digest8[0] = (uint8_t)(state[0] >> 24);
+    digest8[1] = (uint8_t)(state[0] >> 16);
+    digest8[2] = (uint8_t)(state[0] >> 8);
+    digest8[3] = (uint8_t)(state[0]);
+    digest8[4] = (uint8_t)(state[1] >> 24);
+    digest8[5] = (uint8_t)(state[1] >> 16);
+    digest8[6] = (uint8_t)(state[1] >> 8);
+    digest8[7] = (uint8_t)(state[1]);
 
-  uint64_t val = (uint64_t)digest8[0] | ((uint64_t)digest8[1] << 8) |
-                 ((uint64_t)digest8[2] << 16) | ((uint64_t)digest8[3] << 24) |
-                 ((uint64_t)digest8[4] << 32) | ((uint64_t)digest8[5] << 40) |
-                 ((uint64_t)digest8[6] << 48) | ((uint64_t)digest8[7] << 56);
+    uint64_t val = (uint64_t)digest8[0] | ((uint64_t)digest8[1] << 8) |
+                   ((uint64_t)digest8[2] << 16) | ((uint64_t)digest8[3] << 24) |
+                   ((uint64_t)digest8[4] << 32) | ((uint64_t)digest8[5] << 40) |
+                   ((uint64_t)digest8[6] << 48) | ((uint64_t)digest8[7] << 56);
 
-  unsigned __int128 bits = ((unsigned __int128)val) << 2;
-  for (int pos = 10; pos >= 0; pos--) {
-    int shift = pos * 6;
-    int idx = (int)((bits >> shift) & 0x3F);
-    out_nid[10 - pos] = alphabet[idx];
-  }
-  out_nid[11] = '\0';
+    unsigned __int128 bits = ((unsigned __int128)val) << 2;
+    for (int pos = 10; pos >= 0; pos--) {
+        int shift = pos * 6;
+        int idx = (int)((bits >> shift) & 0x3F);
+        out_nid[10 - pos] = alphabet[idx];
+    }
+    out_nid[11] = '\0';
 }
 
-const void *obs_kexport_lookup(const obs_kexport_table_t *table,
-                               const char *nid) {
-  if (table == NULL || nid == NULL)
-    return NULL;
-  uintptr_t utable = (uintptr_t)table;
-  if (utable < 0x10000UL || utable >= 0x0000800000000000UL || (utable & 0x7UL) != 0)
-    return NULL;
-  if (table->count == 0 || table->count > 16384)
-    return NULL;
-  int low = 0;
-  int high = (int)table->count - 1;
-  while (low <= high) {
-    int mid = low + (high - low) / 2;
-    int cmp = obs_strcmp(table->entries[mid].nid, nid);
-    if (cmp == 0) {
-      return (const void *)(uintptr_t)table->entries[mid].vaddr;
-    } else if (cmp < 0) {
-      low = mid + 1;
-    } else {
-      high = mid - 1;
+const void *obs_kexport_lookup(const obs_kexport_table_t *table, const char *nid) {
+    if (table == NULL || nid == NULL)
+        return NULL;
+    uintptr_t utable = (uintptr_t)table;
+    if (utable < 0x10000UL || utable >= 0x0000800000000000UL || (utable & 0x7UL) != 0)
+        return NULL;
+    if (table->count == 0 || table->count > 16384)
+        return NULL;
+    int low = 0;
+    int high = (int)table->count - 1;
+    while (low <= high) {
+        int mid = low + (high - low) / 2;
+        int cmp = obs_strcmp(table->entries[mid].nid, nid);
+        if (cmp == 0) {
+            return (const void *)(uintptr_t)table->entries[mid].vaddr;
+        } else if (cmp < 0) {
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
     }
-  }
-  return NULL;
+    return NULL;
 }
 
 typedef struct {
-  char *buf;
-  size_t size;
-  size_t written;
+    char *buf;
+    size_t size;
+    size_t written;
 } snprintf_ctx_t;
 
 static inline void snprintf_putc(snprintf_ctx_t *ctx, char c) {
-  if (ctx->buf != NULL && ctx->size > 0) {
-    if (ctx->written + 1 < ctx->size) {
-      ctx->buf[ctx->written] = c;
+    if (ctx->buf != NULL && ctx->size > 0) {
+        if (ctx->written + 1 < ctx->size) {
+            ctx->buf[ctx->written] = c;
+        }
     }
-  }
-  ctx->written++;
+    ctx->written++;
 }
 
 /*
- * **`%f` and its family, written out by hand because this target has no libc to borrow one from.**
+ * `%f` and its family, written by hand because this target has no libc to borrow one
+ * from.
  *
- * Fixed-point, which is what a diagnostic wants: `%e` and `%g` are routed here too rather than
- * left unimplemented, because an unimplemented conversion does not just print badly - it leaves
- * the argument on the stack and corrupts every conversion after it in the same call.
+ * Fixed-point, which is what a diagnostic wants: `%e` and `%g` are routed here too
+ * rather than left unimplemented, because an unimplemented conversion leaves the
+ * argument on the stack and corrupts every conversion after it in the same call.
  *
- * The value is split into an integer part and `prec` fractional digits, rounded half-away-from-zero
- * by adding half an ulp of the last printed digit before the split. Magnitudes too large for
- * `uint64_t` print as `<big>` rather than silently wrapping: a port that hits that has a bug
- * upstream of here, and a wrapped number would hide it.
+ * The value is split into an integer part and `prec` fractional digits, rounded
+ * half-away-from-zero by adding half an ulp of the last printed digit before the split.
+ * Magnitudes too large for `uint64_t` print as `<big>` rather than silently wrapping: a
+ * port that hits that has a bug upstream of here, and a wrapped number would hide it.
  *
  * Returns the length written into `out`, which the caller then pads to `width`.
  */
 static size_t snprintf_fixed(char *out, size_t cap, double v, int prec, int plus_sign,
                              int space_sign) {
-  size_t n = 0;
-  int neg = 0;
+    size_t n = 0;
+    int neg = 0;
 
-  if (prec < 0) prec = 6;
-  if (prec > 17) prec = 17;
+    if (prec < 0)
+        prec = 6;
+    if (prec > 17)
+        prec = 17;
 
-  /* NaN is the only value not equal to itself, and it must be named rather than computed with:
-     every comparison below would be false and it would print as 0. */
-  if (v != v) {
-    const char *s = "nan";
-    while (*s && n + 1 < cap) out[n++] = *s++;
-    return n;
-  }
-  if (v < 0.0) {
-    neg = 1;
-    v = -v;
-  }
-  if (neg && n + 1 < cap) out[n++] = '-';
-  else if (plus_sign && n + 1 < cap) out[n++] = '+';
-  else if (space_sign && n + 1 < cap) out[n++] = ' ';
-
-  /* Infinity: larger than the largest finite double. */
-  if (v > 1.7976931348623157e308) {
-    const char *s = "inf";
-    while (*s && n + 1 < cap) out[n++] = *s++;
-    return n;
-  }
-
-  double round_at = 0.5;
-  for (int p = 0; p < prec; p++) round_at /= 10.0;
-  v += round_at;
-
-  if (v >= 18446744073709551615.0) {
-    const char *s = "<big>";
-    while (*s && n + 1 < cap) out[n++] = *s++;
-    return n;
-  }
-
-  uint64_t whole = (uint64_t)v;
-  double frac = v - (double)whole;
-
-  char digits[24];
-  size_t dn = 0;
-  if (whole == 0) {
-    digits[dn++] = '0';
-  } else {
-    while (whole > 0 && dn < sizeof(digits)) {
-      digits[dn++] = (char)('0' + (int)(whole % 10u));
-      whole /= 10u;
+    /* NaN is the only value not equal to itself, and it must be named rather than
+       computed with: every comparison below would be false and it would print as 0. */
+    if (v != v) {
+        const char *s = "nan";
+        while (*s && n + 1 < cap)
+            out[n++] = *s++;
+        return n;
     }
-  }
-  while (dn > 0 && n + 1 < cap) out[n++] = digits[--dn];
-
-  if (prec > 0 && n + 1 < cap) {
-    out[n++] = '.';
-    for (int p = 0; p < prec && n + 1 < cap; p++) {
-      frac *= 10.0;
-      int d = (int)frac;
-      if (d < 0) d = 0;
-      if (d > 9) d = 9;
-      out[n++] = (char)('0' + d);
-      frac -= (double)d;
+    if (v < 0.0) {
+        neg = 1;
+        v = -v;
     }
-  }
-  return n;
+    if (neg && n + 1 < cap)
+        out[n++] = '-';
+    else if (plus_sign && n + 1 < cap)
+        out[n++] = '+';
+    else if (space_sign && n + 1 < cap)
+        out[n++] = ' ';
+
+    /* Infinity: larger than the largest finite double. */
+    if (v > 1.7976931348623157e308) {
+        const char *s = "inf";
+        while (*s && n + 1 < cap)
+            out[n++] = *s++;
+        return n;
+    }
+
+    double round_at = 0.5;
+    for (int p = 0; p < prec; p++)
+        round_at /= 10.0;
+    v += round_at;
+
+    if (v >= 18446744073709551615.0) {
+        const char *s = "<big>";
+        while (*s && n + 1 < cap)
+            out[n++] = *s++;
+        return n;
+    }
+
+    uint64_t whole = (uint64_t)v;
+    double frac = v - (double)whole;
+
+    char digits[24];
+    size_t dn = 0;
+    if (whole == 0) {
+        digits[dn++] = '0';
+    } else {
+        while (whole > 0 && dn < sizeof(digits)) {
+            digits[dn++] = (char)('0' + (int)(whole % 10u));
+            whole /= 10u;
+        }
+    }
+    while (dn > 0 && n + 1 < cap)
+        out[n++] = digits[--dn];
+
+    if (prec > 0 && n + 1 < cap) {
+        out[n++] = '.';
+        for (int p = 0; p < prec && n + 1 < cap; p++) {
+            frac *= 10.0;
+            int d = (int)frac;
+            if (d < 0)
+                d = 0;
+            if (d > 9)
+                d = 9;
+            out[n++] = (char)('0' + d);
+            frac -= (double)d;
+        }
+    }
+    return n;
 }
 
-static void snprintf_puts(snprintf_ctx_t *ctx, const char *s, size_t len, int left_align, size_t width, char pad_char) {
-  if (!left_align && width > len) {
-    for (size_t i = 0; i < width - len; i++) {
-      snprintf_putc(ctx, pad_char);
+static void snprintf_puts(snprintf_ctx_t *ctx, const char *s, size_t len,
+                          int left_align, size_t width, char pad_char) {
+    if (!left_align && width > len) {
+        for (size_t i = 0; i < width - len; i++) {
+            snprintf_putc(ctx, pad_char);
+        }
     }
-  }
-  for (size_t i = 0; i < len; i++) {
-    snprintf_putc(ctx, s[i]);
-  }
-  if (left_align && width > len) {
-    for (size_t i = 0; i < width - len; i++) {
-      snprintf_putc(ctx, ' ');
+    for (size_t i = 0; i < len; i++) {
+        snprintf_putc(ctx, s[i]);
     }
-  }
+    if (left_align && width > len) {
+        for (size_t i = 0; i < width - len; i++) {
+            snprintf_putc(ctx, ' ');
+        }
+    }
 }
 
 int oops_vsnprintf(char *buf, size_t size, const char *fmt, va_list args) {
-  if (fmt == NULL) {
-    if (buf != NULL && size > 0) {
-      buf[0] = '\0';
-    }
-    return 0;
-  }
-
-  snprintf_ctx_t ctx;
-  ctx.buf = buf;
-  ctx.size = size;
-  ctx.written = 0;
-
-  for (size_t i = 0; fmt[i] != '\0'; i++) {
-    if (fmt[i] != '%') {
-      snprintf_putc(&ctx, fmt[i]);
-      continue;
+    if (fmt == NULL) {
+        if (buf != NULL && size > 0) {
+            buf[0] = '\0';
+        }
+        return 0;
     }
 
-    i++; /* Skip '%' */
-    if (fmt[i] == '\0') {
-      break;
-    }
-    if (fmt[i] == '%') {
-      snprintf_putc(&ctx, '%');
-      continue;
-    }
+    snprintf_ctx_t ctx;
+    ctx.buf = buf;
+    ctx.size = size;
+    ctx.written = 0;
 
-    /* Parse flags */
-    int left_align = 0;
-    int zero_pad = 0;
-    int plus_sign = 0;
-    int space_sign = 0;
-    int alt_form = 0;
+    for (size_t i = 0; fmt[i] != '\0'; i++) {
+        if (fmt[i] != '%') {
+            snprintf_putc(&ctx, fmt[i]);
+            continue;
+        }
 
-    int parsing_flags = 1;
-    while (parsing_flags) {
-      switch (fmt[i]) {
-        case '-': left_align = 1; i++; break;
-        case '0': zero_pad = 1; i++; break;
-        case '+': plus_sign = 1; i++; break;
-        case ' ': space_sign = 1; i++; break;
-        case '#': alt_form = 1; i++; break;
-        default: parsing_flags = 0; break;
-      }
-    }
-    if (left_align) zero_pad = 0;
+        i++; /* Skip '%' */
+        if (fmt[i] == '\0') {
+            break;
+        }
+        if (fmt[i] == '%') {
+            snprintf_putc(&ctx, '%');
+            continue;
+        }
 
-    /* Parse width */
-    size_t width = 0;
-    while (fmt[i] >= '0' && fmt[i] <= '9') {
-      width = width * 10 + (size_t)(fmt[i] - '0');
-      i++;
-    }
+        /* Parse flags */
+        int left_align = 0;
+        int zero_pad = 0;
+        int plus_sign = 0;
+        int space_sign = 0;
+        int alt_form = 0;
 
-    /* Parse precision.
-     *
-     * **It is parsed even where it is not used**, because the alternative is what this function
-     * used to do with `%f`: fall through to "unknown specifier", print the text verbatim, and -
-     * the part that does the damage - *not* consume the argument. Every conversion after it then
-     * reads the wrong vararg. A `printf("w=%f h=%f n=%d", w, h, n)` did not merely fail to print
-     * two doubles; it printed a plausible and entirely wrong `n`. Extreme Tux Racer's course
-     * loader was diagnosed against such a line on 2026-09-24. */
-    int precision = -1; /* -1: unspecified */
-    if (fmt[i] == '.') {
-      i++;
-      precision = 0;
-      if (fmt[i] == '*') {
-        const int p = va_arg(args, int);
-        precision = (p < 0) ? -1 : p;
-        i++;
-      } else {
+        int parsing_flags = 1;
+        while (parsing_flags) {
+            switch (fmt[i]) {
+            case '-':
+                left_align = 1;
+                i++;
+                break;
+            case '0':
+                zero_pad = 1;
+                i++;
+                break;
+            case '+':
+                plus_sign = 1;
+                i++;
+                break;
+            case ' ':
+                space_sign = 1;
+                i++;
+                break;
+            case '#':
+                alt_form = 1;
+                i++;
+                break;
+            default:
+                parsing_flags = 0;
+                break;
+            }
+        }
+        if (left_align)
+            zero_pad = 0;
+
+        /* Parse width */
+        size_t width = 0;
         while (fmt[i] >= '0' && fmt[i] <= '9') {
-          precision = precision * 10 + (fmt[i] - '0');
-          i++;
+            width = width * 10 + (size_t)(fmt[i] - '0');
+            i++;
         }
-      }
+
+        /* Parse precision. It is parsed even where it is not used: a conversion that
+         * falls through to "unknown specifier" does not consume its argument, and every
+         * conversion after it then reads the wrong vararg. */
+        int precision = -1; /* -1: unspecified */
+        if (fmt[i] == '.') {
+            i++;
+            precision = 0;
+            if (fmt[i] == '*') {
+                const int p = va_arg(args, int);
+                precision = (p < 0) ? -1 : p;
+                i++;
+            } else {
+                while (fmt[i] >= '0' && fmt[i] <= '9') {
+                    precision = precision * 10 + (fmt[i] - '0');
+                    i++;
+                }
+            }
+        }
+
+        /* Parse length modifier */
+        int length_mod = 0; /* 0: default, 1: l, 2: ll, 3: z, 4: h */
+        if (fmt[i] == 'l') {
+            i++;
+            if (fmt[i] == 'l') {
+                length_mod = 2;
+                i++;
+            } else {
+                length_mod = 1;
+            }
+        } else if (fmt[i] == 'z') {
+            length_mod = 3;
+            i++;
+        } else if (fmt[i] == 'h') {
+            length_mod = 4;
+            i++;
+        }
+
+        char spec = fmt[i];
+        char scratch[64];
+        size_t len = 0;
+
+        if (spec == 's') {
+            const char *s = va_arg(args, const char *);
+            if (s == NULL)
+                s = "(null)";
+            len = obs_strlen(s);
+            snprintf_puts(&ctx, s, len, left_align, width, ' ');
+        } else if (spec == 'c') {
+            char c = (char)va_arg(args, int);
+            scratch[0] = c;
+            snprintf_puts(&ctx, scratch, 1, left_align, width, ' ');
+        } else if (spec == 'd' || spec == 'i') {
+            int64_t val = 0;
+            if (length_mod == 2)
+                val = va_arg(args, long long);
+            else if (length_mod == 1)
+                val = va_arg(args, long);
+            else if (length_mod == 3)
+                val = (int64_t)va_arg(args, ssize_t);
+            else
+                val = va_arg(args, int);
+
+            uint64_t uval;
+            int negative = 0;
+            if (val < 0) {
+                negative = 1;
+                uval = (uint64_t)(-(val + 1)) + 1;
+            } else {
+                uval = (uint64_t)val;
+            }
+
+            char num_buf[32];
+            size_t num_len = 0;
+            if (uval == 0) {
+                num_buf[num_len++] = '0';
+            } else {
+                while (uval > 0 && num_len < sizeof(num_buf)) {
+                    num_buf[num_len++] = (char)('0' + (uval % 10));
+                    uval /= 10;
+                }
+            }
+
+            /* Compute prefix */
+            char pfx = '\0';
+            if (negative)
+                pfx = '-';
+            else if (plus_sign)
+                pfx = '+';
+            else if (space_sign)
+                pfx = ' ';
+
+            size_t total_len = num_len + (pfx ? 1 : 0);
+            if (zero_pad) {
+                if (pfx)
+                    snprintf_putc(&ctx, pfx);
+                if (width > total_len) {
+                    for (size_t p = 0; p < width - total_len; p++)
+                        snprintf_putc(&ctx, '0');
+                }
+                for (size_t p = 0; p < num_len; p++)
+                    snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+            } else {
+                if (!left_align && width > total_len) {
+                    for (size_t p = 0; p < width - total_len; p++)
+                        snprintf_putc(&ctx, ' ');
+                }
+                if (pfx)
+                    snprintf_putc(&ctx, pfx);
+                for (size_t p = 0; p < num_len; p++)
+                    snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+                if (left_align && width > total_len) {
+                    for (size_t p = 0; p < width - total_len; p++)
+                        snprintf_putc(&ctx, ' ');
+                }
+            }
+        } else if (spec == 'u') {
+            uint64_t uval = 0;
+            if (length_mod == 2)
+                uval = va_arg(args, unsigned long long);
+            else if (length_mod == 1)
+                uval = va_arg(args, unsigned long);
+            else if (length_mod == 3)
+                uval = (uint64_t)va_arg(args, size_t);
+            else
+                uval = va_arg(args, unsigned int);
+
+            char num_buf[32];
+            size_t num_len = 0;
+            if (uval == 0) {
+                num_buf[num_len++] = '0';
+            } else {
+                while (uval > 0 && num_len < sizeof(num_buf)) {
+                    num_buf[num_len++] = (char)('0' + (uval % 10));
+                    uval /= 10;
+                }
+            }
+
+            char pad_ch = zero_pad ? '0' : ' ';
+            if (!left_align && width > num_len) {
+                for (size_t p = 0; p < width - num_len; p++)
+                    snprintf_putc(&ctx, pad_ch);
+            }
+            for (size_t p = 0; p < num_len; p++)
+                snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+            if (left_align && width > num_len) {
+                for (size_t p = 0; p < width - num_len; p++)
+                    snprintf_putc(&ctx, ' ');
+            }
+        } else if (spec == 'x' || spec == 'X') {
+            static const char hex_lower[] = "0123456789abcdef";
+            static const char hex_upper[] = "0123456789ABCDEF";
+            const char *digits = (spec == 'X') ? hex_upper : hex_lower;
+
+            uint64_t uval = 0;
+            if (length_mod == 2)
+                uval = va_arg(args, unsigned long long);
+            else if (length_mod == 1)
+                uval = va_arg(args, unsigned long);
+            else if (length_mod == 3)
+                uval = (uint64_t)va_arg(args, size_t);
+            else
+                uval = va_arg(args, unsigned int);
+
+            char num_buf[32];
+            size_t num_len = 0;
+            if (uval == 0) {
+                num_buf[num_len++] = '0';
+            } else {
+                while (uval > 0 && num_len < sizeof(num_buf)) {
+                    num_buf[num_len++] = digits[uval & 0xf];
+                    uval >>= 4;
+                }
+            }
+
+            size_t pfx_len = (alt_form && uval != 0) ? 2 : 0;
+            size_t total_len = num_len + pfx_len;
+            if (zero_pad) {
+                if (pfx_len) {
+                    snprintf_putc(&ctx, '0');
+                    snprintf_putc(&ctx, spec);
+                }
+                if (width > total_len) {
+                    for (size_t p = 0; p < width - total_len; p++)
+                        snprintf_putc(&ctx, '0');
+                }
+                for (size_t p = 0; p < num_len; p++)
+                    snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+            } else {
+                if (!left_align && width > total_len) {
+                    for (size_t p = 0; p < width - total_len; p++)
+                        snprintf_putc(&ctx, ' ');
+                }
+                if (pfx_len) {
+                    snprintf_putc(&ctx, '0');
+                    snprintf_putc(&ctx, spec);
+                }
+                for (size_t p = 0; p < num_len; p++)
+                    snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+                if (left_align && width > total_len) {
+                    for (size_t p = 0; p < width - total_len; p++)
+                        snprintf_putc(&ctx, ' ');
+                }
+            }
+        } else if (spec == 'p') {
+            void *ptr = va_arg(args, void *);
+            if (ptr == NULL) {
+                const char *nil_str = "(nil)";
+                len = 5;
+                snprintf_puts(&ctx, nil_str, len, left_align, width, ' ');
+            } else {
+                uint64_t uval = (uint64_t)(uintptr_t)ptr;
+                static const char hex_lower[] = "0123456789abcdef";
+                char num_buf[32];
+                size_t num_len = 0;
+                while (uval > 0 && num_len < sizeof(num_buf)) {
+                    num_buf[num_len++] = hex_lower[uval & 0xf];
+                    uval >>= 4;
+                }
+                size_t total_len = num_len + 2; /* "0x" */
+                if (!left_align && width > total_len) {
+                    for (size_t p = 0; p < width - total_len; p++)
+                        snprintf_putc(&ctx, ' ');
+                }
+                snprintf_putc(&ctx, '0');
+                snprintf_putc(&ctx, 'x');
+                for (size_t p = 0; p < num_len; p++)
+                    snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
+                if (left_align && width > total_len) {
+                    for (size_t p = 0; p < width - total_len; p++)
+                        snprintf_putc(&ctx, ' ');
+                }
+            }
+        } else if (spec == 'f' || spec == 'F' || spec == 'e' || spec == 'E' ||
+                   spec == 'g' || spec == 'G') {
+            /* A float argument is promoted to `double` whatever the conversion, and
+               `%Lf` is not supported here - the length modifier is parsed and ignored,
+               which is better than reading the wrong number of bytes off the stack. */
+            const double dval = va_arg(args, double);
+            len = snprintf_fixed(scratch, sizeof(scratch), dval, precision, plus_sign,
+                                 space_sign);
+            snprintf_puts(&ctx, scratch, len, left_align, width, zero_pad ? '0' : ' ');
+        } else {
+            /* Unknown specifier: emit verbatim. This branch cannot consume the argument
+             * because it does not know its size, so every supported conversion is
+             * implemented above. */
+            snprintf_putc(&ctx, '%');
+            snprintf_putc(&ctx, spec);
+        }
     }
 
-    /* Parse length modifier */
-    int length_mod = 0; /* 0: default, 1: l, 2: ll, 3: z, 4: h */
-    if (fmt[i] == 'l') {
-      i++;
-      if (fmt[i] == 'l') {
-        length_mod = 2;
-        i++;
-      } else {
-        length_mod = 1;
-      }
-    } else if (fmt[i] == 'z') {
-      length_mod = 3;
-      i++;
-    } else if (fmt[i] == 'h') {
-      length_mod = 4;
-      i++;
+    if (buf != NULL && size > 0) {
+        if (ctx.written < size) {
+            buf[ctx.written] = '\0';
+        } else {
+            buf[size - 1] = '\0';
+        }
     }
 
-    char spec = fmt[i];
-    char scratch[64];
-    size_t len = 0;
-
-    if (spec == 's') {
-      const char *s = va_arg(args, const char *);
-      if (s == NULL) s = "(null)";
-      len = obs_strlen(s);
-      snprintf_puts(&ctx, s, len, left_align, width, ' ');
-    } else if (spec == 'c') {
-      char c = (char)va_arg(args, int);
-      scratch[0] = c;
-      snprintf_puts(&ctx, scratch, 1, left_align, width, ' ');
-    } else if (spec == 'd' || spec == 'i') {
-      int64_t val = 0;
-      if (length_mod == 2) val = va_arg(args, long long);
-      else if (length_mod == 1) val = va_arg(args, long);
-      else if (length_mod == 3) val = (int64_t)va_arg(args, ssize_t);
-      else val = va_arg(args, int);
-
-      uint64_t uval;
-      int negative = 0;
-      if (val < 0) {
-        negative = 1;
-        uval = (uint64_t)(-(val + 1)) + 1;
-      } else {
-        uval = (uint64_t)val;
-      }
-
-      char num_buf[32];
-      size_t num_len = 0;
-      if (uval == 0) {
-        num_buf[num_len++] = '0';
-      } else {
-        while (uval > 0 && num_len < sizeof(num_buf)) {
-          num_buf[num_len++] = (char)('0' + (uval % 10));
-          uval /= 10;
-        }
-      }
-
-      /* Compute prefix */
-      char pfx = '\0';
-      if (negative) pfx = '-';
-      else if (plus_sign) pfx = '+';
-      else if (space_sign) pfx = ' ';
-
-      size_t total_len = num_len + (pfx ? 1 : 0);
-      if (zero_pad) {
-        if (pfx) snprintf_putc(&ctx, pfx);
-        if (width > total_len) {
-          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, '0');
-        }
-        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
-      } else {
-        if (!left_align && width > total_len) {
-          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
-        }
-        if (pfx) snprintf_putc(&ctx, pfx);
-        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
-        if (left_align && width > total_len) {
-          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
-        }
-      }
-    } else if (spec == 'u') {
-      uint64_t uval = 0;
-      if (length_mod == 2) uval = va_arg(args, unsigned long long);
-      else if (length_mod == 1) uval = va_arg(args, unsigned long);
-      else if (length_mod == 3) uval = (uint64_t)va_arg(args, size_t);
-      else uval = va_arg(args, unsigned int);
-
-      char num_buf[32];
-      size_t num_len = 0;
-      if (uval == 0) {
-        num_buf[num_len++] = '0';
-      } else {
-        while (uval > 0 && num_len < sizeof(num_buf)) {
-          num_buf[num_len++] = (char)('0' + (uval % 10));
-          uval /= 10;
-        }
-      }
-
-      char pad_ch = zero_pad ? '0' : ' ';
-      if (!left_align && width > num_len) {
-        for (size_t p = 0; p < width - num_len; p++) snprintf_putc(&ctx, pad_ch);
-      }
-      for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
-      if (left_align && width > num_len) {
-        for (size_t p = 0; p < width - num_len; p++) snprintf_putc(&ctx, ' ');
-      }
-    } else if (spec == 'x' || spec == 'X') {
-      static const char hex_lower[] = "0123456789abcdef";
-      static const char hex_upper[] = "0123456789ABCDEF";
-      const char *digits = (spec == 'X') ? hex_upper : hex_lower;
-
-      uint64_t uval = 0;
-      if (length_mod == 2) uval = va_arg(args, unsigned long long);
-      else if (length_mod == 1) uval = va_arg(args, unsigned long);
-      else if (length_mod == 3) uval = (uint64_t)va_arg(args, size_t);
-      else uval = va_arg(args, unsigned int);
-
-      char num_buf[32];
-      size_t num_len = 0;
-      if (uval == 0) {
-        num_buf[num_len++] = '0';
-      } else {
-        while (uval > 0 && num_len < sizeof(num_buf)) {
-          num_buf[num_len++] = digits[uval & 0xf];
-          uval >>= 4;
-        }
-      }
-
-      size_t pfx_len = (alt_form && uval != 0) ? 2 : 0;
-      size_t total_len = num_len + pfx_len;
-      if (zero_pad) {
-        if (pfx_len) {
-          snprintf_putc(&ctx, '0');
-          snprintf_putc(&ctx, spec);
-        }
-        if (width > total_len) {
-          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, '0');
-        }
-        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
-      } else {
-        if (!left_align && width > total_len) {
-          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
-        }
-        if (pfx_len) {
-          snprintf_putc(&ctx, '0');
-          snprintf_putc(&ctx, spec);
-        }
-        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
-        if (left_align && width > total_len) {
-          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
-        }
-      }
-    } else if (spec == 'p') {
-      void *ptr = va_arg(args, void *);
-      if (ptr == NULL) {
-        const char *nil_str = "(nil)";
-        len = 5;
-        snprintf_puts(&ctx, nil_str, len, left_align, width, ' ');
-      } else {
-        uint64_t uval = (uint64_t)(uintptr_t)ptr;
-        static const char hex_lower[] = "0123456789abcdef";
-        char num_buf[32];
-        size_t num_len = 0;
-        while (uval > 0 && num_len < sizeof(num_buf)) {
-          num_buf[num_len++] = hex_lower[uval & 0xf];
-          uval >>= 4;
-        }
-        size_t total_len = num_len + 2; /* "0x" */
-        if (!left_align && width > total_len) {
-          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
-        }
-        snprintf_putc(&ctx, '0');
-        snprintf_putc(&ctx, 'x');
-        for (size_t p = 0; p < num_len; p++) snprintf_putc(&ctx, num_buf[num_len - 1 - p]);
-        if (left_align && width > total_len) {
-          for (size_t p = 0; p < width - total_len; p++) snprintf_putc(&ctx, ' ');
-        }
-      }
-    } else if (spec == 'f' || spec == 'F' || spec == 'e' || spec == 'E' || spec == 'g' ||
-               spec == 'G') {
-      /* A float argument is promoted to `double` whatever the conversion, and `%Lf` is not
-         supported here - the length modifier is parsed and ignored, which is better than reading
-         the wrong number of bytes off the stack. */
-      const double dval = va_arg(args, double);
-      len = snprintf_fixed(scratch, sizeof(scratch), dval, precision, plus_sign, space_sign);
-      snprintf_puts(&ctx, scratch, len, left_align, width, zero_pad ? '0' : ' ');
-    } else {
-      /* Unknown specifier: emit verbatim.
-       *
-       * **This branch cannot consume the argument**, because it does not know its size - which is
-       * exactly why every conversion this function understands has to be implemented rather than
-       * left to fall through here. See the note on precision above. */
-      snprintf_putc(&ctx, '%');
-      snprintf_putc(&ctx, spec);
-    }
-  }
-
-  if (buf != NULL && size > 0) {
-    if (ctx.written < size) {
-      buf[ctx.written] = '\0';
-    } else {
-      buf[size - 1] = '\0';
-    }
-  }
-
-  return (int)ctx.written;
+    return (int)ctx.written;
 }
 
 int oops_snprintf(char *buf, size_t size, const char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  int ret = oops_vsnprintf(buf, size, fmt, args);
-  va_end(args);
-  return ret;
+    va_list args;
+    va_start(args, fmt);
+    int ret = oops_vsnprintf(buf, size, fmt, args);
+    va_end(args);
+    return ret;
 }
 
 /* ---------------------------------------------------------------------------
- * The parser's half of <string.h>, and the sort a depth-sorted scene needs
+ * `strspn`, `strcspn`, `strpbrk`, `strtok_r`, `qsort` and `bsearch`
  *
- * These are `src/system/libc.c`'s `strspn`, `strcspn`, `strpbrk`, `strtok_r`, `qsort` and
- * `bsearch`. They live here because that file is target-only - the host build's real C library
- * provides those names - so an algorithm written there could never be run by a test. What is
- * there is a rename; what is here is the code.
+ * `src/system/libc.c` renames these to the standard names. They live here because that
+ * file is target-only - the host build's C library owns those names - so only code here
+ * can be run by a test.
  * --------------------------------------------------------------------------- */
 
-/* A byte is in the set. The terminator is not: `obs_strspn("ab", "")` is 0 rather than the whole
- * string, because the empty set contains nothing. */
+/* A byte is in the set. The terminator is not: `obs_strspn("ab", "")` is 0 rather than
+ * the whole string, because the empty set contains nothing. */
 static int obs_in_set(char c, const char *set) {
-  if (set == NULL) {
-    return 0;
-  }
-  for (; *set != '\0'; set++) {
-    if (*set == c) {
-      return 1;
+    if (set == NULL) {
+        return 0;
     }
-  }
-  return 0;
+    for (; *set != '\0'; set++) {
+        if (*set == c) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 size_t obs_strspn(const char *s, const char *accept) {
-  size_t n = 0;
-  if (s == NULL) {
-    return 0;
-  }
-  while (s[n] != '\0' && obs_in_set(s[n], accept)) {
-    n++;
-  }
-  return n;
+    size_t n = 0;
+    if (s == NULL) {
+        return 0;
+    }
+    while (s[n] != '\0' && obs_in_set(s[n], accept)) {
+        n++;
+    }
+    return n;
 }
 
 size_t obs_strcspn(const char *s, const char *reject) {
-  size_t n = 0;
-  if (s == NULL) {
-    return 0;
-  }
-  while (s[n] != '\0' && !obs_in_set(s[n], reject)) {
-    n++;
-  }
-  return n;
+    size_t n = 0;
+    if (s == NULL) {
+        return 0;
+    }
+    while (s[n] != '\0' && !obs_in_set(s[n], reject)) {
+        n++;
+    }
+    return n;
 }
 
 char *obs_strpbrk(const char *s, const char *accept) {
-  if (s == NULL) {
-    return NULL;
-  }
-  for (; *s != '\0'; s++) {
-    if (obs_in_set(*s, accept)) {
-      return (char *)(size_t)s;
+    if (s == NULL) {
+        return NULL;
     }
-  }
-  return NULL;
+    for (; *s != '\0'; s++) {
+        if (obs_in_set(*s, accept)) {
+            return (char *)(size_t)s;
+        }
+    }
+    return NULL;
 }
 
 /*
- * `strtok_r`'s contract, which is the awkward one C specifies: the first call takes the string
- * and every call after takes NULL, leading delimiters are skipped, an all-delimiter remainder is
- * the end, and the token is terminated **in the caller's own buffer** - so a string literal
- * passed to it is a write to read-only memory. That is the behaviour every parser written
- * against it expects, including the sharp edge.
+ * `strtok_r`'s contract, which is the awkward one C specifies: the first call takes the
+ * string and every call after takes NULL, leading delimiters are skipped, an
+ * all-delimiter remainder is the end, and the token is terminated in the caller's own
+ * buffer - so a string literal passed to it is a write to read-only memory, as every
+ * parser written against it expects.
  */
 char *obs_strtok_r(char *s, const char *delim, char **save) {
-  if (save == NULL) {
-    return NULL;
-  }
-  char *p = (s != NULL) ? s : *save;
-  if (p == NULL) {
-    return NULL;
-  }
-  while (*p != '\0' && obs_in_set(*p, delim)) {
-    p++;
-  }
-  if (*p == '\0') {
+    if (save == NULL) {
+        return NULL;
+    }
+    char *p = (s != NULL) ? s : *save;
+    if (p == NULL) {
+        return NULL;
+    }
+    while (*p != '\0' && obs_in_set(*p, delim)) {
+        p++;
+    }
+    if (*p == '\0') {
+        *save = p;
+        return NULL;
+    }
+    char *start = p;
+    while (*p != '\0' && !obs_in_set(*p, delim)) {
+        p++;
+    }
+    if (*p != '\0') {
+        *p = '\0';
+        p++;
+    }
     *save = p;
-    return NULL;
-  }
-  char *start = p;
-  while (*p != '\0' && !obs_in_set(*p, delim)) {
-    p++;
-  }
-  if (*p != '\0') {
-    *p = '\0';
-    p++;
-  }
-  *save = p;
-  return start;
+    return start;
 }
 
 static void obs_swap_bytes(unsigned char *a, unsigned char *b, size_t size) {
-  for (size_t i = 0; i < size; i++) {
-    const unsigned char t = a[i];
-    a[i] = b[i];
-    b[i] = t;
-  }
+    for (size_t i = 0; i < size; i++) {
+        const unsigned char t = a[i];
+        a[i] = b[i];
+        b[i] = t;
+    }
 }
 
 /*
- * **`qsort` is what a GL 1.x program draws transparency with.** A fixed-function pipeline blends
- * in the order the triangles arrive, so anything see-through is sorted back to front by the
- * program, every frame.
- *
- * Median-of-three quicksort, insertion-sorting runs under sixteen, and **recursing into the
- * smaller partition only** while looping on the larger. That last part is not a refinement: it
- * bounds the stack at log2(count) frames instead of count, and the input that would otherwise
- * reach `count` is a *sorted* one - which is exactly what a scene hands this on the frame after
- * it sorted, and a payload's stack has nothing to overflow into.
+ * Median-of-three quicksort, insertion-sorting runs under sixteen, recursing into the
+ * smaller partition only while looping on the larger. That bounds the stack at
+ * log2(count) frames: a GL 1.x program depth-sorts its transparent geometry every
+ * frame, so already-sorted input is the common case, and a payload's stack has nothing
+ * to overflow into.
  */
 void obs_qsort(void *base, size_t count, size_t size,
                int (*compare)(const void *, const void *)) {
-  if (base == NULL || compare == NULL || size == 0u) {
-    return;
-  }
-  unsigned char *lo = (unsigned char *)base;
-  size_t n = count;
-  while (n > 1u) {
-    if (n < 16u) {
-      for (size_t i = 1; i < n; i++) {
-        for (size_t j = i; j > 0u && compare(lo + (j - 1u) * size, lo + j * size) > 0; j--) {
-          obs_swap_bytes(lo + (j - 1u) * size, lo + j * size, size);
+    if (base == NULL || compare == NULL || size == 0u) {
+        return;
+    }
+    unsigned char *lo = (unsigned char *)base;
+    size_t n = count;
+    while (n > 1u) {
+        if (n < 16u) {
+            for (size_t i = 1; i < n; i++) {
+                for (size_t j = i;
+                     j > 0u && compare(lo + (j - 1u) * size, lo + j * size) > 0; j--) {
+                    obs_swap_bytes(lo + (j - 1u) * size, lo + j * size, size);
+                }
+            }
+            return;
         }
-      }
-      return;
-    }
-    /* The median of the first, middle and last to the front - which is what stops a sorted
-     * input from partitioning into one element and the rest. */
-    unsigned char *const mid = lo + (n / 2u) * size;
-    unsigned char *const last = lo + (n - 1u) * size;
-    if (compare(mid, lo) < 0) {
-      obs_swap_bytes(mid, lo, size);
-    }
-    if (compare(last, mid) < 0) {
-      obs_swap_bytes(last, mid, size);
-      if (compare(mid, lo) < 0) {
-        obs_swap_bytes(mid, lo, size);
-      }
-    }
-    obs_swap_bytes(lo, mid, size);
+        /* The median of the first, middle and last to the front - which is what stops a
+         * sorted input from partitioning into one element and the rest. */
+        unsigned char *const mid = lo + (n / 2u) * size;
+        unsigned char *const last = lo + (n - 1u) * size;
+        if (compare(mid, lo) < 0) {
+            obs_swap_bytes(mid, lo, size);
+        }
+        if (compare(last, mid) < 0) {
+            obs_swap_bytes(last, mid, size);
+            if (compare(mid, lo) < 0) {
+                obs_swap_bytes(mid, lo, size);
+            }
+        }
+        obs_swap_bytes(lo, mid, size);
 
-    /*
-     * **Both scans stop on an element equal to the pivot**, and that is not a detail. Letting
-     * the ascending scan walk over equals instead puts a run of identical elements entirely on
-     * one side: an array that is all one value partitions into n-1 and 0, every time, which is
-     * the quadratic case the median-of-three was chosen to avoid. Stopping both and swapping
-     * splits the run down the middle. `test_freestd_qsort_and_bsearch` counts the comparisons on
-     * an all-equal array, which is how that was found.
-     *
-     * The swap is followed by advancing both, or two equal elements would be exchanged forever.
-     */
-    size_t i = 1u;
-    size_t j = n - 1u;
-    for (;;) {
-      while (i <= j && compare(lo + i * size, lo) < 0) {
-        i++;
-      }
-      while (i <= j && compare(lo + j * size, lo) > 0) {
-        j--;
-      }
-      if (i > j) {
-        break;
-      }
-      obs_swap_bytes(lo + i * size, lo + j * size, size);
-      i++;
-      if (j == 0u) {
-        break;
-      }
-      j--;
-    }
-    obs_swap_bytes(lo, lo + j * size, size); /* the pivot into its place */
+        /*
+         * Both scans stop on an element equal to the pivot. Walking over equals would
+         * put a run of identical elements on one side, and an all-equal array would
+         * partition n-1 and 0 every time - quadratic. `test_freestd_qsort_and_bsearch`
+         * counts comparisons on that case.
+         *
+         * The swap is followed by advancing both, or two equal elements would be
+         * exchanged forever.
+         */
+        size_t i = 1u;
+        size_t j = n - 1u;
+        for (;;) {
+            while (i <= j && compare(lo + i * size, lo) < 0) {
+                i++;
+            }
+            while (i <= j && compare(lo + j * size, lo) > 0) {
+                j--;
+            }
+            if (i > j) {
+                break;
+            }
+            obs_swap_bytes(lo + i * size, lo + j * size, size);
+            i++;
+            if (j == 0u) {
+                break;
+            }
+            j--;
+        }
+        obs_swap_bytes(lo, lo + j * size, size); /* the pivot into its place */
 
-    const size_t left = j;
-    const size_t right = n - j - 1u;
-    if (left < right) {
-      obs_qsort(lo, left, size, compare);
-      lo += (j + 1u) * size;
-      n = right;
-    } else {
-      obs_qsort(lo + (j + 1u) * size, right, size, compare);
-      n = left;
+        const size_t left = j;
+        const size_t right = n - j - 1u;
+        if (left < right) {
+            obs_qsort(lo, left, size, compare);
+            lo += (j + 1u) * size;
+            n = right;
+        } else {
+            obs_qsort(lo + (j + 1u) * size, right, size, compare);
+            n = left;
+        }
     }
-  }
 }
 
 void *obs_bsearch(const void *key, const void *base, size_t count, size_t size,
                   int (*compare)(const void *, const void *)) {
-  if (key == NULL || base == NULL || compare == NULL || size == 0u) {
+    if (key == NULL || base == NULL || compare == NULL || size == 0u) {
+        return NULL;
+    }
+    const unsigned char *lo = (const unsigned char *)base;
+    size_t n = count;
+    while (n > 0u) {
+        const size_t half = n / 2u;
+        const unsigned char *const mid = lo + half * size;
+        const int c = compare(key, mid);
+        if (c == 0) {
+            return (void *)(size_t)mid;
+        }
+        if (c > 0) {
+            lo = mid + size;
+            n -= half + 1u;
+        } else {
+            n = half;
+        }
+    }
     return NULL;
-  }
-  const unsigned char *lo = (const unsigned char *)base;
-  size_t n = count;
-  while (n > 0u) {
-    const size_t half = n / 2u;
-    const unsigned char *const mid = lo + half * size;
-    const int c = compare(key, mid);
-    if (c == 0) {
-      return (void *)(size_t)mid;
-    }
-    if (c > 0) {
-      lo = mid + size;
-      n -= half + 1u;
-    } else {
-      n = half;
-    }
-  }
-  return NULL;
 }
 
 /*
@@ -926,48 +979,45 @@ typedef unsigned __int128 oops_u128;
 oops_u128 __udivti3(oops_u128 num, oops_u128 den);
 
 oops_u128 __udivti3(oops_u128 num, oops_u128 den) {
-  if (den == 0) return 0;
-  if (den > num) return 0;
-  if (den == num) return 1;
+    if (den == 0)
+        return 0;
+    if (den > num)
+        return 0;
+    if (den == num)
+        return 1;
 
-  oops_u128 quot = 0;
-  oops_u128 bit = 1;
-  oops_u128 d = den;
+    oops_u128 quot = 0;
+    oops_u128 bit = 1;
+    oops_u128 d = den;
 
-  while (d <= num && (d & ((oops_u128)1 << 127)) == 0) {
-    d <<= 1;
-    bit <<= 1;
-  }
-
-  while (bit != 0) {
-    if (num >= d) {
-      num -= d;
-      quot |= bit;
+    while (d <= num && (d & ((oops_u128)1 << 127)) == 0) {
+        d <<= 1;
+        bit <<= 1;
     }
-    d >>= 1;
-    bit >>= 1;
-  }
-  return quot;
+
+    while (bit != 0) {
+        if (num >= d) {
+            num -= d;
+            quot |= bit;
+        }
+        d >>= 1;
+        bit >>= 1;
+    }
+    return quot;
 }
 
 /*
- * The remainder and the signed pair, which arrived with libc++'s `<filesystem>`.
+ * The remainder and the signed pair. libc++'s `<filesystem>` needs them
+ * (`file_time_type` is 128-bit nanoseconds), and libc++ is linked `--whole-archive`, so
+ * every C++ payload references them.
  *
- * `file_time_type` is nanoseconds in a 128-bit representation, so reporting a
- * timestamp is a *signed* 128-bit divide. libc++ is linked `--whole-archive`, so
- * every object in it lands in every C++ payload - which is how a title that never
- * mentions `std::filesystem` came to fail its link on `__divti3`.
+ * Magnitude and sign over the unsigned divide above, rather than a second loop. C
+ * truncates toward zero and gives the remainder the dividend's sign, which is what
+ * dividing absolute values and reapplying the signs produces: `-7 / 2` is -3 remainder
+ * -1.
  *
- * **Magnitude and sign over the unsigned divide above**, rather than a second loop.
- * C truncates toward zero and gives the remainder the *dividend's* sign, which is
- * exactly what dividing absolute values and reapplying the signs produces - so there
- * is one algorithm here to be right about, not two. `-7 / 2` is -3 remainder -1, not
- * -4 remainder 1.
- *
- * **The negation is unsigned on purpose.** `-a` on the most negative `__int128` is
- * signed overflow, which is undefined; casting first makes it the defined wrap that
- * gives the correct magnitude. That value is the one case a sign-magnitude divider
- * written the obvious way gets wrong.
+ * The negation is unsigned on purpose: `-a` on the most negative `__int128` is
+ * undefined signed overflow, while the unsigned wrap gives the correct magnitude.
  */
 typedef __int128 oops_i128;
 
@@ -976,26 +1026,26 @@ oops_i128 __divti3(oops_i128 a, oops_i128 b);
 oops_i128 __modti3(oops_i128 a, oops_i128 b);
 
 oops_u128 __umodti3(oops_u128 num, oops_u128 den) {
-  if (den == 0) return 0;
-  return num - __udivti3(num, den) * den;
+    if (den == 0)
+        return 0;
+    return num - __udivti3(num, den) * den;
 }
 
 oops_i128 __divti3(oops_i128 a, oops_i128 b) {
-  const int negative = ((a < 0) != (b < 0));
-  const oops_u128 ua = (a < 0) ? (oops_u128)0 - (oops_u128)a : (oops_u128)a;
-  const oops_u128 ub = (b < 0) ? (oops_u128)0 - (oops_u128)b : (oops_u128)b;
-  const oops_u128 q = __udivti3(ua, ub);
+    const int negative = ((a < 0) != (b < 0));
+    const oops_u128 ua = (a < 0) ? (oops_u128)0 - (oops_u128)a : (oops_u128)a;
+    const oops_u128 ub = (b < 0) ? (oops_u128)0 - (oops_u128)b : (oops_u128)b;
+    const oops_u128 q = __udivti3(ua, ub);
 
-  return negative ? (oops_i128)((oops_u128)0 - q) : (oops_i128)q;
+    return negative ? (oops_i128)((oops_u128)0 - q) : (oops_i128)q;
 }
 
 oops_i128 __modti3(oops_i128 a, oops_i128 b) {
-  const oops_u128 ua = (a < 0) ? (oops_u128)0 - (oops_u128)a : (oops_u128)a;
-  const oops_u128 ub = (b < 0) ? (oops_u128)0 - (oops_u128)b : (oops_u128)b;
-  const oops_u128 r = __umodti3(ua, ub);
+    const oops_u128 ua = (a < 0) ? (oops_u128)0 - (oops_u128)a : (oops_u128)a;
+    const oops_u128 ub = (b < 0) ? (oops_u128)0 - (oops_u128)b : (oops_u128)b;
+    const oops_u128 r = __umodti3(ua, ub);
 
-  /* The dividend's sign, not the divisor's - C's rule, and where a floor-division
-   * implementation would differ. */
-  return (a < 0) ? (oops_i128)((oops_u128)0 - r) : (oops_i128)r;
+    /* The dividend's sign, not the divisor's - C's rule, and where a floor-division
+     * implementation would differ. */
+    return (a < 0) ? (oops_i128)((oops_u128)0 - r) : (oops_i128)r;
 }
-

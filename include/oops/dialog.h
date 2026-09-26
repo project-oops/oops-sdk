@@ -1,3 +1,7 @@
+/*
+ * System dialogs: the on-screen keyboard (libSceImeDialog) and the message dialog
+ * (libSceMsgDialog). Each is opened, polled once a frame until it finishes, and closed.
+ */
 #ifndef OOPS_DIALOG_H
 #define OOPS_DIALOG_H
 
@@ -9,9 +13,7 @@
 extern "C" {
 #endif
 
-/* ========================================================================= */
-/* On-Screen Virtual Keyboard (libSceImeDialog)                               */
-/* ========================================================================= */
+/* On-screen keyboard (libSceImeDialog). */
 
 typedef enum oops_ime_type {
     OOPS_IME_TYPE_DEFAULT = 0,
@@ -51,9 +53,7 @@ int oops_dialog_ime_get_result(char *out_text, size_t max_len,
 void oops_dialog_ime_abort(void);
 void oops_dialog_ime_close(void);
 
-/* ========================================================================= */
-/* System Message Dialog (libSceMsgDialog)                                   */
-/* ========================================================================= */
+/* System message dialog (libSceMsgDialog). */
 
 typedef enum oops_msg_dialog_button {
     OOPS_MSG_DIALOG_BTN_OK = 0,

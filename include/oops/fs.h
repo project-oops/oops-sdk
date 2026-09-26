@@ -1,3 +1,7 @@
+/*
+ * Files and directories over the platform's syscalls: descriptors, whole-file helpers,
+ * directory walking, and the application's writable storage locations.
+ */
 #ifndef OOPS_FS_H
 #define OOPS_FS_H
 
@@ -50,22 +54,10 @@ int oops_fs_unlink(const char *path);
 int oops_fs_rename(const char *from, const char *to);
 
 /*
- * **Walking a directory** (2026-09-22).
- *
- * This was absent for no better reason than that nothing had asked for it -
- * `SYS_getdents` has been in `<oops/syscall.h>` the whole time, next to the `SYS_mkdir`
- * that `oops_fs_mkdir` already uses. Neverball asked: `share/dir.c` lists levels, sets
- * and replays, which is what a game with user content does.
- *
- * The shape is the POSIX one because that is what a port expects and what the kernel
- * gives: open a directory, read entries until there are none, close it.
- * `oops_fs_opendir` returns a handle or NULL; `oops_fs_readdir` fills `out` and returns
- * 1 for an entry, 0 at the end and -1 on error, so a caller can tell "finished" from
- * "failed" - which a NULL-or-not API cannot.
- *
- * `.` and `..` are **returned**, not filtered. They are directory entries and a caller
- * that wants them gone says so; hiding them here would be this SDK deciding what a
- * port's file list means.
+ * Walking a directory, in the POSIX shape over `SYS_getdents`: open, read entries until
+ * there are none, close. `oops_fs_opendir` returns a handle or NULL; `oops_fs_readdir`
+ * fills `out` and returns 1 for an entry, 0 at the end and -1 on error, so a caller
+ * can tell finished from failed. `.` and `..` are returned, not filtered.
  */
 typedef struct oops_dir oops_dir_t;
 

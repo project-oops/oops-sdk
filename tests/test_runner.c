@@ -1,3 +1,5 @@
+/* The host test runner: runs every unit and integration suite and prints a summary of
+ * all failures. */
 #include "tests/test_common.h"
 
 #include <stdarg.h>
@@ -10,18 +12,10 @@ jmp_buf g_test_abort;
 int g_test_abort_ready = 0;
 
 /*
- * # Every failure, not the first one
- *
- * `tests/test_common.h` explains why an assertion unwinds instead of exiting; this is
- * the other half of it. A failure is printed where it happens, as it always was, and
- * also kept here, so the end of the run can name all of them in one place - the thing a
- * red gate is read for, and the thing that scrolling back through nine hundred lines of
- * suite output does not give.
- *
- * The store is fixed and lives in `.bss`: a test run that is failing is not the moment
- * to find out what the allocator does. Past its end the failures are counted rather
- * than kept, and the summary says so, because a runner that quietly drops the two
- * hundredth failure is back to hiding things.
+ * Every failure is printed where it happens and also kept here, so the summary names
+ * all of them in one place (see `tests/test_common.h`). The store is fixed and lives in
+ * `.bss`, so a failing run does not depend on the allocator. Past its end failures are
+ * counted rather than kept, and the summary says so.
  */
 #define OOPS_TEST_MAX_FAILURES 256
 
@@ -88,8 +82,7 @@ void oops_test_fail(const char *file, int line, const char *fmt, ...) {
     }
 
     /* An assertion outside any RUN_TEST - fixture setup, or a helper called from main -
-     * has no test to abandon and nowhere to unwind to, so it ends the run as it did
-     * before. */
+     * has no test to abandon and nowhere to unwind to, so it ends the run. */
     printf("(that assertion was outside a test: stopping)\n");
     fflush(stdout);
     exit(1);

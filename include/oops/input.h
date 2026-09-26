@@ -1,3 +1,7 @@
+/*
+ * Controller input: per-port pad state, batched low-latency reads, rumble, light bar,
+ * orientation and adaptive triggers, with a keyboard folded into port 0.
+ */
 #ifndef OOPS_INPUT_H
 #define OOPS_INPUT_H
 
@@ -7,8 +11,8 @@
 extern "C" {
 #endif
 
-/* Standard controller button bitmasks (matching ScePad layout; CREATE excepted,
- * see its note) */
+/* Controller button bitmasks, matching the ScePad layout (bit 16 excepted, see its
+ * note). */
 #define OOPS_BUTTON_L3 (1u << 1)
 #define OOPS_BUTTON_R3 (1u << 2)
 #define OOPS_BUTTON_OPTIONS (1u << 3)
@@ -25,37 +29,17 @@ extern "C" {
 #define OOPS_BUTTON_CROSS (1u << 14)
 #define OOPS_BUTTON_SQUARE (1u << 15)
 /*
- * **Bit 16, and it has one name here because it is one bit.**
- *
- * It is not in the public ScePad button layout, and which physical button it carries is
- * open. This SDK held it as Create; Prosperous (`pros-link/src/pad.rs`) maps it to Home
- * and its enum claims the bit was confirmed empirically on a target. obSCEne has not
- * settled it - its button-bits probe needs a controller attached, and resolved
- * not-possible on the test rig.
- *
- * Until 2026-09-22 this header carried the question and the answer three lines apart: a
- * warning saying *"do not bind it as a shell or system button"*, immediately followed
- * by `OOPS_BUTTON_PS` and `OOPS_BUTTON_HOME` defined as exactly that bit with no
- * caveat, and `src/input/keyboard.c` returning a bare `(1u << 16)` that cited an
- * application's private constant. Five spellings, one of which forbade what the other
- * four did
- * (`REQ-20260922T2015Z-b4d7`).
- *
- * So: **`OOPS_BUTTON_BIT16` is the name**, deliberately describing the bit rather than
- * a button, because the bit is what is known. The two aliases below are kept so
- * existing callers still build, and they carry the same caveat rather than
- * contradicting it. When a sweep settles this, one of them becomes the name and the
- * others go.
- *
- * Binding it is not forbidden - SeaShell binds it to the Control Centre overlay and
- * that is a reasonable bet - but it is a bet, and a caller should be able to see that
- * from the name.
+ * Bit 16 is not in the public ScePad button layout, and which physical button it
+ * carries is unsettled: Create in one reading, Home in Prosperous's
+ * (`pros-link/src/pad.rs`). `OOPS_BUTTON_BIT16` names the bit rather than a button
+ * because the bit is what is known; the aliases below carry the same caveat. Binding
+ * it is allowed (SeaShell binds it to the Control Centre overlay), but it is a bet the
+ * name makes visible.
  */
 #define OOPS_BUTTON_BIT16 (1u << 16)
 /* Prospero Create / Orbis Share - one reading of OOPS_BUTTON_BIT16, not confirmed. */
 #define OOPS_BUTTON_CREATE OOPS_BUTTON_BIT16
-/* PlayStation / Home - the other reading of OOPS_BUTTON_BIT16, equally not confirmed.
- */
+/* PlayStation / Home - the other reading of OOPS_BUTTON_BIT16, not confirmed. */
 #define OOPS_BUTTON_PS OOPS_BUTTON_BIT16
 #define OOPS_BUTTON_HOME OOPS_BUTTON_BIT16 /* Alias for OOPS_BUTTON_PS. */
 #define OOPS_BUTTON_TOUCHPAD (1u << 20)
@@ -84,7 +68,7 @@ typedef struct oops_pad_state {
     uint8_t r2_trigger;   /* 0 to 255 */
     int connected;
     oops_touch_point_t touch[2];
-    /* 6-Axis Motion & Orientation IMU Telemetry (DualShock 4 & DualSense) */
+    /* Motion sensors (DualShock 4 and DualSense) */
     float orientation[4];      /* Quaternion [x, y, z, w] */
     float acceleration[3];     /* Accelerometer [x, y, z] in G's */
     float angular_velocity[3]; /* Gyroscope [x, y, z] in rad/s */
@@ -92,8 +76,8 @@ typedef struct oops_pad_state {
 
 /*
  * Adaptive-trigger effect modes (DualSense L2/R2). OOPS's own values; the
- * mapping to the platform's trigger-effect parameter lives in the effect call,
- * which is capture-gated.
+ * mapping to the platform's trigger-effect parameter belongs to
+ * `oops_input_set_trigger_effect`, which is gated on a capture of that parameter.
  */
 enum {
     OOPS_TRIGGER_OFF = 0,      /* release any effect - the resistance-free default */
@@ -112,10 +96,14 @@ enum {
 
 /*
  * Open pad 0 for the initial user. Returns 0 on success. A failure is
- * remembered and reported again by later calls until oops_input_close(); it
- * does not turn into success because the first call ran.
+ * remembered and reported again by later calls until oops_input_close().
  */
 int oops_input_init(void);
+/*
+ * The current state of `port`, opening it on first use. Returns 0 when a pad was read
+ * or (port 0) keyboard-as-pad produced buttons, -1 otherwise; `out_state` is zeroed
+ * first either way.
+ */
 int oops_input_poll(unsigned int port, oops_pad_state_t *out_state);
 
 /*
@@ -126,44 +114,41 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state);
  * the current state. Reuses the same pad-state layout as oops_input_poll.
  *
  * The stride is the driver's record: 120 bytes on 12.40, measured by obSCEne's
- * write-extent probes of both the single and the batched read (sweep
- * 20260909-110725), which also showed the batched read returning one record
- * when nothing is attached. Returns the driver's count, or -1 when the port is
- * not open or the read did not resolve.
+ * write-extent probes of both the single and the batched read; the batched read
+ * returns one record when nothing is attached. Returns the driver's count, or -1
+ * when the port is not open or the read did not resolve.
  */
 int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
                           unsigned int max_samples);
 
 /*
  * Whether `oops_input_poll` folds a keyboard's keys in as pad buttons on port 0.
- * Default **on**.
+ * Default on.
  *
- * Keyboard-as-pad is a *fallback for an application that only understands a pad*:
+ * Keyboard-as-pad is a fallback for an application that only understands a pad:
  * arrows and WASD become the D-pad, Enter becomes Cross, Escape becomes Circle, and a
- * console with no controller is still usable. `oops_keyboard_poll_buttons` has always
- * done this and SeaShell has always relied on it.
+ * console with no controller is still usable.
  *
- * **An application that reads real characters should turn it off**, because the same
- * key arrives twice with two different meanings: press `a` in a GLUT program and it is
- * both the letter `a` and `GLUT_KEY_LEFT`. Measured on hardware 2026-09-22, where
- * `fbotexture` got both; it has no special-key handler so nothing came of it, and the
- * next program will not be so lucky.
- *
- * oops-sdk's own GLUT calls this with 0 from `glutKeyboardFunc`, so a GLUT program that
- * wants characters gets characters and one that does not keeps the fallback. Nothing
+ * An application that reads real characters turns it off, because otherwise the same
+ * key arrives twice with two meanings: `a` in a GLUT program is both the letter and
+ * `GLUT_KEY_LEFT`. oops-sdk's GLUT calls this with 0 from `glutKeyboardFunc`; nothing
  * else in the SDK changes it.
  */
 void oops_input_set_keyboard_as_pad(int enable);
 
+/* Rumble motor speeds, 0..255. Returns the platform's result, or -1 when the port is
+ * not open or the entry point did not resolve; the same holds for the two below. */
 int oops_input_set_rumble(unsigned int port, uint8_t small_motor, uint8_t large_motor);
+/* Light bar colour. */
 int oops_input_set_lightbar(unsigned int port, uint8_t r, uint8_t g, uint8_t b);
+/* Resets the orientation quaternion's reference to the pad's current pose. */
 int oops_input_reset_orientation(unsigned int port);
 
 /*
  * Whether the adaptive-trigger effect entry point resolves and this port is
- * open. Real detection - the entry point is confirmed present in the app
- * context on 12.40 and absent in the eboot and payload contexts - but it does
- * not check that the pad is a DualSense. Returns 1/0.
+ * open. The entry point is present in the app context on 12.40 and absent in the
+ * eboot and payload contexts; whether the pad is a DualSense is not checked.
+ * Returns 1/0.
  */
 int oops_input_adaptive_triggers_available(unsigned int port);
 
@@ -173,14 +158,15 @@ int oops_input_adaptive_triggers_available(unsigned int port);
  * `position`/`position_end` are 0..255 along the pull, `strength` 0..255,
  * `frequency` 0..255 (used by VIBRATION).
  *
- * NOTE: capture-gated. The entry point is confirmed; its parameter layout is
- * not, so this returns a negative code rather than pass a guessed struct. A
- * write-extent capture of the parameter is what completes it.
+ * The entry point is confirmed but its parameter layout is not, so this returns a
+ * negative code rather than pass a guessed struct, until a write-extent capture of
+ * the parameter confirms the layout.
  */
 int oops_input_set_trigger_effect(unsigned int port, unsigned int triggers, int mode,
                                   uint8_t position, uint8_t position_end,
                                   uint8_t strength, uint8_t frequency);
 
+/* Closes every open pad and forgets the init result. */
 void oops_input_close(void);
 
 #ifdef __cplusplus

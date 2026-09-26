@@ -5,27 +5,16 @@
 #
 #   tools/shader-survey.sh <dir-or-file>...
 #
-# It exists because "which GLSL features do the ports need" is a question with an answer, and
-# guessing it wastes work. Run against the upstream trees under `oops-apps/src/oops-titles`, it
-# found four real gaps in one evening - ES 1.00's `#version 100`, constant-expression array
-# lengths, function overloading, and the sampler-set limit that is what actually stops SuperTux
-# generating for the console.
+# Point it at a port's upstream shaders (under `oops-apps/src/oops-titles`) to learn which GLSL
+# features that port needs.
 #
-# **The two columns are different questions.** The first is the front end: does this shader
-# compile at all. The second is the generator: can it be turned into gfx1030 instructions, which
-# is what decides whether a port runs on hardware rather than only on the software reference. A
-# shader can pass the first and fail the second, and for the ports surveyed so far that is the
-# common case - so a survey of only the front end is the more flattering measurement and the less
-# useful one.
+# The two columns are different questions. The first is the front end: does this shader
+# compile. The second is the generator: can it become gfx1030 instructions, which decides
+# whether a port runs on hardware rather than only on the software reference. A shader can pass
+# the first and fail the second.
 #
-# Two harness mistakes are worth knowing about, because both reported a property of the harness
-# as a finding about a port and `tools/shader-survey.c` carries the fix for each:
-#
-#   - taking the stage from the file extension. craft's vertex shaders are `*_vertex.glsl`, so
-#     they were compiled as fragment shaders and `gl_Position` came back undeclared.
-#   - pairing every fragment shader with one fixed vertex shader. A fragment `varying` has to be
-#     declared by the vertex stage too, so three of craft's four would not link and the
-#     generator was never reached.
+# `tools/shader-survey.c` infers each shader's stage from its source rather than its extension,
+# and links each fragment shader with a vertex shader that declares its varyings.
 #
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -48,9 +37,8 @@ fi
 # GLUT is the windowing layer rather than the GL core, and it pulls in time, keyboard and mouse.
 mapfile -t SRCS < <(ls "$SDK"/src/gl/*.c | grep -v glut)
 
-# The host configuration `oops-apps/common/app.mk` uses for its own host tests, so that what this
-# compiles with is what the build compiles with - a survey set up separately from the build can
-# only tell you that some other configuration works. See AGENTS.md on that trap.
+# The host configuration `oops-apps/common/app.mk` uses for its own host tests, so the survey
+# measures the configuration the build uses.
 clang -std=c11 -O1 -DOOPS_HOST_BUILD -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L \
       -I"$SDK/include" -I"$SDK/src/gl" -o "$OUT" "$HERE/shader-survey.c" \
       "${SRCS[@]}" \

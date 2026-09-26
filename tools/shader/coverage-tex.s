@@ -1,19 +1,13 @@
 .text
-// Antialiasing's coverage in the **textured** pixel shader: the same arithmetic as
-// `coverage.s`, reading the offset from a different interpolant.
+// Antialiasing's coverage in the textured pixel shader: the same arithmetic as `coverage.s`,
+// reading the offset from a different interpolant.
 //
-// **Why it needs its own file.** The untextured shader takes the primitive's offset from the
-// texture-coordinate parameter, `attr1`, which a draw with no texture does not read. A textured
-// draw reads all four of those components - s and t in x and y, fog's factor in z, q in w - so
-// the offset has nowhere to sit, and a smooth textured point or line has been drawn aliased
-// since antialiasing landed on 2026-09-20. `gl_smoothing` says so in the log.
-//
-// **`attr3` is where it goes.** That parameter carries the second texture unit's coordinate,
-// and a draw with one unit does not read it. Escalating such a draw to four parameters costs
-// eighty bytes a vertex and the four-parameter vertex shader - both of which exist and both of
-// which ran on a console on 2026-09-21, which is what makes this worth doing now rather than
-// when the paragraph in GL_ROADMAP.md was written. A draw that *does* use two units keeps only
-// `attr3.z` free, which is one float and not the three this needs, so that case stays aliased.
+// The untextured shader takes the primitive's offset from the texture-coordinate parameter,
+// `attr1`. A textured draw reads all four of those components - s and t in x and y, fog's
+// factor in z, q in w - so here the offset goes in `attr3`, the second texture unit's
+// coordinate, which a one-unit draw does not read. Such a draw moves to four parameters, eighty
+// bytes a vertex and the four-parameter vertex shader. A draw that uses two units keeps only
+// `attr3.z` free, one float and not the three this needs, so that case is drawn aliased.
 //
 // The layout inside the parameter is the one `coverage.s` already uses - across in x, along in
 // y, the radius plus a half in w - so these are its fifteen words with the six interpolations'

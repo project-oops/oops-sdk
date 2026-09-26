@@ -1,18 +1,20 @@
+/*
+ * Compressed audio decode over libSceAudiodec and libSceAjm. Availability is real;
+ * open and decode refuse with OOPS_AUDIODEC_ELAYOUT because the control structure
+ * layouts are unconfirmed.
+ */
 #include "oops/audiodec.h"
 #include "oops/sysmodule.h"
 #include "oops/system.h"
 #include <stddef.h>
 
 /*
- * Platform symbols from libSceAudiodec and libSceAjm.
- *
- * The set below is exactly what obSCEne's 108-audiodec census resolved on
- * hardware: the base libSceAudiodec create/decode/delete/clear entry points
- * (the Initialize/Terminate/`...Ex` spellings did not resolve, so they are not
- * declared), and the seven libSceAjm batch entry points beneath them.
- * Signatures are partial on purpose - the layout-sensitive control and batch
- * structures are `void *` placeholders because this subsystem does not call the
- * decode/batch paths until a struct-layout probe confirms their shapes.
+ * Platform symbols from libSceAudiodec and libSceAjm, as the obSCEne probe
+ * 108-audiodec resolved them on hardware: the base libSceAudiodec
+ * create/decode/delete/clear entry points (the Initialize/Terminate/`...Ex` spellings
+ * do not resolve), and libSceAjm entry points beneath them. The layout-sensitive
+ * control and batch structures are `void *` placeholders until a struct-layout probe
+ * confirms their shapes.
  */
 __attribute__((weak)) int sceAudiodecCreateDecoder(const void *ctrl, int codec_type);
 __attribute__((weak)) int sceAudiodecDeleteDecoder(int handle);
@@ -27,7 +29,7 @@ __attribute__((weak)) int sceAjmInstanceCreate(void *context, int codec, uint64_
 
 struct oops_audiodec {
     int codec;
-    int handle; /* platform decoder handle once the create path is unblocked */
+    int handle; /* platform decoder handle; unset while the create path is gated */
 };
 
 static int s_last_error = OOPS_AUDIODEC_OK;
@@ -39,7 +41,7 @@ int oops_audiodec_last_error(void) {
 int oops_audiodec_available(void) {
     (void)oops_sysmodule_load(OOPS_SYSMODULE_AUDIO_DEC);
 
-    /* Real, measured capability: the base decode entry points resolved. */
+    /* Available when the base decode entry points resolved. */
     if (sceAudiodecCreateDecoder && sceAudiodecDecode && sceAudiodecDeleteDecoder) {
         oops_log_trace("AUDIODEC", "available: entry points resolved");
         return 1;
@@ -52,8 +54,8 @@ int oops_audiodec_available(void) {
 }
 
 int oops_audiodec_offload_available(void) {
-    /* The engine beneath the codec. Present separately because a front door
-     * without the engine is a distinct finding a caller may want to know. */
+    /* The engine beneath the codec, reported separately because the codec entry
+     * points can resolve without it. */
     if (sceAjmInitialize && sceAjmInstanceCreate) {
         oops_log_trace("AUDIODEC", "offload available: AJM entry points resolved");
         return 1;
@@ -75,10 +77,9 @@ oops_audiodec_t *oops_audiodec_open(int codec) {
         return NULL;
     }
 
-    /* sceAudiodecCreateDecoder takes a control structure whose layout OOPS has
-     * not confirmed. A guessed layout corrupts the stack rather than failing, so
-     * this refuses loudly. Completing it needs the obSCEne struct-layout probe
-     * (see the header). */
+    /* sceAudiodecCreateDecoder takes a control structure whose layout is
+     * unconfirmed, and a guessed layout corrupts the stack rather than failing, so
+     * this refuses until a struct-layout probe confirms it (see the header). */
     oops_log_warn("AUDIODEC", "open: struct layout unconfirmed (ELAYOUT)");
     s_last_error = OOPS_AUDIODEC_ELAYOUT;
     return NULL;

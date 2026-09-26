@@ -2,6 +2,10 @@
 #include "tests/test_common.h"
 #include <stdlib.h>
 
+/* Unit tests for the display tiler (`agc/tiler.h`): the 64KB_R_X swizzle, surface
+ * placement, buffer descriptors and the tiling dispatch. */
+
+/* A surface's tiled size is whole 64 KiB tiles, rounded up on both axes. */
 static void test_tiler_surface_bytes(void) {
     ASSERT_EQ(agc_tile_surface_bytes(0, 0), 0);
     ASSERT_EQ(agc_tile_surface_bytes(128, 0), 0);
@@ -70,6 +74,7 @@ static void check_placement(uint32_t w, uint32_t h, uint32_t x, uint32_t y,
     free(src);
 }
 
+/* Pixels in later tiles land at the tile's base plus the in-tile swizzle. */
 static void test_tiler_tile_placement(void) {
     check_placement(256, 128, 128, 0, 16384); /* second tile of the first tile row */
     check_placement(128, 256, 0, 128, 16384); /* first tile of the second tile row */
@@ -120,20 +125,24 @@ static void check_bijection(uint32_t w, uint32_t h) {
     free(src);
 }
 
+/* One whole tile maps every pixel exactly once. */
 static void test_tiler_bijection_128x128(void) {
     check_bijection(128, 128);
 }
 
+/* A 1080p surface maps every pixel exactly once, including its short last tile row. */
 static void test_tiler_bijection_1920x1080(void) {
     check_bijection(1920, 1080); /* 15 x 9 tiles, last tile row 56 pixels tall */
 }
 
+/* Surfaces with partial tiles map every pixel exactly once and leave the margin. */
 static void test_tiler_bijection_partial_tiles(void) {
     check_bijection(200, 100); /* partial in both axes */
     check_bijection(129, 3);   /* one pixel into a second tile column */
     check_bijection(1, 1);
 }
 
+/* NULL buffers and an empty surface are ignored rather than dereferenced. */
 static void test_tiler_null_safety(void) {
     uint32_t buf[16];
     agc_tile_surface(NULL, buf, 4, 4);
@@ -145,6 +154,7 @@ static void test_tiler_null_safety(void) {
 #include "oops/agc.h"
 #include "oops/display.h"
 
+/* `oops_agc_dcb_desc` keeps its 16-byte layout. */
 static void test_agc_dcb_desc_contract(void) {
     ASSERT_EQ(sizeof(oops_agc_dcb_desc), 16);
     ASSERT_EQ(offsetof(oops_agc_dcb_desc, gpu_addr), 0);
@@ -153,6 +163,7 @@ static void test_agc_dcb_desc_contract(void) {
     ASSERT_EQ(offsetof(oops_agc_dcb_desc, pad), 14);
 }
 
+/* A NULL display reports no GPU acceleration. */
 static void test_agc_display_acceleration_query(void) {
     ASSERT_EQ(agc_display_is_gpu_accelerated(NULL), 0);
     ASSERT_EQ(oops_display_is_gpu_accelerated(NULL), 0);
@@ -265,6 +276,7 @@ static void test_tiler_dispatch_refusals(void) {
     ASSERT_EQ(agc_tiler_dispatch_params(ud, &gx, &gy, 0, 0, 1920, 1081), -1);
 }
 
+/* agc_detile_pixel maps known offsets to their pixels. */
 static void test_agc_detile_pixel_golden(void) {
     uint32_t x = 0, y = 0;
     /* Hardware oracle anchor point: (15, 15) -> 0x43f (byte 4348) */
@@ -311,6 +323,7 @@ static void test_agc_tile_pixel_inverts_detile(void) {
     free(lin);
 }
 
+/* Tiling then detiling a surface returns it unchanged. */
 static void test_agc_detile_surface_roundtrip(void) {
     enum { W = 256, H = 256 };
     size_t n = (size_t)W * H;

@@ -1,3 +1,7 @@
+/*
+ * The Orbis/Neo display backend: two linear scanout buffers in direct memory,
+ * registered with VideoOut and flipped with a wait on the flip event queue.
+ */
 #include "gnm/display.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -13,10 +17,9 @@ struct SceVideoOutBufferAttribute {
     uint8_t reserved[44];
 };
 
-/* 64 bytes, confirmed on 12.40 in the app context (obSCEne
- * 080-video/flip-status): a fresh handle reads flip_arg = -1 at offset 24 and
- * current_buffer = -1 at offset 56, everything else zero, which is exactly this
- * shape. */
+/* 64 bytes of fields, confirmed on 12.40 in the app context by the obSCEne probe
+ * 080-video/flip-status: a fresh handle reads flip_arg = -1 at offset 24 and
+ * current_buffer = -1 at offset 56, everything else zero. */
 struct SceVideoOutFlipStatus {
     uint64_t count;
     uint64_t process_time;
@@ -279,12 +282,10 @@ int gnm_display_flip(gnm_display_t *disp) {
     return 0;
 }
 
-/* The framebuffer here *is* a scanout buffer, and the one on screen is the other:
- * the last flipped, which `fb_index` has moved past. A caller's image goes
- * straight into that one - scanned out as it is written, which is what drawing
- * to a front buffer looks like - and the framebuffer is left alone. Before the
- * first flip nothing is on screen, so the image is flipped there once, and the
- * same buffer stays the one on screen. */
+/* The framebuffer is a scanout buffer, and the one on screen is the other: the
+ * last flipped, which `fb_index` has moved past. A caller's image goes straight
+ * into that one, scanned out as it is written, and the framebuffer is left alone.
+ * Before the first flip nothing is on screen, so the image is flipped there once. */
 int gnm_display_present(gnm_display_t *disp, const uint32_t *pixels) {
     if (!disp || !disp->ready || disp->handle < 0 || !pixels)
         return -1;

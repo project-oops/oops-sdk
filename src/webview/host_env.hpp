@@ -1,6 +1,8 @@
 #ifndef OOPS_HOST_ENV_HPP
 #define OOPS_HOST_ENV_HPP
 
+// The browser globals (console, timers, fetch) a webview installs in its JS context.
+
 #include "oops/webview.h"
 #include "quickjs/quickjs.h"
 #include <string>

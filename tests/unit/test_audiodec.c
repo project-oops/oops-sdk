@@ -1,15 +1,17 @@
 #include "oops/audiodec.h"
 #include "tests/test_common.h"
 
-/* On a host with no platform symbols, audio decode and its offload engine are
- * both unavailable; the subsystem reports each honestly, rejects bad arguments,
- * and never returns a decoder while the control-struct layout is unconfirmed.
- */
+/* Unit tests for `oops/audiodec.h`. On a host with no platform symbols, audio decode
+ * and its offload engine are unavailable, bad arguments are rejected, and no decoder
+ * is returned. */
+
+/* Decode and offload both report unavailable on host. */
 static void test_audiodec_unavailable_on_host(void) {
     ASSERT_EQ(oops_audiodec_available(), 0);
     ASSERT_EQ(oops_audiodec_offload_available(), 0);
 }
 
+/* Open rejects a bad codec as EPARAM and a valid one as EUNAVAIL. */
 static void test_audiodec_open_contract(void) {
     /* Bad codec is rejected before availability. */
     ASSERT_TRUE(oops_audiodec_open(999) == NULL);
@@ -21,6 +23,7 @@ static void test_audiodec_open_contract(void) {
     ASSERT_EQ(oops_audiodec_last_error(), OOPS_AUDIODEC_EUNAVAIL);
 }
 
+/* Decode refuses NULL arguments, and close tolerates NULL. */
 static void test_audiodec_decode_and_close_contract(void) {
     int16_t pcm[64];
     /* Null / zero arguments rejected. */

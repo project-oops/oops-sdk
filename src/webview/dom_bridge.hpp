@@ -1,6 +1,8 @@
 #ifndef OOPS_DOM_BRIDGE_HPP
 #define OOPS_DOM_BRIDGE_HPP
 
+// The `document`, `window` and `Element` objects a webview exposes to its scripts.
+
 #include "oops/webview.h"
 #include "quickjs/quickjs.h"
 #include "litehtml/html.h"

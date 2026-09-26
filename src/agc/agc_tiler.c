@@ -1,10 +1,13 @@
+/*
+ * CPU tiling and detiling of 32bpp surfaces in the 64KB_R_X scanout layout, and the
+ * buffer descriptors and dispatch parameters for the compute tiler (<agc/tiler.h>).
+ */
 #include "agc/tiler.h"
 #include <stddef.h>
 #include <stdint.h>
 
-/* Precomputed 128-element LUTs for 64KB RDNA2 macro-tiles, 32bpp kRenderTarget,
- * in the swizzle addrlib calls 64KB_R_X.
- */
+/* 128-entry tables for 64KB macro-tiles, 32bpp kRenderTarget, in the swizzle addrlib
+ * calls 64KB_R_X. */
 static uint32_t s_lut_x[128];
 static uint32_t s_lut_y[128];
 static int s_lut_initialized = 0;
@@ -13,15 +16,11 @@ static uint8_t s_inv_lx[16384];
 static uint8_t s_inv_ly[16384];
 
 static void init_tiler_lut(void) {
-    /* RDNA2 basis vectors for 32bpp (4 bytes/pixel) in 64KB blocks, for the GFX10
-     * level without RB+ that this part reports - not GFX10.3, which this comment
-     * claimed until the gfx level was actually settled. The vectors did not
-     * change; only the label on them was wrong. It was settled by deriving
-     * GB_ADDR_CONFIG from this table rather than by assuming a family: inverting
-     * addrlib against these numbers, no RB+ (GFX10.3) configuration reproduces
-     * them at all, and the non-RB+ one does, at 16 pipes with a 256 B interleave.
-     * The derivation is written out where its result is used, beside
-     * OOPS_GB_ADDR_CONFIG in oops-mesa's drm_device.c.
+    /* Basis vectors for 32bpp in 64KB blocks, for the GFX10 level without RB+ that
+     * this part reports. Inverting addrlib against them, no RB+ (GFX10.3)
+     * configuration reproduces them and the non-RB+ one does, at 16 pipes with a
+     * 256 B interleave; the derivation is beside OOPS_GB_ADDR_CONFIG in oops-mesa's
+     * drm_device.c.
      *
      * Each entry is the byte-address contribution of one x (or y) bit inside a
      * tile; a pixel's tile-relative byte address is the XOR of the entries for
@@ -46,10 +45,8 @@ static void init_tiler_lut(void) {
         s_lut_y[i] = by >> 2;
     }
 
-    /* Precompute the inverse permutation for 16,384 pixels per 64KB macro-tile.
-     * Writing destination memory in strictly sequential order (tile_dest[0..16383])
-     * allows the CPU to stream stores directly through Write-Combining (WC) write
-     * buffers into GDDR6 without evictions or cache line thrashing. */
+    /* The inverse permutation, so tiling writes each tile in sequential order and
+     * the stores stream through the write-combining buffers. */
     for (uint32_t i = 0; i < 16384u; i++) {
         uint32_t x = 0, y = 0;
         agc_detile_pixel(i, &x, &y);
@@ -104,7 +101,7 @@ int agc_tiler_dispatch_params(uint32_t *user_data, uint32_t *groups_x,
     }
 
     /* The source is the linear surface, one 32-bit pixel per record. The
-     * destination is the tiled surface addressed as dword *pairs*, because the
+     * destination is the tiled surface addressed as dword pairs, because the
      * stores are two-component: the swizzle puts a pixel and its x+1 neighbour in
      * adjacent dwords (x bit 0 contributes 4 bytes, x bit 1 contributes 8), so a
      * pair is contiguous and a two-component record is the right unit. */
@@ -121,9 +118,9 @@ int agc_tiler_dispatch_params(uint32_t *user_data, uint32_t *groups_x,
         return -1;
     }
 
-    /* User data 0: read once by the shader and never again. Unestablished; the
-     * surface width in pixels is the assumption, and the one thing a hardware
-     * bring-up should vary first if the addressing comes out wrong. */
+    /* User data 0 is read once by the shader and its meaning is unestablished; the
+     * surface width in pixels is the assumption, and the first thing to vary if the
+     * addressing comes out wrong on hardware. */
     user_data[0] = width;
     for (int i = 0; i < 4; i++) {
         user_data[AGC_TILER_SRC_DESC_SLOT + (unsigned)i] = src_desc[i];

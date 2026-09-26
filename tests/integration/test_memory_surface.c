@@ -4,15 +4,18 @@
 #include "tests/test_common.h"
 #include <stdlib.h>
 
+/* Integration test: drawing and blitting into a surface bound over a 64 KiB aligned
+ * block. */
+
+/* Rectangles and blits land at the right pixels of an externally allocated surface. */
 static void test_memory_surface_integration(void) {
-    /* Allocate 64KB page-aligned block */
     size_t size = 64 * 1024;
     void *mem = NULL;
     int rc = posix_memalign(&mem, 0x10000, size);
     ASSERT_EQ(rc, 0);
     ASSERT_TRUE(mem != NULL);
 
-    /* Bind surface (128x128 32bpp = 64KB) */
+    /* 128 x 128 at 32 bits fills the 64 KiB exactly. */
     oops_surface_t surf;
     surf.pixels = (uint32_t *)mem;
     surf.width = 128;
@@ -23,7 +26,6 @@ static void test_memory_surface_integration(void) {
     oops_draw_rect(&surf, 10, 10, 50, 50, OOPS_COLOR_CYAN);
     ASSERT_EQ(surf.pixels[10 * 128 + 10], OOPS_COLOR_CYAN);
 
-    /* Create offscreen surface and blit */
     uint32_t icon_buf[16 * 16];
     oops_surface_t icon = {icon_buf, 16, 16, 16, OOPS_SURFACE_LINEAR};
     oops_draw_clear(&icon, OOPS_COLOR_RED);

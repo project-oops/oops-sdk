@@ -3,6 +3,9 @@
 #include "tests/test_common.h"
 #include <stdlib.h>
 
+/* Integration test: a frame drawn by the software renderer and tiled for scanout. */
+
+/* A drawn frame has the expected pixels, and tiling it fills every tiled word. */
 static void test_pipeline_draw_and_tile(void) {
     uint32_t width = 128;
     uint32_t height = 128;

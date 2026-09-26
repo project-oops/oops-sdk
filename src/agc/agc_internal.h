@@ -1,3 +1,5 @@
+/* The GPU queue shared by the AGC compute and draw paths: a driver queue, its command
+ * buffer and its completion fence. */
 #ifndef OOPS_AGC_INTERNAL_H
 #define OOPS_AGC_INTERNAL_H
 

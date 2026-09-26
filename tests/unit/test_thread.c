@@ -1,6 +1,10 @@
 #include "oops/thread.h"
 #include "tests/test_common.h"
 
+/* Unit tests for `oops/thread.h`. The host has no platform threads, so these pin
+ * argument checks and honest failure. */
+
+/* Every mutex, condition and semaphore call refuses NULL. */
 static void test_thread_primitives_null_safety(void) {
     ASSERT_EQ(oops_mutex_init(NULL, NULL), -1);
     ASSERT_EQ(oops_mutex_lock(NULL), -1);
@@ -50,15 +54,15 @@ static void test_thread_host_contract(void) {
     oops_thread_yield();
 }
 
-/* Exception handling: the constants are the confirmed raw platform codes, the
- * handler type compiles, and on a host with no libkernel every call fails
- * rather than pretending, install refuses a NULL handler locally. */
 static void handler_probe(int signum, void *a1, void *a2) {
     (void)signum;
     (void)a1;
     (void)a2;
 }
 
+/* Exception handling: the constants are the platform's raw codes, the handler type
+ * compiles, and on a host with no libkernel every call fails; install refuses a NULL
+ * handler before asking the platform. */
 static void test_thread_exception_contract(void) {
     ASSERT_EQ(OOPS_EXCEPTION_SIGNAL, 30);
     ASSERT_EQ((int)OOPS_EXC_EAGAIN, (int)0x80020023);

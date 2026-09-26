@@ -2,45 +2,26 @@
  * oops/gfx.h - one way to bring up a renderer, whichever renderer a title is built
  * against.
  *
- * # What this is
+ * oops-gl hands out a context for a display the title opened (`glContextCreate`),
+ * while oops-mesa opens the whole stack in one call (`oops_gl_create`). This entry
+ * point hides that difference: the same source builds against either, and
+ * `OOPS_RENDERER` (a build switch in oops-apps) decides which backend answers.
  *
- * A title that wants a GL context has, today, two different shapes of setup depending
- * on which renderer it links: oops-gl hands out a context for a display the title
- * opened
- * (`glContextCreate`), while oops-mesa opens the whole stack in one call
- * (`oops_gl_create`). This is the single entry point that hides that difference: the
- * same source builds against either, and `OOPS_RENDERER` (a build switch in oops-apps)
- * decides which backend answers.
+ * `oops_gfx_create` opens the display itself because the display's scanout buffers
+ * are named to the compositor exactly once, at open, and never change afterwards
+ * (D011). A renderer that wants its own target scanned out without a per-frame copy
+ * has to hand that target over at open, so it has to own the display.
  *
- * # Why create opens the display
- *
- * On this platform the display's scanout buffers are named to the compositor exactly
- * once, at open, and can never be changed afterwards (oops-sdk D011). So a renderer
- * that wants its own target scanned out without a per-frame copy has to hand that
- * target over *at open* - which means it has to own the display, not be handed one the
- * title already opened. That is why `oops_gfx_create` opens the display itself rather
- * than taking one, and it is the whole reason this API exists rather than a title
- * calling `oops_display_open` and a context call by hand (oops-sdk D012).
- *
- * The oops-gl backend does not yet take that shortcut - it opens the display and builds
- * a context the same way a title did by hand - but the shape of the call is now the one
- * that lets it, so the optimisation is a change behind this API rather than a change to
- * every title.
- *
- * # What a title does with it
- *
- *     oops_gfx_t *gfx = oops_gfx_create(&(oops_gfx_desc_t){ .width = 0, .height = 0,
- *                                                           .depth = true, .vsync =
- * true }); if (!gfx) { ... }
- *     ... per frame: draw, then
+ *     oops_gfx_desc_t desc = {.width = 0, .height = 0, .depth = true, .vsync = true};
+ *     oops_gfx_t *gfx = oops_gfx_create(&desc);
+ *     // per frame: draw, then
  *     oops_gfx_present(gfx);
- *     ... at the end:
+ *     // at the end:
  *     oops_gfx_destroy(gfx);
  *
- * The context is made current on the calling thread by `create`, and there is exactly
- * one - so there is no `make_current`, because a call that can only ever succeed is not
- * worth having (oops-sdk D001). `glSwapBuffers()` still works for ported GL source; it
- * presents the same frame `oops_gfx_present` does.
+ * `create` makes the one context current on the calling thread, so there is no
+ * `make_current`. `glSwapBuffers()` still works for ported GL source and presents the
+ * same frame `oops_gfx_present` does.
  */
 #ifndef OOPS_GFX_H
 #define OOPS_GFX_H

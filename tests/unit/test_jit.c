@@ -3,6 +3,10 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Unit tests for `oops/jit.h`: executable memory is allocated, written through its
+ * writable view, run through its executable view, and freed. */
+
+/* The method identifiers keep their values. */
 static void test_jit_constants(void) {
     ASSERT_EQ(OOPS_JIT_METHOD_NONE, 0);
     ASSERT_EQ(OOPS_JIT_METHOD_SHARED_MEM, 1);
@@ -10,6 +14,7 @@ static void test_jit_constants(void) {
     ASSERT_EQ(OOPS_JIT_METHOD_HOST, 3);
 }
 
+/* Alloc, free and icache flush refuse NULL and empty arguments. */
 static void test_jit_null_safety(void) {
     oops_jit_memory_t mem;
     memset(&mem, 0, sizeof(mem));
@@ -28,6 +33,7 @@ static void test_jit_null_safety(void) {
     ASSERT_EQ(oops_jit_flush_icache(NULL, 100), -1);
 }
 
+/* Code written through the RW view runs from the RX view, and free clears both. */
 static void test_jit_alloc_execute_free(void) {
     ASSERT_TRUE(oops_jit_is_available() != 0);
 
@@ -37,7 +43,7 @@ static void test_jit_alloc_execute_free(void) {
     oops_jit_memory_t mem;
     memset(&mem, 0, sizeof(mem));
 
-    /* Allocate small buffer (should round to page size) */
+    /* A small request, rounded up to a page. */
     ASSERT_EQ(oops_jit_alloc(64, &mem), 0);
     ASSERT_TRUE(mem.rx_addr != NULL);
     ASSERT_TRUE(mem.rw_addr != NULL);
@@ -54,17 +60,14 @@ static void test_jit_alloc_execute_free(void) {
     const uint8_t code[] = {0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3};
     memcpy(mem.rw_addr, code, sizeof(code));
 
-    /* Flush cache */
     ASSERT_EQ(oops_jit_flush_icache(mem.rx_addr, sizeof(code)), 0);
 
-    /* Execute the generated function */
     typedef int (*jit_fn_t)(void);
     jit_fn_t fn = (jit_fn_t)(uintptr_t)mem.rx_addr;
     int result = fn();
     ASSERT_EQ(result, 42);
 #endif
 
-    /* Free the memory */
     ASSERT_EQ(oops_jit_free(&mem), 0);
     ASSERT_TRUE(mem.rx_addr == NULL);
     ASSERT_TRUE(mem.rw_addr == NULL);

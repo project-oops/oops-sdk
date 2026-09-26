@@ -1,3 +1,7 @@
+/*
+ * CPU 2D drawing on 32bpp surfaces, linear or scanout-tiled: fills, lines, circles,
+ * 8x8 text, blits and sprites, opaque or alpha-blended, plus a PNG decoder.
+ */
 #ifndef OOPS_DRAW_H
 #define OOPS_DRAW_H
 
@@ -83,7 +87,7 @@ oops_surface_t oops_display_get_surface(oops_display_t *disp);
 
 /*
  * Present a sprite as a source surface without copying - the result aliases the
- * sprite's const pixels, so it is READ-ONLY: use it only as a blit source,
+ * sprite's const pixels, so it is read-only: use it only as a blit source,
  * never as a draw target. Returns an empty surface (NULL pixels) for a NULL
  * sprite.
  */

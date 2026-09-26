@@ -1,6 +1,9 @@
 #include "oops/pkg.h"
 #include "tests/test_common.h"
 
+/* Unit tests for package install and app management, `oops/pkg.h`. */
+
+/* Every call refuses NULL and empty identifiers. */
 static void test_pkg_null_safety(void) {
     bool exists = false;
     uint32_t prog = 0;
@@ -19,13 +22,12 @@ static void test_pkg_null_safety(void) {
               -1);
 }
 
+/* Without the platform, every call fails and clears its outputs. */
 static void test_pkg_unsupported_environment(void) {
     bool exists = true;
     uint32_t prog = 99;
     oops_pkg_progress_info_t info;
 
-    /* On host (non-PlayStation target), weak symbols resolve to NULL -> safe -1
-     * errors */
     ASSERT_EQ(oops_pkg_init(), -1);
     ASSERT_EQ(oops_pkg_install("/data/test.pkg"), -1);
     ASSERT_EQ(oops_app_exists("CUSA00001", &exists), -1);

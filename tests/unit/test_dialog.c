@@ -1,6 +1,10 @@
 #include "oops/dialog.h"
 #include "tests/test_common.h"
 
+/* Unit tests for the IME and message dialogs in `oops/dialog.h`, which fail on a host
+ * without the platform library. */
+
+/* The IME calls refuse NULL and zero-length buffers. */
 static void test_dialog_ime_null_safety(void) {
     ASSERT_EQ(oops_dialog_ime_open(NULL), -1);
     ASSERT_EQ(oops_dialog_ime_poll(), OOPS_IME_STATUS_NONE);
@@ -10,6 +14,7 @@ static void test_dialog_ime_null_safety(void) {
     ASSERT_EQ(oops_dialog_ime_get_result(buf, 0, NULL), -1);
 }
 
+/* Opening the IME fails without the platform, and abort and close are safe after. */
 static void test_dialog_ime_unsupported(void) {
     oops_ime_param_t param;
     for (size_t i = 0; i < sizeof(param); i++)
@@ -26,6 +31,7 @@ static void test_dialog_ime_unsupported(void) {
     oops_dialog_ime_close();
 }
 
+/* A message dialog refuses NULL and fails without the platform. */
 static void test_dialog_message_null_safety(void) {
     ASSERT_EQ(oops_dialog_message_show(NULL, OOPS_MSG_DIALOG_BTN_OK), -1);
     ASSERT_EQ(oops_dialog_message_poll(NULL), -1);

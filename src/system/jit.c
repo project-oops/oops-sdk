@@ -1,3 +1,12 @@
+/*
+ * Executable memory for code generated at run time (oops/jit.h).
+ *
+ * On the target it prefers a shared-memory dual mapping (separate writable and
+ * executable views of the same pages) and falls back to `mprotect` on one mapping.
+ * The host build uses POSIX `mmap`. A caller writes through `rw_addr`, runs through
+ * `rx_addr`, and calls `oops_jit_flush_icache` in between.
+ */
+
 #include "oops/jit.h"
 #include "oops/freestd.h"
 #include "oops/system.h"

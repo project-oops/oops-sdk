@@ -1,20 +1,10 @@
 /*
- * errno, over the platform's own.
+ * errno, over the platform's own. The console carries the FreeBSD-derived POSIX
+ * exports, and errno lives behind `__error()` as on FreeBSD; obSCEne measured `__error`
+ * callable on firmware 12.40, and `src/net/net.c` reads it the same way.
  *
- * **This is a bridge, not an invention.** The console carries the FreeBSD-derived POSIX
- * exports, and errno lives behind `__error()` exactly as it does on FreeBSD -
- * `src/net/net.c` has read it that way since the socket work, and obSCEne measured
- * `__error` callable on firmware 12.40 (sweep 20260909-083918) alongside the rest of
- * the POSIX set.
- *
- * It arrives now because three separate consumers wanted it and each was shimming its
- * own: SDL2's `SDL_RWops` reaches for `<errno.h>` on the stdio path, Extreme Tux
- * Racer's `DirExists` reads `errno` after a failed `opendir`, and libc++'s `string.cpp`
- * compares it against `ERANGE` in `std::stoi`. Three private answers to one standard
- * question is the signal that the question belongs here.
- *
- * `errno` is a macro over a function returning a pointer, which is what C requires of
- * it and what makes it work per-thread when the platform's does.
+ * `errno` is a macro over a function returning a pointer, as C requires, which makes it
+ * per-thread when the platform's is.
  */
 #ifndef OOPS_LIBC_ERRNO_H
 #define OOPS_LIBC_ERRNO_H
@@ -34,34 +24,17 @@ int *oops_errno_location(void);
 #define errno (*oops_errno_location())
 
 /*
- * **FreeBSD's numbering, because it is the platform's.** Not a set this SDK chose:
- * `net.c` records try-again as 35 on this console, which is FreeBSD's `EAGAIN` and pins
- * the whole table to that origin. A program comparing `errno` against a constant from
- * somewhere else would be comparing against the wrong number.
+ * FreeBSD's numbering, because it is the platform's: `net.c` records try-again as 35 on
+ * this console, which is FreeBSD's `EAGAIN`. The whole table is here, generated from
+ * the FreeBSD `sys/errno.h` that oops-mesa stages as its target sysroot
+ * (`oops-mesa/toolchain/sysroot/usr/include/sys/errno.h`); libc++'s `<system_error>`
+ * names the socket and network set unconditionally.
  *
- * **The whole table, not the part someone needed.** This began as the thirty-odd names
- * the first three consumers happened to touch, and stopped at `EAGAIN` - which is where
- * the numbering only starts getting interesting, because everything above 35 is the
- * socket and network set. libc++'s
- * `<system_error>` maps forty-two of those onto `std::errc` and names them
- * unconditionally, so Extreme Tux Racer could not compile a single translation unit
- * that reached it: twenty errors and `-ferror-limit` giving up, on `ECONNREFUSED`,
- * `ECONNRESET`, `EDESTADDRREQ` and the rest.
- *
- * A partial table is how this file has failed twice now - once as three private shims,
- * once here
- * - and completing it costs nothing, because these are not choices to be made one at a
- * time. They are transcribed from the FreeBSD `sys/errno.h` that oops-mesa stages as
- * its target sysroot
- * (`oops-mesa/toolchain/sysroot/usr/include/sys/errno.h`), which is the platform's own
- * header rather than a recollection of it, and generated from it rather than typed.
- *
- * **What is deliberately absent.** FreeBSD does not define the four STREAMS errors -
- * `ENODATA`, `ENOSR`, `ENOSTR`, `ETIME` - and neither does this. libc++ guards all four
- * with `#ifdef` and drops those `errc` enumerators when they are missing, which is the
- * correct outcome: a number invented here would be one no syscall on this console will
- * ever return. The kernel's own pseudo-errors (`ERESTART` and the negative values
- * beside it) are likewise not userspace values and are not here.
+ * FreeBSD does not define the four STREAMS errors (`ENODATA`, `ENOSR`, `ENOSTR`,
+ * `ETIME`), and neither does this: libc++ drops those `errc` enumerators when they are
+ * missing, and an invented number would be one no syscall returns. The kernel's
+ * pseudo-errors (`ERESTART` and the negative values beside it) are not userspace
+ * values and are not here.
  */
 #define EPERM 1
 #define ENOENT 2

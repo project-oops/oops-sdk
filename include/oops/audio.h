@@ -56,6 +56,8 @@ int oops_audio_write(oops_audio_port_t *port, const int16_t *pcm_samples,
  * went out. */
 int oops_audio_flush(oops_audio_port_t *port);
 
+/* Per-channel volume, each clamped to 0.0..1.0. 0 on success, -1 without an open
+ * port or the entry point, or the platform's code. */
 int oops_audio_set_volume(oops_audio_port_t *port, float left, float right);
 
 /* Flushes the held tail, then drains the queued chunks and releases the handle.

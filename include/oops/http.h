@@ -1,3 +1,7 @@
+/*
+ * A small HTTP/1.1 GET client over `oops/net.h`: fetch to memory or to a file, with
+ * the URL, request, header and chunked-body helpers it is built from.
+ */
 #ifndef OOPS_HTTP_H
 #define OOPS_HTTP_H
 

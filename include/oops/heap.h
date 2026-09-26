@@ -9,11 +9,12 @@ extern "C" {
 #endif
 
 /**
- * Freestanding Userland Virtual Memory Heap Allocator.
+ * The freestanding heap, with the C allocation contract.
  *
- * Backed by anonymous virtual memory (SYS_mmap / MAP_ANON | MAP_PRIVATE).
- * Operates independently of Direct Memory (DMEM), guaranteeing functionality
- * across all application categories (Big Apps, System Apps with 0 DMEM, Daemons).
+ * Backed by anonymous virtual memory (SYS_mmap / MAP_ANON | MAP_PRIVATE), not direct
+ * memory, so it works in every application category (big apps, system apps with no
+ * direct memory, daemons). `oops_aligned_alloc` follows C17: `size` a multiple of a
+ * power-of-two `alignment`.
  */
 
 void *oops_malloc(size_t size);
@@ -29,6 +30,7 @@ typedef struct oops_heap_stats {
     size_t total_free_count;
 } oops_heap_stats_t;
 
+/* A snapshot of the counters above. 0, or -1 for a NULL `out_stats`. */
 int oops_heap_get_stats(oops_heap_stats_t *out_stats);
 
 #ifdef __cplusplus

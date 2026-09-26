@@ -3,6 +3,8 @@
  *
  * Implements HTTP/1.1 request formatting, response header parsing, chunked
  * transfer decoding, and buffered / streaming transfers over oops/net.h sockets.
+ * HTTPS on the target goes through the platform's `libSceHttp`; the host build has
+ * no TLS and answers `OOPS_HTTP_ERR_TLS_UNAVAIL`.
  */
 
 #include "oops/http.h"

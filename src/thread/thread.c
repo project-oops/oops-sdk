@@ -1,3 +1,8 @@
+/*
+ * Threads, mutexes, condition variables, semaphores, thread-local storage and
+ * exception handlers over the platform's scePthread and sceKernel entry points, all
+ * weakly bound.
+ */
 #include "oops/thread.h"
 #include "oops/system.h"
 
@@ -55,9 +60,8 @@ __attribute__((weak)) int sceKernelPollSema(int32_t sema, int need);
 __attribute__((weak)) int sceKernelSignalSema(int32_t sema, int signal);
 __attribute__((weak)) int sceKernelDeleteSema(int32_t sema);
 
-/* Exception handling (libkernel; addresses 0x800028660/0x8000287b0/0x8000288e0
- * in the payload leg, resolved here by name). The handler receives (signum,
- * arg1, arg2) as measured. */
+/* Exception handling (libkernel, resolved by name). The handler receives (signum,
+ * arg1, arg2), as measured on hardware. */
 __attribute__((weak)) int
 sceKernelInstallExceptionHandler(int signo, void (*handler)(int, void *, void *));
 __attribute__((weak)) int sceKernelRemoveExceptionHandler(int signo);
@@ -176,29 +180,17 @@ int oops_mutex_destroy(oops_mutex_t *mutex) {
 }
 
 /*
- * **A recursive mutex, which is the same object with a different initialiser.**
- *
- * `oops_mutex_init` passes a null attribute, which is the default kind: locking it
- * twice from one thread deadlocks. This builds an attribute object, sets the recursive
- * type on it, and hands that to the same `scePthreadMutexInit`. Everything afterwards -
- * lock, trylock, unlock, destroy - is shared, because the difference lives in the mutex
- * and not in the verbs.
- *
- * **The attribute is destroyed immediately.** pthread copies what it needs out of it at
- * init, so keeping it would be a leak per mutex for nothing. Destroyed even when the
- * init failed, which is the case a `goto`-free version of this gets wrong.
- *
- * The attribute object's size is not something this can ask for, so it is a local
- * buffer with room to spare. Sony's `ScePthreadMutexattr` is a pointer-sized handle on
- * this platform, like the mutex itself; 64 bytes is far more than it needs and costs
- * one stack frame.
+ * A recursive mutex: the same object as `oops_mutex_init` makes, initialised with an
+ * attribute that sets the recursive type, so lock, trylock, unlock and destroy are
+ * shared. The attribute is destroyed straight after init, whether or not init
+ * succeeded, since pthread copies what it needs. `ScePthreadMutexattr` is a
+ * pointer-sized handle; the 64-byte buffer leaves room to spare.
  */
 int oops_mutex_init_recursive(oops_mutex_t *mutex, const char *name) {
     if (!mutex || !scePthreadMutexInit)
         return -1;
-    /* Without the attribute symbols there is no way to ask for recursion, and returning
-     * the *non*-recursive mutex the caller did not ask for is the kind of quiet
-     * substitution that deadlocks somewhere else entirely. Refuse instead. */
+    /* Without the attribute symbols recursion cannot be asked for, and a non-recursive
+     * mutex in its place would deadlock elsewhere, so this refuses. */
     if (!scePthreadMutexattrInit || !scePthreadMutexattrSettype ||
         !scePthreadMutexattrDestroy)
         return -1;
@@ -222,13 +214,9 @@ int oops_mutex_init_recursive(oops_mutex_t *mutex, const char *name) {
 }
 
 /*
- * Thread-local storage.
- *
- * Thin over the platform's pthread keys, with the one behaviour a caller depends on
- * made explicit: `oops_tls_get` on a thread that has never set the key answers NULL
- * rather than failing, so "first use on this thread" is detectable without a second
- * flag. That is what pthread already does; it is stated here because the rest of this
- * file returns -1 for "unavailable" and a pointer-returning function cannot.
+ * Thread-local storage over the platform's pthread keys. `oops_tls_get` on a thread
+ * that has never set the key answers NULL, as pthread does, so first use on a thread
+ * is detectable; it also answers NULL when the entry point is unavailable.
  */
 int oops_tls_create(oops_tls_key_t *key, void (*destructor)(void *)) {
     if (!key || !scePthreadKeyCreate)
@@ -275,9 +263,8 @@ int oops_cond_wait(oops_cond_t *cond, oops_mutex_t *mutex) {
 int oops_cond_timedwait(oops_cond_t *cond, oops_mutex_t *mutex, uint32_t timeout_us) {
     if (!cond || !mutex || !scePthreadCondTimedwait)
         return -1;
-    /* No fallback to the untimed wait: a caller who asked for a timeout is
-     * relying on coming back, and a wait that never returns is not a degraded
-     * version of that. */
+    /* No fallback to the untimed wait: a caller who asked for a timeout relies on
+     * coming back. */
     return scePthreadCondTimedwait(&cond->handle, &mutex->handle, (uint64_t)timeout_us);
 }
 
@@ -349,10 +336,9 @@ int oops_sem_destroy(oops_sem_t *sem) {
 }
 
 /*
- * Exception handling. Thin wrappers over the confirmed libkernel entry points;
- * where one does not resolve the call fails rather than pretending. A NULL
- * handler on install is refused locally (the platform reports 0x80020023 for
- * it, but there is nothing to install).
+ * Exception handling over the libkernel entry points; a call whose entry point does
+ * not resolve fails. A NULL handler on install is refused locally (the platform
+ * reports 0x80020023 for it).
  */
 int oops_thread_install_exception_handler(int signum,
                                           oops_exception_handler_t handler) {

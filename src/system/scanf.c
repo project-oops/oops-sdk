@@ -1,42 +1,17 @@
 /*
- * `sscanf`, for the loaders a port arrives with.
+ * `sscanf`, for the hand-written asset loaders (OBJ, MTL, level formats) a port arrives
+ * with. It builds on the host under the `obs_` prefix so tests can run it; the
+ * target-only `src/system/libc.c` renames it to `sscanf`.
  *
- * # Why this exists
- *
- * An OBJ mesh loader is a `fgets` and an `sscanf("%f %f %f")`. So is an MTL material
- * loader, and so is every level format anyone wrote by hand. A port without `sscanf`
- * has its asset loader rewritten, which is the work this library exists to remove.
- *
- * # Why it is here rather than in `src/system/libc.c`
- *
- * That file is target-only - a host build's real C library owns the name `sscanf` - so
- * an algorithm written there could never be run by a test. This builds both ways under
- * the `obs_` prefix and `libc.c` is a one-line rename over it, which is the promise
- * that file's own header makes.
- *
- * # What it converts
- *
- * `%d %i %u %o %x %X %p`, `%f %F %e %E %g %G %a %A`, `%s`, `%c`, `%n`, `%%` and
+ * Converts `%d %i %u %o %x %X %p`, `%f %F %e %E %g %G %a %A`, `%s`, `%c`, `%n`, `%%`
+ * and
  * `%[...]` scansets, with the `hh h l ll L z j t` length modifiers, a field width, and
- * `*` to convert without assigning. Whitespace in the format matches any run of input
- * whitespace including none; any other character must match itself.
+ * `*`. Returns the number of assignments, or `EOF` when the input ran out before the
+ * first.
  *
- * The return is the number of assignments made, or `EOF` when the input ran out before
- * the first one - which is how a caller tells "end of file" from "that line did not
- * parse".
- *
- * # What it is not
- *
- * **Floats are accumulated in double and are not correctly rounded.** The exponent is
- * applied by repeated multiplication, so the last bit or two can differ from a
- * correctly-rounded conversion, and the exponent is clamped at 10^400 - past which the
- * answer is an infinity or a zero anyway. A mesh coordinate does not notice, and a
- * program that would has no business reading it with `scanf`.
- *
- * `fscanf` and `scanf` are **not** here. Both need to put a character back when a
- * conversion reads one too many, and this SDK's file handles have no pushback; a loader
- * reads its line with `fgets` and scans the line, which is what the code being ported
- * does anyway.
+ * Floats accumulate in double and are not correctly rounded; the exponent is clamped at
+ * 10^400. `fscanf` and `scanf` are absent: they need character pushback, which this
+ * SDK's file handles do not have, so a loader scans each line it read with `fgets`.
  */
 #include "oops/freestd.h"
 
@@ -76,12 +51,11 @@ static int obs_scan_int(const char **pp, int width, int base, unsigned long long
         used++;
     }
     /*
-     * **`0x` commits.** Once those two characters are seen under `%x` or `%i`, C has
-     * taken them as the start of the input item - "0x" could begin a valid hexadecimal
-     * integer - so a missing digit after them fails the conversion rather than falling
-     * back to reading the "0" and leaving the "x". The float path above does the same
-     * for the same reason, and the differential test against the host's library is what
-     * settled both.
+     * `0x` commits. Under `%x` or `%i`, C takes those two characters as the start of
+     * the input item, so a missing digit after them fails the conversion rather than
+     * reading the "0" and leaving the "x". The float path does the same, and
+     * `test_freestd_sscanf_agrees_with_the_host` checks both against the host's
+     * library.
      */
     if ((base == 0 || base == 16) && used + 1 < width && p[0] == '0' &&
         (p[1] == 'x' || p[1] == 'X')) {
@@ -128,21 +102,14 @@ static int obs_scan_float(const char **pp, int width, double *out) {
         used++;
     }
     /*
-     * **The hexadecimal form**, which C99 added and which a program never writes by
-     * hand but a
-     * `%f` over "0x10" gets from the host's library as sixteen. Left out at first, and
-     * the differential test against that library is what said so.
-     *
-     * `0x` then hex digits, an optional point, and an optional `p` binary exponent -
-     * which C does not require here, unlike a hex literal in source.
+     * The C99 hexadecimal form: a `%f` over "0x10" reads sixteen. `0x`, hex digits, an
+     * optional point, and an optional `p` binary exponent, which C does not require
+     * here, unlike a hex literal in source.
      */
     if (used + 1 < width && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
         /*
-         * **Once `0x` is seen there is no falling back to decimal.** "0x" on its own
-         * could begin a valid hexadecimal float, so C takes it as the input item and
-         * then fails the conversion because it is not one - it does not read the "0"
-         * and leave the "x". Returning 1 and a zero there was this library's next
-         * difference from the host's library, and the same test found it.
+         * Once `0x` is seen there is no falling back to decimal: C takes it as the
+         * input item and fails the conversion if no hex digits follow.
          */
         p += 2;
         used += 2;
@@ -231,17 +198,11 @@ static int obs_scan_float(const char **pp, int width, double *out) {
     }
     if (used < width && (*p == 'e' || *p == 'E')) {
         /*
-         * **"1e" is a matching failure, not the number one.** C defines the input item
-         * as the longest sequence that could begin a valid number - "1e" can, because
-         * "1e5" is one - and then fails the conversion if that sequence is not itself
-         * valid. So an exponent marker with no digits after it takes the whole
-         * conversion down rather than being wound back.
-         *
-         * This library's first draft wound back and returned 1, which reads as the
-         * friendlier answer and is the wrong one: the point of having `sscanf` at all
-         * is that ported code behaves as it did, and
-         * `test_freestd_sscanf_agrees_with_the_host` caught the difference against the
-         * host's own library.
+         * "1e" is a matching failure, not the number one. C takes the longest sequence
+         * that could begin a valid number as the input item and fails the conversion if
+         * that sequence is not itself valid, so an exponent marker with no digits fails
+         * rather than being wound back. `test_freestd_sscanf_agrees_with_the_host`
+         * checks this against the host's library.
          */
         int eneg = 0;
         int edigits = 0;

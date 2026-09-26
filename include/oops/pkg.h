@@ -1,6 +1,10 @@
 ﻿#ifndef OOPS_PKG_H
 #define OOPS_PKG_H
 
+/*
+ * Package installation and installed-application queries through libSceAppInstUtil.
+ */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

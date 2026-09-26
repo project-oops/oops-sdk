@@ -4,6 +4,9 @@
 #include <string.h>
 #include <assert.h>
 
+/* Unit tests for the JavaScript engine binding, `oops/js.h`. A standalone program; each
+ * test asserts and prints PASS. */
+
 static oops_js_value_t native_add(oops_js_t *js, int argc, oops_js_value_t *argv,
                                   void *userdata) {
     intptr_t offset = (intptr_t)userdata;
@@ -30,6 +33,7 @@ static oops_js_value_t native_concat(oops_js_t *js, int argc, oops_js_value_t *a
     return oops_js_make_string(js, buf);
 }
 
+/* An engine creates and destroys cleanly. */
 void test_js_lifecycle(void) {
     oops_js_t *js = oops_js_create();
     assert(js != NULL);
@@ -37,6 +41,7 @@ void test_js_lifecycle(void) {
     printf("PASS: test_js_lifecycle\n");
 }
 
+/* Eval returns integer and float results with their types. */
 void test_js_eval_arithmetic(void) {
     oops_js_t *js = oops_js_create();
     assert(js != NULL);
@@ -58,6 +63,7 @@ void test_js_eval_arithmetic(void) {
     printf("PASS: test_js_eval_arithmetic\n");
 }
 
+/* A registered native function receives its arguments and userdata. */
 void test_js_native_binding(void) {
     oops_js_t *js = oops_js_create();
     assert(js != NULL);
@@ -87,6 +93,7 @@ void test_js_native_binding(void) {
     printf("PASS: test_js_native_binding\n");
 }
 
+/* Globals round-trip, and a promise resolves only when pending jobs are drained. */
 void test_js_globals_and_microtasks(void) {
     oops_js_t *js = oops_js_create();
     assert(js != NULL);
@@ -123,6 +130,7 @@ void test_js_globals_and_microtasks(void) {
     printf("PASS: test_js_globals_and_microtasks\n");
 }
 
+/* A syntax error fails the eval rather than crashing. */
 void test_js_syntax_error(void) {
     oops_js_t *js = oops_js_create();
     assert(js != NULL);

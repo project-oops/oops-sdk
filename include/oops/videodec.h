@@ -11,33 +11,19 @@ extern "C" {
 /*
  * Hardware video decode (libSceVideodec2).
  *
- * The platform decodes H.264 / HEVC / VP9 into caller-owned, GPU-visible
- * memory, and that output buffer can be sampled directly by the display path
- * with no CPU copy - the missing front half of a stream client or media player.
- * The existing `display` subsystem presents linear SDR RGB and knows nothing
- * about decode; this is the piece that feeds it.
+ * The platform decodes H.264 / HEVC / VP9 into caller-owned, GPU-visible memory
+ * that the display path can sample with no CPU copy.
  *
- * # State of this subsystem, honestly
- *
- * The nine libSceVideodec2 entry points this binds are **confirmed to exist on
- * hardware** - obSCEne's `107-videodec` census resolved every one of them (in
- * the ps4_mode context, with real addresses). So capability detection here is
- * real: `oops_videodec_available` answers a measured question.
- *
- * What is **not** yet confirmed is the layout of the structures the decode
- * calls take. A probe that only resolves a symbol proves the symbol is there;
- * it does not prove the shape of the struct you pass it, and a wrong field
- * offset does not fail cleanly - it corrupts the stack and crashes somewhere
- * unrelated. OOPS does not ship a guessed layout (the same rule obSCEne holds).
- * So `oops_videodec_open` and `oops_videodec_decode` are present as the settled
- * interface but return `OOPS_VIDEODEC_ELAYOUT` until an obSCEne struct-layout
- * probe confirms the config/input/output layouts. When it does, only the
- * internal struct definitions and the two call bodies need filling - the
- * interface below does not change.
+ * The nine libSceVideodec2 entry points resolve on hardware (the obSCEne probe
+ * `107-videodec`, ps4_mode context), so `oops_videodec_available` answers a
+ * measured question. The layouts of the structures the decode calls take are
+ * unconfirmed, and a wrong field offset corrupts the stack rather than failing, so
+ * `oops_videodec_open` and `oops_videodec_decode` return `OOPS_VIDEODEC_ELAYOUT`
+ * until a struct-layout probe confirms them. The interface below is settled.
  */
 
 /* Codec selection. OOPS's own values; the mapping to the platform's codec
- * constant lives in the (layout-gated) decode path, not here. */
+ * constant belongs to the layout-gated decode path. */
 enum {
     OOPS_VIDEODEC_H264 = 1,
     OOPS_VIDEODEC_HEVC = 2,
@@ -60,9 +46,9 @@ typedef struct oops_videodec oops_videodec_t;
 /*
  * A decoded frame, described in OOPS's own terms: where the luma and chroma
  * planes landed in caller-visible memory and how they are laid out. This is the
- * SDK's contract with its caller, not the platform's output struct - the point
- * of the subsystem is that this buffer is GPU-visible and can be handed to the
- * display path directly. Populated by a successful `oops_videodec_decode`.
+ * SDK's contract with its caller, not the platform's output struct; the buffer
+ * is GPU-visible and can be handed to the display path directly. Populated by a
+ * successful `oops_videodec_decode`.
  */
 typedef struct oops_videodec_frame {
     void *luma;   /* Y plane */
@@ -76,7 +62,7 @@ typedef struct oops_videodec_frame {
  * Whether hardware video decode is reachable in this process: the library loads
  * (a best-effort sysmodule load is attempted) and the create/decode entry
  * points resolve. Returns 1 if usable, 0 if not. Safe to call before anything
- * else, and the honest gate an app should check before offering decode.
+ * else; an app checks it before offering decode.
  */
 int oops_videodec_available(void);
 
@@ -84,10 +70,9 @@ int oops_videodec_available(void);
  * Open a decoder for `codec` at `width` x `height`. Returns a handle, or NULL
  * on failure with the reason available from `oops_videodec_last_error`.
  *
- * NOTE: gated on the struct-layout confirmation described above - currently
- * returns NULL and sets the last error to `OOPS_VIDEODEC_ELAYOUT` when the
- * library is present but the decoder config layout is unconfirmed, rather than
- * pass a guessed struct to the platform.
+ * Gated on the struct-layout confirmation described above: returns NULL with the
+ * last error `OOPS_VIDEODEC_ELAYOUT` when the library is present, rather than pass
+ * a guessed struct to the platform.
  */
 oops_videodec_t *oops_videodec_open(int codec, uint32_t width, uint32_t height);
 
@@ -96,8 +81,7 @@ oops_videodec_t *oops_videodec_open(int codec, uint32_t width, uint32_t height);
  * `out_frame` with the decoded picture in caller-visible memory. Returns
  * OOPS_VIDEODEC_OK or a negative code.
  *
- * NOTE: gated on the struct-layout confirmation above - currently returns
- * OOPS_VIDEODEC_ELAYOUT.
+ * Gated on the struct-layout confirmation above: returns OOPS_VIDEODEC_ELAYOUT.
  */
 int oops_videodec_decode(oops_videodec_t *dec, const void *au, size_t au_size,
                          oops_videodec_frame_t *out_frame);
@@ -105,8 +89,7 @@ int oops_videodec_decode(oops_videodec_t *dec, const void *au, size_t au_size,
 /* Release a decoder opened with oops_videodec_open. Safe on NULL. */
 void oops_videodec_close(oops_videodec_t *dec);
 
-/* The last error recorded by this subsystem on the calling thread's most recent
- * call. */
+/* The last error this subsystem recorded, process-wide. */
 int oops_videodec_last_error(void);
 
 #ifdef __cplusplus

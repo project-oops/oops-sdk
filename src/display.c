@@ -1,3 +1,8 @@
+/*
+ * The portable display: one `oops_display_t` that forwards to the AGC backend on
+ * Prospero and Trinity and to the GNM backend on Orbis and Neo, plus weak stubs of the
+ * other backend so code calling it directly still links.
+ */
 #include "oops/display.h"
 #include "oops/draw.h"
 #include "oops/system.h"
@@ -242,8 +247,7 @@ int oops_display_adopted_index(const oops_display_t *disp, int nth) {
     return agc_display_adopted_index(disp->agc, nth);
 #else
     /* The PS4 backend names no foreign buffers, so there is never an index to
-     * report. A caller that gets -1 keeps whatever copy it was doing, which is
-     * what it was doing before this existed. */
+     * report; a caller that gets -1 keeps copying. */
     (void)nth;
     return -1;
 #endif
@@ -289,9 +293,9 @@ oops_display_scanout_layout_t oops_display_use_scanout(oops_display_t *disp) {
 
 /* Here rather than with the drawing calls, because which buffer the next flip
  * shows is the display's to know. A program that flips its framebuffer draws
- * on that, linear. A renderer drawing the scanout buffers in place has the next
- * one described in its own layout, so a CPU overlay - a HUD over a GL frame -
- * lands in what is flipped rather than in a framebuffer nothing shows. */
+ * on that, linear. A renderer drawing the scanout buffers in place gets the next
+ * one in its own layout, so a CPU overlay (a HUD over a GL frame) lands in what
+ * is flipped. */
 oops_surface_t oops_display_get_surface(oops_display_t *disp) {
     oops_surface_t surf = {NULL, 0, 0, 0, OOPS_SURFACE_LINEAR};
     if (!disp)

@@ -1,48 +1,29 @@
 /*
  * oops/hud.h - a 2D overlay drawn by the GPU, over whatever a title is rendering.
  *
- * # Why this exists
+ * `oops/draw.h` writes pixels into a CPU-addressable surface, which suits `oops-gl`'s
+ * linear scanout buffer. A Mesa title scans out Mesa's own tiled buffer directly
+ * (oops-mesa#D012), so there is no linear surface to write text into.
  *
- * A title that wants a frame counter, a build stamp or a line of telemetry over its 3D
- * scene has two ways to put text on the screen, and on this platform only one of them
- * works everywhere.
+ * So the overlay is drawn the way the scene is, on the GPU, with fixed-function
+ * OpenGL 1.1: an orthographic projection, a font baked into a texture atlas once, and
+ * one textured quad per glyph. That runs unchanged on `oops-gl` and on Mesa (whose
+ * default context is a compatibility profile). Immediate mode, rather than vertex
+ * arrays, leaves the bound vertex-array object and client-array state untouched, so it
+ * composes over a title that drives the modern pipeline.
  *
- * `oops/draw.h` writes pixels into a CPU-addressable surface. That is right for
- * `oops-gl`, whose scanout buffer is linear and reachable from the CPU. It is *wrong*
- * for a Mesa title: since the present path scans out Mesa's own tiled buffer directly
- * (oops-mesa D012), there is no linear surface to write into, and drawing text with
- * `oops_draw_text` would either land in a detiled scratch copy the CPU has to pay for
- * every frame, or scatter a lattice across a tiled buffer the display reads as raw
- * pixels.
+ * It does not open the display, own a context, or present; the title does all three
+ * and calls this between its last draw and its present. It draws ASCII 0x20..0x7E in
+ * the collection's 8x8 font (`src/draw/font8x8.h`) at integer scales. Colour is a
+ * 32-bit ARGB word, the layout of `oops_color_t`, so the `OOPS_COLOR_*` constants in
+ * `<oops/draw.h>` pass straight in.
  *
- * So the overlay is drawn the way the scene is: on the GPU. This library issues
- * fixed-function OpenGL 1.1 - an orthographic projection, a font baked into a texture
- * atlas once, and one textured quad per glyph - which runs unchanged on `oops-gl`
- * (native fixed-function) and on Mesa (whose default context is a compatibility
- * profile, so fixed-function and the title's own shaders both work). It uses immediate
- * mode rather than vertex arrays deliberately: immediate mode does not touch the bound
- * vertex-array object or client-array state, so it composes over a title that drives
- * the modern pipeline without disturbing it.
- *
- * # What it does not do
- *
- * It does not open the display, own a context, or present - the title does all three,
- * and calls this between its last draw and its present. It draws only ASCII 0x20..0x7E,
- * in the collection's one 8x8 font (`src/draw/font8x8.h`, the same glyphs
- * `oops_draw_text` uses), at integer scales. Colour is a 32-bit ARGB word - the layout
- * of `oops_color_t` and the `OOPS_COLOR_*` constants in `<oops/draw.h>`, so those pass
- * straight in - and this header stays free of that dependency.
- *
- * # How a title uses it
- *
- *     oops_hud_t *hud = oops_hud_create(fb_w, fb_h);   // once, after the context is
- * current
- *     ... per frame, after the scene draw and before present:
+ *     oops_hud_t *hud = oops_hud_create(fb_w, fb_h);  // once, context current
+ *     // per frame, after the scene draw and before present:
  *     oops_hud_begin(hud);
- *     oops_hud_rect(hud, 40, 30, 360, 60, 0xC0101820u);           // a panel behind the
- * text oops_hud_text(hud, 52, 44, 2, OOPS_COLOR_WHITE, "MESA-CUBE"); oops_hud_end(hud);
- *     ... then oops_gfx_present(gfx) / glutSwapBuffers(), whichever the title presents
- * with.
+ *     oops_hud_rect(hud, 40, 30, 360, 60, 0xC0101820u);  // a panel behind the text
+ *     oops_hud_text(hud, 52, 44, 2, OOPS_COLOR_WHITE, "MESA-CUBE");
+ *     oops_hud_end(hud);
  *
  * `begin` saves the GL state it changes (including the bound program, so a shader title
  * is left as it was) and `end` restores it. Everything between them is in pixel

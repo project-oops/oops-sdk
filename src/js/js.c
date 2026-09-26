@@ -1,3 +1,11 @@
+/*
+ * JavaScript (oops/js.h) over QuickJS: one runtime and one context per `oops_js_t`.
+ *
+ * Values cross the boundary as `oops_js_value_t` copies; strings are duplicated and
+ * freed with `oops_js_free_value`. A native function is registered in a fixed table
+ * and reached through one thunk, which finds its binding by the QuickJS `magic` index.
+ */
+
 #include "oops/js.h"
 #include "oops/system.h"
 #pragma GCC diagnostic push
@@ -90,13 +98,10 @@ static JSValue oops_val_to_js(JSContext *ctx, oops_js_value_t val) {
 static JSValue native_thunk(JSContext *ctx, JSValueConst this_val, int argc,
                             JSValueConst *argv, int magic) {
     (void)this_val;
-    /* The oops_js_t is found via the *runtime* opaque, not the context opaque. The
-     * context opaque is a single slot an embedder may need for its own back-pointer -
-     * the webview sets it to its oops_webview_t so its fetch/console/DOM callbacks can
-     * find it - and if this thunk read it as an oops_js_t it would dereference that
-     * unrelated struct (the crash oopsy-daisy hit: the webview's 1280x720 dims sat
-     * where the callback pointer was expected). Each oops_js_t owns its runtime, so the
-     * runtime opaque is a private, collision-free home for it. */
+    /* The oops_js_t is found through the runtime opaque, not the context opaque: an
+     * embedder may use the context opaque for its own back-pointer (the webview stores
+     * its oops_webview_t there). Each oops_js_t owns its runtime, so that slot is
+     * private to it. */
     oops_js_t *js = (oops_js_t *)JS_GetRuntimeOpaque(JS_GetRuntime(ctx));
     oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG thunk entered magic=%d js=%lx",
                        magic, (unsigned long)(uintptr_t)js);
@@ -152,10 +157,9 @@ oops_js_t *oops_js_create(void) {
         return NULL;
     }
 
-    /* The runtime opaque is this instance's authoritative back-pointer, used by
-     * native_thunk - see the note there. The context opaque is also set for callers
-     * that expect it, but an embedder (e.g. the webview) may repurpose the context
-     * opaque, so nothing internal relies on it. */
+    /* The runtime opaque is the back-pointer native_thunk reads. The context opaque is
+     * set too, for callers that expect it, but an embedder may replace it, so nothing
+     * internal relies on it. */
     JS_SetRuntimeOpaque(js->rt, js);
     JS_SetContextOpaque(js->ctx, js);
     oops_log_debug("JS", "QuickJS runtime and context initialized");

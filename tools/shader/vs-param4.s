@@ -1,16 +1,8 @@
 .text
-// The vertex shader for a draw with two texture units (since 2026-09-20): the three-parameter
-// program of vs-param3.s with an 80-byte vertex instead of 64 and a fifth vec4 loaded and
-// exported as param3 - the second unit's texture coordinate.
-//
-// obSCEne measured that this interface is legal on the part and retires
-// (REQ-20260919T2258Z-8b1c, sweep 20260920-082906, 166-agc/primitive-draw-param4): with
-// SPI_VS_OUT_CONFIG 0x6, SPI_PS_IN_CONTROL 0x4 and SPI_PS_INPUT_CNTL_3 0x3 - the unpacked form
-// again - `arm1-4param` retired with both canaries and drew its 512 pixels. **What that sweep
-// did not show is the value arriving**: its three-parameter control printed the same pixel as
-// the arm, so the rows cannot say whether attribute 3 was read or something else was. That is
-// re-asked as REQ-20260920T0745Z-9a41, and until it answers, oops-gl exports this parameter but
-// the pixel shader does not sample a second unit from it (OOPS_GL_MULTITEX_MEASURED).
+// The vertex shader for a draw with two texture units: the three-parameter program of
+// vs-param3.s with an 80-byte vertex instead of 64 and a fifth vec4 loaded and exported as
+// param3 - the second unit's texture coordinate. The interface is SPI_VS_OUT_CONFIG 0x6,
+// SPI_PS_IN_CONTROL 0x4 and SPI_PS_INPUT_CNTL_3 0x3, the unpacked form.
 //
 // The vertex: position (0), colour (16), unit 0's {s, t, fog, q} (32), param2 (48) -
 // {secondary r, g, b, unit 0's r} - and unit 1's {s, t, unused, q} (64).

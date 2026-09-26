@@ -7,6 +7,10 @@
 #include <cassert>
 #include <unistd.h>
 
+// Unit tests for `oops/webview.h`: page load, script DOM access, input events, timers
+// and rendering. A standalone program; each test asserts and prints PASS.
+
+// A webview creates its JS and HTML engines and destroys cleanly.
 void test_webview_lifecycle() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);
@@ -16,6 +20,7 @@ void test_webview_lifecycle() {
     printf("PASS: test_webview_lifecycle\n");
 }
 
+// A page's script changes and creates DOM nodes that a later eval reads back.
 void test_webview_dom_mutation() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);
@@ -60,6 +65,7 @@ void test_webview_dom_mutation() {
     printf("PASS: test_webview_dom_mutation\n");
 }
 
+// Mouse and key input reach the page's window listeners once each.
 void test_webview_events_and_input() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);
@@ -112,6 +118,7 @@ void test_webview_events_and_input() {
     printf("PASS: test_webview_events_and_input\n");
 }
 
+// A `setTimeout` callback fires from a pump after its delay has passed.
 void test_webview_timers_and_pump() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);
@@ -129,10 +136,9 @@ void test_webview_timers_and_pump() {
 
     oops_js_t *js = oops_webview_get_js(wv);
 
-    // Immediately pump: timer shouldn't have fired yet if delay is 10ms
+    // One pump before the 10ms delay has passed, one after.
     oops_webview_pump(wv);
 
-    // Wait 25ms and pump again
     usleep(25000);
     oops_webview_pump(wv);
 
@@ -147,6 +153,7 @@ void test_webview_timers_and_pump() {
     printf("PASS: test_webview_timers_and_pump\n");
 }
 
+// Rendering a styled page writes pixels to the surface.
 void test_webview_render() {
     oops_webview_t *wv = oops_webview_create(800, 600);
     assert(wv != nullptr);

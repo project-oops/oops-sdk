@@ -4,6 +4,9 @@
 #include "tests/test_common.h"
 #include <string.h>
 
+/* Unit tests for the ZIP extractor, `oops/zip.h`, on archives built in memory. */
+
+/* Missing or empty paths and buffers are refused with OOPS_ZIP_ERR_PARAM. */
 static void test_zip_null_params(void) {
     ASSERT_EQ(oops_zip_extract(NULL, "/tmp"), OOPS_ZIP_ERR_PARAM);
     ASSERT_EQ(oops_zip_extract("", "/tmp"), OOPS_ZIP_ERR_PARAM);
@@ -16,6 +19,7 @@ static void test_zip_null_params(void) {
     ASSERT_EQ(oops_zip_extract_mem("DATA", 4, ""), OOPS_ZIP_ERR_PARAM);
 }
 
+/* A buffer too short for an end record, or without its signature, is refused. */
 static void test_zip_bad_headers(void) {
     /* Too short to have an EOCD (< 22 bytes) is invalid parameter */
     char tiny[10] = {0};
@@ -41,6 +45,7 @@ static void put_u32(uint8_t *p, uint32_t val) {
     p[3] = (uint8_t)((val >> 24) & 0xFF);
 }
 
+/* A STORED entry extracts byte for byte. */
 static void test_zip_extract_stored(void) {
     /* Create a valid ZIP in memory with one STORED file: "test.txt" -> "Hello World!"
      */
@@ -161,6 +166,7 @@ static void test_zip_extract_stored(void) {
     (void)oops_fs_unlink(target_file);
 }
 
+/* A DEFLATE entry inflates, and its subdirectory is created. */
 static void test_zip_extract_deflated(void) {
     /* Create a valid ZIP in memory with one DEFLATED file (method 8):
      * Deflate uncompressed block: BFINAL=1, BTYPE=00 (raw stored block within deflate)
@@ -288,8 +294,8 @@ static void test_zip_extract_deflated(void) {
     (void)oops_fs_unlink(target_file);
 }
 
+/* An entry named "../escape.txt" is refused rather than written outside the target. */
 static void test_zip_path_traversal_rejection(void) {
-    /* Test that zip with "../escape.txt" is rejected */
     const char *fname = "../escape.txt";
     uint16_t fname_len = (uint16_t)strlen(fname);
 

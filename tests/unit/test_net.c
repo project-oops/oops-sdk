@@ -1,6 +1,9 @@
 #include "oops/net.h"
 #include "tests/test_common.h"
 
+/* Unit tests for the byte-order and IPv4 address helpers in `oops/net.h`. */
+
+/* The byte-order helpers swap on this little-endian target. */
 static void test_net_endian_conversions(void) {
     ASSERT_EQ(oops_htons(0x1234), 0x3412);
     ASSERT_EQ(oops_ntohs(0x3412), 0x1234);
@@ -9,6 +12,7 @@ static void test_net_endian_conversions(void) {
     ASSERT_EQ(oops_ntohl(0x78563412), 0x12345678);
 }
 
+/* Dotted-quad addresses survive a pton/ntop round trip, including the extremes. */
 static void test_net_ipv4_parsing_valid(void) {
     uint32_t ip = 0;
     char out[32];
@@ -30,6 +34,7 @@ static void test_net_ipv4_parsing_valid(void) {
     ASSERT_STR_EQ(out, "0.0.0.0");
 }
 
+/* Malformed addresses are refused rather than parsed to something plausible. */
 static void test_net_ipv4_parsing_invalid(void) {
     uint32_t ip = 0;
     ASSERT_NE(oops_net_inet_pton(NULL, &ip), 0);

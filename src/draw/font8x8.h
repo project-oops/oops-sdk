@@ -1,16 +1,13 @@
 /*
  * font8x8.h - the collection's one 8x8 bitmap font, ASCII 0x20 ' ' through 0x7E '~'.
  *
- * One table, two readers. The CPU rasteriser (`src/draw/draw.c`, `oops_draw_text`)
- * walks it a pixel at a time into a surface; the GL overlay (`src/hud/hud.c`,
- * `oops_hud_text`) bakes it once into a texture atlas. They were separate copies until
- * the HUD needed the same glyphs the CPU path draws - a shared header keeps them from
- * drifting, the same reason `gl1_cube_scene.h` is shared between a payload and its host
- * self-test.
+ * One table, two readers: the CPU rasteriser (`src/draw/draw.c`, `oops_draw_text`)
+ * walks it a pixel at a time into a surface, and the GL overlay (`src/hud/hud.c`,
+ * `oops_hud_text`) bakes it once into a texture atlas.
  *
  * Each glyph is 8 rows of 8 bits, MSB the leftmost column: `(row >> (7 - col)) & 1` is
- * the pixel. A `static const` in a header is one small copy per translation unit (760
- * bytes); that is the price of one source of truth here, and it is cheap.
+ * the pixel. As a `static const` in a header it costs one 760-byte copy per
+ * translation unit that includes it.
  */
 #ifndef OOPS_FONT8X8_H
 #define OOPS_FONT8X8_H

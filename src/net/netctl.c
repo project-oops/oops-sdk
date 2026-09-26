@@ -1,3 +1,9 @@
+/*
+ * Network configuration (oops/netctl.h): the interface's addresses, DNS servers, link
+ * and signal state, through `sceNetCtlGetInfo`. Each field is one query; a field the
+ * platform does not answer stays empty or zero, and no answer at all is a failure.
+ */
+
 #include "oops/netctl.h"
 #include "oops/sysmodule.h"
 #include "oops/system.h"

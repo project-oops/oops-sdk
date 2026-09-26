@@ -154,7 +154,7 @@ static void gl_hw_self_test(gl_context_t *ctx) {
     }
 }
 
-/* **Onto the scanout path** (gl_rx.h): the back becomes the display's next scanout
+/* Onto the scanout path (gl_rx.h): the back becomes the display's next scanout
  * buffer, once it has left the screen, and the front the one on screen. Every colour
  * buffer the CPU touches from here on is in their 64KB_R_X swizzle (gl_color_index). */
 static void gl_scanout_begin(gl_context_t *ctx) {
@@ -187,32 +187,19 @@ static inline __attribute__((unused)) void gl_hw_dump_stream(const gl_context_t 
 #endif
 
 /*
- * **The CPU's outstanding colour writes, made real.**
+ * The CPU's outstanding colour writes, made visible to the GPU.
  *
- * `sfence` is the one that matters and `clflush` is the one that is usually a no-op,
- * which is the opposite of how it reads. On the scanout path the colour buffer is the
- * display's memory, mapped write-combined: a store goes into a write-combining buffer,
- * reaches memory whenever that buffer is evicted, and **is not ordered against a later
- * load** - so a pixel rectangle the CPU wrote can be read back, by this CPU or by the
- * CP's DMA, as what was there before. `sfence` drains the buffers and orders them ahead
- * of everything after it. The `clflush` loop covers the other case, a buffer mapped
- * write-back, where the data sits in the cache rather than in a WC buffer; on a WC line
- * it costs a cycle and does nothing.
+ * On the scanout path the colour buffer is the display's memory, mapped write-combined:
+ * a store sits in a write-combining buffer and is not ordered against a later load, so
+ * the CP's DMA in `gl_hw_flush` could read what was there before. `sfence` drains those
+ * buffers. The `clflush` loop covers a buffer mapped write-back; on a WC line it does
+ * nothing.
  *
- * Only the span that was written is flushed. A full-screen buffer is eight megabytes
- * and a glBitmap glyph is a hundred bytes, so flushing the whole buffer would make a
- * HUD cost more than the frame under it.
+ * Only the span that was written is flushed: a full-screen buffer is eight megabytes
+ * and a glBitmap glyph a hundred bytes.
  *
- * **It is not what gl1-probe's six pixel-rectangle failures were.** This was written
- * believing it was, and the console said otherwise: the run of 2026-09-21 returned all
- * eight failing pixels byte for byte unchanged, which ruled the store ordering out and
- * sent the search to `glGetFrameReadbackSampled` above. The hazard is still real - the
- * CP's DMA in `gl_hw_flush` reads this buffer - so the drain stays; it is just not a
- * fix for anything that was measured.
- *
- * It lives outside this file's target-only section because the host build calls it too,
- * where it is the bookkeeping and no barrier: the host's framebuffer is ordinary
- * memory.
+ * The host build calls it too, where it is only the bookkeeping: the host's framebuffer
+ * is ordinary memory.
  */
 void gl_color_cpu_drain(gl_context_t *ctx) {
     if (!ctx)
@@ -240,9 +227,8 @@ static void gl_hw_flush_body(gl_context_t *ctx);
 void gl_hw_flush_at(gl_context_t *ctx, const char *fn) {
     if (ctx) {
         ctx->hw_flushes++;
-        /* Linear over a table of twenty, on a path that runs at most a few thousand
-           times a frame - and the thing it is measuring costs half a millisecond each,
-           so the scan is not what anybody will be reading about. */
+        /* A linear scan: the table is small and each submit it counts costs far more.
+         */
         GLboolean placed = GL_FALSE;
         for (uint32_t i = 0u; i < OOPS_GL_FLUSH_SITES && !placed; i++) {
             if (ctx->hw_flush_site[i] == fn) {
@@ -259,9 +245,8 @@ void gl_hw_flush_at(gl_context_t *ctx, const char *fn) {
     }
     if (!ctx)
         return;
-    /* **Timed around the whole submit**, so a frame can be split into the part spent
-       waiting for the GPU and the part this library spent on the CPU. Two clock reads
-       per submit, at a few dozen a frame, which is nothing beside what they measure. */
+    /* Timed around the whole submit, so a frame splits into time waiting for the GPU
+       and time this library spent on the CPU. */
 #ifndef OOPS_HOST_BUILD
     const uint64_t t0 = oops_time_get_ns();
     gl_hw_flush_body(ctx);
@@ -272,12 +257,10 @@ void gl_hw_flush_at(gl_context_t *ctx, const char *fn) {
 }
 
 static void gl_hw_flush_body(gl_context_t *ctx) {
-    /* **Before the early return, not after it.** A flush is where "everything issued so
-     * far is real" is promised, and that has to hold for a frame with nothing to submit
-     * as much as for one with draws in it - a glDrawPixels followed by a glReadPixels
-     * builds no command stream at all, and it is exactly the case that was failing. The
-     * CP's DMA copy below reads the colour buffer too, so the drain has to precede it
-     * either way. */
+    /* Before the early return: a flush promises that everything issued so far is
+     * visible, including for a frame with nothing to submit - a glDrawPixels followed
+     * by a glReadPixels builds no command stream. The CP's DMA copy below reads the
+     * colour buffer too, so the drain precedes it. */
     gl_color_cpu_drain(ctx);
     if (!ctx->use_hardware || !ctx->hw_frame_active || ctx->dcb_words == 0) {
         return;
@@ -326,13 +309,9 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
         gl_hw_emit_dma_copy(&dw, (uint64_t)(uintptr_t)ctx->framebuffer,
                             (uint64_t)(uintptr_t)ctx->readback,
                             (uint32_t)gl_color_words(ctx) * 4u);
-        /* **The second colour target is copied too** (since 2026-09-23), and behind the
-         * same wait: the fence above is already satisfied by the time the first copy is
-         * issued, so this one needs no wait of its own. A draw under GL_FRONT_AND_BACK
-         * writes both surfaces and the CPU has to be able to read either -
-         * `glReadPixels` of the buffer that happened not to be primary was reading raw
-         * memory before this, which is what made gl1-probe's `front-and-back` rows
-         * drift from run to run. */
+        /* The second colour target is copied too, behind the same wait: the fence is
+         * already satisfied when the first copy is issued. A draw under
+         * GL_FRONT_AND_BACK writes both surfaces and `glReadPixels` may read either. */
         if (ctx->readback_also && ctx->fb_also) {
             ctx->readback_also_of = ctx->fb_also;
             gl_hw_emit_dma_copy(&dw, (uint64_t)(uintptr_t)ctx->fb_also,
@@ -367,24 +346,12 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
         __builtin_ia32_clflush((const void *)((const char *)ctx->dcb_mem + p));
     }
     /*
-     * **The drain, once, for everything this frame wrote - not just the command
-     * buffer.**
-     *
-     * `gl_color_cpu_drain` says it above and says it correctly: "`sfence` is the one
-     * that matters and `clflush` is the one that is usually a no-op". `clflush` starts
-     * a writeback; it does not wait for it and it is not ordered against what follows.
-     * Every other write a frame makes - the texture descriptors, the vertices, the
-     * patched shader words - is flushed the same way at twenty-four other sites and,
-     * until now, was never fenced at all. The submit below is the moment the GPU begins
-     * reading all of it, so this is the one place the ordering has to hold.
-     *
-     * **Measured, not reasoned.** Neverball renders correctly when a frame is split
-     * into forty-six submits and wrongly when it is one, with the per-frame counters
-     * *byte for byte identical* - 10,046 draws, the same descriptor slots, the same
-     * rings, nothing at a limit. Identical CPU work and a different picture is a race,
-     * and more submits meant more fence waits, each of which incidentally gave the
-     * outstanding writes time to land. That is the shape of a missing barrier rather
-     * than a missing flush, and this is where it was missing.
+     * One drain for everything this frame wrote, not just the command buffer.
+     * `clflush` starts a writeback but neither waits for it nor orders it against what
+     * follows. The descriptors, vertices and patched shader words are flushed the same
+     * way elsewhere, and the submit below is where the GPU begins reading all of them,
+     * so this is where the ordering has to hold. Without it a single-submit frame races
+     * its own writes.
      */
     __builtin_ia32_sfence();
 #endif
@@ -421,22 +388,10 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
             }
         }
 
-        /* **A submit the GPU never finishes used to be silent, and silence is the worst
-         * thing this can be.** The bound above is a hundred thousand ten-microsecond
-         * sleeps, so a stalled submit costs a second and then carries on as though
-         * nothing happened; a title that submits twenty-seven times a frame - Neverball
-         * does - spends twenty-seven seconds on a frame and looks, from the outside and
-         * in the log, exactly like a hang. No fault is raised, no GL error is set, and
-         * the per-frame block below never prints because it runs after every submit of
-         * the frame has returned. The log simply stops.
-         *
-         * That is what a frozen title looked like on 2026-09-23, and working out that
-         * the GPU had stopped retiring rather than the game having stopped stepping
-         * took a reading of this function rather than of the log, which is backwards.
-         * So it says so now: what the fence held, what the timestamp held, which submit
-         * it was and how long it waited.
-         *
-         * It cannot flood - each line costs the second it took to earn. */
+        /* A submit the GPU never finishes costs the one-second bound above and then
+         * carries on with no fault or GL error, which looks like a hang when a title
+         * submits many times a frame. So it is logged: the fence, the timestamp, which
+         * submit and how long it waited. It cannot flood - each line costs a second. */
         if (waited >= 99999) {
             gl_klog_val("fence-timeout-after-us", (uint64_t)waited * 10u);
             gl_klog_val("fence-timeout-fence", (uint64_t)fence_w[0]);
@@ -473,20 +428,11 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
     }
 
     /*
-     * **Rate-limited on the counter that moves here.** This ran on `frame_count`, which
-     * only advances when a frame is *presented* - and this block runs on every
-     * *submit*. An app that presents once per frame and submits once per frame is the
-     * case that was in mind, and it is not the general one: Neverball submits several
-     * times per present, so `frame_count` sat at single digits, `% 60` was true nearly
-     * always, and nine lines went to the kernel log per submit. At sixty frames a
-     * second that is thousands of lines a second, and it buried every
-     * `[NVRB00001:stderr]` line the title wrote - which is where a port says what went
-     * wrong.
-     *
-     * `hw_frames_confirmed` advances right above, once per submit the GPU acknowledged,
-     * so it is the counter this gate wanted. It has a property worth keeping too:
-     * **while frames are not confirming it stays at zero and every submit logs**, which
-     * is exactly when the detail is wanted and exactly when there is no flood to cause.
+     * Rate-limited on `hw_frames_confirmed`, which advances once per acknowledged
+     * submit, not on `frame_count`, which advances per present: a title that submits
+     * several times per present would otherwise flood the log. While frames are not
+     * confirming it stays at zero and every submit logs, which is when the detail is
+     * wanted.
      */
     if (gl_log_level >= (int)OOPS_LOG_DEBUG &&
         (ctx->hw_frames_confirmed % 60 == 0 || ctx->hw_frames_confirmed < 5)) {
@@ -501,8 +447,8 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
         gl_klog_val("canary-ps", (uint64_t)ctx->canary_ps);
         gl_klog_val("draws-textured", (uint64_t)ctx->hw_draws_textured);
         gl_klog_val("draws-untextured", (uint64_t)ctx->hw_draws_untextured);
-        /* Cumulative, unlike the pair above, and **printed only when they have moved**
-         * - see the declarations for why. Read them before the draw counts:
+        /* Cumulative, unlike the pair above, and printed only when they have moved -
+         * see the declarations for why. Read them before the draw counts:
          * `tex-failed` non-zero makes the draw census meaningless, because the textures
          * those draws wanted were never created. */
         if (ctx->hw_tex_created != ctx->hw_tex_created_said) {
@@ -515,10 +461,9 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
         }
         if (ctx->hw_gl_errors != ctx->hw_gl_errors_said) {
             gl_klog_val("gl-errors", (uint64_t)ctx->hw_gl_errors);
-            /* Beside the count, because a count alone cannot be acted on: 0x500 is an
-             * enum a call did not expect, 0x502 is a call made in the wrong state, and
-             * they send you to different places. `first` is what `glGetError` would
-             * return if anything ever asked it. */
+            /* Beside the count, because 0x500 (an unexpected enum) and 0x502 (a call in
+             * the wrong state) point to different causes. `first` is what `glGetError`
+             * would return. */
             gl_klog_val("gl-error-last", (uint64_t)ctx->hw_gl_error_last);
             gl_klog_val("gl-error-first", (uint64_t)ctx->last_error);
             if (ctx->hw_gl_error_has_val) {
@@ -545,8 +490,7 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
         }
     }
     /* Reset whether or not this submit reported them, so a reported pair is one
-     * submit's own count and not everything since the last time the gate happened to
-     * open. */
+     * submit's own count. */
     ctx->hw_draws_textured = 0u;
     ctx->hw_draws_untextured = 0u;
 
@@ -594,61 +538,30 @@ void gl_ps_build_textured(uint32_t *ps_tex, uint64_t canary_gpu) {
     ps_tex[13] = 0x007d0a08u;
     ps_tex[14] = 0xbefe0304u; /* s_mov_b32 exec_lo, s4 */
     ps_tex[15] = 0xbf8c3f70u; /* s_waitcnt vmcnt(0) */
-    /* 16..31: the polygon stipple's discard, patched in place by gl_ps_patch_stipple;
-     * s_nop is no stipple. It sits here because the fragment's position arrives in v2
-     * and v3, which the interpolation below uses as scratch, and because the discard
-     * must happen before whole-quad mode so that the mask kept in s16 for the sample is
-     * the one it leaves. */
+    /* GL_PS_STIPPLE_SLOT: the polygon stipple's discard, patched in place by
+     * gl_ps_patch_stipple; s_nop is no stipple. It sits here because the fragment's
+     * position arrives in v2 and v3, which the interpolation below uses as scratch, and
+     * because the discard must happen before whole-quad mode so that the mask kept in
+     * s16 for the sample is the one it leaves. */
     for (size_t p = GL_PS_STIPPLE_SLOT; p < GL_PS_STIPPLE_SLOT + GL_PS_STIPPLE_WORDS;
          p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
-    /* 32..59 (since 2026-09-19; tools/shader/tex-prolog.s): **whole-quad mode for the
-     * sample**, so the helper pixels of each 2x2 quad run and the sample's implicit
-     * derivatives - its level of detail - exist; **q divided per fragment**; and the
-     * sample with that level of detail. It was image_sample_lz, level zero, until then:
-     * the mip chain, the minification filter and GL 1.4's LOD bias never took effect on
-     * the console. The live pixels' mask is kept in s16 and restored after the sample,
-     * so the combine, fog, the alpha test and the export see exactly the pixels they
-     * did - ACO's discipline (aco_insert_exec_mask.cpp:61-97, :150-163). */
-    /* Written relative to the slot above it since 2026-09-20, so that a slot inserted
-     * before it moves it rather than renumbering twenty-eight literals by hand. */
+    /* The prologue (tools/shader/tex-prolog.s): whole-quad mode for the sample, so the
+     * helper pixels of each 2x2 quad run and the sample's implicit derivatives - its
+     * level of detail - exist; q divided per fragment; and the sample with that level
+     * of detail, so the mip chain, the minification filter and GL 1.4's LOD bias apply.
+     * The live pixels' mask is kept in s16 and restored after the sample, so the
+     * combine, fog, the alpha test and the export see only live pixels - ACO's
+     * discipline (aco_insert_exec_mask.cpp:61-97, :150-163). Written relative to the
+     * slot above it, so a slot inserted before it moves it. */
     uint32_t *const pro = ps_tex + GL_PS_STIPPLE_SLOT + GL_PS_STIPPLE_WORDS;
     pro[0] = 0xbe90037eu; /* s_mov_b32 s16, exec_lo */
     pro[1] = 0xbefe097eu; /* s_wqm_b32 exec_lo, exec_lo */
-    /* **Every p1 first, then every p2** - the order LLVM emits for the same shader and
-     * the opposite of what this did.
-     *
-     * `v_interp_p2_f32` reads the register `v_interp_p1_f32` wrote, and llc separates
-     * each pair by three unrelated instructions rather than putting them back to back:
-     *
-     *     v_interp_p1_f32 v2, v0, attr0.x      v_interp_p2_f32 v2, v1, attr0.x
-     *     v_interp_p1_f32 v3, v0, attr0.y      v_interp_p2_f32 v3, v1, attr0.y
-     *     v_interp_p1_f32 v4, v0, attr0.z  ->  v_interp_p2_f32 v4, v1, attr0.z
-     *     v_interp_p1_f32 v0, v0, attr0.w      v_interp_p2_f32 v0, v1, attr0.w
-     *
-     * This emitted `p1 x, p2 x, p1 y, p2 y, ...`, with every p2 immediately behind the
-     * p1 whose result it reads.
-     *
-     * **This is housekeeping, not a fix, and it was briefly mistaken for one.** The
-     * seven p1s write seven distinct registers and each p2 reads its own, so the two
-     * orders are the same program and reordering them cannot change a result. It was
-     * reordered while chasing a per-lane fault in a port, on the reasoning that a read
-     * landing before its write would be wrong per lane - and then reported as having
-     * "measurably changed the output", on a comparison of two pixels that were
-     * *already* wrong for an unrelated reason. Comparing two corrupted lanes and
-     * calling the difference evidence is not a measurement.
-     *
-     * The fault was blending: a blend whose result combines both terms is correct at
-     * one pixel in every 2x2 quad on this part, and obSCEne's own sweep of it
-     * (`REQ-20260923T2015Z-5b8e`, resolved) found an unblended draw clean at all 4,096
-     * pixels of its region - geometry, rasteriser, viewport and shader export included.
-     * The interpolation prologue was never in it.
-     *
-     * Kept because matching the reference is worth having on its own, and reverting a
-     * no-op is a change for no reason. The same seventeen instructions in a different
-     * order, so every slot after this is where it was and nothing that patches them has
-     * to know. */
+    /* Every p1 first, then every p2 - the order LLVM emits for the same shader, which
+     * separates each `v_interp_p2_f32` from the `v_interp_p1_f32` whose register it
+     * reads. Each p1 writes a distinct register, so the order does not change a result;
+     * it matches the reference. */
     pro[2] = 0xc8080400u;  /* v_interp_p1_f32 v2, v0, attr1.x (s) */
     pro[3] = 0xc80c0500u;  /* v_interp_p1_f32 v3, v0, attr1.y (t) */
     pro[4] = 0xc8300700u;  /* v_interp_p1_f32 v12, v0, attr1.w (q) */
@@ -672,10 +585,10 @@ void gl_ps_build_textured(uint32_t *ps_tex, uint64_t canary_gpu) {
     pro[21] = 0xf4080300u; /* s_load_dwordx4 s[12:15], s[0:1], 0x20 */
     pro[22] = 0xfa000020u;
     pro[23] = 0xbf8cc07fu; /* s_waitcnt lgkmcnt(0) */
-    /* 56..83: the sample itself - two words for a 2D texture, seven for a volume, which
-     * has its third coordinate to interpolate and divide, twenty-four for a cube map,
-     * which has its face to find first. gl_ps_patch_sample writes it; what it starts as
-     * is the 2D form, which is what the shader has always done here. */
+    /* GL_PS_SAMPLE_SLOT_TEX: the sample itself - two words for a 2D texture, seven for
+     * a volume, which has its third coordinate to interpolate and divide, twenty-four
+     * for a cube map, which has its face to find first. gl_ps_patch_sample writes it;
+     * it starts as the 2D form. */
     ps_tex[GL_PS_SAMPLE_SLOT_TEX] =
         0xf0800f08u; /* image_sample v[4:7], v[2:3], ... 2D */
     ps_tex[GL_PS_SAMPLE_SLOT_TEX + 1u] = 0x00610402u;
@@ -684,22 +597,22 @@ void gl_ps_build_textured(uint32_t *ps_tex, uint64_t canary_gpu) {
          p < GL_PS_SAMPLE_SLOT_TEX + GL_PS_SAMPLE_WORDS; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
-    /* 84: the wait, after whichever sample ran. */
+    /* The wait, after whichever sample ran. */
     ps_tex[GL_PS_SAMPLE_SLOT_TEX + GL_PS_SAMPLE_WORDS] =
         0xbf8c3f70u; /* s_waitcnt vmcnt(0) */
-    /* 59..78: the second unit's sample, still inside whole-quad mode -
-     * gl_ps_patch_unit1. A branch over the slot is what "one unit" looks like, and is
-     * what this starts as. */
+    /* GL_PS_UNIT1_SLOT_TEX: the second unit's sample, still inside whole-quad mode -
+     * gl_ps_patch_unit1. It starts as a branch over the slot, which is one unit. */
     ps_tex[GL_PS_UNIT1_SLOT_TEX] = gl_ps_s_branch(GL_PS_UNIT1_WORDS - 1u);
     for (size_t p = GL_PS_UNIT1_SLOT_TEX + 1u;
          p < GL_PS_UNIT1_SLOT_TEX + GL_PS_UNIT1_WORDS; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
-    /* 79: the live pixels again, after both samples. */
+    /* The live pixels again, after both samples. */
     ps_tex[GL_PS_UNIT1_SLOT_TEX + GL_PS_UNIT1_WORDS] =
         0xbefe0310u; /* s_mov_b32 exec_lo, s16 */
-    /* 60..123: the combine, GL_MODULATE's four multiplies to start with and a branch
-     * over the rest of the slot - gl_ps_patch_tex_env rewrites all of it. */
+    /* GL_PS_COMBINE_SLOT_TEX: the combine, GL_MODULATE's four multiplies to start with
+     * and a branch over the rest of the slot - gl_ps_patch_tex_env rewrites all of it.
+     */
     uint32_t *const comb = ps_tex + GL_PS_COMBINE_SLOT_TEX;
     comb[0] = 0x10081104u; /* v_mul_f32 v4, v4, v8 (R * R) */
     comb[1] = 0x100a1305u; /* v_mul_f32 v5, v5, v9 (G * G) */
@@ -710,42 +623,40 @@ void gl_ps_build_textured(uint32_t *ps_tex, uint64_t canary_gpu) {
          p < GL_PS_COMBINE_SLOT_TEX + GL_PS_COMBINE_WORDS; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
-    /* 144..207: the second unit's combine stage, a branch over itself until a draw sets
-     * it - gl_ps_patch_tex_env_unit1, which a two-unit draw does and a one-unit draw
-     * undoes. */
+    /* GL_PS_COMBINE2_SLOT_TEX: the second unit's combine stage, a branch over itself
+     * until a draw sets it - gl_ps_patch_tex_env_unit1, which a two-unit draw does and
+     * a one-unit draw undoes. */
     ps_tex[GL_PS_COMBINE2_SLOT_TEX] = gl_ps_s_branch(GL_PS_COMBINE_WORDS - 1u);
     for (size_t p = GL_PS_COMBINE2_SLOT_TEX + 1u;
          p < GL_PS_COMBINE2_SLOT_TEX + GL_PS_COMBINE_WORDS; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
-    /* 208..219: the colour sum, after the combine and before fog as GL orders them -
-     * see gl_ps_patch_sum. */
+    /* GL_PS_SUM_SLOT_TEX: the colour sum, after the combine and before fog as GL orders
+     * them - see gl_ps_patch_sum. */
     for (size_t p = GL_PS_SUM_SLOT_TEX; p < GL_PS_SUM_SLOT_TEX + GL_PS_SUM_WORDS; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
-    /* 120..131: fog, after the combine and the sum - see gl_ps_patch_fog. */
+    /* GL_PS_FOG_SLOT_TEX: fog, after the combine and the sum - see gl_ps_patch_fog. */
     for (size_t p = GL_PS_FOG_SLOT_TEX; p < GL_PS_FOG_SLOT_TEX + GL_PS_FOG_WORDS; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
-    /* 258..273: antialiasing's coverage, between fog and the alpha test - the same
-     * place the untextured shader keeps it, and the order GL specifies (1.x, 3.12). A
-     * branch over the slot is no smoothing, which is what every frame that does not
-     * smooth carries, so the program a frame like gl-cube's executes is the one it
-     * always was. `gl_ps_patch_coverage` writes it. */
+    /* GL_PS_COVERAGE_SLOT_TEX: antialiasing's coverage, between fog and the alpha test
+     * - the same place the untextured shader keeps it, and the order GL specifies (1.x,
+     * 3.12). A branch over the slot is no smoothing. `gl_ps_patch_coverage` writes it.
+     */
     ps_tex[GL_PS_COVERAGE_SLOT_TEX] = gl_ps_s_branch(GL_PS_COVERAGE_WORDS - 1u);
     for (size_t p = GL_PS_COVERAGE_SLOT_TEX + 1u;
          p < GL_PS_COVERAGE_SLOT_TEX + GL_PS_COVERAGE_WORDS; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
-    /* 132..135: the alpha test, as in the untextured shader. It goes *after* the
-     * texture multiply, so the alpha tested is the one that reaches the framebuffer
-     * rather than the interpolated one before modulation - which is what GL specifies
-     * and is the difference a texture with an alpha channel makes visible. */
+    /* GL_PS_ALPHA_SLOT_TEX: the alpha test, as in the untextured shader. It goes after
+     * the texture multiply, so the alpha tested is the one that reaches the
+     * framebuffer, as GL specifies. */
     for (size_t p = GL_PS_ALPHA_SLOT_TEX; p < GL_PS_ALPHA_SLOT_TEX + 4u; p++) {
         ps_tex[p] = 0xbf800000u; /* s_nop 0 */
     }
     /* The half-float export `gl_ps_patch_export` keeps, written here so the program is
-       correct before the first draw patches it rather than only afterwards. */
+       correct before the first draw patches it. */
     ps_tex[GL_PS_EXPORT_TEX] = 0x5e080b04u;      /* v_cvt_pkrtz_f16_f32 v4, v4, v5 */
     ps_tex[GL_PS_EXPORT_TEX + 1u] = 0x5e0a0f06u; /* v_cvt_pkrtz_f16_f32 v5, v6, v7 */
     ps_tex[GL_PS_EXPORT_TEX + 2u] = 0xf8001c0fu; /* exp mrt0, v4, v5 done compr vm */
@@ -755,14 +666,12 @@ void gl_ps_build_textured(uint32_t *ps_tex, uint64_t canary_gpu) {
         ps_tex[p] = 0xbf800000u;
 }
 
-/* **The vertex shader for a draw with a third interpolant** (since 2026-09-19). It is
- * the two-parameter program with a 64-byte vertex, whose fourth vec4 is exported as
- * param2: {secondary r, g, b, unit 0's r}. Every word is tools/shader/vs-param3.s's,
- * assembled; the instructions the two share assembled to the words gl_context.c has
- * written since 2026-09-14. The interface - SPI_VS_OUT_CONFIG 0x4, SPI_PS_IN_CONTROL
- * 0x3, SPI_PS_INPUT_CNTL_2 0x2, the unpacked form - carried a third parameter's value
- * to the pixel shader byte for byte on a console (REQ-20260919T1745Z-9c3e, sweep
- * 20260919-212620). The packed form hung the GPU in the same sweep. */
+/* The vertex shader for a draw with a third interpolant: the two-parameter program with
+ * a 64-byte vertex, whose fourth vec4 is exported as param2: {secondary r, g, b, unit
+ * 0's r}. Every word is tools/shader/vs-param3.s's, assembled. The interface -
+ * SPI_VS_OUT_CONFIG 0x4, SPI_PS_IN_CONTROL 0x3, SPI_PS_INPUT_CNTL_2 0x2, the unpacked
+ * form - carries a third parameter's value to the pixel shader byte for byte on a
+ * console; the packed form hangs the GPU. */
 void gl_vs_build_param3(uint32_t *vs, uint64_t vbo_gpu, uint64_t canary_gpu) {
     static const uint32_t words[OOPS_GL_VS_P3_WORDS] = {
         0xbfa00001u, /* s_inst_prefetch 0x1 */
@@ -843,19 +752,9 @@ void gl_vs_build_param3(uint32_t *vs, uint64_t vbo_gpu, uint64_t canary_gpu) {
 /*
  * The vertex shader for a draw with two texture units: the three-parameter program
  * above with an 80-byte vertex and a fifth vec4 exported as param3 - the second unit's
- * texture coordinate. tools/shader/vs-param4.s, where every instruction it shares with
- * the three-parameter program assembled to the word written there.
- *
- * **What is measured and what is not.** obSCEne's `REQ-20260919T2258Z-8b1c` (sweep
- * `20260920-082906`, `166-agc/primitive-draw-param4`) retired a draw with
- * `SPI_VS_OUT_CONFIG` 0x6, `SPI_PS_IN_CONTROL` 0x4 and `SPI_PS_INPUT_CNTL_3` 0x3, both
- * canaries intact - so this interface is legal on the part and does not hang it, which
- * the packed form of the *third* parameter did (`-9c3e`). It did **not** show the value
- * arriving: its three-parameter control printed the same pixel as the four-parameter
- * arm, so nothing in those rows distinguishes attribute 3 being read from something
- * else being exported. `REQ-20260920T0745Z-9a41` re-asks for a control that can differ.
- * Until it answers, this program is built and host-tested but no draw runs it - see
- * OOPS_GL_MULTITEX_MEASURED in gl_multitex.h.
+ * texture coordinate. tools/shader/vs-param4.s, assembled. The interface
+ * (`SPI_VS_OUT_CONFIG` 0x6, `SPI_PS_IN_CONTROL` 0x4, `SPI_PS_INPUT_CNTL_3` 0x3) is
+ * measured in gl_multitex.h.
  *
  * The 80-byte stride is not a shift, so the lane's offset is lane * 64 plus lane * 16.
  */
@@ -984,9 +883,9 @@ void *glContextCreate(struct oops_display *disp) {
     if (!disp)
         return NULL;
 
-    /* **The `gl` channel of `/app0/oops-log`**, so a launch can turn the frame
-     * accounting below on without a rebuild - see `oops_log_channel_level`. Asked here
-     * rather than pushed from the logging module, which keeps the dependency one way:
+    /* The `gl` channel of `/app0/oops-log`, so a launch can turn the frame accounting
+     * below on without a rebuild - see `oops_log_channel_level`. Asked here rather than
+     * pushed from the logging module, which keeps the dependency one way:
      * oops-gl needs logging, logging needs nothing. A title calling
      * `oops_gl_set_log_level` afterwards still wins. */
     gl_log_level = (int)oops_log_channel_level("gl", (oops_log_level_t)gl_log_level);
@@ -1001,9 +900,8 @@ void *glContextCreate(struct oops_display *disp) {
             gl_klog_val("mipchain-enabled", (uint64_t)(uint32_t)gl_mipchain_enabled);
         }
         /* `vbobytes=<decimal>` - how much of the vertex ring a frame may fill before it
-         * submits. 65536 is what it was before 2026-09-24, when a frame flushed about
-         * twenty times; the whole ring is one flush. Clamped to the allocation, so a
-         * typo cannot write past it. */
+         * submits; the whole ring is one flush. Clamped to the allocation, so a typo
+         * cannot write past it. */
         char vb[16];
         if (oops_config_value("/app0/oops-gl", "vbobytes", vb, sizeof(vb)) == 0) {
             uint32_t n = 0u;
@@ -1015,23 +913,14 @@ void *glContextCreate(struct oops_display *disp) {
         }
     }
 
-    /* **`/app0/oops-capture` arms a frame capture, so a title needs no code to be
-     * captured.**
-     *
-     * `oops_gl_capture_frame` already avoids patching a program's main loop - the swap
-     * does the arming and the writing - but somebody still had to call it with a frame
-     * number, which meant a line in each title's entry point and a rebuild to change
-     * the number. Neverball carried exactly that, pinned to frame 3, which is the title
-     * screen: the one frame nobody needs.
+    /* `/app0/oops-capture` arms a frame capture, so a title needs no code or rebuild to
+     * be captured:
      *
      *     frame=240                  # captured after this many swaps
      *     path=/app0/frame.oglcap    # optional; this is the default
      *
-     * `/app0` is writable - the package mount - which the shim that used to search five
-     * candidate directories for somewhere to write established the hard way. Replay the
-     * file on a build machine with `oops-gl/gl-replay`, where the software rasteriser
-     * is the reference: the difference between that image and a screenshot of the same
-     * frame is the bug. */
+     * `/app0`, the package mount, is writable. Replay the file on a build machine with
+     * `oops-gl/gl-replay`, where the software rasteriser is the reference. */
     {
         char v[24];
         if (oops_config_value("/app0/oops-capture", "frame", v, sizeof(v)) == 0) {
@@ -1085,14 +974,12 @@ void *glContextCreate(struct oops_display *disp) {
         oops_mem_free(ctx);
         return NULL;
     }
-    /* **The stencil surface is the GPU's** (since 2026-09-19): STENCIL_8 at the depth
-     * surface's swizzle, 64KB_Z_X, which the hardware stencil test reads and writes. A
-     * 64 KiB block of one byte a pixel is 256 x 256 - 2^16 elements split between the
-     * axes, width first, by addrlib's ComputeThinBlockDimension
-     * (addrlib2.cpp:1698-1709), which gives 32-bit depth its 128 x 128 - so both axes
-     * pad to 256 here, not to depth's 128: 1920 x 1080 needs 8 x 5 blocks, 2.5 MiB.
-     * This was sized as depth's 128-padded extent while it was CPU memory only, which a
-     * tiled 8-bit surface would have overrun. */
+    /* The stencil surface is the GPU's: STENCIL_8 at the depth surface's swizzle,
+     * 64KB_Z_X, which the hardware stencil test reads and writes. A 64 KiB block of one
+     * byte a pixel is 256 x 256 - 2^16 elements split between the axes, width first, by
+     * addrlib's ComputeThinBlockDimension (addrlib2.cpp:1698-1709), which gives 32-bit
+     * depth its 128 x 128 - so both axes pad to 256 here, not to depth's 128: 1920 x
+     * 1080 needs 8 x 5 blocks, 2.5 MiB. */
     size_t stencil_px = (size_t)((w + 255u) & ~255u) * (size_t)((h + 255u) & ~255u);
     stencil = (uint8_t *)oops_mem_alloc(stencil_px, 64 * 1024, OOPS_MEM_WC_GARLIC);
     if (!stencil) {
@@ -1128,7 +1015,7 @@ void *glContextCreate(struct oops_display *disp) {
      * reference 0 and both masks all-ones, every operation GL_KEEP, and the clear value
      * 0. An all-ones write mask matters - a zero one silently makes every stencil write
      * a no-op. */
-    /* The raster position starts at the origin and **valid**: a program that calls
+    /* The raster position starts at the origin and valid: a program that calls
      * glDrawPixels without ever setting one draws at (0,0), which is what the
      * specification says. */
     ctx->raster_pos[0] = 0.0f;
@@ -1206,7 +1093,7 @@ void *glContextCreate(struct oops_display *disp) {
         ctx->polygon_stipple[i] = 0xffffffffu;
 
     /* Fog defaults, from the specification: GL_EXP, density 1, the range 0..1, and a
-     * **black, fully transparent** fog colour - (0,0,0,0), not opaque black. */
+     * black, fully transparent fog colour - (0,0,0,0), not opaque black. */
     ctx->cap_fog = GL_FALSE;
     ctx->fog_mode = GL_EXP;
     ctx->fog_density = 1.0f;
@@ -1268,11 +1155,7 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->depth_func = GL_LESS;
     ctx->depth_mask = GL_TRUE;
     /* GL_ONE and GL_ZERO: the specification's defaults, as Mesa initialises them
-     * (main/blend.c:1148-1151). These were GL_SRC_ALPHA / GL_ONE_MINUS_SRC_ALPHA until
-     * 2026-09-19 - the factors most programs go on to ask for, which is why nothing
-     * noticed - so a program that enabled GL_BLEND and never called glBlendFunc got
-     * alpha blending here and a plain overwrite everywhere else, and
-     * glGetIntegerv(GL_BLEND_SRC) answered wrong before any call at all. */
+     * (main/blend.c:1148-1151): GL_BLEND without glBlendFunc is a plain overwrite. */
     ctx->blend_src = GL_ONE;
     ctx->blend_dst = GL_ZERO;
     ctx->blend_src_alpha = GL_ONE;
@@ -1305,9 +1188,7 @@ void *glContextCreate(struct oops_display *disp) {
     /* Matrices */
     ctx->matrix_mode = GL_MODELVIEW;
     /* The specification's defaults, set explicitly: a zeroed context would read as
-     * alignment 1, which silently misplaces every row after the first for any caller
-     * that relies on the default of 4 - which is most of them, because most never call
-     * glPixelStorei at all. */
+     * alignment 1 and misplace every row after the first for a caller relying on 4. */
     ctx->unpack_alignment = 4;
     ctx->unpack_row_length = 0;
     ctx->pack_alignment = 4;
@@ -1345,11 +1226,10 @@ void *glContextCreate(struct oops_display *disp) {
      * zeroed context. */
     ctx->fog_coord_src = GL_FRAGMENT_DEPTH;
 
-    /* **Each array's initial size and type**, which glGet reports before any pointer
+    /* Each array's initial size and type, which glGet reports before any pointer
      * call: four GL_FLOATs for the vertex, colour and texture coordinate arrays, three
      * for the normal and the secondary colour, one for the index (Mesa
-     * main/varray.c:4127-4150, init_default_vao_state). The zeroed context answered 0
-     * for every one until 2026-09-19. */
+     * main/varray.c:4127-4150, init_default_vao_state). */
     ctx->array_vertex.size = 4;
     ctx->array_vertex.type = GL_FLOAT;
     ctx->array_color.size = 4;
@@ -1380,8 +1260,8 @@ void *glContextCreate(struct oops_display *disp) {
 
     ctx->last_error = GL_NO_ERROR;
 
-    /* GL 2.0's generic vertex attributes. **Every one's current value is (0, 0, 0, 1)**
-     * - not all zeros - so an attribute whose array is disabled and which nothing has
+    /* GL 2.0's generic vertex attributes. Every one's current value is (0, 0, 0, 1) -
+     * not all zeros - so an attribute whose array is disabled and which nothing has
      * set reads as a point rather than a direction, and `gl_Position = mvp * attr` of
      * an unset attribute lands at the origin instead of being degenerate. Array state
      * starts as four floats and disabled, matching the named arrays beside it. The name
@@ -1404,18 +1284,15 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->program_current = 0u;
 
     /* The version this context has until the program states its own
-     * (glContextSetVersion).
-     * **It gates the API as well as the badge** - see OOPS_GL_DEFAULT_VERSION_MINOR for
-     * why the default is 1.5 and why it is not 2.0. */
+     * (glContextSetVersion). It gates the API as well as the version string - see
+     * OOPS_GL_DEFAULT_VERSION_MINOR for the default. */
     ctx->version_major = OOPS_GL_DEFAULT_VERSION_MAJOR;
     ctx->version_minor = OOPS_GL_DEFAULT_VERSION_MINOR;
     gl_version_string(ctx);
 
-    /* Whether a draw may use the second texture unit (gl_multitex.h). It is a property
-     * of the build rather than of the hardware init, so it is set here with the other
-     * defaults and not beside the queue: the draw path reaches it only when
-     * `use_hardware` is on anyway, and a host test that wants to exercise that path
-     * needs it true without a queue to talk to. */
+    /* Whether a draw may use the second texture unit (gl_multitex.h). A property of the
+     * build, set with the other defaults rather than beside the queue, so a host test
+     * can exercise that path without a queue. */
     ctx->hw_multitex = (GLboolean)(OOPS_GL_MULTITEX_MEASURED != 0);
 
     /* Lighting defaults */
@@ -1500,8 +1377,7 @@ void *glContextCreate(struct oops_display *disp) {
     gl_klog_val("sceAgcDriverCreateQueue rc", (uint64_t)(uint32_t)rc_q);
     if (rc_q == 0 && queue != NULL) {
         ctx->agc_queue = queue;
-        /* 0x8000 since 2026-09-21, when the GL 2.0 uniform ring went in at 0x4000 -
-         * which is where the payload used to end. gl_internal.h holds the map. */
+        /* gl_internal.h holds the payload map. */
         ctx->gpu_payload =
             oops_mem_alloc(OOPS_GL_PAYLOAD_BYTES, 256, OOPS_MEM_WB_ONION);
         /* One constant with the bound that guards it - see OOPS_GL_VBO_RING_BYTES. */
@@ -1534,8 +1410,7 @@ void *glContextCreate(struct oops_display *disp) {
              * bits 0, 10 and 20, and a wait for the export counter before exec
              * changes), following the RDNA ISA reference on s_sendmsg and export
              * ordering. Allocate, export the primitive from the GS thread, wait, then
-             * fetch and export positions from the ES threads; confirmed on the console
-             * 2026-09-14 (D005). */
+             * fetch and export positions from the ES threads (D005). */
             vs[0] = 0xbfa00001u; /* s_inst_prefetch 0x1 */
             vs[1] = 0xbe8c037eu; /* s_mov_b32 s12, exec_lo (save the entry exec mask) */
             vs[2] = 0xbefc03ffu; /* s_mov_b32 m0, 0x1003: one primitive of three
@@ -1618,24 +1493,10 @@ void *glContextCreate(struct oops_display *disp) {
             gl_vs_build_param3(
                 (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_VS_P3_OFFSET), vbo_gpu,
                 canary_gpu);
-            /*
-             * And the four-parameter program, for a draw with a second texture unit.
-             *
-             * **This line was missing, and it cost a console run.**
-             * `gl_vs_build_param4` was written, unit-tested against a scratch buffer,
-             * and wired into `gl_hw_vs_offset`, which points SPI_SHADER_PGM_LO at
-             * OOPS_GL_VS_P4_OFFSET as soon as a draw needs four parameters - but
-             * nothing ever wrote its seventy words into the payload. The first two-unit
-             * draw on hardware jumped to 0xb00, executed whatever the allocation
-             * happened to hold, and took `ILLEGAL_INST` on two waves at one PC, then a
-             * GPU reset. `payload-va` plus that PC is what located it: 0x201390B04
-             * minus 0x201390000 is 0xb04, the second word of this program.
-             *
-             * The shape is the one the collection already knows: **a definition nothing
-             * calls links and tests clean.** `app.mk`'s undefined-symbol check catches
-             * the opposite case, a call with no definition; this is a definition with
-             * no call, and the only thing that can see it is the hardware, once.
-             */
+            /* And the four-parameter program, for a draw with a second texture unit.
+             * `gl_hw_vs_offset` points SPI_SHADER_PGM_LO at OOPS_GL_VS_P4_OFFSET as
+             * soon as a draw needs four parameters, so without this call the GPU
+             * executes whatever the allocation holds. */
             gl_vs_build_param4(
                 (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_VS_P4_OFFSET), vbo_gpu,
                 canary_gpu);
@@ -1643,15 +1504,15 @@ void *glContextCreate(struct oops_display *disp) {
             /* The NGG stage table points both the ES and GS program slots at this
              * shader (offset 0). */
 
-            /* 2. Hardware Textured + Gouraud Pixel Shader (OOPS_GL_PS_TEX_OFFSET,
-             * 0x400; 0x200 until the longer combine outgrew it) - gl_ps_build_textured,
-             * callable on the host so its words can be checked there. */
+            /* 2. Hardware Textured + Gouraud Pixel Shader (OOPS_GL_PS_TEX_OFFSET) -
+             * gl_ps_build_textured, callable on the host so its words can be checked
+             * there. */
             gl_ps_build_textured(
                 (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET),
                 canary_gpu);
 
             /* 3. Hardware Gouraud Barycentric Interpolating Pixel Shader (untextured,
-             * offset 0x300) */
+             * OOPS_GL_PS_UNTEX_OFFSET) */
             uint32_t *ps_untex =
                 (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_UNTEX_OFFSET);
             ps_untex[0] = 0xbf8c0000u; /* s_waitcnt 0 */
@@ -1673,7 +1534,8 @@ void *glContextCreate(struct oops_display *disp) {
             ps_untex[13] = 0x007d0a08u;
             ps_untex[14] = 0xbefe0304u; /* s_mov_b32 exec_lo, s4 */
             ps_untex[15] = 0xbf8c3f70u; /* s_waitcnt vmcnt(0) */
-            /* 16..31: the polygon stipple's discard - see gl_ps_patch_stipple. The same
+            /* GL_PS_STIPPLE_SLOT: the polygon stipple's discard - see
+             * gl_ps_patch_stipple. The same
              * slot in the same place as the textured shader's, and for the same reason:
              * v2 and v3 carry the fragment's position in, and the interpolation below
              * is free to use them after. s_nop is no stipple. */
@@ -1690,30 +1552,30 @@ void *glContextCreate(struct oops_display *disp) {
             in[5] = 0xc8190201u; /* v_interp_p2_f32 v6, v1, attr0.z */
             in[6] = 0xc81c0300u; /* v_interp_p1_f32 v7, v0, attr0.w (A) */
             in[7] = 0xc81d0301u; /* v_interp_p2_f32 v7, v1, attr0.w */
-            /* 40..51: fog, patched in place by gl_ps_patch_fog; s_nop is no fog. */
+            /* GL_PS_FOG_SLOT_UNTEX: fog, patched in place by gl_ps_patch_fog; s_nop is
+             * no fog. */
             for (size_t p = GL_PS_FOG_SLOT_UNTEX;
                  p < GL_PS_FOG_SLOT_UNTEX + GL_PS_FOG_WORDS; p++) {
                 ps_untex[p] = 0xbf800000u; /* s_nop 0 */
             }
-            /* 52..67: antialiasing's coverage, after fog and before the alpha test -
-             * see gl_ps_patch_coverage. A branch over the slot is no smoothing, which
-             * is what it starts as and what a frame that never smooths keeps, so
-             * gl-cube's stream is the one it was. */
+            /* GL_PS_COVERAGE_SLOT_UNTEX: antialiasing's coverage, after fog and before
+             * the alpha test - see gl_ps_patch_coverage. A branch over the slot is no
+             * smoothing, which is what it starts as. */
             ps_untex[GL_PS_COVERAGE_SLOT_UNTEX] =
                 gl_ps_s_branch(GL_PS_COVERAGE_WORDS - 1u);
             for (size_t p = GL_PS_COVERAGE_SLOT_UNTEX + 1u;
                  p < GL_PS_COVERAGE_SLOT_UNTEX + GL_PS_COVERAGE_WORDS; p++) {
                 ps_untex[p] = 0xbf800000u; /* s_nop 0 */
             }
-            /* 68..71: the alpha test, patched in place by gl_ps_patch_alpha_test. Four
-             * words, which is exactly what the longest form needs (a literal load is
-             * two). Left as s_nop here, which is what "no alpha test" is. */
+            /* GL_PS_ALPHA_SLOT_UNTEX: the alpha test, patched in place by
+             * gl_ps_patch_alpha_test. Four words, which is what the longest form needs
+             * (a literal load is two). Left as s_nop here, which is no alpha test. */
             for (size_t p = GL_PS_ALPHA_SLOT_UNTEX; p < GL_PS_ALPHA_SLOT_UNTEX + 4u;
                  p++) {
                 ps_untex[p] = 0xbf800000u; /* s_nop 0 */
             }
-            /* 72..76: the export and the end - see gl_ps_patch_export, which writes the
-             * second target's when GL names both buffers. */
+            /* GL_PS_EXPORT_UNTEX: the export and the end - see gl_ps_patch_export,
+             * which writes the second target's when GL names both buffers. */
             ps_untex[GL_PS_EXPORT_UNTEX] =
                 0x5e080b04u; /* v_cvt_pkrtz_f16_f32 v4, v4, v5 */
             ps_untex[GL_PS_EXPORT_UNTEX + 1u] =
@@ -1727,8 +1589,7 @@ void *glContextCreate(struct oops_display *disp) {
             }
 
             /* 4. Initialize active texture descriptor table (unit 0's pair; unit 1's
-             * follows it at OOPS_GL_DESC_UNIT_STRIDE and is filled by nothing yet -
-             * gl_multitex.h). */
+             * follows it at OOPS_GL_DESC_UNIT_STRIDE - gl_multitex.h). */
             uint32_t *desc_table =
                 (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_DESC_TABLE_OFFSET);
             memset(desc_table, 0, 64);
@@ -1746,9 +1607,8 @@ void *glContextCreate(struct oops_display *disp) {
 #endif
             ctx->use_hardware = GL_TRUE;
             /* The mirrors take their first copy of the two masters here, after every
-             * word of them is written and before any draw patches one. The single
-             * payload read this whole mechanism exists to stop doing ten thousand times
-             * a frame. */
+             * word of them is written and before any draw patches one - the one payload
+             * read the shadow mechanism makes. */
             gl_ps_shadow_seed(ctx);
             ctx->zs_tiled =
                 GL_TRUE; /* the DB draws depth and stencil 64KB_Z_X from here on */
@@ -1758,22 +1618,10 @@ void *glContextCreate(struct oops_display *disp) {
                 oops_display_scanout_layout(disp) == OOPS_DISPLAY_SCANOUT_RX) {
                 gl_scanout_begin(ctx);
             }
-            /*
-             * **The payload's address, so a faulting wave's program counter names a
-             * word.**
-             *
-             * A GPU fault reports a PC and nothing else - `PC=0x0000000201390B04
-             * ILLEGAL_INST`, one line per wave. Every shader this library runs lives at
-             * a fixed offset inside this one allocation (OOPS_GL_VS_P3_OFFSET,
-             * _VS_P4_OFFSET, OOPS_GL_PS_TEX_OFFSET and the rest), so the base is the
-             * entire difference between that number and a line of a `.s` file.
-             *
-             * It cost a console run to learn that. On 2026-09-20 the first draw with
-             * two texture units faulted on two waves at the same PC, and the log had no
-             * way to say which shader the address was even in - the offsets fit more
-             * than one guess, and guessing at a register or an address from memory is
-             * the mistake this project keeps a bus to avoid.
-             */
+            /* The payload's address, so a faulting wave's program counter names a word.
+             * A GPU fault reports only a PC, and every shader this library runs lives
+             * at a fixed offset inside this allocation (OOPS_GL_VS_P3_OFFSET,
+             * OOPS_GL_PS_TEX_OFFSET and the rest), so PC minus this base locates it. */
             gl_klog_val("payload-va", (uint64_t)(uintptr_t)ctx->gpu_payload);
             oops_log_info("GL", "hardware AGC RDNA2 pipeline initialized successfully");
             gl_hw_self_test(ctx);
@@ -1799,7 +1647,7 @@ void glContextDestroy(void *ctx_handle) {
 
     /* Before the branch below, because the target arm frees `ctx` itself at the end of
      * it and the buffer storage has to go first. The display lists' storage is heap
-     * memory now too. */
+     * memory too. */
     gl_free_all_buffers(ctx);
     gl_free_all_shaders(ctx);
     gl_list_free_all(ctx);
@@ -1884,41 +1732,34 @@ void glSwapBuffers(void) {
                            (long)"[OOPS-GL] AGC hardware frame rendered and flipped\n",
                            0, 0, 0, 0);
         }
-        /* **What the displayed frame actually cost**, reported here because this is the
-         * only point that corresponds to one: a submit is a GPU round-trip, so this
-         * count times that round-trip is the frame time, and the name says which site
-         * to go and look at. Reported every flip rather than on the submit gate - there
-         * are only a handful of flips a second when this number is the problem, which
-         * is exactly when it is worth reading. */
-        /* **The counters are cleared whether or not they are printed**, so that turning
-           the log down changes what is written and never what is measured. Only the
-           printing asks. */
+        /* What the displayed frame cost, reported here because a flip is the one point
+         * that corresponds to a frame: a submit is a GPU round-trip, so the submit
+         * count times that round-trip is the frame time, and the site names say where
+         * to look. */
+        /* The counters are cleared whether or not they are printed, so the log level
+           changes what is written and never what is measured. */
         const int gl_verbose = gl_log_level >= (int)OOPS_LOG_DEBUG;
         if (gl_verbose) {
             gl_klog_val("flushes-this-frame", (uint64_t)ctx->hw_flushes);
-            /* **Microseconds waiting for the GPU this frame.** Against the frame's own
+            /* Microseconds waiting for the GPU this frame. Against the frame's own
                duration this says whether a slow frame is submits or this library's CPU
-               work, which two rounds of reasoning from the submit count alone got
-               wrong. */
+               work. */
             gl_klog_val("flush-us-this-frame", ctx->hw_flush_ns / 1000u);
             /* And the draw path's own share, with the triangles behind it. Frame time
                minus `flush-us` minus `draw-us` is what the program above this library
                spent. */
             gl_klog_val("draw-us-this-frame", ctx->hw_draw_ns / 1000u);
             gl_klog_val("draw-calls-this-frame", (uint64_t)ctx->hw_draw_calls);
-            /* Of the draw time above, how much went on rebuilding shader words that
-               were usually already right. */
+            /* Of the draw time above, how much went on rebuilding shader words. */
             gl_klog_val("patch-us-this-frame", ctx->hw_patch_ns / 1000u);
             gl_klog_val("dcb-us-this-frame", ctx->hw_dcb_ns / 1000u);
-            /* And the two phases that had no timer until the frame budget stopped
-             * adding up - see `hw_tnl_ns`. `draw-us` minus these four is the state
-             * evaluation between them. */
+            /* Transform-and-light and the vertex ring - see `hw_tnl_ns`. `draw-us`
+             * minus these four is the state evaluation between them. */
             gl_klog_val("tnl-us-this-frame", ctx->hw_tnl_ns / 1000u);
             gl_klog_val("vbo-us-this-frame", ctx->hw_vbo_ns / 1000u);
-            /* **Which shader slot is actually moving, and what the moves cost in
-             * evictions.** A slot that changes per draw is the patch cost; one that
-             * changes per material is not. See `hw_patch_writes`. Only the slots that
-             * moved are printed, so a quiet frame costs one line. */
+            /* Which shader slot is moving, and what the moves cost in evictions. A slot
+             * that changes per draw is the patch cost; one that changes per material is
+             * not. See `hw_patch_writes`. Only the slots that moved are printed. */
             {
                 static const char *const patch_names[GL_PATCH_SLOT_COUNT] = {
                     "env",      "env1",   "sum", "sample", "unit1",
@@ -1941,11 +1782,9 @@ void glSwapBuffers(void) {
                 }
             }
             gl_klog_val("ps-flush-calls", (uint64_t)ctx->hw_ps_flush_calls);
-            /* **Which textures this frame drew with, one line each.** The question a
-             * port asks when a surface comes out wrong is not what a texture holds but
-             * which one a draw reached for, and this is the only place that says so at
-             * a cost a frame can carry - see `hw_tex_census`. `id 0` is the untextured
-             * draws. */
+            /* Which textures this frame drew with, one line each: when a surface comes
+             * out wrong, which texture a draw reached for - see `hw_tex_census`. `id 0`
+             * is the untextured draws. */
             for (uint32_t ci = 0; ci < ctx->hw_tex_census_n; ci++) {
                 char m[192];
                 size_t n = 0;
@@ -1970,7 +1809,7 @@ void glSwapBuffers(void) {
                 m[n] = 0;
                 oops_log_info("GL", "%s", m);
 
-                /* **And what the sampler was handed for it**, beside what the library
+                /* And what the sampler was handed for it, beside what the library
                  * believes - see `hw_tex_census[].desc`. The width and height are
                  * decoded out of words 1 and 2 so a mismatch against the `w/h` above is
                  * readable without a calculator; `pitch-desc` is word 4's encoded row
@@ -2034,11 +1873,9 @@ void glSwapBuffers(void) {
                 gl_klog_val("tex-census-overflowed-draws",
                             (uint64_t)ctx->hw_tex_census_over);
             }
-            /* **A descriptor slot that served two textures inside one submit**, which
-             * is the one way a draw can sample a texture that is not the one it bound -
-             * see `hw_slot_tex`. Printed only when it happens, with the slot and both
-             * textures, because a count on its own says a thing went wrong and not
-             * what. Silence here is the ring holding. */
+            /* A descriptor slot that served two textures inside one submit, the one way
+             * a draw can sample a texture it did not bind - see `hw_slot_tex`. Printed
+             * below only when it happens, with the slot and both textures. */
             /* Draws that ran another draw's pixel shader because the six-slot variant
              * ring was full - see `hw_ps_ring_stale`. Printed only when it happens. */
             if (ctx->hw_ps_ring_stale != 0u) {
@@ -2080,11 +1917,9 @@ void glSwapBuffers(void) {
         for (int s = 0; s < GL_PATCH_SLOT_COUNT; s++)
             ctx->hw_patch_writes[s] = 0u;
         ctx->hw_ps_flush_calls = 0u;
-        /* **Every site with a count, not the largest one.** A single winner would
-           answer "what to fix first" and leave "is that all of it" open; the full
-           breakdown sums to the total above, so a reader can see at a glance whether
-           one site is the frame or merely part of it. At most a dozen lines, once per
-           displayed frame. */
+        /* Every site with a count, not only the largest: the breakdown sums to the
+           total above, so it shows whether one site is the whole frame or part of it.
+         */
         for (uint32_t i = 0u; i < OOPS_GL_FLUSH_SITES; i++) {
             if (!ctx->hw_flush_site[i] || ctx->hw_flush_site_n[i] == 0u)
                 continue;
@@ -2125,7 +1960,7 @@ void glSwapBuffers(void) {
         ctx->hw_flushes = 0u;
     }
 
-    /* **The scanout path's swap** (gl_rx.h): the back was drawn in place, so it is
+    /* The scanout path's swap (gl_rx.h): the back was drawn in place, so it is
      * flipped as drawn and becomes the front - it is the buffer on screen. The other
      * scanout buffer is the back once it has left the screen. Nothing is copied or
      * tiled, and the back's old contents are the frame before last, which GL allows: a
@@ -2148,7 +1983,7 @@ void glSwapBuffers(void) {
     uint32_t *const presented = ctx->back_fb;
     oops_display_flip(ctx->disp);
 
-    /* **The front buffer is now what was just presented**: a swap makes the back's
+    /* The front buffer is now what was just presented: a swap makes the back's
      * contents the front's (GL 1.0, 2.1.1). A program that has a front surface gets it
      * brought up to date. The back is left as it was, which GL allows - its contents
      * after a swap are undefined. */
@@ -2201,21 +2036,17 @@ GLboolean gl_front_buffer(gl_context_t *ctx) {
     return GL_TRUE;
 }
 
-/* **Where a draw goes** - glDrawBuffer's buffers as the pointers every write goes
+/* Where a draw goes - glDrawBuffer's buffers as the pointers every write goes
  * through. The console's colour target is set when a frame begins (gl_hw_begin_frame's
  * CB_COLOR0_BASE), so a frame open on one buffer is submitted before draws move to the
  * other. A draw into both writes `fb_also` too wherever the CPU writes pixels, and on
  * the GPU binds it as MRT1: its own CB_COLOR1 surface registers, its half of
  * CB_TARGET_MASK, its own CB_BLEND1_CONTROL, and a pixel shader exporting to both
- * (gl_draw.c). This comment claimed the opposite - that the hardware had one colour
- * target and dropped the second buffer with a log line - until 2026-09-21; it had been
- * out of date since the second target was written, and reading it is what sent a hunt
- * for `front-and-back`'s wrong front to the tiling of MRT1 rather than to its blending.
- * GL_NONE keeps the pointer and writes no colour (gl_color_writes). */
+ * (gl_draw.c). GL_NONE keeps the pointer and writes no colour (gl_color_writes). */
 void gl_draw_targets(gl_context_t *ctx) {
     /*
-     * **A bound framebuffer object takes the whole target and the draw-buffer selection
-     * with it.** GL_FRONT and GL_BACK name the window system's buffers and mean nothing
+     * A bound framebuffer object takes the whole target and the draw-buffer selection
+     * with it. GL_FRONT and GL_BACK name the window system's buffers and mean nothing
      * here; a framebuffer object has one colour attachment and the draw goes to it.
      *
      * `width` and `height` move too, because every address into the colour buffer is
@@ -2231,8 +2062,7 @@ void gl_draw_targets(gl_context_t *ctx) {
         ctx->width = (uint32_t)fbo.width;
         ctx->height = (uint32_t)fbo.height;
         ctx->depth_buffer = fbo_depth;
-        /* **An attachment is linear**, whatever swizzle the display's buffers are in.
-         */
+        /* An attachment is linear, whatever swizzle the display's buffers are in. */
         ctx->hw_rx = GL_FALSE;
         ctx->color_tiled = GL_FALSE;
         return;
@@ -2258,16 +2088,11 @@ void gl_draw_targets(gl_context_t *ctx) {
     if (primary != ctx->framebuffer && ctx->use_hardware && ctx->hw_frame_active) {
         gl_hw_flush(ctx);
     }
-    /* **The second target's readback, allocated the first time there is a second
-     * target.**
-     *
-     * Here rather than in `gl_front_buffer` because that one is skipped entirely on the
-     * scanout path, where the front is a scanout buffer the display already owns -
-     * which is the console, so allocating there would have covered every case except
-     * the one that matters. Sized like `readback`: whole 128x128 blocks, because the
+    /* The second target's readback, allocated the first time there is a second target.
+     * Here rather than in `gl_front_buffer`, which the scanout path skips because the
+     * display owns its front. Sized like `readback`: whole 128x128 blocks, because the
      * copy is of a tiled surface (gl_color_words). A failed allocation leaves the
-     * pointer NULL and `gl_color_read_source` falls through to the buffer itself, which
-     * is what it did before this existed. */
+     * pointer NULL and `gl_color_read_source` falls through to the buffer itself. */
     if (also && ctx->readback && !ctx->readback_also) {
         ctx->readback_also =
             (uint32_t *)oops_mem_alloc((size_t)((ctx->width + 127u) & ~127u) *
@@ -2279,7 +2104,7 @@ void gl_draw_targets(gl_context_t *ctx) {
     ctx->fb_also = also;
 }
 
-/* **The front on screen.** Whatever has been drawn into the front since it was last
+/* The front on screen. Whatever has been drawn into the front since it was last
  * shown is presented - oops_display_present, which leaves the display's framebuffer,
  * the back, as it is. Called after the frame is submitted, so the front holds every
  * draw issued. A front still being drawn into is presented again at the next flush. On
@@ -2321,15 +2146,11 @@ void glFinish(void) {
     glFlush();
 }
 
-/* **What oops-gl offers the suspend path**, registered at context creation.
+/* What oops-gl offers the suspend path, registered at context creation.
  *
  * `glFlush` submits the open frame and then waits on the end-of-pipe fence - bounded,
  * sleeping, the same wait every other submit here uses - so on return nothing of this
- * context's is still in flight. That is exactly the quiescence the kernel's suspend
- * point wants, and the reason it is worth offering: obSCEne could name the GPU suspend
- * point but not test, from inside a probe, whether an unretired submission is what
- * holds a process out of suspend
- * (`gpu-drain-required / needs-live-suspend`). This is the arm that settles it. */
+ * context's is still in flight: the quiescence the kernel's suspend point wants. */
 static void gl_suspend_drain(void) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
@@ -2357,70 +2178,28 @@ void glGetCanaryEx(GLuint *vs_canary, GLuint *ps_canary, GLuint *vs_s0, GLuint *
         *ps_s0 = ctx ? ctx->canary_ps_s0 : 0;
 }
 
-/* Writes the alpha test into both pixel shaders, or takes it out.
+/* The pixel-shader patch mechanism.
  *
- * # The encodings are assembled, not remembered
+ * Every instruction word is assembled for gfx1030 and read back
+ * (`clang -target amdgcn-amd-amdhsa -mcpu=gfx1030 -c`), because a wrong encoding
+ * produces a wrong frame rather than a failed build. The shaders are laid into the
+ * payload at context creation and patched in place rather than rebuilt. Mask registers
+ * are the `_lo` halves because this runs wave32 (`VGT_SHADER_STAGES_EN` sets `GS_W32`
+ * and `VS_W32`).
  *
- * Every word below came from assembling the instruction in its comment for gfx1030 and
- * reading the object back:
- *
- *     clang -target amdgcn-amd-amdhsa -mcpu=gfx1030 -c alpha.s
- *
- * That matters because this repository has no way to notice a wrong instruction
- * encoding: it would assemble into the payload, the GPU would do something else, and
- * the result would be a frame that is wrong rather than a build that fails. Two of the
- * results are cross-checks against words already in the tree and agree with them -
- * `s_endpgm` came out `0xbf810000`, and the literal-load form `0x7e18_02ff` has the
- * same `0xff` source marker as the canary load the untextured shader already does.
- *
- * # Why patched rather than rebuilt
- *
- * The shaders are laid into the GPU payload at context creation, along with the
- * descriptor table, and the payload is flushed from the CPU's caches once. Rebuilding a
- * shader would mean redoing that; patching four words in place does not, and the four
- * words are enough for every form the test takes.
- *
- * # Wave32
- *
- * The mask registers are the `_lo` halves, because this runs wave32 -
- * `VGT_SHADER_STAGES_EN` sets `GS_W32` and `VS_W32`. A wave64 build would need `vcc`
- * and `exec` instead, and the encodings would differ.
- */
-/* **The draws already built this frame are still pointing at the words about to be
- * rewritten.**
- *
- * On hardware a draw does not execute when it is issued; it is built into the command
- * buffer and runs at the flush. The shader payload is one buffer shared by every draw
- * in the frame, so rewriting a patch slot changes the program those built draws will
- * run. The last thing a program does with a piece of shader state is usually switch it
- * *off*, which retroactively removed it from the draws that were supposed to have it:
- *
- *     glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f);
- *     glRectf(...);              // alpha 0.25 - must be discarded
- *     glRectf(...);              // alpha 0.75 - must survive
- *     glDisable(GL_ALPHA_TEST);  // <- patches both back to s_nop, before either has
- * run
- *
- * Nothing was discarded, because by the time the GPU read the program there was no test
- * in it. That is gl1-probe's `alpha-test` failing on hardware while passing on the
- * host, where a draw is finished when it returns. The same applies within a frame
- * rather than at the end of one: two draws wanting different texture environments
- * cannot share one payload either.
- *
- * Submitting first is what makes the built draws keep the program they were built with,
- * and it is the rule texture storage already follows in gl_tex_storage_release_sync.
- * Only when the words actually change - an unconditional flush would split a frame on
- * every glPopAttrib, and on the glDisable that follows a test which was never enabled.
+ * A draw built into the command buffer runs at the flush, and the payload is shared by
+ * every draw in the frame, so rewriting a slot would change the program already-built
+ * draws run - a glDisable(GL_ALPHA_TEST) after two rectangles would take the test out
+ * of both. So a patch that changes words submits first, as
+ * gl_tex_storage_release_sync does for texture storage; one that changes nothing does
+ * not, or every glPopAttrib would split the frame.
  */
 /*
- * **Where a pixel-shader slot's words are mirrored, so a patch does not read them
- * back.**
- *
+ * Where a pixel-shader slot's words are mirrored, so a patch does not read them back:
  * `ctx->gpu_payload` is ONION and `gl_ps_flush_shaders` evicts every line it writes, so
- * a `memcmp` against a slot is a cold miss across the slow bus - nine of them per draw,
- * which is what `patch-us` was measuring. See `hw_ps_untex_shadow`. Returns the mirror
- * of `dst`, or NULL for a pointer outside the two shader regions, which is not
- * something a patch site passes.
+ * a `memcmp` against a slot is a cold miss across the slow bus. See
+ * `hw_ps_untex_shadow`. Returns the mirror of `dst`, or NULL for a pointer outside the
+ * two shader regions.
  */
 static uint32_t *gl_ps_shadow_of(gl_context_t *ctx, const uint32_t *dst) {
     const size_t off = (size_t)((const char *)dst - (const char *)ctx->gpu_payload);
@@ -2453,8 +2232,8 @@ void gl_ps_slot_wrote(gl_context_t *ctx, const uint32_t *dst, const uint32_t *wo
         memcpy(sh, words, n * sizeof(uint32_t));
 }
 
-/* The mirrors seeded from the masters, once, after they are built. The one read of the
- * payload that this whole mechanism exists to avoid doing per draw. */
+/* The mirrors seeded from the masters, once, after they are built - the one read of the
+ * payload the mirrors make. */
 void gl_ps_shadow_seed(gl_context_t *ctx) {
     if (!ctx || !ctx->gpu_payload)
         return;
@@ -2471,21 +2250,17 @@ void gl_ps_sync_payload_edit(gl_context_t *ctx, const uint32_t *dst,
 #ifndef OOPS_HOST_BUILD
     if (!ctx->use_hardware || !ctx->hw_frame_active)
         return;
-    /* Through the mirror, not through `dst`: this ran a word-by-word read of GPU memory
-     * on every patch that reached it, which is the cost `gl_ps_slot_same` exists to
-     * remove. */
+    /* Through the mirror, not through `dst`, so a patch does not read GPU memory. */
     if (gl_ps_slot_same(ctx, dst, words, n))
         return;
 
-    /* **The textured shader is no longer edited where the GPU reads it.** Its copy at
+    /* The textured shader is not edited where the GPU reads it. Its copy at
      * OOPS_GL_PS_TEX_OFFSET is a master that no draw points at; draws bind a variant in
-     * the ring, and a change is published by copying the master into a fresh slot. So
-     * an edit costs a memcpy rather than submitting the frame and waiting for it -
-     * which is what made this function the origin of 994 of a frame's 1003 submits.
+     * the ring, and a change is published by copying the master into a fresh slot, so
+     * an edit costs a memcpy rather than a submit.
      *
-     * Everything else patched in place - the untextured shader above all - still has
-     * the GPU reading exactly the words being written, and still has to be synchronised
-     * the old way. */
+     * Everything else patched in place - the untextured shader above all - has the GPU
+     * reading the words being written, and submits first. */
     const uint32_t *const tex =
         (const uint32_t *)((const char *)ctx->gpu_payload + OOPS_GL_PS_TEX_OFFSET);
     if (dst >= tex && dst < tex + OOPS_GL_PS_TEX_WORDS) {
@@ -2511,12 +2286,9 @@ void gl_ps_flush_shaders(gl_context_t *ctx) {
     if (ctx)
         ctx->hw_ps_flush_calls++;
 #if !defined(OOPS_HOST_BUILD) && defined(__x86_64__)
-    /* Two ranges since 2026-09-20: the textured shader moved to 0x1000 to have room to
-     * grow, so one range over both would flush a kilobyte of payload that neither
-     * occupies. **Three since 2026-09-21**, the third being the slot a compiled GL 2.0
-     * pixel shader is copied into - a payload edit the GPU has not seen flushed is the
-     * previous shader running against this draw's parameters, which is the same hazard
-     * the other two are flushed for. */
+    /* Three ranges, the untextured shader, the textured one and the slot a compiled GL
+     * 2.0 pixel shader is copied into; they are not contiguous. An unflushed edit is
+     * the previous shader running against this draw's parameters. */
     const size_t ranges[3][2] = {
         {OOPS_GL_PS_UNTEX_OFFSET,
          OOPS_GL_PS_UNTEX_OFFSET + OOPS_GL_PS_UNTEX_WORDS * 4u},
@@ -2537,8 +2309,8 @@ void gl_ps_flush_shaders(gl_context_t *ctx) {
  * v4..v7 with the interpolated colour in v8..v11, leaving the result in v4..v7 where
  * the export reads it.
  *
- * **Which four depend on the bound texture's base format as well as the mode** (since
- * 2026-09-19), because GL's texture functions do: a GL_ALPHA texture leaves the
+ * Which four depend on the bound texture's base format as well as the mode, because
+ * GL's texture functions do: a GL_ALPHA texture leaves the
  * fragment's colour alone, and GL_LUMINANCE and GL_RGB ones its alpha - the rules
  * gl_draw.c's gl_tex_env_apply states, from Mesa's `calculate_derived_texenv`. Each
  * channel is one word:
@@ -2556,22 +2328,20 @@ void gl_ps_flush_shaders(gl_context_t *ctx) {
  * GL_DECAL of an RGBA texture (a lerp by the texel's alpha) and GL_BLEND (a lerp by the
  * texel towards the environment colour) are two and three instructions a channel and do
  * not fit; nor does GL_COMBINE, whose arguments, operands and scale alone outrun four
- * words. They modulated on the console until 2026-09-19; they are the general form
- * below now, in a slot of sixty-four.
+ * words. They take the general form below.
  */
 enum { GL_CH_TEX, GL_CH_FRAG, GL_CH_MUL, GL_CH_ADD };
 
 static uint32_t gl_ps_env_word(int op, int channel, const gl_ps_stage_t *st) {
-    /* Generated rather than tabulated since 2026-09-20, so that one stage's words are
-     * the other's with its own registers. The result is always v4 + c; one of the two
+    /* Generated rather than tabulated, so that one stage's words are the other's with
+     * its own registers. The result is always v4 + c; one of the two
      * operands is already there - the texel for unit 0, the stage before it for unit 1
      * - and the other is the one this names. So "take what is already in v4" is a nop
      * for one stage and a move for the other, which is why the two cases are written by
      * register and not by name.
      *
-     * test_pm4_gl_tex_env_reaches_the_combine_slot pins unit 0's four words against the
-     * table these replace, which is the check that the encoder agrees with the
-     * assembler. */
+     * test_pm4_gl_tex_env_reaches_the_combine_slot pins unit 0's four words against
+     * assembled ones. */
     const uint32_t c = (uint32_t)channel;
     const uint32_t r = 4u + c;
     const uint32_t in_r =
@@ -2591,7 +2361,7 @@ static uint32_t gl_ps_env_word(int op, int channel, const gl_ps_stage_t *st) {
     }
 }
 
-/* # The general form (since 2026-09-19)
+/* The general form.
  *
  * GL_BLEND, GL_DECAL of an RGBA texture and GL_COMBINE are a program, not a word per
  * channel: the combiner's arguments gathered into v16..v27 (argument i's channel c in
@@ -2604,9 +2374,7 @@ static uint32_t gl_ps_env_word(int op, int channel, const gl_ps_stage_t *st) {
  *
  * The words come from the encoder in gl_internal.h, whose every form is checked against
  * the assembler. The longest program - three interpolated arguments from the constant
- * colour, scaled
- * - is well under the slot's sixty-four words; one that did not fit would modulate and
- * say so. */
+ * colour, scaled - fits the slot; one that did not would modulate and say so. */
 typedef struct {
     uint32_t *w;
     size_t n, cap;
@@ -2763,13 +2531,9 @@ static void gl_tex_env_as_combine(GLenum mode, GLenum base, gl_combine_t *cb) {
         cb->operand_rgb[i] = GL_SRC_COLOR;
         cb->operand_alpha[i] = GL_SRC_ALPHA;
     }
-    /* **GL_PREVIOUS, not GL_PRIMARY_COLOR** (corrected 2026-09-20). The fixed
-     * environment functions combine the texel with "the incoming fragment colour"
-     * (GL 1.3, table 3.18), which at unit n is the *result of unit n-1* - GL_PREVIOUS.
-     * The two are the same thing at unit 0, which is why writing GL_PRIMARY_COLOR here
-     * was harmless while one unit was applied; at unit 1 it is the difference between a
-     * lightmap modulating the base map and a lightmap modulating the vertex colour with
-     * the base map thrown away. */
+    /* GL_PREVIOUS, not GL_PRIMARY_COLOR: the fixed environment functions combine the
+     * texel with the incoming fragment colour (GL 1.3, table 3.18), which at unit n is
+     * the result of unit n-1. The two agree only at unit 0. */
     cb->source_rgb[0] = GL_PREVIOUS;
     if (keep_rgb) {
         cb->mode_rgb = GL_REPLACE;
@@ -2827,13 +2591,9 @@ static void gl_ps_env_write(gl_context_t *ctx, size_t slot, const uint32_t *word
     gl_ps_flush_shaders(ctx);
 }
 
-/* **A guard on this was tried twice and measured a loss both times; see the commit that
- * removed it.** The function assembles up to 64 words of GPU machine code on every draw
- * and usually finds them already in the payload, which looks exactly like something a
- * cache should fix - and the cache cost more than the rebuild, because a program
- * changes texture environment per material and so the key changes nearly as often as
- * the words do. Left plain, and the 34ms it costs a Neverball frame stands as measured
- * rather than papered over.
+/* Assembles the combine slot on every draw and usually finds it already in the payload.
+ * It has no cache in front of it: a program changes texture environment per material,
+ * so a cache key changes nearly as often as the words and costs more than the rebuild.
  */
 GLboolean gl_ps_patch_tex_env(gl_context_t *ctx) {
     if (!ctx || !ctx->gpu_payload)
@@ -2845,7 +2605,7 @@ GLboolean gl_ps_patch_tex_env(gl_context_t *ctx) {
      * the primary colour (GL 1.3, 3.8.13), so both fall on v8..v11. */
     static const gl_ps_stage_t stage0 = {4u, 8u, 0u};
     const gl_ps_stage_t *const st = &stage0;
-    /* **The environment comes from the unit the sample came from.** That is unit 0
+    /* The environment comes from the unit the sample came from. That is unit 0
      * whenever unit 0 has a texture, and unit 1 when it does not - see
      * `gl_hw_base_unit`. Taking the mode from unit 0 regardless would combine unit 1's
      * texel under unit 0's rule. */
@@ -2878,10 +2638,9 @@ GLboolean gl_ps_patch_tex_env(gl_context_t *ctx) {
     uint32_t words[GL_PS_COMBINE_WORDS];
     size_t n = 0;
     if (exact) {
-        /* The short form: a word per channel, and - new with the longer slot - GL_ADD's
-         * sums clamped, which the colour buffer's conversion did alone before, too late
-         * for fog and the alpha test. A sum of two values in [0, 1] needs only the
-         * upper bound. */
+        /* The short form: a word per channel, and GL_ADD's sums clamped here rather
+         * than by the colour buffer's conversion, which is too late for fog and the
+         * alpha test. A sum of two values in [0, 1] needs only the upper bound. */
         words[0] = gl_ps_env_word(rgb, 0, st);
         words[1] = gl_ps_env_word(rgb, 1, st);
         words[2] = gl_ps_env_word(rgb, 2, st);
@@ -2923,12 +2682,8 @@ GLboolean gl_ps_patch_tex_env(gl_context_t *ctx) {
  * The second unit's combine stage: unit 1's texel against what unit 0's stage left in
  * v4..v7.
  *
- * The same encoder, the same sixty-four words, one `gl_ps_stage_t` apart - which is the
- * whole point of having parameterised it. Off is a branch over the slot.
- *
- * **Hardware-validated 2026-09-20**: gl1-probe's `multitexture` passes on the console,
- * which is the first time this slot has run there - a red base under a blue `GL_ADD`
- * unit, magenta.
+ * The same encoder and slot size as unit 0's, one `gl_ps_stage_t` apart. Off is a
+ * branch over the slot. gl1-probe's `multitexture` covers it on the console.
  */
 GLboolean gl_ps_patch_tex_env_unit1(gl_context_t *ctx, GLboolean on) {
     if (!ctx || !ctx->gpu_payload)
@@ -2978,20 +2733,18 @@ GLboolean gl_ps_patch_tex_env_unit1(gl_context_t *ctx, GLboolean on) {
  * it is twelve words in each pixel shader, between the colour becoming final and the
  * alpha test.
  *
- * **The factor is the vertex's, carried in the texture coordinate's spare z**:
- * gl_draw.c computes it per vertex on the CPU - where the software path computes it,
- * from the eye distance or GL 1.4's fog coordinate, clamped - and the vertex shader
- * exports that parameter as a full vec4 already, so the shader interface does not move:
- * SPI_VS_OUT_CONFIG, SPI_PS_IN_CONTROL and the input slots
- * `test_pm4_gl_honours_the_gl_cube_oracle_record` pins are as they were. Both shaders
- * interpolate it as attr1.z, perspective-correct as the software path's is.
+ * The factor is the vertex's, carried in the texture coordinate's spare z: gl_draw.c
+ * computes it per vertex on the CPU - where the software path computes it, from the eye
+ * distance or GL 1.4's fog coordinate, clamped - and the vertex shader exports that
+ * parameter as a full vec4 already, so the shader interface does not move: the
+ * SPI_VS_OUT_CONFIG, SPI_PS_IN_CONTROL and input slots
+ * `test_pm4_gl_honours_the_gl_cube_oracle_record` pins stay. Both shaders interpolate
+ * it as attr1.z, perspective-correct as the software path's is.
  *
- * **The fog colour is three literals**, patched in place as the alpha test's reference
- * is, so a glFog colour change mid-frame submits the draws built with the old one first
+ * The fog colour is three literals, patched in place as the alpha test's reference is,
+ * so a glFog colour change mid-frame submits the draws built with the old one first
  * (gl_ps_sync_payload_edit). Every word is from `tools/shader/fog.s`, assembled for
- * gfx1030 and read back; the file also assembles the textured shader's own `attr1.x`
- * interpolation, which came out as the word already in the tree. Written 2026-09-19;
- * `fog` and `fog-coord` both pass on a console as of 2026-09-20. */
+ * gfx1030 and read back. gl1-probe's `fog` and `fog-coord` cover it on a console. */
 void gl_ps_patch_fog(gl_context_t *ctx) {
     if (!ctx || !ctx->gpu_payload)
         return;
@@ -3068,56 +2821,46 @@ void gl_ps_patch_sum(gl_context_t *ctx, GLboolean on) {
 }
 
 /*
- * **How unit 0's texture is sampled**: a 2D image, or a cube map.
+ * How unit 0's texture is sampled: a 2D image, or a cube map.
  *
  * A cube map is not a sample with an extra coordinate. The texture coordinate is a
- * *direction*, and the sampler wants the face it points at and the place on that face -
+ * direction, and the sampler wants the face it points at and the place on that face -
  * which RDNA2 computes in four instructions of its own, `V_CUBEID_F32`, `V_CUBESC_F32`,
  * `V_CUBETC_F32` and `V_CUBEMA_F32`. The shader divides the two coordinates by twice
  * the major axis, biases them by a half, and hands the sampler `(u, v, face)` with
- * `dim:SQ_RSRC_IMG_CUBE`. `tools/shader/tex-cube.s` is the sequence, and its two
- * cross-check instructions - the 2D sample this replaces and the prolog's own `attr1.x`
- * interpolation - assembled to the words already in the tree.
+ * `dim:SQ_RSRC_IMG_CUBE`. `tools/shader/tex-cube.s` is the sequence.
  *
- * **The direction is interpolated again rather than reused.** The prolog divides s and
+ * The direction is interpolated again rather than reused. The prolog divides s and
  * t by q before this runs, which is right for a 2D sample and wrong for a direction:
  * dividing all three components would leave the direction unchanged, but dividing two
  * of them does not. The third component is `attr2.w`, where the vertex carries unit 0's
  * r - so a cube-textured draw runs at least the three-parameter vertex shader, which
  * gl_draw.c arranges.
  *
- * obSCEne's `REQ-20260920T0745Z-6c80` measured the receiving side: a cube sampled on
- * this part under `TYPE 0xb`, returning the texel of the face it names. The descriptor
- * is gl_pack_descriptors', the array of six faces is gl_tex_cube_upload's, and this is
- * the sample.
+ * A cube samples on this part under `TYPE 0xb`, returning the texel of the face it
+ * names. The descriptor is gl_pack_descriptors', the array of six faces is
+ * gl_tex_cube_upload's, and this is the sample.
  */
 /*
- * **Antialiasing's coverage**, in the untextured pixel shader's slot (since
- * 2026-09-20).
+ * Antialiasing's coverage, in the untextured pixel shader's slot.
  *
- * `tools/shader/coverage.s`, whose two cross-check instructions - this shader's own
- * interpolation of the red channel and the lane kill the alpha test ends with -
- * assembled to words already in the tree. What the fifteen words do is read the offset
- * from the primitive's centre out of the texture-coordinate parameter, weigh the alpha
- * by GL's coverage, and kill the fragments the primitive misses entirely, which is what
- * the software rasteriser does with them.
+ * `tools/shader/coverage.s`: the fifteen words read the offset from the primitive's
+ * centre out of the texture-coordinate parameter, weigh the alpha by GL's coverage, and
+ * kill the fragments the primitive misses entirely, as the software rasteriser does.
  *
- * A branch over the slot is no smoothing, and is what a frame that never smooths
- * carries - so the stream the gl-cube oracle record pins is untouched.
+ * A branch over the slot is no smoothing, so the stream the gl-cube oracle record pins
+ * is untouched by a frame that never smooths.
  */
 void gl_ps_patch_coverage(gl_context_t *ctx, GLboolean on) {
     gl_ps_patch_coverage_where(ctx, on ? GL_COVERAGE_UNTEXTURED : GL_COVERAGE_OFF);
 }
 
 /*
- * **Which shader smooths, and from which interpolant.**
+ * Which shader smooths, and from which interpolant.
  *
  * The arithmetic is one program; only the parameter it reads differs, and only in the
  * ATTR field of its six interpolations. `tools/shader/coverage-tex.s` assembles both
- * forms and its seven cross-check lines came back as words already in the tree -
- * `coverage.s`'s own six interpolations and the lane kill the alpha test ends with - so
- * the claim that the two programs differ by nothing else is checked rather than
- * asserted.
+ * forms.
  *
  * Both slots are written on every call, so a draw that stops smoothing, or moves
  * between textured and not, leaves the other shader branching over its slot rather than
@@ -3166,18 +2909,15 @@ void gl_ps_patch_coverage_where(gl_context_t *ctx, gl_coverage_kind_t kind) {
     };
 
     /*
-     * **A smooth polygon's coverage**, `tools/shader/coverage-poly.s`: the product of
+     * A smooth polygon's coverage, `tools/shader/coverage-poly.s`: the product of
      * three edge fades rather than one distance. The three signed distances arrive as
      * `d*w` in `attr3`'s x, y and z with `w` in its own w, and the reciprocal below
      * turns them into the screen-linear distances the fade needs - the identity the
      * textured prolog already uses for `q`, because `v_interp` is perspective-correct
      * and a distance to a line is not.
      *
-     * Twenty-six words, and the same program in both shaders: it reads `attr3` either
-     * way, so where a point or a line needs one form per shader a polygon needs one at
-     * all. Its four cross-check lines came back as words already in the tree -
-     * `coverage.s`'s alpha weighting and lane kill, and `coverage-tex.s`'s
-     * interpolation of `attr3.x`.
+     * The same program in both shaders: it reads `attr3` either way, so where a point
+     * or a line needs one form per shader a polygon needs one.
      */
     static const uint32_t code_poly[26] = {
         0xc8300c00u, 0xc8310c01u, /* v_interp_p1/p2_f32 v12, attr3.x - d0 * w */
@@ -3253,7 +2993,7 @@ void gl_ps_patch_sample(gl_context_t *ctx, gl_ps_sample_kind_t kind,
     for (size_t i = 0; i < GL_PS_SAMPLE_WORDS; i++)
         words[i] = 0xbf800000u; /* s_nop 0 */
     if (kind == GL_PS_SAMPLE_DEPTH || kind == GL_PS_SAMPLE_SHADOW) {
-        /* tools/shader/tex-shadow.s. **One value comes back, not four.** A depth texel
+        /* tools/shader/tex-shadow.s. One value comes back, not four. A depth texel
          * is a single float and a comparison's result is a single 0 or 1, so `dmask` is
          * 0x1 and the value lands in v4 alone; the moves below spread it across v4..v7
          * the way GL_DEPTH_TEXTURE_MODE says, which is what the texture environment
@@ -3261,10 +3001,10 @@ void gl_ps_patch_sample(gl_context_t *ctx, gl_ps_sample_kind_t kind,
          * moves read what the sample wrote and the shader's next one is a word past the
          * end of this slot - the outer one then costs nothing.
          *
-         * **The comparison is the sampler's.** SQ_IMG_SAMP_WORD0's DEPTH_COMPARE_FUNC
-         * already carries GL_TEXTURE_COMPARE_FUNC (gl_pack_descriptors, measured by
-         * `-6c80`); what the shadow form adds is the reference - r/q, clamped to [0, 1]
-         * as GL 1.4 3.8.14 and softpipe both clamp it - as the **first** address
+         * The comparison is the sampler's. SQ_IMG_SAMP_WORD0's DEPTH_COMPARE_FUNC
+         * already carries GL_TEXTURE_COMPARE_FUNC (gl_pack_descriptors); what the
+         * shadow form adds is the reference - r/q, clamped to [0, 1] as GL 1.4 3.8.14
+         * and softpipe both clamp it - as the first address
          * register, ahead of s and t, which is the VADDR order the ISA gives for the
          * `_c` forms. */
         size_t n = 0;
@@ -3305,8 +3045,8 @@ void gl_ps_patch_sample(gl_context_t *ctx, gl_ps_sample_kind_t kind,
         words[1] = 0x00610402u;
         words[2] = gl_ps_s_branch(GL_PS_SAMPLE_WORDS - 3u);
     } else if (kind == GL_PS_SAMPLE_3D) {
-        /* tools/shader/tex-3d.s. **The third coordinate is divided and the direction of
-         * a cube map is not**: a volume's (s, t, r) is a position GL 1.2 divides by q
+        /* tools/shader/tex-3d.s. The third coordinate is divided and the direction of a
+         * cube map is not: a volume's (s, t, r) is a position GL 1.2 divides by q
          * like the other two, and the prolog left 1/q in v12 and never overwrote it, so
          * the divide is one multiply. v2 and v3 are copied up beside it because the
          * address registers have to be consecutive and v4 is the texel's own. */
@@ -3369,35 +3109,24 @@ void gl_ps_patch_sample(gl_context_t *ctx, gl_ps_sample_kind_t kind,
 /*
  * The second texture unit's sample, in the textured pixel shader.
  *
- * The software rasteriser applies every unit `glActiveTexture` names; the hardware path
- * samples one and says so in the log, so a multitextured scene comes out on the console
- * missing its second layer. This is the sampling half of closing that: unit 1's
- * coordinate interpolated from the fourth parameter the four-parameter vertex shader
- * exports, its own descriptors loaded from the second pair of the table (image at
- * +0x40, sampler at +0x60), and the texel left in
- * **v28..v31**. `tools/shader/tex-prolog2.s`, whose three cross-check instructions -
- * unit 0's own descriptor loads and sample - assembled to the words this file already
- * writes for them.
+ * Unit 1's coordinate interpolated from the fourth parameter the four-parameter vertex
+ * shader exports, its own descriptors loaded from the second pair of the table (image
+ * at +0x40, sampler at +0x60, into s[20:27] and s[28:31]), and the texel left in
+ * v28..v31. `tools/shader/tex-prolog2.s`.
  *
- * **The register range is not free choice.** `gl_ps_combine_program` gathers the
+ * The register range is not free choice. `gl_ps_combine_program` gathers the
  * general combine form's arguments into v16..v27, so a texel parked there would be
  * overwritten by unit 0's own combine whenever its environment is GL_COMBINE, GL_BLEND
  * or GL_DECAL of an RGBA texture - right under GL_MODULATE, wrong under the modes that
  * need a program. The pixel shader's SPI_SHADER_PGM_RSRC1 is 0x000c0010, VGPRS 0x10,
  * which is 136 registers in wave32, so v28..v31 are allocated and clear of everything.
  *
- * It sits at the end of the prolog, before exec is restored from s16, because **a
- * sample outside whole-quad mode has no helper pixels**: its implicit derivatives, and
- * so its level of detail, are wrong along every quad edge. Both samples are hoisted
- * above both combines for that reason. GL's order - unit 0 combined with the fragment,
- * then unit 1 against that result - is kept by the combine slots that follow, not by
- * where the texels are fetched.
- *
- * **Hardware-validated 2026-09-20.** Both this slot and the second combine stage ran on
- * a console for the first time when gl1-probe's `multitexture` passed, which also
- * confirms
- * `-9a41`'s descriptor rows: the second pair really is read from s[20:27] and s[28:31],
- * one `OOPS_GL_DESC_UNIT_STRIDE` along the table.
+ * It sits at the end of the prolog, before exec is restored from s16, because a sample
+ * outside whole-quad mode has no helper pixels: its implicit derivatives, and so its
+ * level of detail, are wrong along every quad edge. Both samples are hoisted above both
+ * combines for that reason. GL's order - unit 0 combined with the fragment, then unit 1
+ * against that result - is kept by the combine slots that follow, not by where the
+ * texels are fetched. gl1-probe's `multitexture` covers it on the console.
  */
 void gl_ps_patch_unit1(gl_context_t *ctx, GLboolean on) {
     if (!ctx || !ctx->gpu_payload)
@@ -3457,14 +3186,13 @@ void gl_ps_patch_unit1(gl_context_t *ctx, GLboolean on) {
  * hardware, so the pixel shader discards - which needs the fragment's position, and the
  * mask somewhere it can read.
  *
- * **The position** comes from `SPI_PS_INPUT_ENA`/`_ADDR` `0x302`, which the draw sets
- * while a stipple is on: obSCEne's `REQ-20260919T2258Z-c7d4` (sweep `20260920-082906`,
- * `166-agc/ps-pos-xy`) measured POS_X arriving in v2 and POS_Y in v3, at pixel centres,
- * with the barycentrics left in v0 and v1 - and its control arm, at `0x2`, had v2 zero.
- * Nothing else is enabled there, so v4 and v5 hold nothing the shader may read, and it
- * does not.
+ * The position comes from `SPI_PS_INPUT_ENA`/`_ADDR` `0x302`, which the draw sets
+ * while a stipple is on: obSCEne's `166-agc/ps-pos-xy` measured POS_X arriving in v2
+ * and POS_Y in v3, at pixel centres, with the barycentrics left in v0 and v1. Nothing
+ * else is enabled there, so v4 and v5 hold nothing the shader may read, and it does
+ * not.
  *
- * **The mask** is written here, at OOPS_GL_STIPPLE_OFFSET, in the form the shader wants
+ * The mask is written here, at OOPS_GL_STIPPLE_OFFSET, in the form the shader wants
  * rather than the form GL stores: row `i` holds `polygon_stipple[(height - 1 - i) &
  * 31]` with its bits reversed, so the lookup is the row at `y & 31` shifted right by `x
  * & 31`. The rotation and the reversal are the two operations the software path does
@@ -3487,8 +3215,7 @@ void gl_ps_patch_stipple(gl_context_t *ctx, GLboolean on) {
          * shaders is taken (gl_hw_emit_draw's payload_va). */
         const uint64_t table_va = (uint64_t)(uintptr_t)table;
         /* tools/shader/polygon-stipple.s. The two literals are the table's address; the
-         * rest is that file's output word for word, and its cross-check word - the wait
-         * after the canary store, 0xbf8c3f70 - is one the shaders already carry. */
+         * rest is that file's output word for word. */
         const uint32_t code[GL_PS_STIPPLE_WORDS] = {
             0x7e040f02u, /* v_cvt_u32_f32_e32 v2, v2 (x) */
             0x7e060f03u, /* v_cvt_u32_f32_e32 v3, v3 (y) */
@@ -3553,21 +3280,18 @@ void gl_ps_patch_stipple(gl_context_t *ctx, GLboolean on) {
  * The export, in both pixel shaders: one colour target or two.
  *
  * `glDrawBuffer(GL_FRONT_AND_BACK)` (and `GL_LEFT`, which names the same pair here)
- * asks for the fragment in both buffers. Until now the console path wrote the back only
- * and said so in the log; the CPU's clears and pixel rectangles reached both, so the
- * two buffers drifted apart exactly where a draw had been. The GPU can write both in
- * one draw - obSCEne's `REQ-20260919T2258Z-3f62` measured it (sweep `20260920-082906`,
- * `166-agc/mrt-dual-target`): masks `0xff` and `SPI_SHADER_COL_FORMAT 0x99` put 512
- * pixels in each of two targets, where the one-target control left the second at its
- * fill. The registers come from that check and `gl_hw_emit_draw`; these five words are
- * the shader's half, assembled in `tools/shader/mrt1-export.s`.
+ * asks for the fragment in both buffers, and the GPU writes both in one draw: obSCEne's
+ * `166-agc/mrt-dual-target` measured target masks `0xff` and `SPI_SHADER_COL_FORMAT
+ * 0x99` putting every pixel in each of two targets. The registers are in
+ * `gl_hw_emit_draw`; these words are the shader's half, assembled in
+ * `tools/shader/mrt1-export.s`.
  *
  * Patched on every draw, from the same place as the colour sum and for the same reason:
  * a draw after `glDrawBuffer(GL_BACK)` must stop exporting to the second target, and a
  * stale export writes a buffer GL no longer names.
  */
-/* **The export tail, shared by the payload's fixed-function shaders and by a compiled
- * one.**
+/* The export tail, shared by the payload's fixed-function shaders and by a compiled
+ * one.
  *
  * Both forms are exactly `GL_PS_EXPORT_WORDS` long so that either can be written over
  * the other in place - the one-target form pays for that with two `s_nop`s past its
@@ -3599,21 +3323,13 @@ const uint32_t *gl_ps_export_words(GLboolean both) {
 void gl_ps_patch_export(gl_context_t *ctx, GLboolean both) {
     if (!ctx || !ctx->gpu_payload)
         return;
-    /* **The colour leaves as two packed half-float registers, not four floats.**
+    /* The colour leaves as two packed half-float registers, not four floats.
      *
-     * This exported `exp mrt0, v4, v5, v6, v7 done vm` - `SPI_SHADER_32_ABGR`, four
-     * 32-bit floats - from the day it was written until 2026-09-23, and every unblended
-     * frame it ever drew was byte-exact, so nothing pointed at it. Blending is where it
-     * shows. Mesa's `ac_choose_spi_color_formats` (amd/common/ac_shader_util.c:672-693)
-     * maps `COLOR_8_8_8_8` UNORM to `SPI_SHADER_FP16_ABGR` in every one of its four
-     * cases, under the comment
-     * **"These are required values for RB+."** RB+ is allowed on every GFX10_3 part
-     * (ac_gpu_info.c:1117-1125), so it is not optional here: an 8-bit target fed 32-bit
-     * exports has the render backend read a 32-bit export bus as packed 16-bit data,
-     * and the blended result - which is computed correctly - is scattered in 2-byte
-     * slices across RB+'s 16-byte transaction, the first four bytes landing in place
-     * and the other twelve not. That is the fault recorded against `CB_COLOR0_INFO` in
-     * gl_draw.c, and no register cures it, because no register was what was wrong.
+     * Mesa's `ac_choose_spi_color_formats` (amd/common/ac_shader_util.c:672-693) maps
+     * `COLOR_8_8_8_8` UNORM to `SPI_SHADER_FP16_ABGR` in all four cases, as required
+     * for RB+, which every GFX10_3 part allows (ac_gpu_info.c:1117-1125). An 8-bit
+     * target fed 32-bit exports has the render backend read the export bus as packed
+     * 16-bit data, which scatters a blended result across RB+'s 16-byte transaction.
      *
      * The sequence is Mesa's: `ac_nir_lower_ps_late.c:479-506` packs `(R,G)` and
      * `(B,A)` with `pack_half_2x16_rtz_split`, enables all four channels, and sets the
@@ -3765,52 +3481,30 @@ const GLuint *glGetFrameReadbackSampled(GLuint line_stride) {
     if (line_stride == 0u)
         line_stride = 1u;
     /*
-     * **Which buffer holds the current pixels** - `gl_color_read_source`, the same
-     * question glReadPixels asks. This read `ctx->readback` unconditionally, and that
-     * is the CP's copy
-     * **as of the last submit**: a `glDrawPixels`, `glBitmap`, `glCopyPixels` or
-     * `glAccum` writes the colour buffer with the CPU and builds no command stream, so
-     * no submit follows and no DMA re-copies it. The caller then got the frame as it
-     * was *before* its own pixels.
-     *
-     * That is what gl1-probe's six pixel-rectangle failures were, measured on
-     * 2026-09-20 and unchanged by a CPU store fence on 2026-09-21 - which is what
-     * finally ruled the memory ordering out and pointed here. Their passing neighbours
-     * are the tell: `read-pixels` passes because glReadPixels already goes through
-     * `gl_color_read_source`, and `stencil-pixels` and the depth and stencil readbacks
-     * pass because those buffers are the CPU's own and never travel through `readback`
-     * at all.
+     * Which buffer holds the current pixels - `gl_color_read_source`, the same question
+     * glReadPixels asks. `ctx->readback` is the CP's copy as of the last submit, and a
+     * `glDrawPixels`, `glBitmap`, `glCopyPixels` or `glAccum` writes the colour buffer
+     * with the CPU and builds no command stream, so no DMA re-copies it.
      *
      * `gl_raster_sync` drops `readback_of` the moment the CPU is about to write, so the
-     * choice below is already made for us: the copy while it is current, the buffer
-     * itself once it is not. Both are in the same layout, so the detiling loop is
-     * indifferent to which arrived.
+     * choice is the copy while it is current and the buffer itself once it is not. Both
+     * are in the same layout, so the detiling loop is indifferent to which arrived.
      */
     const uint32_t *src = gl_color_read_source(ctx, ctx->framebuffer);
     if (!src)
         return NULL;
     /*
-     * **The invalidation belongs to the copy, not to the buffer.**
+     * The invalidation belongs to the copy, not to the buffer.
      *
      * `clflush` writes a dirty line back and then invalidates it. That is what the CP's
      * copy wants - it is written by a DMA the CPU knows nothing about, and the CPU must
-     * drop what it has cached of it. Doing the same to the *live* colour buffer is the
-     * opposite of harmless: any line of it the CPU still holds dirty is written back
-     * **over what the GPU just drew**.
-     *
-     * **The signature is intermittency, and that is how it was nearly misread.** On
-     * 2026-09-21 `depth-range-in-frame` - two quads in one frame, the red one
-     * underneath coming back on top - failed on the first run that read from the live
-     * buffer and passed on the next, from the *same* binary. Whether the write-back
-     * corrupts anything depends on what the CPU happens to be holding dirty, so a run
-     * that passes proves nothing either way. The first failure was written up here as a
-     * deterministic regression; it is not, and the correction matters more than the
-     * original note, because a hazard that only sometimes fires is the kind a green run
-     * talks you out of.
+     * drop what it has cached of it. On the live colour buffer, any line the CPU still
+     * holds dirty would be written back over what the GPU just drew. The corruption
+     * depends on what the CPU happens to hold dirty, so it is intermittent and a
+     * passing run proves nothing.
      */
-    /* `gl_color_is_copy`, so that the one question "is this a copy the CPU must drop?"
-     * has one answer - this test was `src == ctx->readback` and would have missed the
-     * second target's copy had a caller ever read the frame through it. */
+    /* `gl_color_is_copy` answers "is this a copy the CPU must drop?" for both targets'
+     * copies. */
     const GLboolean invalidate = gl_color_is_copy(ctx, src);
     if (!ctx->color_tiled) {
 #if defined(__x86_64__)
@@ -3825,7 +3519,7 @@ const GLuint *glGetFrameReadbackSampled(GLuint line_stride) {
         return src;
     }
 
-    /* **On the scanout path the copy is tiled**, like the scanout buffer it is of, and
+    /* On the scanout path the copy is tiled, like the scanout buffer it is of, and
      * callers index a linear image. So the words they read are detiled into one: every
      * word for a full read, or the first word of every `line_stride`th cache line when
      * sampling, which is what a sampling caller reads. Those words lie all over the
@@ -3866,7 +3560,7 @@ const GLuint *glGetFrameReadback(void) {
 /*
  * `oops_gl_get_proc_address` is what `SDL_GL_GetProcAddress` calls through to, and it
  * is `glXGetProcAddress` by another name: a title written against post-1.1 GL fills
- * function pointers from **strings**, so being linked in is not enough - see
+ * function pointers from strings, so being linked in is not enough - see
  * `gl_procs.h`, which holds the list and the reason it is a list rather than a
  * symbol-table walk.
  */
@@ -3890,8 +3584,7 @@ void *oops_gl_get_proc_address(const char *name) {
             return gl_proc_table[i].addr;
         }
     }
-    /* **NULL is an answer, not a failure.** A program probing for an extension it can
-     * do without asks here and takes no for an answer - Neverball does exactly that for
-     * shader objects and framebuffer objects, and draws its own way when told no. */
+    /* NULL is an answer, not a failure: a program probing for an extension it can do
+     * without takes no for an answer and draws its own way. */
     return NULL;
 }

@@ -1,3 +1,6 @@
+/*
+ * Network interface information through libSceNetCtl: addresses, link and Wi-Fi state.
+ */
 #ifndef OOPS_NETCTL_H
 #define OOPS_NETCTL_H
 

@@ -1,3 +1,6 @@
+/* System module loading (oops/sysmodule.h) over `libSceSysmodule`, whose entry points
+ * are weak: in a build without them each call returns -1. */
+
 #include "oops/sysmodule.h"
 #include "oops/system.h"
 

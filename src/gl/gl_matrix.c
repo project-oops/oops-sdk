@@ -1,5 +1,6 @@
 /*
- * oops-gl: Matrix operations, stacks, projection, and transformations
+ * oops-gl: the matrix stacks, projection and transformation calls, the viewport and
+ * depth range, and the float math helpers the GL sources share.
  */
 
 #include "gl_internal.h"
@@ -37,18 +38,11 @@ float gl_sqrt(float val) {
     return __builtin_sqrtf(val);
 }
 
-/* exp(), for the two exponential fog modes.
- *
- * Here rather than called from `src/math/math.c` for the same reason `gl_sqrt` and
- * `gl_pow` are: the GL sources link on their own. The host self-tests of gl1-probe and
- * gl1-cube compile the GL sources plus the system stubs and **not** `math.c`, so
- * reaching into it would break two builds that have nothing wrong with them. The
- * algorithm is the one `oops_expf` uses - reduce by log2(e), a minimax polynomial on
- * the remainder, and scale by a power of two built from the exponent bits.
- *
- * Fog only ever asks for a negative argument, but the positive side is kept correct
- * rather than clamped, because a helper that is wrong outside its current caller's
- * range is a trap for the next one. */
+/* exp(), for the two exponential fog modes. Local, like `gl_sqrt` and `gl_pow`, so the
+ * GL sources link without `src/math/math.c` (the gl1-probe and gl1-cube host self-tests
+ * build without it). The algorithm is `oops_expf`'s: reduce by log2(e), a minimax
+ * polynomial on the remainder, scale by a power of two built from the exponent bits.
+ * Correct for positive arguments too, though fog only passes negative ones. */
 float gl_exp(float x) {
     if (x > 88.0f)
         return 1e38f;
@@ -226,18 +220,11 @@ void mat4_transform_vec4(float *out4, const gl_mat4_t *m, const float *in4) {
     out4[3] = m->m[3] * x + m->m[7] * y + m->m[11] * z + m->m[15] * w;
 }
 
-/* The full 4x4 inverse, by cofactors.
- *
- * Needed because GL_EYE_LINEAR texture generation stores its plane multiplied by the
- * inverse of the modelview **as it was when glTexGen was called** - that is what makes
- * an eye-linear plane stay put in eye space while the modelview moves underneath it,
- * and it is the whole difference between GL_EYE_LINEAR and GL_OBJECT_LINEAR. The
- * existing normal matrix is only the inverse-transpose of the upper 3x3, which cannot
- * carry the translation a plane equation needs.
- *
- * Returns false and leaves `out` untouched for a singular matrix, rather than filling
- * it with infinities: a caller that ignores the result then keeps whatever it had,
- * which is a stale answer instead of a poisoned one.
+/* The full 4x4 inverse, by cofactors. GL_EYE_LINEAR texture generation stores its plane
+ * multiplied by the inverse of the modelview as it was when glTexGen was called; the
+ * normal matrix (upper 3x3 only) cannot carry the translation a plane equation needs.
+ * Returns false and leaves `out` untouched for a singular matrix, so a caller that
+ * ignores the result keeps a stale value rather than infinities.
  */
 GLboolean mat4_invert(gl_mat4_t *out, const gl_mat4_t *in) {
     if (!out || !in)
@@ -312,11 +299,10 @@ void gl_update_mvp(gl_context_t *ctx) {
 
 /* `glDepthRange(near, far)` - where NDC z lands in the depth buffer.
  *
- * Both are clamped to 0..1 as the specification requires, and **`near` above `far` is
- * legal**: it reverses the depth buffer, which is a real technique rather than a
- * mistake, so it is not an error and not silently swapped. The viewport registers carry
- * the result - see the ZSCALE and ZOFFSET arms of the patch loop in `gl_draw.c` for the
- * arithmetic. */
+ * Both are clamped to 0..1 as the specification requires. `near` above `far` is legal
+ * and reverses the depth buffer, so it is neither an error nor swapped. The viewport
+ * registers carry the result - see the ZSCALE and ZOFFSET arms of the patch loop in
+ * `gl_draw.c`. */
 void glDepthRange(GLclampd near_val, GLclampd far_val) {
     if (gl_list_recording() &&
         GL_LIST_REC(GL_LIST_OP_DEPTH_RANGE, gl_la_f((GLfloat)near_val),
@@ -338,14 +324,9 @@ void glDepthRange(GLclampd near_val, GLclampd far_val) {
         far_f = 1.0f;
     ctx->depth_near = near_f;
     ctx->depth_far = far_f;
-    /* **Dirty, so the next draw carries it.** This used to rely on the frame's register
-     * table alone - "in force from the next frame" - which is wrong for the way depth
-     * range is used: a program narrows it, draws one thing, and widens it again inside
-     * the same frame (the view weapon drawn in front of the world is the classic case).
-     * Every draw in that frame got whichever range was current when the frame began.
-     * The software rasteriser reads the range per triangle and was always right, so
-     * only the hardware showed it. The matrix stacks are untouched - depth range is a
-     * viewport transform, not part of the model-view-projection. */
+    /* Dirty, so the next draw carries it: programs change the depth range between
+     * draws inside one frame. Depth range is a viewport transform, so the matrix
+     * stacks are untouched. */
     ctx->hw_depth_range_dirty = GL_TRUE;
 }
 
@@ -359,13 +340,8 @@ void glMatrixMode(GLenum mode) {
         ctx->matrix_mode = mode;
         return;
     }
-    /* **Leaving the mode alone is the worst of the three options.**
-     *
-     * An unrecognised mode used to be dropped here, so the mode stayed whatever it was
-     * and every glLoadIdentity, glRotatef and glPushMatrix that followed silently went
-     * to the previous matrix. The caller believed it was editing one stack and was
-     * editing another, and nothing in the geometry says so - it just comes out
-     * transformed wrongly. */
+    /* An unrecognised mode is an error, so the matrix calls that follow do not
+     * silently edit the previous stack. */
     gl_record_error(ctx, GL_INVALID_ENUM);
 }
 
@@ -582,11 +558,8 @@ void glScalef(GLfloat x, GLfloat y, GLfloat z) {
     mark_matrix_dirty(ctx);
 }
 
-/* The double spellings. The stacks hold `float` either way - GL 1.x implementations
- * generally do, and glOrtho and glFrustum above already take doubles and narrow them -
- * so these convert and forward rather than carrying a second precision that would be
- * discarded one call later. Forwarding also means they are captured into a display list
- * by the sibling's own capture. */
+/* The double spellings narrow and forward: the stacks hold `float`, and forwarding lets
+ * the float call's own capture record them into a display list. */
 void glTranslated(GLdouble x, GLdouble y, GLdouble z) {
     glTranslatef((GLfloat)x, (GLfloat)y, (GLfloat)z);
 }
@@ -599,9 +572,8 @@ void glScaled(GLdouble x, GLdouble y, GLdouble z) {
     glScalef((GLfloat)x, (GLfloat)y, (GLfloat)z);
 }
 
-/* **Sixteen elements, narrowed into a local.** The obvious shortcut - casting the
- * pointer - would reinterpret eight doubles as sixteen floats and load a matrix of
- * noise, and it would do it silently. */
+/* Sixteen elements narrowed into a local; casting the pointer would reinterpret eight
+ * doubles as sixteen floats. */
 void glLoadMatrixd(const GLdouble *m) {
     if (!m)
         return;
@@ -621,12 +593,7 @@ void glMultMatrixd(const GLdouble *m) {
 }
 
 /* The transposed spellings (GL 1.3). GL matrices are column-major; these take the same
- * sixteen numbers written row-major, which is how a C programmer naturally writes a
- * matrix literal.
- *
- * **Transposing is not reversing.** `out[c*4+r] = in[r*4+c]` - walking the input
- * backwards would be a rotation by 180 degrees about the diagonal and happens to leave
- * a symmetric matrix unchanged, so the test fixture below is deliberately asymmetric.
+ * sixteen numbers written row-major, as a C matrix literal reads.
  */
 static void gl_transpose16(GLfloat *out, const GLfloat *in) {
     for (int r = 0; r < 4; r++) {
@@ -670,8 +637,7 @@ void glMultTransposeMatrixd(const GLdouble *m) {
     glMultTransposeMatrixf(f);
 }
 
-/* GL_ARB_transpose_matrix's own spellings, which a program written before GL 1.3 took
- * it into the core calls - a port whose matrices are row-major, typically. */
+/* GL_ARB_transpose_matrix's spellings, for programs written before GL 1.3. */
 void glLoadTransposeMatrixfARB(const GLfloat *m) {
     glLoadTransposeMatrixf(m);
 }

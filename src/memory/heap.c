@@ -1,9 +1,7 @@
 /*
- * Freestanding Userland Virtual Memory Heap Allocator.
- *
- * Implements a segregated-fit slab allocator for small objects (<= 4 KB)
- * and direct page mmap for large objects, backed entirely by anonymous
- * virtual memory (SYS_mmap 477).
+ * The freestanding heap: a segregated-fit slab allocator for objects up to 4 KB and a
+ * direct page mapping for larger ones, all backed by anonymous virtual memory
+ * (SYS_mmap 477).
  */
 
 #include "oops/heap.h"

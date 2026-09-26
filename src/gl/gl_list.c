@@ -1,62 +1,16 @@
 /*
  * oops-gl: display lists
  *
- * A list records the calls made between glNewList and glEndList and replays them on
- * glCallList. This is the oldest feature in OpenGL and the one GL 1.x programs lean on
- * hardest: static geometry is compiled once and drawn by name for the rest of the run.
- *
- * # What is recorded is the call, not its effect
- *
- * Each entry point that can be compiled appends a `gl_list_cmd_t` and, under
- * GL_COMPILE, returns without doing anything. Replay calls the same entry points again
- * in order. So a list compiled before a texture is bound and executed after it draws
- * with the *later* texture, which is what the specification says happens and would not
- * if the effect were baked in.
- *
- * # Everything the specification compiles, is compiled
- *
- * **Until 2026-09-19 this recorded 21 operations** - the vertex attributes, the
- * enables, the matrix-stack calls and a handful of others - and every other call ran at
- * compile time. A `glMaterialfv` inside a GL_COMPILE list therefore changed the
- * material *while the list was being built* and was absent when it was called, so a
- * program that gave each object its own material in its own list drew every object in
- * whichever material was set last. That is the gears demo, and the shape of a great
- * deal of GL 1.x code.
- *
- * The specification names the calls that are *not* compiled - they execute immediately
- * even inside glNewList: everything that returns a value (glGen*, glIs*, glGet*,
- * glRenderMode, glReadPixels), the client-side state (the array pointers,
- * glEnable/DisableClientState, glInterleavedArrays, glPixelStore,
- * glPush/PopClientAttrib, glClientActiveTexture), the object lifetimes
- * (glDeleteTextures, glDeleteLists, the buffer-object calls), glNewList and glEndList
- * themselves, and glFlush and glFinish. Those simply have no hook. Every other entry
- * point has one, at the one place its spellings converge - `glColor3ub` forwards to
- * `glColor4f`, which records.
- *
- * # What a list keeps
- *
- * Arguments passed by pointer are copied when the call is compiled, not when it is
- * replayed: a matrix, a list of names, a light's position - and an image, which is
- * unpacked through the
- * **compile-time** `glPixelStorei` state into tight rows. Replay then runs it under
- * default unpacking, which is what makes a list independent of whatever the pixel-store
- * state has become by the time it is called. That is Mesa's arrangement too
- * (`main/dlist.c`, `unpack_image`).
- *
- * The vertex-array draws compile the same way: the specification says a list records
- * what the arrays held when the draw was compiled, so `glDrawArrays` and friends
- * expand, at compile time, into the `glBegin`/attribute/`glEnd` sequence they are
- * defined to be equivalent to. They were refused with GL_INVALID_OPERATION before,
- * which was honest but not GL.
- *
- * # GL_COMPILE_AND_EXECUTE
- *
- * Handled in one place: the recorder appends the command and then *executes the command
- * it just recorded*, with recording suspended, and tells the caller to stop. So an
- * entry point that is recorded and whose body calls other recorded entry points -
- * `glCopyTexImage2D` does - records once rather than once per level of nesting, and a
- * list called while another is being compiled this way runs without being copied into
- * it. Both of those recorded twice before.
+ * A list records the calls made between glNewList and glEndList and replays them
+ * through the same entry points on glCallList, so state bound later applies at replay.
+ * Every call the specification compiles has a hook at the place its spellings converge;
+ * the calls it executes immediately (queries, client state, object lifetimes, glFlush,
+ * glFinish) have none. Pointer arguments are copied at compile time, images unpacked
+ * through the compile-time pixel-store state into tight rows and replayed under default
+ * unpacking (Mesa `main/dlist.c`, `unpack_image`). Vertex-array draws expand into their
+ * `glBegin`/attribute/`glEnd` equivalents. Under GL_COMPILE_AND_EXECUTE the recorder
+ * appends a command, then executes it with recording suspended, so nested recorded
+ * calls record once.
  */
 
 #include "gl_internal.h"
@@ -183,34 +137,19 @@ int gl_list_param_count(gl_list_op_t op, GLenum pname) {
 
 static void gl_list_execute_cmd(gl_context_t *ctx, const gl_list_cmd_t *cmd);
 
-/* Appends one command, taking ownership of `owned`, and runs it if the list is also
- * executing.
- *
- * **A list that cannot grow is an error, not a truncation.** Dropping commands silently
- * would give a list that draws part of what was compiled into it, which looks like a
- * modelling mistake rather than a limit being hit. */
 /* -------------------------------------------------------------------------
- * Capture: the same calls, written down instead of compiled
+ * Capture: the same calls, written to a stream for replay on the host's software
+ * rasteriser, the reference the console path is compared against.
  *
- * A display list records a call to replay it later in the same process. A capture
- * records it to replay it somewhere else - specifically on the host's software
- * rasteriser, which is this library's reference implementation and is the thing the
- * console path is supposed to agree with. Ninety-three hand-written conformance checks
- * all pass while a real program renders wrong, because a hand-written check only covers
- * what somebody thought to write down; a capture covers what the program actually did.
- *
- * The stream is flat and self-describing, so a reader needs nothing but the file:
+ * The stream is flat and self-describing:
  *
  *     "OGLCAP" 0x00 0x01   magic and version
  *     u32 count            commands
  *     then, per command:
- *     u32 op, u32 a[10], u32 bytes, then `bytes` of blob padded up to a multiple of
- * four
+ *     u32 op, u32 a[10], u32 bytes, then `bytes` of blob padded to a multiple of four
  *
- * Little-endian throughout, because both ends of this are x86-64 and pretending
- * otherwise would be untested code standing in for a portability nobody has asked for.
- * Arguments are written as the 32-bit words they already are - `gl_list_arg_t` is a
- * union of four-byte scalars - so no conversion happens and a float survives exactly.
+ * Little-endian, since both ends are x86-64. Arguments are written as the 32-bit words
+ * `gl_list_arg_t` already holds, so a float survives exactly.
  */
 #define GL_CAPTURE_MAGIC0 'O'
 #define GL_CAPTURE_VERSION 1u
@@ -223,14 +162,8 @@ static size_t g_capture_cap;
 static uint32_t g_capture_count;
 static GLboolean g_capture_overflow;
 
-/* **A ceiling, so a capture fails predictably instead of asking for the machine.**
- *
- * An array draw is recorded the way a display list records one - expanded into the
- * `glBegin`/attribute/`glEnd` sequence it is defined to be equivalent to - which is
- * faithful and fat: **measured at 144 bytes and 3 commands per vertex**. A frame of
- * twenty thousand vertices is under 3 MB and one of a hundred thousand is about 14 MB,
- * so this is far above any frame worth capturing while still being a number rather than
- * "whatever malloc will give". */
+/* A ceiling, so a capture fails predictably. An array draw expands to about 144 bytes
+ * per vertex, so a frame of a hundred thousand vertices is about 14 MB. */
 #define GL_CAPTURE_MAX_BYTES (64u * 1024u * 1024u)
 
 static void gl_capture_put(const void *src, size_t n) {
@@ -246,8 +179,7 @@ static void gl_capture_put(const void *src, size_t n) {
         }
         uint8_t *next = (uint8_t *)gl_list_alloc(grown);
         if (!next) {
-            /* **Recorded, not ignored.** A capture that quietly stopped part way would
-               be a file that looks complete and replays a different program. */
+            /* Recorded, so a partial capture is never handed back as complete. */
             g_capture_overflow = GL_TRUE;
             return;
         }
@@ -285,7 +217,7 @@ static void gl_capture_append(gl_list_op_t op, const gl_list_arg_t *args, int na
     if (n) {
         gl_capture_put(blob, n);
         /* Padded so every command starts word-aligned and a reader can walk the stream
-           without knowing anything about the op it just passed. */
+           without knowing the ops. */
         const size_t pad = (4u - ((size_t)n & 3u)) & 3u;
         if (pad)
             gl_capture_put((const void *)0, pad);
@@ -293,11 +225,13 @@ static void gl_capture_append(gl_list_op_t op, const gl_list_arg_t *args, int na
     g_capture_count++;
 }
 
+/* Appends one command, taking ownership of `owned`, and runs it if the list is also
+ * executing. A list that cannot grow is an error, never a silent truncation. */
 GLboolean gl_list_rec_owned(gl_list_op_t op, const gl_list_arg_t *args, int nargs,
                             void *owned, size_t bytes) {
     gl_context_t *ctx = gl_get_ctx();
-    /* **The capture sees the call before the list decides to swallow it**, and sees it
-       whether or not a list is compiling at all. */
+    /* The capture sees the call before the list decides to swallow it, and whether or
+       not a list is compiling. */
     if (ctx && ctx->capture_active && ctx->list_suspend == 0u) {
         gl_capture_append(op, args, nargs, owned, bytes);
     }
@@ -937,7 +871,7 @@ void glCallList(GLuint list) {
         return;
 
     gl_display_list_t *slot = gl_list_slot(ctx, list);
-    /* Calling an undefined list is *ignored*, not an error - the specification is
+    /* Calling an undefined list is ignored, not an error - the specification is
      * explicit, and it is what lets a list reference one compiled later. */
     if (!slot || !slot->used || !slot->compiled)
         return;
@@ -957,8 +891,7 @@ void glCallList(GLuint list) {
 /* Name `i` of glCallLists' array, as the offset from the list base it stands for -
  * every type GL 1.0 gives the call, decoded as Mesa decodes them
  * (main/dlist.c:13510-13575): the signed and unsigned integers as themselves, a float
- * truncated, and GL_2_BYTES to GL_4_BYTES as big-endian byte strings. Only the three
- * unsigned types were accepted until 2026-09-19. */
+ * truncated, and GL_2_BYTES to GL_4_BYTES as big-endian byte strings. */
 static GLint gl_call_lists_name(GLenum type, const GLvoid *lists, GLsizei i) {
     const GLubyte *ub = (const GLubyte *)lists;
     const size_t k = (size_t)i;
@@ -1007,10 +940,8 @@ void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
     if (!lists || n == 0)
         return;
 
-    /* **Compiled as the names, not as the lists they name.** This used to call
-     * glCallList per name while compiling, which recorded `base + name` with the base
-     * current at *compile* time; the specification applies the base current when the
-     * list runs. */
+    /* Compiled as the names, not as the lists they name: the specification applies
+     * the list base current when the list runs, not when it is compiled. */
     if (gl_list_recording()) {
         GLuint *names = (GLuint *)gl_list_alloc((size_t)n * sizeof(GLuint));
         if (!names) {
@@ -1039,35 +970,13 @@ void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
  */
 
 /*
- * **Every live texture, written into the stream before the frame is.**
- *
- * A capture records the calls a frame makes, and a frame in the middle of a game makes
- * no `glTexImage2D`: a port uploads its textures when a level loads, hundreds of frames
- * earlier. Replayed on its own, such a capture binds names that were never given an
- * image and samples GL's default white - so the replay of Neverball's floor came back
- * white while the console drew it black, and neither told anybody anything about the
- * console.
- *
- * That is the difference between an oracle that can answer a geometry question and one
- * that can answer a texturing question. The blend fault was cornered with this tool
- * because it was a question about state; "which texture did this draw sample" is the
- * commoner question and was exactly the one it could not be asked.
- *
- * So the capture opens with the texture state as it stands: a bind, the base image, and
- * the sampler parameters that decide what a sample of it looks like. The texels are the
- * SDK's own host copy, which is RGBA8 and tightly packed whatever the program uploaded
- * - so the image goes back in as `GL_RGBA`/`GL_UNSIGNED_BYTE` under the internal format
- * the program asked for, and the replay's own unpack state is already neutral for a
- * recorded image.
- *
- * Appended rather than called: `gl_capture_append` writes the command without executing
- * it, so arming a capture costs no re-upload and cannot perturb the frame it is about
- * to record.
- *
- * **Mip levels above the base are not emitted yet.** They change how a minified sample
- * *looks*, never which texture it came from, and every fault this exists to answer is
- * the second kind. A blurred replay of the right texture is a legible answer; a white
- * one is not.
+ * Every live 2D texture, written into the stream before the frame, because a frame
+ * rarely uploads the textures it samples. Each is a bind, the base image and the
+ * sampler parameters. The texels are the SDK's RGBA8 host copy, so the image goes back
+ * in as `GL_RGBA`/`GL_UNSIGNED_BYTE` under the program's internal format. Appended
+ * without executing, so arming a capture does not perturb the frame. Only the base
+ * level is emitted; the other levels change how a minified sample looks, not which
+ * texture it is.
  */
 static void gl_capture_emit_texture_state(gl_context_t *ctx) {
     if (!ctx)
@@ -1080,7 +989,7 @@ static void gl_capture_emit_texture_state(gl_context_t *ctx) {
         if (t->width <= 0 || t->height <= 0)
             continue;
         /* 2D only: a cube map's faces and a volume's slices each want their own target
-           and their own emission, and no port here has rendered a surface from one. */
+           and their own emission. */
         if (t->target != GL_TEXTURE_2D)
             continue;
 
@@ -1101,8 +1010,7 @@ static void gl_capture_emit_texture_state(gl_context_t *ctx) {
         gl_capture_append(GL_LIST_OP_TEX_IMAGE_2D, img, 8, t->pixels,
                           (size_t)t->width * (size_t)t->height * 4u);
 
-        /* The sampler state, because a texture replayed with the default filter and
-           wrap is a different image at every fragment that is not exactly on a texel
+        /* The sampler state, since filter and wrap change every sample off a texel
            centre. */
         static const GLenum pnames[4] = {GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER,
                                          GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T};
@@ -1162,9 +1070,8 @@ void oops_gl_capture_end(void) {
 const void *oops_gl_capture_data(size_t *out_bytes, unsigned *out_calls) {
     if (out_calls)
         *out_calls = g_capture_count;
-    /* **An overflowed capture hands back nothing.** Half a call stream replays as a
-       different program, and a caller that wrote it to a file would have a plausible
-       artefact of a run that never happened. */
+    /* An overflowed capture hands back nothing: half a call stream replays as a
+       different program. */
     if (g_capture_overflow) {
         if (out_bytes)
             *out_bytes = 0u;
@@ -1213,8 +1120,8 @@ unsigned oops_gl_capture_replay(const void *data, size_t bytes) {
         if (blob) {
             if (off + blob > bytes)
                 break;
-            /* **Pointed into the stream, not copied.** The executor only reads it, and
-               the caller owns the buffer for the length of the replay. */
+            /* Pointed into the stream, not copied: the executor only reads it, and the
+               caller owns the buffer for the length of the replay. */
             cmd.data = (void *)(uintptr_t)(p + off);
             off += blob;
             off += (4u - ((size_t)blob & 3u)) & 3u;
@@ -1230,15 +1137,9 @@ unsigned oops_gl_capture_replay(const void *data, size_t bytes) {
 /* -------------------------------------------------------------------------
  * Capturing a frame without the program's help
  *
- * `oops_gl_capture_begin`/`end` need somebody to call them at the right moment, and the
- * right moment is between two buffer swaps - which a program's main loop knows about
- * and a payload entry point does not. A port would need a patch to its own loop to use
- * them, and the point of this is to avoid modifying the program under test.
- *
- * So the swap does it: arm a frame number and a path, and the frame after that number
- * completes is recorded and written out. Nothing else in the title changes, which also
- * means the captured stream is the program's real behaviour rather than the behaviour
- * of a program with capture code in it.
+ * The swap calls `oops_gl_capture_begin`/`end`, so a program is captured unmodified:
+ * arm a frame number and a path, and the frame after that number completes is recorded
+ * and written out.
  */
 static uint32_t g_capture_arm_frame;
 static const char *g_capture_path;
@@ -1257,9 +1158,7 @@ void gl_capture_swap_tick(gl_context_t *ctx) {
         unsigned calls = 0u;
         const void *data = oops_gl_capture_data(&bytes, &calls);
         {
-            /* One line, three numbers: what was recorded, how big it is, and how the
-               write went. `gl_klog_val` belongs to gl_context.c, so this builds its
-               own. */
+            /* One line: calls recorded, bytes, and the write's result. */
             char msg[128];
             size_t n = 0;
             const char *head = "capture: calls";
@@ -1292,8 +1191,7 @@ void gl_capture_swap_tick(gl_context_t *ctx) {
         if (data && bytes && g_capture_path) {
             /* Reported above. */
         } else {
-            /* Overflowed, so `oops_gl_capture_data` handed back nothing. Said plainly:
-               a missing file with a reason beats a short file without one. */
+            /* Overflowed, so `oops_gl_capture_data` handed back nothing. */
             oops_log_info("GL",
                           "capture overflowed and was discarded - nothing written");
         }

@@ -1,3 +1,13 @@
+/*
+ * Save data (oops/savedata.h).
+ *
+ * A mount uses the platform's `libSceSaveData` container when it loads and mounts, and
+ * otherwise a title-scoped directory, `/data/savedata/<app id>/<dir>` on the target or
+ * `savedata/<app id>/<dir>` on the host. The fallback writes straight through, so its
+ * unmount has nothing to commit. The `libSceSaveData` entry points are resolved by
+ * name.
+ */
+
 #include "oops/savedata.h"
 #include "oops/freestd.h"
 #include "oops/fs.h"

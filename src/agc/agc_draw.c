@@ -1,3 +1,8 @@
+/*
+ * `oops_agc_draw_primitive`: one NGG draw into a linear color target, optionally
+ * depth-tested, built as a complete PM4 command buffer, submitted, and waited on
+ * through a RELEASE_MEM fence.
+ */
 #include "oops/agc.h"
 #include "oops/gpu.h"
 #include "oops/memory.h"

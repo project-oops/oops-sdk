@@ -2,6 +2,8 @@
 #include <pthread.h>
 #include <unistd.h>
 
+/* Integration test: a pthread worker pool driven by a mutex and a condition. */
+
 #define NUM_WORKERS 4
 #define TOTAL_TASKS 100
 
@@ -29,6 +31,7 @@ static void *worker_entry(void *arg) {
     return NULL;
 }
 
+/* Every task is taken exactly once, and the workers shut down on broadcast. */
 static void test_thread_pool_dispatch(void) {
     pthread_t threads[NUM_WORKERS];
     s_tasks_remaining = TOTAL_TASKS;

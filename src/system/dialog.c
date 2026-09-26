@@ -1,3 +1,12 @@
+/*
+ * System dialogs (oops/dialog.h): the IME text-entry dialog and the message dialog.
+ *
+ * Each dialog loads its system module on first use and is driven by polling: open,
+ * poll until finished, read the result, close. Text crosses the boundary as UTF-8 and
+ * is converted to and from the platform's UTF-16. The platform entry points are weak,
+ * so a build without them fails the call instead of the link.
+ */
+
 #include "oops/dialog.h"
 #include "oops/sysmodule.h"
 #include "oops/system.h"

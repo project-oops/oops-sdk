@@ -1,3 +1,7 @@
+/*
+ * DualShock/DualSense input through libScePad: per-port polling, batched reads, rumble,
+ * light bar and orientation, with a keyboard folded into port 0 as pad buttons.
+ */
 #include "oops/input.h"
 #include "oops/keyboard.h"
 #include "oops/system.h"
@@ -5,18 +9,13 @@
 #include <stddef.h>
 
 /*
- * The keyboard fold, weakly. `oops_input_poll` merges a keyboard's buttons into port 0
- * (the feature `REQ-20260922T2015Z-b4d7` asked for), which means calling into
- * keyboard.c. A *strong* reference would drag keyboard.c into every title that reads
- * the pad - and silently fault a hosted title, whose undefined-symbol check is off, on
- * the first poll if it did not link it.
- *
- * Weak instead: keyboard.c's definition satisfies it when a title links keyboard.c, and
- * it resolves to null (and the call below is skipped) when a title does not. So a
- * pad-only title neither fails to link nor faults, and a title that wants
- * keyboard-as-pad gets it by linking keyboard.c exactly as before - no per-title source
- * list to keep in step. `oops_keyboard_poll_buttons` is the one first-party name in
- * `common/app.mk`'s undefined-symbol allow-list for this reason.
+ * The keyboard fold, weakly. `oops_input_poll` merges a keyboard's buttons into port 0,
+ * which means calling into keyboard.c. A strong reference would pull keyboard.c into
+ * every title that reads the pad, and fault a hosted title (whose undefined-symbol
+ * check is off) on the first poll if it did not link it. This weak definition returns
+ * no buttons; keyboard.c's definition replaces it when a title links keyboard.c.
+ * `oops_keyboard_poll_buttons` is in `common/app.mk`'s undefined-symbol allow-list for
+ * this reason.
  */
 __attribute__((weak)) uint32_t oops_keyboard_poll_buttons(void) {
     return 0u;
@@ -35,10 +34,10 @@ __attribute__((weak)) int scePadSetVibration(int handle, const void *param);
 __attribute__((weak)) int scePadSetLightBar(int handle, const void *param);
 __attribute__((weak)) int scePadResetLightBar(int handle);
 __attribute__((weak)) int scePadResetOrientation(int handle);
-/* Present in the app context on 12.40 (obSCEne 100-input/dualsense-symbols
- * resolved all seven DualSense entry points there) and absent in the eboot and
- * payload contexts, so whether it resolves is the availability check. Its
- * parameter layout is still unconfirmed. */
+/* Present in the app context on 12.40 (the obSCEne probe
+ * 100-input/dualsense-symbols resolves all seven DualSense entry points there) and
+ * absent in the eboot and payload contexts, so whether it resolves is the
+ * availability check. Its parameter layout is unconfirmed. */
 __attribute__((weak)) int scePadSetTriggerEffect(int handle, const void *param);
 __attribute__((weak)) int sceUserServiceGetForegroundUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
@@ -85,7 +84,7 @@ static void try_resolve_user_id(void) {
             }
         }
     }
-    /* Fallback to primary retail user ID if user service list unpopulated */
+    /* Fall back to the primary retail user id when the user service names none. */
     if (s_user_id < 0 && (scePadOpen || scePadInit || scePadGetHandle)) {
         s_user_id = 0x10000000;
     }
@@ -179,15 +178,6 @@ int oops_input_init(void) {
     return s_init_rc;
 }
 
-/*
- * A keyboard's directional and action keys, as pad buttons, for a port-0 poll that
- * found no pad.
- *
- * `out_state` is already zeroed when this is called, and `connected` stays 0 on
- * purpose: there is no pad, and saying otherwise would be a lie a caller could act on.
- * What changes is the return code - a poll that has buttons to report succeeds,
- * whatever produced them.
- */
 /* See `oops_input_set_keyboard_as_pad` in the header for why this defaults on and who
  * turns it off. */
 static int s_keyboard_as_pad = 1;
@@ -196,6 +186,11 @@ void oops_input_set_keyboard_as_pad(int enable) {
     s_keyboard_as_pad = enable ? 1 : 0;
 }
 
+/*
+ * A keyboard's buttons for a port-0 poll that found no pad. `out_state` is already
+ * zeroed and `connected` stays 0, since there is no pad; a poll with buttons to report
+ * succeeds whatever produced them.
+ */
 static int input_keyboard_only(oops_pad_state_t *out_state, uint32_t kbd) {
     if (kbd == 0u) {
         return -1;
@@ -213,29 +208,19 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
     }
 
     /*
-     * **The keyboard is an input device, so it arrives through the input call.**
-     *
-     * It did not, until 2026-09-22. `oops_keyboard_poll_buttons` decodes arrows, WASD,
-     * Enter, Escape and the rest into `OOPS_BUTTON_*`, and an application wanting both
-     * had to know that and OR the two together by hand. Exactly one did
-     * (`REQ-20260922T2015Z-b4d7`), which is what a second public path to the same
-     * capability gets you: it works for whoever found it.
-     *
-     * Port 0 only - a keyboard is not per-port, and folding it into every port would
-     * report the same keypress four times. It costs one `sceKeyboardReadState` per
-     * poll, and nothing at all when no keyboard library resolved, which
-     * `oops_keyboard_poll_buttons` checks first.
-     *
-     * An application that still calls `oops_keyboard_poll_buttons` itself is not broken
-     * by this - the bits are the same and OR is idempotent - but the call is now
-     * redundant.
+     * The keyboard arrives through the input call: `oops_keyboard_poll_buttons`
+     * decodes arrows, WASD, Enter, Escape and the rest into `OOPS_BUTTON_*`. Port 0
+     * only, since a keyboard is not per-port and folding it into every port would
+     * report each keypress four times. It costs one `sceKeyboardReadState` per poll,
+     * and nothing when no keyboard library resolved. An application that also calls
+     * `oops_keyboard_poll_buttons` itself gets the same bits.
      */
     const uint32_t kbd =
         (port == 0u && s_keyboard_as_pad && oops_keyboard_poll_buttons != 0)
             ? oops_keyboard_poll_buttons()
             : 0u;
 
-    /* Lazy-open port if uninitialized but requested */
+    /* Open the port on first use. */
     if (s_pad_handles[port] < 0 && (scePadOpen || scePadGetHandle)) {
         if (s_pad_retry_cooldown[port] > 0) {
             s_pad_retry_cooldown[port]--;
@@ -305,7 +290,7 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
     oops_input_map_record(out_state, &raw);
     out_state->buttons |= kbd;
 
-    /* Verbose telemetry when buttons change, when non-zero, or periodically */
+    /* Logged when buttons change, every 30 polls while held, and every 300. */
     static uint32_t s_last_polled_buttons[OOPS_MAX_PADS] = {0};
     static int s_poll_ticks[OOPS_MAX_PADS] = {0};
     s_poll_ticks[port]++;
@@ -332,8 +317,7 @@ int oops_input_poll_batch(unsigned int port, oops_pad_state_t *out_states,
     }
 
     /* The stride is the driver's 120-byte record, held to that size in
-     * pad_layout.h. */
-    /* Lazy-open port if uninitialized but requested */
+     * pad_layout.h. The port opens on first use. */
     if (s_pad_handles[port] < 0 && scePadOpen) {
         if (s_pad_retry_cooldown[port] > 0) {
             s_pad_retry_cooldown[port]--;
@@ -417,10 +401,9 @@ int oops_input_adaptive_triggers_available(unsigned int port) {
     if (port >= OOPS_MAX_PADS || s_pad_handles[port] < 0) {
         return 0;
     }
-    /* Real detection: the effect entry point resolved here. Whether the pad on
-     * this port is a DualSense is not asked - the controller-information call
-     * that would say so returned an error and wrote nothing in the same capture.
-     */
+    /* Detection is whether the effect entry point resolved. Whether the pad on this
+     * port is a DualSense is not asked: the controller-information call that would
+     * say so returns an error and writes nothing in the app context. */
     return scePadSetTriggerEffect ? 1 : 0;
 }
 
@@ -440,10 +423,9 @@ int oops_input_set_trigger_effect(unsigned int port, unsigned int triggers, int 
     if (mode < OOPS_TRIGGER_OFF || mode > OOPS_TRIGGER_VIBRATION) {
         return -1;
     }
-    /* Capture-gated: the entry point is confirmed (see its declaration) but its
-     * parameter layout is not. Passing a guessed struct corrupts state rather
-     * than failing, so this refuses. A write-extent capture of the parameter is
-     * what completes it. */
+    /* The entry point is confirmed (see its declaration) but its parameter layout is
+     * not, and a guessed struct corrupts state rather than failing, so this refuses
+     * until a capture of the parameter confirms the layout. */
     return -1;
 }
 

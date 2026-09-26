@@ -1,3 +1,7 @@
+/* The C API of oops/html.h over litehtml: an `oops_html_t` owns one container, which
+ * owns the loaded document. Loading and resizing lay the document out at the view's
+ * width. */
+
 #include "oops/html.h"
 #include "html_container.hpp"
 #include "litehtml/master_css.h"

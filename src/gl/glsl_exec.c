@@ -1,44 +1,15 @@
 /*
- * oops-gl: running a GLSL shader on the CPU
+ * oops-gl: the GLSL interpreter, the reference for the programmable pipeline.
  *
- * **This is the reference.** oops-gl has two implementations of every fixed-function
- * stage - a software rasteriser that defines what the answer is, and a console pipeline
- * that has to agree with it - and the programmable pipeline is no different. The
- * compiler in `glsl_gen.c` turns a shader into gfx1030 instructions for the hardware;
- * this walks the same tree and computes the same values, so a probe can ask both and
- * compare.
+ * `glsl_gen.c` compiles a shader to gfx1030 instructions; this walks the same tree on
+ * the CPU and computes the same values, so a probe can compare the two. Rules are
+ * GLSL 1.10's. A value is up to `EXEC_MAX_VAL_FLOATS` floats and a type; `int` and
+ * `bool` are floats too, and a matrix is column-major.
  *
- * A tree walker rather than a bytecode machine. It runs on the host, where nothing is
- * timed, and being obviously the specification is worth more here than being fast.
- * Every rule below is GLSL 1.10's, and the ones that are surprising are the ones that
- * are commented.
- *
- * # Values
- *
- * One shape for everything: up to sixteen floats and a type. An `int` and a `bool` are
- * floats too - GLSL 1.10 has no integer arithmetic to speak of and the hardware has one
- * register file - with the integer operations truncating where the language says they
- * do. A matrix is sixteen floats **column-major**, which is what `m[0]` returning the
- * first column means and what the fixed-function matrix stack already is.
- *
- * # Derivatives, and why a fragment runs three times
- *
- * `dFdx`, `fwidth` and the level of detail of a mipmapped texture lookup all need to
- * know how a value changes across the screen. Hardware takes that from the other pixels
- * of a quad; this takes it from the interpolated block, which the rasteriser hands over
- * three times - at the pixel, one pixel right and one pixel down.
- *
- * So a derivative is **the expression re-evaluated against the neighbouring block**,
- * which is exact for anything linear in the varyings and is the same finite difference
- * the hardware takes for anything else. `gl_shader_needs_derivatives` says whether a
- * program contains anything that asks, so the common shader is still evaluated once.
- *
- * # What stops a bad shader taking the machine with it
- *
- * A shader is a program someone else wrote, and `while (true) {}` compiles. Every
- * invocation carries a step budget and a call depth; running out is an error the draw
- * reports, not a hang. The same for the value arena, which is fixed like every other
- * buffer here.
+ * A derivative is the expression re-evaluated against the neighbouring interpolated
+ * block (one pixel right, one pixel down); `gl_shader_needs_derivatives` says whether
+ * a program needs them. Every invocation has a step budget, a call depth and a fixed
+ * arena, so a runaway shader is a reported error, not a hang.
  */
 
 #include "glsl_internal.h"
@@ -51,34 +22,23 @@
 #define EXEC_MAX_VARS 96
 #define EXEC_ARENA_FLOATS 2048
 #define EXEC_MAX_DEPTH 16
-/* Statements and expressions one invocation may execute. A real shader runs a few
- * hundred; this is generous enough never to be met by one and small enough that a
- * runaway costs a frame rather than the session. */
+/* Statements and expressions one invocation may execute: far above a real shader's,
+ * small enough that a runaway costs a frame. */
 #define EXEC_STEP_BUDGET 100000
 
 /* -------------------------------------------------------------------------
  * Values and places
  * ------------------------------------------------------------------------- */
 
-/*
- * **How wide a value may be**, which was 16 for `mat4` and is now larger because a
- * struct is a value too - constructed, assigned, passed and returned whole.
- *
- * A *variable* of any size fits: those live in the arena and are addressed through a
- * pointer. This is the width of a value in flight, and it is a stack cost paid by every
- * expression the interpreter evaluates, so it is a real number rather than a generous
- * one. `glsl_sema` refuses a struct larger than this at compile time, by name, so the
- * limit is a diagnostic and never a silently truncated copy.
- */
+/* The width of a value in flight, larger than a `mat4` because a struct is a value
+ * too. Variables live in the arena and may be any size; this is a stack cost on every
+ * expression. `glsl_sema` refuses a larger struct at compile time. */
 #define EXEC_MAX_VAL_FLOATS 32
 
 typedef struct {
     glsl_type_t type;
-    /* **How many of `v` are live, when the type cannot say.** A whole array's type is
-     * its *element*'s - the length lives on the symbol, because there is no array type
-     * here - so a value holding one needs to carry its own width. Zero means "ask the
-     * type", which is every value but an array and keeps every existing construction
-     * site correct without touching it. */
+    /* How many of `v` are live when the type cannot say: a whole array's type is its
+     * element's, so the value carries its own width. Zero means "ask the type". */
     int count;
     float v[EXEC_MAX_VAL_FLOATS];
 } exec_val_t;
@@ -178,8 +138,7 @@ static const glsl_struct_t *exec_struct(const exec_t *e, glsl_type_t t) {
     return &e->unit->structs[i];
 }
 
-/* **The size of anything this interpreter can hold**, which `comps_of` alone cannot
- * answer: a struct's size lives in the unit's table beside it. */
+/* The size of any value, including a struct, whose size lives in the unit's table. */
 static int exec_comps(const exec_t *e, glsl_type_t t) {
     const glsl_struct_t *st = exec_struct(e, t);
     return st ? st->components : comps_of(t);
@@ -202,9 +161,8 @@ static glsl_type_t exec_struct_by_name(const exec_t *e, const char *name, size_t
     return GLSL_TYPE_ERROR;
 }
 
-/* **The type a declaration or parameter node writes**, the interpreter's copy of sema's
- * `node_declared_type`: the token, unless the token is an identifier and then the
- * struct it names. The two have to agree, which is why both read the same table. */
+/* The type a declaration or parameter node writes, matching sema's
+ * `node_declared_type`: the token, or the struct an identifier token names. */
 static glsl_type_t exec_node_type(const exec_t *e, const glsl_node_t *n) {
     if (n->type_tok == GLSL_TOK_IDENTIFIER && n->type_name) {
         return exec_struct_by_name(e, n->type_name, n->type_name_len);
@@ -332,9 +290,8 @@ static void scope_push(exec_t *e) {
 static void scope_pop(exec_t *e) {
     while (e->var_count > 0 && e->vars[e->var_count - 1].scope >= e->scope) {
         exec_var_t *v = &e->vars[e->var_count - 1];
-        /* Only storage came out of the arena; an input binding took none. The arena is
-         * wound back only for the most recent allocation chain, which is what a bump
-         * allocator can do - and the declarations in a scope are exactly that chain. */
+        /* Only storage came out of the arena. A bump allocator winds back only its
+         * most recent allocations, which is what a scope's declarations are. */
         if (v->kind == VAR_STORE && v->store) {
             const int n = comps_of(v->type) * ((v->array > 0) ? v->array : 1);
             if (v->store + n == &e->arena[e->arena_used])
@@ -374,9 +331,7 @@ static float f_exp2(float x) {
     return oops_expf(x * 0.6931471805599453f);
 }
 
-/* **GLSL's `mod` is a floored modulus, not C's truncated `fmod`.** `mod(-1.0, 3.0)` is
- * 2 in a shader and -1 in C. A shader tiling a texture by `mod(uv, 1.0)` wraps
- * correctly with one and mirrors at the origin with the other. */
+/* GLSL's `mod` is floored, not C's truncated `fmod`: `mod(-1.0, 3.0)` is 2. */
 static float f_mod(float x, float y) {
     if (y == 0.0f)
         return 0.0f;
@@ -435,11 +390,8 @@ static exec_place_t place_none(void) {
 
 /* Where a value lives, for reading or for writing.
  *
- * **`for_write` is what separates an error from a miss.** A fragment shader's varying
- * has no address - it is a window into the interpolated block - so asking for its place
- * is perfectly ordinary when reading and is a mistake when assigning. Recording an
- * error either way poisons the whole invocation the first time a shader writes
- * `gl_FragColor = vec4(uv.x, ...)`, which is most of them. */
+ * `for_write` separates an error from a miss: a fragment input has no address, which
+ * is ordinary when reading and an error only when assigning. */
 static exec_place_t place_of_rw(exec_t *e, int32_t node, GLboolean for_write) {
     exec_place_t p = place_none();
     if (node == GLSL_NO_NODE)
@@ -459,14 +411,9 @@ static exec_place_t place_of_rw(exec_t *e, int32_t node, GLboolean for_write) {
             return p;
         }
         p.addr = v->store;
-        /* `exec_comps`, so a struct's place covers the whole struct. `comps_of` answers
-         * 1 for one, which would make `s = t` copy a single component and a member read
-         * past the first look like a read past the end.
-         *
-         * **Times the length for a whole array**, so `v = w` copies all of it - 1.20's
-         * rule. An element's place is not this: `a[k]` is handled above, off the
-         * variable's own store and stride, so widening here reaches only a whole-array
-         * assignment. */
+        /* `exec_comps`, so a struct's place covers the whole struct, times the length
+         * for a whole array so `v = w` copies all of it (1.20). `a[k]` takes its own
+         * path below. */
         p.comps = exec_comps(e, v->type) * ((v->array > 0) ? v->array : 1);
         p.type = v->type;
         return p;
@@ -498,10 +445,8 @@ static exec_place_t place_of_rw(exec_t *e, int32_t node, GLboolean for_write) {
         if (!bp.addr)
             return p;
         if (glsl_type_is_matrix(bp.type)) {
-            /* A `matCxR` has C columns, each R floats long: the bound is the column
-             * count and the stride is the row count. Reading one for the other is
-             * invisible on a square matrix and walks into the next column on a
-             * `mat2x4`. */
+            /* A `matCxR` has C columns of R floats: the bound is the column count and
+             * the stride is the row count. */
             const int cols = glsl_type_matrix_cols(bp.type);
             const int rows = glsl_type_matrix_rows(bp.type);
             if (i < 0 || i >= cols) {
@@ -527,11 +472,8 @@ static exec_place_t place_of_rw(exec_t *e, int32_t node, GLboolean for_write) {
         exec_place_t bp = place_of_rw(e, n->a, for_write);
         if (!bp.addr)
             return p;
-        /* **A struct member is a run, not a map.** Members lie end to end in the order
-         * they were declared - the layout sema fixed - so a member is its base plus its
-         * position, and it is assignable whole. The swizzle machinery below is for
-         * vectors and its `map` has four entries, which a member of any size would not
-         * fit through. */
+        /* A struct member is a run, not a map: members lie end to end in declaration
+         * order, the layout sema fixed. The four-entry swizzle `map` is for vectors. */
         const glsl_struct_member_t *mem = exec_member(e, bp.type, n->text, n->length);
         if (mem) {
             p.addr = bp.addr + mem->offset;
@@ -561,10 +503,8 @@ static exec_place_t place_of_rw(exec_t *e, int32_t node, GLboolean for_write) {
             }
             p.map[k] = bp.swizzled ? bp.map[c] : c;
         }
-        /* **A swizzle that names a component twice is not assignable** - `v.xx = ...`
-         * has two values for one home. GLSL says so, and letting it through would write
-         * whichever came last, which is neither an error nor a defined result. Reading
-         * `v.xx` is perfectly ordinary, so the check is on the writing side only. */
+        /* A swizzle naming a component twice is not assignable (`v.xx = ...`); reading
+         * one is ordinary, so the check is on writes only. */
         if (for_write) {
             for (int a = 0; a < p.comps; a++) {
                 for (int b = a + 1; b < p.comps; b++) {
@@ -592,13 +532,9 @@ static exec_place_t place_of(exec_t *e, int32_t node) {
 static void place_write(exec_t *e, const exec_place_t *p, const exec_val_t *v) {
     if (!p->addr)
         return;
-    /* **`exec_comps`, because `comps_of` reports 1 for a struct** - and a width of 1 is
-     * the broadcast case below, which would copy the struct's first component across
-     * the whole of it. A struct assignment is a straight copy of its components. */
-    /* A whole array carries its own width, because its type is only its element's -
-     * without that, `q = p` on a `vec2[3]` copies the first element and zeroes the
-     * rest, which reads as an assignment that happened and a comparison that then
-     * disagrees. */
+    /* `exec_comps`, because `comps_of` reports 1 for a struct and a width of 1 is the
+     * broadcast case below. A whole array carries its own width, since its type is
+     * only its element's. */
     const int n = (v->count > 0) ? v->count : exec_comps(e, v->type);
     /* A scalar assigned to a wider place broadcasts, which is only reachable through a
      * constructor here; anything else the semantic stage already refused. */
@@ -614,9 +550,8 @@ static exec_val_t place_read(const exec_place_t *p) {
     for (int i = 0; i < p->comps && i < EXEC_MAX_VAL_FLOATS; i++) {
         v.v[i] = p->addr[p->swizzled ? p->map[i] : i];
     }
-    /* **The place knows a width the type cannot state**, which is a whole array's.
-     * Carried on the value so a later write or comparison covers all of it; left at
-     * zero otherwise, so every other value keeps asking its type. */
+    /* The place knows a whole array's width, which the type cannot state; carried on
+     * the value so a later write or comparison covers all of it. */
     v.count = p->comps;
     return v;
 }
@@ -631,11 +566,9 @@ static GLboolean is_name(const glsl_node_t *n, const char *lit) {
 
 /* A sampler argument: which texture unit it names, and which target it reads.
  *
- * **The unit is the value and the target is the type.** `glUniform1i` set the first;
- * the declaration - `sampler2D` against `samplerCube` - decides the second, and the two
- * are independent. The type has to be converted to the GL enumerant the sampler bridge
- * switches on: handing it the front end's own `glsl_type_t` compiles perfectly and
- * matches no case, so every lookup returns opaque black. */
+ * The unit is the value (`glUniform1i`) and the target is the declared type. The type
+ * is converted to the GL enumerant the sampler bridge switches on; a raw `glsl_type_t`
+ * matches no case. */
 static GLenum sampler_type_of(exec_t *e, const exec_val_t *sampler_value, int *unit) {
     (void)e;
     if (unit)
@@ -646,11 +579,9 @@ static GLenum sampler_type_of(exec_t *e, const exec_val_t *sampler_value, int *u
 /* The level of detail for a texture lookup, from how the coordinate changes across the
  * screen.
  *
- * **Taken by re-evaluating the coordinate against the neighbouring blocks**, which is
- * exact for a varying and is the same finite difference the hardware takes for anything
- * else. Without neighbours - a vertex shader, or a fragment shader in a program that
- * needs no derivative - the base level is sampled, which is what a lookup with no
- * derivative means.
+ * Taken by re-evaluating the coordinate against the neighbouring blocks. Without
+ * neighbours (a vertex shader, or a program that needs no derivative) the base level
+ * is sampled.
  */
 static float lookup_lod(exec_t *e, int32_t coord_node, const exec_val_t *centre,
                         int dims, GLuint unit, GLenum sampler_type) {
@@ -726,9 +657,7 @@ static float lookup_lod(exec_t *e, int32_t coord_node, const exec_val_t *centre,
 static exec_val_t derivative(exec_t *e, int32_t arg, int which) {
     const exec_val_t here = eval(e, arg);
     if (!e->has_neighbours || e->which != 0) {
-        /* No neighbour to difference against: zero, which is what a derivative of a
-         * value that does not change across the screen is - and is what the
-         * specification permits an implementation to answer where it cannot do better.
+        /* No neighbour to difference against: zero, which the specification permits.
          */
         exec_val_t z = val_zero(here.type);
         return z;
@@ -840,8 +769,7 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
         return r;
     }
     if (is_name(callee, "step")) {
-        /* **The result is the second argument's shape**, so `step(0.5, v)` is as wide
-         * as v. */
+        /* The result is the second argument's shape: `step(0.5, v)` is as wide as v. */
         exec_val_t r = val_zero(a[1].type);
         const int s0 = (comps_of(a[0].type) == 1);
         for (int i = 0; i < comps_of(a[1].type); i++) {
@@ -892,9 +820,8 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
             sum += a[0].v[i] * a[0].v[i];
         const float len = oops_sqrtf(sum);
         exec_val_t r = val_zero(a[0].type);
-        /* A zero vector normalises to zero rather than to infinities. The specification
-         * leaves it undefined; zero is the answer that does not poison everything
-         * downstream. */
+        /* A zero vector normalises to zero. The specification leaves it undefined;
+         * zero does not propagate infinities downstream. */
         if (len > 0.0f) {
             for (int i = 0; i < n; i++)
                 r.v[i] = a[0].v[i] / len;
@@ -930,9 +857,8 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
             d += a[1].v[i] * a[0].v[i];
         const float k = 1.0f - eta * eta * (1.0f - d * d);
         exec_val_t r = val_zero(a[0].type);
-        /* **Total internal reflection returns the zero vector**, which is the
-         * specification's own wording and not an error - a shader relies on it to
-         * darken a grazing angle. */
+        /* Total internal reflection returns the zero vector, as the specification
+         * defines it. */
         if (k >= 0.0f) {
             const float s = eta * d + oops_sqrtf(k);
             for (int i = 0; i < n; i++)
@@ -947,10 +873,8 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
         return r;
     }
     if (is_name(callee, "transpose")) {
-        /* Column-major throughout, so element (col, row) is `v[col * rows + row]` and
-         * the transpose swaps the two indices - and the shape with them, since `matCxR`
-         * transposes to `matRxC`. The result's stride is therefore the source's column
-         * count. */
+        /* Element (col, row) is `v[col * rows + row]`. `matCxR` transposes to
+         * `matRxC`, so the result's stride is the source's column count. */
         const int cols = glsl_type_matrix_cols(a[0].type);
         const int rows = glsl_type_matrix_rows(a[0].type);
         exec_val_t r = val_zero(glsl_type_matrix_of(rows, cols));
@@ -961,12 +885,8 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
         return r;
     }
     if (is_name(callee, "outerProduct")) {
-        /* **`outerProduct(c, r)` has `c` down the columns and `r` across them**:
-         * element (col, row) is `c[row] * r[col]`. The other way round is the
-         * transpose, which is a different matrix and still draws.
-         *
-         * The two vectors need not be the same width: `outerProduct(vecR, vecC)` is a
-         * `matCxR`. */
+        /* `outerProduct(c, r)` has `c` down the columns and `r` across them: element
+         * (col, row) is `c[row] * r[col]`. `outerProduct(vecR, vecC)` is a `matCxR`. */
         const int rows = comps_of(a[0].type), cols = comps_of(a[1].type);
         exec_val_t r = val_zero(glsl_type_matrix_of(cols, rows));
         for (int c = 0; c < cols; c++) {
@@ -1060,11 +980,9 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
 
     /* --- noise
      * -------------------------------------------------------------------------- */
-    /* **Zero, which is the implementation and not a stand-in for one.** GLSL 1.10
-     * section 8.9 describes a statistical noise and forbids no constant; every desktop
-     * driver has answered zero for as long as they have existed - Mesa's own source
-     * says so at `builtin_functions.cpp:8237` - and GLSL 4.4 made it the specified
-     * behaviour. The argument is evaluated anyway, because it may assign. */
+    /* Noise is zero: GLSL 1.10 section 8.9 permits it, Mesa answers zero
+     * (`builtin_functions.cpp:8237`), and GLSL 4.4 specifies it. The argument is
+     * evaluated anyway, because it may assign. */
     if (is_name(callee, "noise1") || is_name(callee, "noise2") ||
         is_name(callee, "noise3") || is_name(callee, "noise4")) {
         if (first_arg != GLSL_NO_NODE)
@@ -1076,8 +994,8 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
     /* --- ftransform
      * --------------------------------------------------------------------- */
     if (is_name(callee, "ftransform")) {
-        /* The fixed-function transform of `gl_Vertex`, which is what the function is
-         * for: a shader that wants its depth to match a fixed-function pass exactly. */
+        /* The fixed-function transform of `gl_Vertex`, so depth matches a
+         * fixed-function pass exactly. */
         exec_var_t *gv = lookup(e, "gl_Vertex", 9u);
         exec_val_t r = val_zero(GLSL_TYPE_VEC4);
         if (gv && gv->store && e->ctx) {
@@ -1153,12 +1071,9 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
             const GLenum stype = sampler_type_of(e, &a[0], &unit);
             const GLboolean shadow = (GLboolean)(stype == GL_SAMPLER_1D_SHADOW ||
                                                  stype == GL_SAMPLER_2D_SHADOW);
-            /* **A projective lookup divides by the coordinate's last component**, and
-             * which component that is depends on the form rather than on the vector's
-             * width: `texture2DProj(s, vec4)` divides by w and ignores z, where
-             * `texture2DProj(s, vec3)` divides by z. Taking "the last component of what
-             * was passed" is right for both only because the specification defines the
-             * vec4 form that way. */
+            /* A projective lookup divides by the last component passed:
+             * `texture2DProj(s, vec4)` divides by w and ignores z, `texture2DProj(s,
+             * vec3)` divides by z. */
             float coord[4] = {a[1].v[0], a[1].v[1], a[1].v[2], a[1].v[3]};
             if (proj) {
                 const int w_index = comps_of(a[1].type) - 1;
@@ -1183,8 +1098,8 @@ static exec_val_t call_builtin(exec_t *e, const glsl_node_t *callee, int32_t fir
                 lod = (argc >= 3) ? a[2].v[0] : 0.0f;
             } else {
                 lod = lookup_lod(e, anode[1], &a[1], dims, (GLuint)unit, stype);
-                /* GLSL's optional third argument is a **bias on** the computed level,
-                 * not the level itself. */
+                /* GLSL's optional third argument is a bias on the computed level, not
+                 * the level itself. */
                 if (argc >= 3 && lod > -999.0f)
                     lod += a[2].v[0];
             }
@@ -1225,9 +1140,8 @@ static exec_val_t call_user(exec_t *e, int32_t fn, int32_t first_arg) {
         return val_zero(GLSL_TYPE_VOID);
     }
 
-    /* **The arguments are evaluated in the caller's scope, before the parameters
-     * exist.** An argument that names the same identifier as a parameter must see the
-     * caller's, which is what evaluating first and binding afterwards gives. */
+    /* Arguments are evaluated in the caller's scope before the parameters exist, so an
+     * argument naming the same identifier as a parameter sees the caller's. */
     exec_val_t argv[GLSL_MAX_PARAMS];
     exec_place_t argp[GLSL_MAX_PARAMS];
     int32_t argn[GLSL_MAX_PARAMS];
@@ -1241,28 +1155,20 @@ static exec_val_t call_user(exec_t *e, int32_t fn, int32_t first_arg) {
     }
 
     scope_push(e);
-    /* Bind each parameter. An `out` parameter starts undefined and an `inout` starts as
-     * the argument; both are copied back on return, which is how GLSL passes them - by
-     * value and back again, never by reference. */
+    /* An `out` parameter starts undefined and an `inout` starts as the argument; both
+     * are copied back on return. GLSL never passes by reference. */
     int pi = 0;
     for (int32_t p = f->b; p != GLSL_NO_NODE && pi < argc;
          p = ast->nodes[p].sibling, pi++) {
         const glsl_node_t *pn = &ast->nodes[p];
         if (pn->length == 0u)
             continue;
-        /* **`exec_node_type`, or a struct parameter is not a type at all.** A struct
-         * names its type with an identifier, and `glsl_type_from_token` answers ERROR
-         * for one; `declare` then refuses it and this loop breaks, which abandons the
-         * call and with it the rest of the shader. The symptom is a fragment shader
-         * that draws nothing rather than one that draws the wrong colour - so it is
-         * only visible against a known background. */
+        /* `exec_node_type`, because a struct parameter names its type with an
+         * identifier, for which `glsl_type_from_token` answers ERROR. */
         const glsl_type_t pt = exec_node_type(e, pn);
-        /* **An array parameter is a run and not a value** (1.10, 6.1). The semantic
-         * pass folded its length into the tree, so this reads a number. It cannot come
-         * through `argv`: an `exec_val_t` holds one value's worth of floats and an
-         * array is as long as it is, so the copy is store to store - which is also what
-         * makes it a *copy*, so a body that writes `w[0]` leaves the caller's array
-         * alone the way every other parameter does. */
+        /* An array parameter is a run, not a value (1.10, 6.1). Sema folded its length
+         * into the tree. It is copied store to store, since an `exec_val_t` may be too
+         * narrow, and a copy leaves the caller's array alone. */
         int psize = 0;
         if (pn->array_size != GLSL_NO_NODE) {
             const glsl_node_t *sz = &ast->nodes[pn->array_size];
@@ -1359,11 +1265,9 @@ static exec_val_t construct(exec_t *e, glsl_type_t target, int32_t first_arg) {
 
     if (n == 0)
         return r;
-    /* **One scalar fills.** For a vector it broadcasts; for a matrix it is the
-     * diagonal, and the off-diagonal stays zero - `mat4(1.0)` is the identity and not a
-     * matrix of ones, which is the constructor people get wrong. A non-square matrix's
-     * diagonal runs out at the shorter side, so `mat2x4(1.0)` has two entries on it and
-     * six zeroes. */
+    /* One scalar fills: a vector broadcasts it, a matrix puts it on the diagonal
+     * (`mat4(1.0)` is the identity). A non-square diagonal stops at the shorter side.
+     */
     if (args == 1 && n == 1) {
         if (mcols > 0) {
             const int diag = (mcols < mrows) ? mcols : mrows;
@@ -1399,21 +1303,16 @@ static exec_val_t arith(exec_t *e, glsl_token_type_t op, const exec_val_t *l,
     const int lc = comps_of(l->type), rc = comps_of(rr->type);
 
     if (op == GLSL_TOK_STAR) {
-        /* **`mat * vec` is a linear transform, `vec * mat` is the other one, and `mat *
-         * mat` is a matrix product.** Only `mat * scalar` and the component-wise cases
-         * fall through. */
-        /* Every index below is an element `(col, row)` at `col * rows + row`, with the
-         * *rows* of whichever matrix it belongs to. On a square matrix the two counts
-         * coincide and the distinction is invisible; off it, using the wrong one
-         * addresses another column. */
+        /* `mat * vec`, `vec * mat` and `mat * mat` are linear algebra; only `mat *
+         * scalar` and the component-wise cases fall through. Element (col, row) is at
+         * `col * rows + row`, with the rows of the matrix it belongs to. */
         const int lcols = glsl_type_matrix_cols(l->type);
         const int lrows = glsl_type_matrix_rows(l->type);
         const int rcols = glsl_type_matrix_cols(rr->type);
         const int rrows = glsl_type_matrix_rows(rr->type);
         if (lcols > 0 && rcols > 0) {
             /* `matCxR * matPxC -> matPxR`: the sum runs over the left's columns, which
-             * are the right's rows, and the result takes its columns from the right and
-             * rows from the left. */
+             * are the right's rows. */
             for (int c = 0; c < rcols; c++) {
                 for (int row = 0; row < lrows; row++) {
                     float s = 0.0f;
@@ -1435,11 +1334,8 @@ static exec_val_t arith(exec_t *e, glsl_token_type_t op, const exec_val_t *l,
             return out;
         }
         if (rcols > 0 && lc == rrows) {
-            /* The row vector times the matrix, which is the transpose's product - and
-             * is why `v * m` and `m * v` are different answers rather than a
-             * convenience. `vecR * matCxR -> vecC`: the vector matches the rows and the
-             * result has one entry per column, the opposite way round from the case
-             * above. */
+            /* A row vector times the matrix, the transpose's product: `vecR * matCxR
+             * -> vecC`. */
             for (int c = 0; c < rcols; c++) {
                 float s = 0.0f;
                 for (int k = 0; k < rrows; k++)
@@ -1480,12 +1376,8 @@ static exec_val_t arith(exec_t *e, glsl_token_type_t op, const exec_val_t *l,
     return out;
 }
 
-/* **`exec_comps`, because `comps_of` answers 1 for a struct** - its width lives in the
- * semantic table beside the type and not in the type. With `comps_of` here, `p == q` on
- * two structs compared the first component and stopped, so two structs differing in any
- * later member were equal. Nothing in a port corpus compares structs, so the only thing
- * that found it was a shader written against the specification: GLSL 1.10 section 5.9
- * gives `==` to every type but an array, which includes a struct. */
+/* `exec_comps`, because `comps_of` answers 1 for a struct, and GLSL 1.10 section 5.9
+ * gives `==` to structs. */
 static GLboolean vals_equal(const exec_t *e, const exec_val_t *a, const exec_val_t *b) {
     /* A whole array carries its own width, because its type is only its element's. */
     const int n = (a->count > 0) ? a->count : exec_comps(e, a->type);
@@ -1520,10 +1412,8 @@ static exec_val_t eval(exec_t *e, int32_t node) {
     case GLSL_NODE_IDENTIFIER: {
         exec_var_t *v = lookup(e, n->text, n->length);
         if (!v) {
-            /* **A built-in constant is a number** (7.4), not a variable with storage -
-             * and its value is the constant the matching `glGetIntegerv` answers with,
-             * so this path and the API cannot say different things. Asked after the
-             * lookup, so a shader that shadows one gets its own. */
+            /* A built-in constant is a number (7.4), the same one `glGetIntegerv`
+             * answers. Asked after the lookup, so a shader may shadow one. */
             int bi = 0;
             if (glsl_builtin_const_int(n->text, n->length, &bi)) {
                 exec_val_t c = val_zero(GLSL_TYPE_INT);
@@ -1543,14 +1433,9 @@ static exec_val_t eval(exec_t *e, int32_t node) {
             return out;
         }
         if (v->store) {
-            /* `exec_comps` rather than `comps_of`, so reading a struct variable copies
-             * the whole of it and not the one component a non-struct type would report.
-             *
-             * **And times the length for a whole array**, which GLSL 1.20's `=` and
-             * `==` need. `a[k]` never comes through here - the index path takes the
-             * variable's own store and stride - so a value this wide only reaches a
-             * rule that wants the run. It carries its own `count` because its type is
-             * its element's. */
+            /* `exec_comps`, so a struct is read whole, times the length for a whole
+             * array, which GLSL 1.20's `=` and `==` need. An array value carries its
+             * own `count` because its type is its element's. */
             const int n_comp = exec_comps(e, v->type) * ((v->array > 0) ? v->array : 1);
             if (n_comp > EXEC_MAX_VAL_FLOATS) {
                 fail(e, "this array is wider than a value this interpreter carries");
@@ -1566,10 +1451,8 @@ static exec_val_t eval(exec_t *e, int32_t node) {
 
     case GLSL_NODE_FIELD:
     case GLSL_NODE_INDEX: {
-        /* **`gl_TexCoord[0]` in a fragment shader**, and any other array-typed input:
-         * it has no address, so the element is read straight out of the interpolated
-         * block. Taken before the place below, which would find nothing and fall
-         * through to evaluating an operand that is a whole array. */
+        /* An array-typed fragment input such as `gl_TexCoord[0]` has no address, so
+         * the element is read straight out of the interpolated block. */
         if (n->kind == GLSL_NODE_INDEX) {
             const glsl_node_t *base = &ast->nodes[n->a];
             if (base->kind == GLSL_NODE_IDENTIFIER) {
@@ -1593,8 +1476,8 @@ static exec_val_t eval(exec_t *e, int32_t node) {
                 }
             }
         }
-        /* Reading through a place, so a swizzle and an index are one piece of code for
-         * both directions and cannot disagree about which component they mean. */
+        /* Reading through a place, so reads and writes agree on which component a
+         * swizzle or index means. */
         const exec_place_t p = place_of_rw(e, node, GL_FALSE);
         if (p.addr)
             return place_read(&p);
@@ -1679,9 +1562,7 @@ static exec_val_t eval(exec_t *e, int32_t node) {
     }
 
     case GLSL_NODE_BINARY: {
-        /* **`&&` and `||` do not evaluate their right operand when the left decides
-         * it**, which GLSL requires (1.10, 5.9) and which a shader relies on to guard a
-         * divide. */
+        /* `&&` and `||` short-circuit (1.10, 5.9). */
         if (n->op == GLSL_TOK_AND_AND) {
             const exec_val_t l = eval(e, n->a);
             if (l.v[0] == 0.0f)
@@ -1716,14 +1597,10 @@ static exec_val_t eval(exec_t *e, int32_t node) {
         default:
             break;
         }
-        /* The result's shape: the matrix's if one is a matrix and the other a scalar,
-         * the vector's if one is a vector, and for a transform a vector of the matrix's
-         * *other* side - `matCxR * vecC` is a `vecR` and `vecR * matCxR` is a `vecC`.
-         * The semantic stage decided this already; recomputing it here from the values
-         * is what keeps this file able to run without one.
-         *
-         * A matrix-times-matrix result takes its columns from the right operand and its
-         * rows from the left, so it is only the left's own type while both are square.
+        /* The result's shape, recomputed from the values so a unit that never went
+         * through sema still runs: `matCxR * vecC` is a `vecR`, `vecR * matCxR` a
+         * `vecC`, and a matrix product takes columns from the right, rows from the
+         * left.
          */
         glsl_type_t rt = l.type;
         const int lcols = glsl_type_matrix_cols(l.type);
@@ -1741,14 +1618,9 @@ static exec_val_t eval(exec_t *e, int32_t node) {
         } else if (comps_of(l.type) == 1 && comps_of(r.type) > 1) {
             rt = r.type;
         }
-        /* **A float operand makes an integer result a float** - GLSL 1.20's implicit
-         * conversion, arriving at the value. Taking the left operand's type regardless
-         * would make `2 * 0.5` an int, and `arith` truncates an integer result, so the
-         * answer would be 1. The semantic stage has already refused the mixture in
-         * a 1.10 shader, so this only fires where the conversion is legal.
-         *
-         * Guarded on the result being integer-based, which a matrix and a transform's
-         * vector never are - so neither is disturbed. */
+        /* A float operand makes an integer result a float (GLSL 1.20's implicit
+         * conversion), so `2 * 0.5` is not truncated. Sema refuses the mixture in 1.10.
+         */
         if (glsl_type_base(rt) == GLSL_TYPE_INT &&
             (glsl_type_base(l.type) == GLSL_TYPE_FLOAT ||
              glsl_type_base(r.type) == GLSL_TYPE_FLOAT)) {
@@ -1809,12 +1681,8 @@ static exec_val_t eval(exec_t *e, int32_t node) {
             {"mat2", GLSL_TYPE_MAT2},
             {"mat3", GLSL_TYPE_MAT3},
             {"mat4", GLSL_TYPE_MAT4},
-            /* 1.20's non-square matrices, and the long spellings of the square ones,
-             * which are the same three types under a second name. There is a table like
-             * this in the semantic stage and another in the generator, and a name
-             * missing from only this one type-checks, compiles for the console, and
-             * then reports "a call to a function with no body" the first time the
-             * software path draws it. */
+            /* 1.20's non-square matrices and the long spellings of the square ones.
+             * Sema and the generator keep matching tables; all three must agree. */
             {"mat2x2", GLSL_TYPE_MAT2},
             {"mat3x3", GLSL_TYPE_MAT3},
             {"mat4x4", GLSL_TYPE_MAT4},
@@ -1830,10 +1698,8 @@ static exec_val_t eval(exec_t *e, int32_t node) {
                 return construct(e, ctors[i].type, n->b);
         }
 
-        /* **A struct constructor lays its arguments out end to end**, which is the
-         * layout itself: one argument per member, each written at that member's
-         * position. Sema has already checked the count and the types, so this only has
-         * to copy. */
+        /* A struct constructor writes one argument per member at that member's
+         * position; sema has checked the count and the types. */
         {
             const glsl_type_t st_type =
                 exec_struct_by_name(e, callee->text, callee->length);
@@ -1861,11 +1727,9 @@ static exec_val_t eval(exec_t *e, int32_t node) {
         const exec_val_t bi = call_builtin(e, callee, n->b, &handled);
         if (handled)
             return bi;
-        /* **The overload the semantic pass chose**, when it chose one. A name is not
-         * enough once two functions share it, and this interpreter has no argument
-         * types to choose with - it has values. Falling back to the name keeps a unit
-         * that was never through `glsl_check_unit` working, which is how `glsl_ps.c`
-         * builds its own. */
+        /* The overload sema chose, since this interpreter has values, not argument
+         * types. The name lookup serves units that never went through
+         * `glsl_check_unit`, such as `glsl_ps.c`'s. */
         const int32_t fn = (n->resolved != GLSL_NO_NODE)
                                ? n->resolved
                                : find_function(e, callee->text, callee->length);
@@ -1920,12 +1784,8 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
             const glsl_node_t *sz = &ast->nodes[n->array_size];
             elements = (sz->kind == GLSL_NODE_INTCONST) ? (int)sz->value : 0;
         }
-        /* **An array with an initialiser is GLSL 1.20's array constructor**, and its
-         * arguments fill the run one element each. Taken before the scalar path below,
-         * whose `init` holds one value's worth of floats and could not carry an array
-         * however long
-         * - the same reason the compiled path copies argument by argument rather than
-         * through a value. */
+        /* An array with an initialiser is GLSL 1.20's array constructor; its arguments
+         * fill the run one element each, since `init` below holds only one value. */
         if (elements > 0 && n->a != GLSL_NO_NODE) {
             glsl_type_t ael = GLSL_TYPE_ERROR;
             int acount = 0;
@@ -1952,17 +1812,15 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
             }
             return (GLboolean)(e->error == (const char *)0);
         }
-        /* **The initialiser is evaluated before the name exists**, so `float x = x;`
-         * reads an outer `x` or fails, rather than reading itself. */
+        /* The initialiser is evaluated before the name exists, so `float x = x;` reads
+         * an outer `x` or fails. */
         exec_val_t init = val_zero(t);
         const GLboolean has_init = (GLboolean)(n->a != GLSL_NO_NODE);
         if (has_init)
             init = eval(e, n->a);
         float *store = declare(e, n->text, n->length, t, elements);
         if (store && has_init) {
-            /* `exec_comps`, or a struct initialiser copies its first component and
-             * leaves the rest zero - which reads as a shader that ran and drew the
-             * wrong colour. */
+            /* `exec_comps`, so a struct initialiser copies every component. */
             const int n_comp = exec_comps(e, t);
             for (int i = 0; i < n_comp && i < EXEC_MAX_VAL_FLOATS; i++)
                 store[i] = init.v[i];
@@ -2018,9 +1876,8 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
         return (GLboolean)(e->error == (const char *)0);
 
     case GLSL_NODE_FOR:
-        /* **The initialiser's scope is the loop's**, so `for (int i = 0; ...)` declares
-         * an `i` that ends with the loop - which is why the scope opens here and not
-         * inside the body. */
+        /* The initialiser's scope is the loop's, so `for (int i = 0; ...)` declares an
+         * `i` that ends with the loop. */
         scope_push(e);
         if (n->a != GLSL_NO_NODE)
             exec_stmt(e, n->a);
@@ -2039,8 +1896,7 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
                 e->flow = FLOW_NORMAL;
             if (e->flow != FLOW_NORMAL || e->error)
                 break;
-            /* **`continue` still runs the increment**, which is what makes a `for` loop
-             * with one terminate. */
+            /* `continue` still runs the increment. */
             if (n->c != GLSL_NO_NODE)
                 (void)eval(e, n->c);
         }
@@ -2062,9 +1918,8 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
         return GL_TRUE;
 
     case GLSL_NODE_DISCARD:
-        /* **`discard` ends the fragment, not the function.** It unwinds through every
-         * call and the fragment writes nothing at all - no colour, no depth, no
-         * stencil. */
+        /* `discard` ends the fragment, not the function: it unwinds through every call
+         * and the fragment writes no colour, depth or stencil. */
         e->flow = FLOW_DISCARD;
         return GL_TRUE;
 
@@ -2076,20 +1931,12 @@ static GLboolean exec_stmt(exec_t *e, int32_t node) {
 }
 
 /*
- * **The shader's own globals** - `const float pi = 3.14159265;` and the plain ones
- * GLSL 1.10 also allows, which a real shader opens with and which nothing else here
- * binds.
+ * The shader's own unqualified globals, such as `const float pi = 3.14159265;`. They
+ * run through the local-declaration arm in source order, so one may use an earlier
+ * one, and into the global scope before `main`'s, so a local may shadow one.
  *
- * They are declarations that happen to sit outside `main`, so they run through the same
- * arm that runs a local, **in source order** - which is what lets one be written in
- * terms of an earlier one. Run into the global scope, before `main`'s own is pushed, so
- * a local may shadow one and an assignment inside `main` reaches the global rather than
- * a copy.
- *
- * The qualified declarations are skipped because each already has a binding: an
- * attribute from the vertex array, a varying from the interpolated block, a uniform
- * from the program's value pool. Running one here would overwrite what was bound with
- * its initialiser, or with zero.
+ * Attributes, varyings and uniforms are skipped: each is already bound, and running
+ * its declaration would overwrite the binding.
  */
 static void declare_shader_globals(exec_t *e, const glsl_unit_t *u) {
     if (!u || u->root == GLSL_NO_NODE)
@@ -2139,10 +1986,8 @@ static void bind_builtin_uniforms(exec_t *e) {
         set_mat4(p, &ctx->mvp);
     }
     if ((p = declare(e, "gl_NormalMatrix", 15u, GLSL_TYPE_MAT3, 0))) {
-        /* **The context keeps the normal matrix row-major**, as three rows of three,
-         * and GLSL reads a `mat3` column-major. The transpose here is the whole
-         * difference between a normal that points out of the surface and one that does
-         * not under a non-uniform scale. */
+        /* The context keeps the normal matrix row-major and GLSL reads a `mat3`
+         * column-major, so it is transposed here. */
         for (int col = 0; col < 3; col++) {
             for (int row = 0; row < 3; row++)
                 p[col * 3 + row] = ctx->normal_matrix[row * 3 + col];
@@ -2164,9 +2009,8 @@ static void bind_program_uniforms(exec_t *e) {
         return;
     for (int i = 0; i < prog->uniform_count; i++) {
         const gl_uniform_t *u = &prog->uniforms[i];
-        /* The declared front-end type, recovered from the GL enumerant the table holds.
-         * A sampler keeps its enumerant in the value's `type`, which is how a texture
-         * lookup learns which target to read - see `sampler_type_of`. */
+        /* The declared front-end type, recovered from the table's GL enumerant. A
+         * sampler's type tells a lookup which target to read; see `sampler_type_of`. */
         glsl_type_t t = GLSL_TYPE_FLOAT;
         switch (u->type) {
         case GL_FLOAT:
@@ -2267,13 +2111,9 @@ static void bind_program_uniforms(exec_t *e) {
  * The vertex stage
  * ------------------------------------------------------------------------- */
 
-/* The shader's own `attribute` variables, from the slot each one was given at link
- * time.
- *
- * **The values come off the vertex, not out of the context.** The vertex fetch filled
- * them - from the array where the slot's array is enabled, from `glVertexAttrib`'s
- * current value where it is not - and it did so for every vertex before any of them
- * reached here. */
+/* The shader's own `attribute` variables, from the slot each was given at link time.
+ * The values come off the vertex, which the vertex fetch filled from the enabled array
+ * or from `glVertexAttrib`'s current value. */
 static void bind_generic_attributes(exec_t *e, const gl_vertex_t *vtx) {
     const glsl_ast_t *ast = &e->unit->ast;
     gl_program_object_t *prog = e->prog;
@@ -2363,7 +2203,7 @@ static void bind_fixed_attributes(exec_t *e, const gl_vertex_t *v) {
                 p[k] = v->tc[u][k];
         } else {
             /* A unit this implementation does not have reads as the attribute's
-             * default, (0, 0, 0, 1), rather than as whatever was next in memory. */
+             * default, (0, 0, 0, 1). */
             p[0] = 0.0f;
             p[1] = 0.0f;
             p[2] = 0.0f;
@@ -2407,9 +2247,8 @@ GLboolean gl_shader_run_vertex(gl_context_t *ctx, gl_program_object_t *p,
         bind_fixed_attributes(e, ff);
     bind_generic_attributes(e, ff);
 
-    /* The outputs. `gl_Position` starts at (0, 0, 0, 1) so a shader that writes only
-     * `.xyz` still has a usable w - which the linker has already required it to write.
-     */
+    /* `gl_Position` starts at (0, 0, 0, 1) so a shader that writes only `.xyz` still
+     * has a usable w. */
     float *pos = declare(e, "gl_Position", 11u, GLSL_TYPE_VEC4, 0);
     if (pos)
         pos[3] = 1.0f;
@@ -2472,11 +2311,8 @@ GLboolean gl_shader_run_vertex(gl_context_t *ctx, gl_program_object_t *p,
         for (int i = 0; i < 4; i++)
             out->position[i] = pos ? pos[i] : 0.0f;
         out->point_size = psize ? psize[0] : ctx->point_size;
-        /* **A `gl_ClipVertex` still all zeros is one the shader never wrote.** There is
-         * no write flag on a variable here, and the all-zero vector is not a position
-         * any shader means - it is the origin with w = 0, which every clip plane
-         * reports as exactly on itself. The alternative, clipping against zeros, would
-         * cut geometry away from a program that never asked for user clipping at all.
+        /* A `gl_ClipVertex` still all zeros is one the shader never wrote: variables
+         * have no write flag, and the origin with w = 0 is no position a shader means.
          */
         out->wrote_clip_vertex = GL_FALSE;
         for (int i = 0; i < 4; i++) {
@@ -2486,11 +2322,9 @@ GLboolean gl_shader_run_vertex(gl_context_t *ctx, gl_program_object_t *p,
         }
         for (int i = 0; i < GL_SHADER_VARY_FLOATS; i++)
             out->vary[i] = 0.0f;
-        /* **`gl_FrontColor` is what the fragment stage reads as `gl_Color`.** The back
-         * colour is written and dropped: two-sided colouring would need the rasteriser
-         * to choose between them per primitive, and it does not - so a shader relying
-         * on it would get the front one either way, which this says rather than
-         * implies. */
+        /* `gl_FrontColor` is what the fragment stage reads as `gl_Color`. The back
+         * colours are written and dropped: the rasteriser does not choose a side per
+         * primitive. */
         if (front)
             for (int i = 0; i < 4; i++)
                 out->vary[GL_SHADER_VARY_COLOR + i] = front[i];
@@ -2506,22 +2340,11 @@ GLboolean gl_shader_run_vertex(gl_context_t *ctx, gl_program_object_t *p,
         }
         if (fogf)
             out->vary[GL_SHADER_VARY_FOG] = fogf[0];
-        /*
-         * **The point sprite's coordinate outlives the vertex shader** (since
-         * 2026-09-23).
-         *
-         * `gl_PointCoord` is texture coordinate 0's interpolant, and the point
-         * expansion writes the sprite coordinate into the corner's `tc[0]` before this
-         * runs - but a program with a vertex shader fills this block from what that
-         * shader *wrote*, and a vertex shader has no `gl_PointCoord` to write. Without
-         * this the coordinate is dropped between the expansion and the fragment stage
-         * and every fragment reads (0, 0), which is precisely the silent lie the
-         * refusal this replaced was guarding against.
-         *
-         * Only s and t, and only when the fragment stage reads the name - the link
-         * refuses a program that reads `gl_TexCoord` as well, so nothing else can want
-         * this slot.
-         */
+        /* The point sprite's coordinate outlives the vertex shader. The point expansion
+         * writes it into the corner's `tc[0]`, and `gl_PointCoord` reads texture
+         * coordinate 0's interpolant, which a vertex shader cannot write. Only s and t,
+         * and only when the fragment stage reads `gl_PointCoord`; the link refuses a
+         * program that also reads `gl_TexCoord`. */
         if (p->hw_reads_point_coord && ff) {
             out->vary[GL_SHADER_VARY_TEXCOORD + 0] = ff->tc[0][0];
             out->vary[GL_SHADER_VARY_TEXCOORD + 1] = ff->tc[0][1];
@@ -2588,13 +2411,10 @@ GLboolean gl_shader_run_fragment(gl_context_t *ctx, gl_program_object_t *p,
     declare_vary_in(e, "gl_TexCoord", GLSL_TYPE_VEC4, OOPS_GL_MAX_TEXTURE_UNITS,
                     GL_SHADER_VARY_TEXCOORD);
     declare_vary_in(e, "gl_FogFragCoord", GLSL_TYPE_FLOAT, 0, GL_SHADER_VARY_FOG);
-    /* **`gl_PointCoord` is the s and t of texture coordinate 0**, which is where the
-     * point expansion puts the sprite coordinate - the same slot `GL_COORD_REPLACE`
-     * fills for the fixed-function path, and the same substitution the part performs
-     * with `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`. A vec2 window onto the block, so its
-     * derivative works like any other varying's. The link refuses a shader that reads
-     * this and `gl_TexCoord[0]` both, so the two can never disagree about what the slot
-     * holds. */
+    /* `gl_PointCoord` is the s and t of texture coordinate 0, where the point expansion
+     * puts the sprite coordinate: the slot `GL_COORD_REPLACE` fills, and the hardware's
+     * `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX` substitution. The link refuses a shader that
+     * reads both this and `gl_TexCoord[0]`. */
     declare_vary_in(e, "gl_PointCoord", GLSL_TYPE_VEC2, 0, GL_SHADER_VARY_TEXCOORD);
     {
         const glsl_ast_t *ast = &p->fs->ast;
@@ -2625,9 +2445,8 @@ GLboolean gl_shader_run_fragment(gl_context_t *ctx, gl_program_object_t *p,
         }
     }
 
-    /* `gl_FragCoord` is not interpolated through the block - it is the window position
-     * - so its three values come across directly and a derivative of it picks whichever
-     * `which` says. */
+    /* `gl_FragCoord` is the window position, not an interpolant, so it is copied in
+     * directly. */
     float *fc = declare(e, "gl_FragCoord", 12u, GLSL_TYPE_VEC4, 0);
     if (fc)
         for (int i = 0; i < 4; i++)
@@ -2698,9 +2517,8 @@ GLboolean gl_shader_needs_derivatives(const gl_program_object_t *p) {
         const glsl_node_t *n = &ast->nodes[i];
         if (n->kind != GLSL_NODE_IDENTIFIER)
             continue;
-        /* Any name that could be a derivative-taking built-in. A shader with a variable
-         * of the same name costs two extra evaluations and nothing else, which is the
-         * right way round: missing one would cost the wrong level of detail. */
+        /* Any name that could be a derivative-taking built-in. A false positive costs
+         * two extra evaluations; a miss would cost the wrong level of detail. */
         if (name_eq(n->text, n->length, "dFdx", 4u) ||
             name_eq(n->text, n->length, "dFdy", 4u) ||
             name_eq(n->text, n->length, "fwidth", 6u)) {

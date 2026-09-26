@@ -1,3 +1,12 @@
+/*
+ * The DOM subset a page's scripts see: `document`, `window` and an `Element` class
+ * over litehtml elements.
+ *
+ * Each wrap of a litehtml element creates a new JS object that owns its own listener
+ * list; the wrapper holds a shared pointer to the element, so the element stays alive
+ * while a script still references it. A mutation marks the webview's layout dirty.
+ */
+
 #include "dom_bridge.hpp"
 #include "webview_impl.hpp"
 #include "html_container.hpp"
@@ -326,7 +335,7 @@ static JSValue js_element_get_style(JSContext *ctx, JSValueConst this_val) {
         return JS_UNDEFINED;
 
     JSValue style_obj = JS_NewObject(ctx);
-    // Bind basic style helper properties
+    // An empty object: writes to it do not reach the element's style.
     return style_obj;
 }
 

@@ -4,6 +4,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/* Integration test: BSD sockets over the host loopback interface. */
+
+/* A payload sent over a loopback TCP connection arrives intact. */
 static void test_loopback_socket_communication(void) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(server_fd >= 0);
@@ -15,7 +18,7 @@ static void test_loopback_socket_communication(void) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0; /* Let OS pick port */
+    addr.sin_port = 0; /* the OS picks the port */
 
     int rc = bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
     ASSERT_EQ(rc, 0);
@@ -28,7 +31,6 @@ static void test_loopback_socket_communication(void) {
     rc = listen(server_fd, 1);
     ASSERT_EQ(rc, 0);
 
-    /* Client socket connect */
     int client_fd = socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(client_fd >= 0);
 
@@ -41,11 +43,9 @@ static void test_loopback_socket_communication(void) {
     rc = connect(client_fd, (struct sockaddr *)&client_target, sizeof(client_target));
     ASSERT_EQ(rc, 0);
 
-    /* Accept on server */
     int conn_fd = accept(server_fd, NULL, NULL);
     ASSERT_TRUE(conn_fd >= 0);
 
-    /* Send / Recv */
     const char *msg = "OOPS-SDK Loopback Test Payload 2026";
     size_t msg_len = strlen(msg) + 1;
     ssize_t sent = send(client_fd, msg, msg_len, 0);

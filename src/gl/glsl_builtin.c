@@ -2,40 +2,17 @@
  * oops-gl: GLSL 1.10's built-in library
  *
  * `sin`, `dot`, `texture2D` and the sixty-odd others the language provides, and the
- * `gl_` variables a shader may read and write without declaring them.
+ * `gl_` variables and constants a shader may use without declaring them.
  *
- * # Why these are not in the symbol table
+ * Every arithmetic built-in is overloaded over genType, and `glsl_symbol_t` holds one
+ * signature per name, so built-ins are resolved by rule - a table of names against the
+ * shape of their signature - ahead of the symbol table, as constructors are. The rules
+ * keep the specification's asymmetries (GLSL 1.10, section 8): `min(genType, float)` is
+ * legal and `min(float, genType)` is not, `step(float, genType)` is legal, and
+ * `smoothstep` takes both edges as scalars or neither.
  *
- * Every arithmetic built-in is overloaded over **genType** - `sin` takes a `float`, a
- * `vec2`, a `vec3` or a `vec4` and gives the same type back - and `glsl_symbol_t` holds
- * one signature per name. Entering four symbols per function would work and would say
- * `sin` is four unrelated functions, which is not what the specification says and not
- * what a diagnostic should tell an author. So they are resolved by **rule**: a small
- * table of names against the shape of their signature, matched ahead of the symbol
- * table exactly as constructors already are.
- *
- * The rules are the specification's own (GLSL 1.10, section 8), and the asymmetries in
- * them are deliberate rather than tidied:
- *
- *   - `min(genType, float)` is legal and `min(float, genType)` is not. The second
- * argument may be a scalar; the first may not. The same for `max`, `mod` and `clamp`.
- *   - `mix(genType, genType, float)` is legal; `step(float, genType)` is legal, which
- * is the other way round from `min`, because `step`'s *edge* is the argument that may
- * be scalar.
- *   - `smoothstep(float, float, genType)` takes **both** edges as scalars or neither.
- *
- * Writing "a scalar is allowed anywhere" instead would accept shaders that fail on
- * every other implementation, which is the worse failure: it is found by somebody else,
- * later, on hardware.
- *
- * # What is refused, and why by name
- *
- * GLSL 1.10's built-in *uniform structures* - `gl_LightSource[]`, `gl_FrontMaterial`,
- * `gl_Fog`, `gl_DepthRange` - are not here, because this front end has no struct type.
- * They are refused with their own names rather than left to fail as "undeclared
- * identifier", so an author is told what is missing instead of doubting their spelling.
- * The same for `noise1` and friends, which the specification permits to return zero and
- * which nothing should rely on.
+ * The built-in uniform structures (`gl_LightSource[]`, `gl_Fog`, ...) are refused by
+ * name, since this front end has no struct type; see `glsl_builtin_refusal`.
  */
 
 #include "glsl_internal.h"
@@ -92,22 +69,11 @@ typedef enum {
     BI_NOT,          /* (bvecN) -> bvecN */
     BI_TEXTURE,      /* (sampler, coord [, bias]) -> vec4 */
     BI_FTRANSFORM,   /* () -> vec4 */
-    /*
-     * **The noise functions, which return zero** - `(genType) -> float|vec2|vec3|vec4`,
-     * the width fixed by the name rather than by the argument.
-     *
-     * GLSL 1.10 section 8.9 describes them as returning a statistical noise, and says
-     * nothing that forbids a constant. Every desktop driver has answered zero for as
-     * long as they have existed - Mesa says so in its own source,
-     * `builtin_functions.cpp:8237`, "Mesa has always returned 0 for noise on most
-     * drivers" - and GLSL 4.4 made that the specified behaviour.
-     *
-     * So this is the implementation, not a stub standing in for one. A shader calling
-     * `noise1` gets what it would get on a desktop.
-     */
+    /* The noise functions, which return zero: `(genType) -> float|vec2|vec3|vec4`, the
+     * width fixed by the name. GLSL 1.10 section 8.9 does not forbid a constant, Mesa
+     * returns 0 (`builtin_functions.cpp:8237`), and GLSL 4.4 specifies it. */
     BI_NOISE,
-    BI_REFUSED /* a name that is a built-in and is not implemented - see the file
-                  comment */
+    BI_REFUSED /* a name that is a built-in and is not implemented */
 } bi_rule_t;
 
 typedef struct {
@@ -119,7 +85,7 @@ typedef struct {
     int coord;
     /* Which stage may call it. 0 for either; GL_VERTEX_SHADER or GL_FRAGMENT_SHADER for
      * one. `dFdx` in a vertex shader and `texture2DLod` in a fragment shader are both
-     * errors the specification names, and both are silently useful-looking mistakes. */
+     * errors the specification names. */
     GLenum stage;
     /* BI_REFUSED only: what to say instead of "undeclared". */
     const char *refusal;
@@ -172,9 +138,8 @@ static const bi_entry_t BUILTINS[] = {
     {"refract", BI_REFRACT, 0, 0, 0, 0},
     {"ftransform", BI_FTRANSFORM, 0, 0, GL_VERTEX_SHADER, 0},
 
-    /* 8.5 Matrix. `transpose` and `outerProduct` are GLSL 1.20's; the stage field is
-     * not the place to say so, because they are refused by *version* rather than by
-     * stage - see the `min_version` check in the resolver. */
+    /* 8.5 Matrix. `transpose` and `outerProduct` are GLSL 1.20's, refused by version
+     * in the resolver rather than by stage. */
     {"matrixCompMult", BI_MATCOMP, 0, 0, 0, 0},
     {"transpose", BI_TRANSPOSE, 0, 0, 0, 0},
     {"outerProduct", BI_OUTERPRODUCT, 0, 0, 0, 0},
@@ -193,9 +158,8 @@ static const bi_entry_t BUILTINS[] = {
     /* 8.7 Texture lookup.
      *
      * The `Proj` forms take one component more than the plain ones - the coordinate is
-     * divided by its last - and `texture2DProj` accepts **either** a vec3 or a vec4,
-     * the vec4's third component being ignored. That second form is why `coord` is a
-     * minimum rather than an exact width for the projective entries; see the rule. */
+     * divided by its last - and `texture2DProj` accepts either a vec3 or a vec4, the
+     * vec4's third component being ignored. So `coord` is a minimum width. */
     {"texture1D", BI_TEXTURE, GLSL_TYPE_SAMPLER1D, 1, 0, 0},
     {"texture1DProj", BI_TEXTURE, GLSL_TYPE_SAMPLER1D, 2, 0, 0},
     {"texture2D", BI_TEXTURE, GLSL_TYPE_SAMPLER2D, 2, 0, 0},
@@ -207,9 +171,8 @@ static const bi_entry_t BUILTINS[] = {
     {"shadow2D", BI_TEXTURE, GLSL_TYPE_SAMPLER2DSHADOW, 3, 0, 0},
     {"shadow1DProj", BI_TEXTURE, GLSL_TYPE_SAMPLER1DSHADOW, 4, 0, 0},
     {"shadow2DProj", BI_TEXTURE, GLSL_TYPE_SAMPLER2DSHADOW, 4, 0, 0},
-    /* The `Lod` forms are **vertex-shader only** (1.10, 8.7): a fragment shader has
-     * implicit derivatives and so has no use for one, and the specification makes
-     * calling it there an error rather than a synonym. */
+    /* The `Lod` forms are vertex-shader only (1.10, 8.7); a fragment shader has
+     * implicit derivatives. */
     {"texture1DLod", BI_TEXTURE, GLSL_TYPE_SAMPLER1D, 1, GL_VERTEX_SHADER, 0},
     {"texture1DProjLod", BI_TEXTURE, GLSL_TYPE_SAMPLER1D, 2, GL_VERTEX_SHADER, 0},
     {"texture2DLod", BI_TEXTURE, GLSL_TYPE_SAMPLER2D, 2, GL_VERTEX_SHADER, 0},
@@ -228,10 +191,8 @@ static const bi_entry_t BUILTINS[] = {
     {"dFdy", BI_GEN1, 0, 0, GL_FRAGMENT_SHADER, 0},
     {"fwidth", BI_GEN1, 0, 0, GL_FRAGMENT_SHADER, 0},
 
-    /* 8.9 Noise. Zero, which is what every desktop driver answers - see BI_NOISE. The
-     * `coord` column carries the *result* width here, since the name fixes it and the
-     * argument does not; it is otherwise the texture forms' coordinate width and they
-     * are the only other reader. */
+    /* 8.9 Noise; see BI_NOISE. The `coord` column carries the result width here, since
+     * the name fixes it. */
     {"noise1", BI_NOISE, 0, 1, 0, 0},
     {"noise2", BI_NOISE, 0, 2, 0, 0},
     {"noise3", BI_NOISE, 0, 3, 0, 0},
@@ -271,8 +232,7 @@ static glsl_type_t texture_type(glsl_sema_t *s, const bi_entry_t *e,
         return GLSL_TYPE_ERROR;
     }
     /* Every lookup in 1.10 returns a vec4, the shadow ones included: the comparison
-     * result is broadcast rather than returned as a float, which is the thing about
-     * them people get wrong. */
+     * result is broadcast rather than returned as a float. */
     return GLSL_TYPE_VEC4;
 }
 
@@ -300,10 +260,9 @@ glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
         glsl_sema_fail(s, e->refusal, node);
         return GLSL_TYPE_ERROR;
     }
-    /* **The stage decides whether this name exists at all.** `dFdx` in a vertex shader
-     * is not a function that behaves oddly; it is not there. `s->stage` is 0 when a
-     * caller checks a unit without saying which stage it is, in which case nothing is
-     * refused on this ground - that is how the front end's own tests drive it. */
+    /* The stage decides whether this name exists at all. `s->stage` is 0 when a caller
+     * checks a unit without naming its stage, as the front end's own tests do, and then
+     * nothing is refused on this ground. */
     if (e->stage != 0u && s->stage != 0u && e->stage != s->stage) {
         glsl_sema_fail(s,
                        e->stage == GL_VERTEX_SHADER
@@ -347,9 +306,8 @@ glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
         return args[0];
 
     case BI_STEP:
-        /* **The result is the second argument's type**, not the first's: `step(0.5, v)`
-         * is a vec of v's width. Taking the first would make the scalar-edge form
-         * return a float and then fail somewhere else. */
+        /* The result is the second argument's type: `step(0.5, v)` is a vec of v's
+         * width. */
         if (argc != 2 || !is_gen(args[1]) || !gen_or_scalar(args[1], args[0]))
             break;
         return args[1];
@@ -384,8 +342,7 @@ glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
         return GLSL_TYPE_FLOAT;
 
     case BI_CROSS:
-        /* Only vec3 has a cross product. A vec2 or vec4 argument is the mistake this
-         * refuses; every other implementation refuses it too. */
+        /* Only vec3 has a cross product. */
         if (argc != 2 || args[0] != GLSL_TYPE_VEC3 || args[1] != GLSL_TYPE_VEC3)
             break;
         return GLSL_TYPE_VEC3;
@@ -397,26 +354,21 @@ glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
 
     case BI_TRANSPOSE:
     case BI_OUTERPRODUCT:
-        /* **1.20's, and refused by version in a 1.10 shader.** A 1.10 shader that calls
-         * one is told the function is newer than the language it declared, which is a
-         * better message than "undeclared function" and is the one thing it can act on.
-         */
+        /* GLSL 1.20's, and refused by version in a 1.10 shader. */
         if (s->version != 0 && s->version < 120) {
             glsl_sema_fail(s, "this built-in is GLSL 1.20; this shader is 1.10", node);
             return GLSL_TYPE_ERROR;
         }
         if (e->rule == BI_TRANSPOSE) {
-            /* **`transpose(matCxR)` is `matRxC`**, which for a square matrix is its own
-             * shape - the case this returned while only square ones existed. */
+            /* `transpose(matCxR)` is `matRxC`. */
             if (argc != 1 || !glsl_type_is_matrix(args[0]))
                 break;
             return glsl_type_matrix_of(glsl_type_matrix_rows(args[0]),
                                        glsl_type_matrix_cols(args[0]));
         }
-        /* **`outerProduct(vecR, vecC)` is `matCxR`** - the first is a column and the
-         * second a row, so the result has one column per entry of the second and one
-         * row per entry of the first. Two vectors of different widths give a non-square
-         * matrix, which is a type now rather than a refusal. */
+        /* `outerProduct(vecR, vecC)` is `matCxR`: the first is a column and the second
+         * a row, so the result has one column per entry of the second and one row per
+         * entry of the first. */
         if (argc != 2 || !glsl_type_is_vector(args[0]) || !glsl_type_is_vector(args[1]))
             break;
         if (glsl_type_base(args[0]) != GLSL_TYPE_FLOAT ||
@@ -488,14 +440,10 @@ glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
 /* -------------------------------------------------------------------------
  * Built-in variables
  *
- * The `gl_` names a 1.10 shader may use without declaring. Split three ways, because
- * the stages differ and because writing a fragment shader's `gl_FragColor` from a
- * vertex shader has to be an error rather than a variable that goes nowhere.
- *
- * **The fixed-function uniforms are the ones worth having.** A port written for GL 2.0
- * in 2005 routinely mixes a shader with the matrix stack it already sets, and
- * `gl_ModelViewProjectionMatrix` is the reason it can. They are read-only here, as the
- * specification says, which is what the `uniform` qualifier in each declaration buys.
+ * The `gl_` names a 1.10 shader may use without declaring. Split three ways, so that
+ * writing `gl_FragColor` from a vertex shader is an error. The fixed-function uniforms
+ * let a shader use the matrix stack the program already sets; the `uniform` qualifier
+ * makes them read-only, as the specification says.
  * ------------------------------------------------------------------------- */
 
 typedef struct {
@@ -509,8 +457,7 @@ typedef struct {
 /* Both stages. */
 static const bi_var_t BUILTIN_COMMON[] = {
     /* The matrix stack, as a shader sees it. `gl_NormalMatrix` is the inverse transpose
-     * of the modelview's upper 3x3 - the one lighting uses - and not the modelview
-     * itself, which is the confusion this name exists to prevent. */
+     * of the modelview's upper 3x3, the one lighting uses. */
     {"gl_ModelViewMatrix", GLSL_TYPE_MAT4, 0, GLSL_TOK_KW_UNIFORM},
     {"gl_ProjectionMatrix", GLSL_TYPE_MAT4, 0, GLSL_TOK_KW_UNIFORM},
     {"gl_ModelViewProjectionMatrix", GLSL_TYPE_MAT4, 0, GLSL_TOK_KW_UNIFORM},
@@ -543,9 +490,8 @@ static const bi_var_t BUILTIN_VERTEX[] = {
     {"gl_MultiTexCoord6", GLSL_TYPE_VEC4, 0, GLSL_TOK_KW_ATTRIBUTE},
     {"gl_MultiTexCoord7", GLSL_TYPE_VEC4, 0, GLSL_TOK_KW_ATTRIBUTE},
 
-    /* **`gl_Position` is written, not qualified.** A vertex shader that leaves it
-     * unwritten is undefined by the specification; here the linker says so, because a
-     * cube that does not appear is a worse diagnostic than a sentence. */
+    /* Outputs are written, not qualified. A vertex shader that leaves `gl_Position`
+     * unwritten is undefined by the specification; the linker refuses it. */
     {"gl_Position", GLSL_TYPE_VEC4, 0, GLSL_TOK_EOF},
     {"gl_PointSize", GLSL_TYPE_FLOAT, 0, GLSL_TOK_EOF},
     {"gl_ClipVertex", GLSL_TYPE_VEC4, 0, GLSL_TOK_EOF},
@@ -558,8 +504,8 @@ static const bi_var_t BUILTIN_VERTEX[] = {
 };
 
 static const bi_var_t BUILTIN_FRAGMENT[] = {
-    /* **`gl_FragCoord` is in window coordinates, and its w is 1/w_clip**, not the clip
-     * w. A shader using it as a depth divisor gets the reciprocal of what it meant. */
+    /* `gl_FragCoord` is in window coordinates, and its w is 1/w_clip, not the clip w.
+     */
     {"gl_FragCoord", GLSL_TYPE_VEC4, 0, GLSL_TOK_KW_UNIFORM},
     {"gl_FrontFacing", GLSL_TYPE_BOOL, 0, GLSL_TOK_KW_UNIFORM},
     {"gl_Color", GLSL_TYPE_VEC4, 0, GLSL_TOK_KW_UNIFORM},
@@ -567,52 +513,28 @@ static const bi_var_t BUILTIN_FRAGMENT[] = {
     {"gl_TexCoord", GLSL_TYPE_VEC4, OOPS_GL_MAX_TEXTURE_UNITS, GLSL_TOK_KW_UNIFORM},
     {"gl_FogFragCoord", GLSL_TYPE_FLOAT, 0, GLSL_TOK_KW_UNIFORM},
 
-    /*
-     * **`gl_PointCoord`** (GLSL 1.20; since 2026-09-23). Where the fragment sits inside
-     * the point being drawn, (0,0) at one corner and (1,1) at the other, with the
-     * origin `GL_POINT_SPRITE_COORD_ORIGIN` names - `GL_UPPER_LEFT` by default, which
-     * is the opposite of the rest of GL and the specification's own choice.
+    /* `gl_PointCoord` (GLSL 1.20): where the fragment sits inside the point being
+     * drawn, (0,0) to (1,1), with the origin `GL_POINT_SPRITE_COORD_ORIGIN` names
+     * (`GL_UPPER_LEFT` by default).
      *
-     * **It is texture coordinate 0's interpolant, and that is the hardware's mechanism
-     * rather than a shortcut here.** A point is expanded into two triangles whose
-     * corners carry the sprite coordinates (gl_draw.c), which is exactly what
-     * `GL_COORD_REPLACE` already does for the fixed-function path; on the part itself
-     * the same thing is spelled `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`, which substitutes
-     * the sprite coordinate for a chosen interpolant. So `gl_PointCoord` and
-     * `gl_TexCoord[0]` are one slot, and a fragment shader reading both is refused at
-     * link time rather than given the same value twice.
-     *
-     * This was refused until 2026-09-23 on the grounds that point sprites were not
-     * implemented. They were - `cap_point_sprite`, `GL_COORD_REPLACE`,
-     * `GL_POINT_SPRITE_COORD_ORIGIN` and the corner expansion have all been here since
-     * 2026-09-20, and gl1-probe's `point-sprite` passes on hardware. The refusal
-     * outlived its reason, which is the failure mode a refusal that names its cause is
-     * supposed to prevent.
-     */
+     * It is texture coordinate 0's interpolant: a point is expanded into two triangles
+     * whose corners carry the sprite coordinates (gl_draw.c), as `GL_COORD_REPLACE`
+     * does for the fixed-function path; the part's own mechanism is
+     * `SPI_PS_INPUT_CNTL.PT_SPRITE_TEX`. So `gl_PointCoord` and `gl_TexCoord[0]` are
+     * one slot, and a fragment shader reading both is refused at link time. */
     {"gl_PointCoord", GLSL_TYPE_VEC2, 0, GLSL_TOK_KW_UNIFORM},
     {"gl_FragColor", GLSL_TYPE_VEC4, 0, GLSL_TOK_EOF},
     {"gl_FragDepth", GLSL_TYPE_FLOAT, 0, GLSL_TOK_EOF},
-    /* One draw buffer, so one element - and the *same* number
-     * `glGetIntegerv(GL_MAX_DRAW_BUFFERS)` answers and `gl_MaxDrawBuffers` reads,
-     * because GLSL declares this array as `gl_FragData[gl_MaxDrawBuffers]` and the
-     * three cannot be allowed to differ. A shader writing `gl_FragData[1]` is refused
-     * by the array bound rather than writing somewhere nothing reads. */
+    /* One draw buffer, so one element: the same number `GL_MAX_DRAW_BUFFERS` answers
+     * and `gl_MaxDrawBuffers` reads, because GLSL declares this array as
+     * `gl_FragData[gl_MaxDrawBuffers]`. */
     {"gl_FragData", GLSL_TYPE_VEC4, OOPS_GL_MAX_DRAW_BUFFERS, GLSL_TOK_EOF},
 };
 
-/*
- * **The built-in constants** (1.10, 7.4), which are this implementation's own limits
- * and not the specification's minima. Every value comes from the constant the matching
- * `glGetIntegerv` answers with, so a shader and the API cannot be told different
- * numbers - which is the whole hazard here: a program that sizes an array from `glGet`
- * and a shader that sizes a loop from the constant have to agree, and nothing but a
- * shared definition makes them.
- *
- * They are `const int`, so the semantic pass records a value and both back ends fold a
- * use into a literal rather than spending a register on a number that is known. That is
- * also what lets one appear as an array's length, which GLSL 4.1.9 requires of an
- * integral constant expression.
- */
+/* The built-in constants (1.10, 7.4): this implementation's own limits, each from the
+ * constant the matching `glGetIntegerv` answers with, so a shader and the API agree.
+ * They are `const int`, so both back ends fold a use into a literal, and one may be an
+ * array's length (4.1.9 requires an integral constant expression). */
 typedef struct {
     const char *name;
     int value;
@@ -622,25 +544,19 @@ static const bi_const_t BUILTIN_CONSTS[] = {
     {"gl_MaxLights", OOPS_GL_LIGHT_COUNT},
     {"gl_MaxClipPlanes", OOPS_GL_CLIP_PLANE_COUNT},
     {"gl_MaxTextureUnits", OOPS_GL_MAX_TEXTURE_UNITS},
-    /* The fixed-function stage count, because `gl_TexCoord[]` is a fixed-function array
-     * - the same answer `GL_MAX_TEXTURE_COORDS` gives and not the sampler count. */
+    /* The fixed-function stage count, because `gl_TexCoord[]` is a fixed-function
+     * array: the answer `GL_MAX_TEXTURE_COORDS` gives, not the sampler count. */
     {"gl_MaxTextureCoords", OOPS_GL_MAX_TEXTURE_UNITS},
     {"gl_MaxVertexAttribs", OOPS_GL_MAX_VERTEX_ATTRIBS},
     {"gl_MaxVertexUniformComponents", OOPS_GL_MAX_PROGRAM_UNIFORMS * 4},
     {"gl_MaxVaryingFloats", OOPS_GL_MAX_VARYING_FLOATS},
-    /* **Zero, which is legal and is true**: the vertex stage on this hardware is not
-     * wired to the texture pipe, and saying otherwise sends a shader down a path that
-     * samples nothing. */
+    /* Zero, which is legal: the vertex stage here does not sample textures. */
     {"gl_MaxVertexTextureImageUnits", 0},
     {"gl_MaxCombinedTextureImageUnits", OOPS_GL_MAX_TEXTURE_IMAGE_UNITS},
     {"gl_MaxTextureImageUnits", OOPS_GL_MAX_TEXTURE_IMAGE_UNITS},
     {"gl_MaxFragmentUniformComponents", OOPS_GL_MAX_PROGRAM_UNIFORMS * 4},
-    /* **And the one that was withheld until 2026-09-25.** GLSL declares
-     * `gl_FragData[gl_MaxDrawBuffers]`, so this constant and that array's length are
-     * one fact - and while `GL_MAX_DRAW_BUFFERS` answered 2 for the front and back
-     * surfaces, they were two. A shader could be handed 1 and disagree with the API, or
-     * 2 and index past its own array, so it was handed neither. The API answers 1 now;
-     * see `OOPS_GL_MAX_DRAW_BUFFERS`. */
+    /* GLSL declares `gl_FragData[gl_MaxDrawBuffers]`, so this constant, that array's
+     * length and `GL_MAX_DRAW_BUFFERS` are one fact; see `OOPS_GL_MAX_DRAW_BUFFERS`. */
     {"gl_MaxDrawBuffers", OOPS_GL_MAX_DRAW_BUFFERS},
 };
 
@@ -657,14 +573,9 @@ static GLboolean declare_table(glsl_sema_t *s, const bi_var_t *t, size_t n) {
     return GL_TRUE;
 }
 
-/*
- * **The `gl_` names that are real GLSL and are not here**, each with the reason.
- *
- * A shader that uses one gets a sentence about what is missing rather than "use of an
- * undeclared name", which reads as a typo and sends its author to check their spelling.
- * Every entry is a thing this implementation does not have rather than a thing it has
- * not got round to spelling, and each names it.
- */
+/* The `gl_` names that are real GLSL and are not here, each with the reason. A shader
+ * that uses one is told what is missing rather than "use of an undeclared name", which
+ * reads as a typo. */
 const char *glsl_builtin_refusal(const char *name, size_t len) {
     static const struct {
         const char *name;
@@ -685,20 +596,12 @@ const char *glsl_builtin_refusal(const char *name, size_t len) {
          "gl_BackLightProduct is a struct array, and structs are not implemented"},
         {"gl_Fog", "gl_Fog is a struct, and structs are not implemented"},
         {"gl_DepthRange", "gl_DepthRange is a struct, and structs are not implemented"},
-        /* `gl_PointCoord` was here until 2026-09-23, refused because point sprites were
-         * said not to exist. They did, and had since 2026-09-20. It is a declared input
-         * now. */
         /* GLSL 1.30 and later, named so a shader that meant to be a later version is
          * told which version it is written in rather than which word is unknown. */
         {"gl_InstanceID",
          "gl_InstanceID is GLSL 1.40; this front end takes 1.10 and 1.20"},
         {"gl_VertexID", "gl_VertexID is GLSL 1.30; this front end takes 1.10 and 1.20"},
         {"gl_ClipDistance", "gl_ClipDistance is GLSL 1.30; use gl_ClipVertex"},
-        /* `gl_MaxDrawBuffers` was here for one day, refused because
-         * `GL_MAX_DRAW_BUFFERS` answered 2 while `gl_FragData` had one element and no
-         * number could be given without disagreeing with one of them. The API answers 1
-         * now and the constant is a constant - see `OOPS_GL_MAX_DRAW_BUFFERS` for which
-         * of the two was wrong and why. */
     };
     if (!name || len == 0u)
         return (const char *)0;

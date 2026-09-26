@@ -1,36 +1,17 @@
 /*
  * rx-check: whether the colour block draws 64KB_R_X exactly as the display scans it
- * out, read from obSCEne's REQ-20260919T1927Z-7e21 rows.
+ * out, read from obSCEne's `OBS|bytes|<check>|<arm>|<key>|<offset>|<hex>` rows.
  *
- * # The question
- *
- * oops-gl can draw straight into the display's scanout buffers - as a title on this
- * console does - only if the colour block, told COLOR_SW_MODE 27 (ADDR_SW_64KB_R_X),
- * writes the same layout the display tiler produces and VideoOut scans. The display
- * tiler's layout is hardware-verified, and include/agc/tiler.h addresses it pixel by
- * pixel (agc_tile_pixel). The colour block's side is REQ-7e21: one 128 x 128 block
- * drawn under each candidate CB_COLOR0_ATTRIB3 value, and the same draw into a linear
- * target as the control, every byte of each dumped as
- * `OBS|bytes|<check>|<arm>|<key>|<offset>|<hex>` rows.
- *
- * # What is checked
- *
- * 1. That each surface's dump is complete.
- * 2. That the control drew something, and not everything: a triangle over the
- * 0x55555555 fill.
- * 3. For each tiled arm, **every pixel detiled through agc_tile_pixel equals the
- * control's**, and the same bytes read as rows do *not* - so the comparison can tell
- * the two layouts apart in this picture, rather than agreeing because the picture
- * cannot show a difference.
- *
- * The verdict names the CB_COLOR0_ATTRIB3 value of the first arm that passes. That
- * value, and OOPS_GL_RX_MEASURED 1, are what oops-gl's src/gl/gl_rx.h takes from it;
- * the output is tracked beside this file as rx_check_7e21.txt once the rows exist.
- *
- * `--self-test` writes rows in obSCEne's format for a synthetic triangle - the control
- * linear, one arm tiled right, one arm written as rows - and requires the verdict to
- * pick the right one, and an incomplete dump to be reported as such, before real rows
- * are trusted to it.
+ * oops-gl can draw straight into the display's scanout buffers only if the colour
+ * block, told COLOR_SW_MODE 27 (ADDR_SW_64KB_R_X), writes the layout the display tiler
+ * produces; include/agc/tiler.h addresses that layout pixel by pixel (agc_tile_pixel).
+ * The rows hold one 128 x 128 block drawn under each candidate CB_COLOR0_ATTRIB3 value
+ * and the same draw into a linear target as the control. Checked: each dump is
+ * complete; the control drew a triangle over the 0x55555555 fill; and for each tiled
+ * arm every pixel detiled through agc_tile_pixel equals the control's while the same
+ * bytes read as rows do not. The verdict names the ATTRIB3 of the first arm that
+ * passes, the value src/gl/gl_rx.h takes. `--self-test` checks the verdict on
+ * synthetic rows before real rows are trusted to it.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -171,16 +152,12 @@ static void take_row(job_t *j, char *line) {
 /*
  * The block order read out of one tiled dump, with no control to compare against.
  *
- * `-4b19`'s 256 x 256 arms are tiled only: there is no linear image of the same draw to
- * detile against, so block_map() has nothing to match. What there is instead is the
- * *shape*. The fixture draws one flat-colour triangle, and a triangle has exactly one
- * run of drawn pixels in every row it touches. Detile the dump with the wrong block
- * order and the quadrants are shuffled: rows acquire a second run where a block
- * boundary falls, and the count collapses.
- *
- * So every block order is tried and the clean rows counted. This decides nothing by
- * assumption - it is decisive only if the order the tool uses is the *one* order that
- * produces a triangle, which is what the verdict says.
+ * The 256 x 256 arms are tiled only, so block_map() has no linear image to match; the
+ * shape decides instead. The fixture draws one flat-colour triangle, which has exactly
+ * one run of drawn pixels in every row it touches. Detiled with the wrong block order,
+ * rows acquire a second run where a block boundary falls. Every block order is tried
+ * and the clean rows counted; the verdict holds only if the tool's order is the one
+ * order that produces a triangle.
  */
 static uint32_t at_block(const surface_t *s, uint32_t blk, uint32_t x, uint32_t y) {
     return at32(s,
@@ -189,7 +166,7 @@ static uint32_t at_block(const surface_t *s, uint32_t blk, uint32_t x, uint32_t 
 
 /*
  * Rows of the detiled image holding exactly one run, the pixels drawn, and the gaps -
- * empty rows with drawn rows above *and* below them - under `perm`: perm[i] is the dump
+ * empty rows with drawn rows above and below them - under `perm`: perm[i] is the dump
  * block holding picture block i.
  *
  * The gap count is what tells block orders apart vertically. An order that swaps whole
@@ -300,17 +277,14 @@ static size_t coverage(const surface_t *s) {
 /*
  * Which 64 KiB block of a tiled dump holds which 128 x 128 block of the picture.
  *
- * tiled_offset() lays the blocks out row-major across the surface, because that is what
- * addrlib computes for 64KB_R_X with pipeBankXor 0 - not because any row has shown it.
- * Past one block that assumption is the whole answer, so this reads the order back out
- * of the dump: each dumped block is compared against every block of the linear control,
- * and the one it equals everywhere is the picture block it holds. A block whose picture
- * is all fill matches anything, so it is reported with a `?` rather than counted as
- * agreement.
+ * tiled_offset() lays the blocks out row-major, which is what addrlib computes for
+ * 64KB_R_X with pipeBankXor 0. This reads the order back out of the dump: each dumped
+ * block is compared against every block of the linear control, and the one it equals
+ * everywhere is the picture block it holds. A block whose picture is all fill matches
+ * anything, so it is reported with a `?` rather than counted as agreement.
  *
- * It decides nothing - the pixel comparison in judge() already fails an arm whose
- * blocks are out of order. It says *how* they are out of order, which is the difference
- * between a re-file and a fix.
+ * It decides nothing - judge() already fails an arm whose blocks are out of order. It
+ * says how they are out of order.
  */
 static void block_map(const job_t *j, const surface_t *s, FILE *out) {
     const uint32_t nbx = (j->w + 127u) / 128u, nby = (j->h + 127u) / 128u;
@@ -377,8 +351,8 @@ static int judge(job_t *j, FILE *out, uint32_t *chosen) {
     }
     fprintf(out, "control %s: %u of %u pixels drawn over the fill\n", j->control.name,
             drawn, j->w * j->h);
-    /* An eighth of the block at least: a layout is checked by where many pixels land,
-     * and the 2026-09-16 run of this check drew one. */
+    /* An eighth of the block at least: a layout is checked by where many pixels
+     * land. */
     if (drawn < j->w * j->h / 8u || drawn == j->w * j->h)
         missing = 1;
 
@@ -537,9 +511,8 @@ static int self_test_one_block(void) {
 }
 
 /*
- * The same, past one block: 256 x 256 is 2 x 2 blocks, the extent `-4b19` asks for. One
- * arm has the blocks row-major, the other has them transposed - the same 64 KiB pieces
- * in the other order, which is the mistake a single-block sweep cannot catch. The
+ * The same, past one block: 256 x 256 is 2 x 2 blocks. One arm has the blocks
+ * row-major, the other transposed - the mistake a single-block surface cannot show. The
  * transposed arm has to fail, and the block map has to name it.
  */
 static int self_test_multiblock(void) {
@@ -549,7 +522,7 @@ static int self_test_multiblock(void) {
     for (uint32_t y = 0; y < H; y++) {
         for (uint32_t x = 0; x < W; x++) {
             /* Corners near (16,16), (240,40), (64,240): every block holds drawn and
-             * undrawn texels, as the request requires. */
+             * undrawn texels. */
             const int in = (int)(x * 24u + y * 224u) > 16 * 24 + 16 * 224 &&
                            (int)(y * 176u) < (int)(x * 200u) + 40 * 176 - 16 * 200 &&
                            x + y < 360;

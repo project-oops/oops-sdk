@@ -2,6 +2,10 @@
 #include "oops/gpu.h"
 #include "tests/test_common.h"
 
+/* Unit tests for `oops/gpu.h` and `oops/agc.h`: NULL safety, host unavailability, and
+ * the PM4 and register constants pinned to their values. */
+
+/* Every entry point accepts NULL and invalid arguments without faulting. */
 static void test_gpu_null_safety(void) {
     /* Safe destruction with NULL */
     oops_gpu_destroy_queue(NULL);
@@ -29,6 +33,7 @@ static void test_gpu_null_safety(void) {
     ASSERT_EQ(f, 0);
 }
 
+/* On host the direct hardware queue reports unavailable. */
 static void test_gpu_available_contract(void) {
     /* On host test runner, GPU direct hardware queue is not available */
     int avail = oops_gpu_available();
@@ -41,6 +46,7 @@ static void test_gpu_available_contract(void) {
     ASSERT_TRUE(gq == NULL);
 }
 
+/* The dispatch descriptor keeps the fields callers set. */
 static void test_gpu_dispatch_struct_contract(void) {
     oops_gpu_dispatch_t d;
     d.shader = NULL;
@@ -59,6 +65,7 @@ static void test_gpu_dispatch_struct_contract(void) {
     ASSERT_EQ(rc, -1);
 }
 
+/* A primitive draw with NULL arguments fails safely, and its depth fields hold. */
 static void test_gpu_primitive_draw_contract(void) {
     /* Safe with NULL queue and descriptor */
     int rc = oops_agc_draw_primitive(NULL, NULL);
@@ -79,6 +86,7 @@ static void test_gpu_primitive_draw_contract(void) {
     ASSERT_TRUE(desc.depth_buffer != NULL);
 }
 
+/* PM4 opcodes, register offsets and field macros keep their values. */
 static void test_gpu_pm4_constants(void) {
     /* Verify PM4 Packet 3 Opcodes */
     ASSERT_EQ(OOPS_AGC_PM4_NOP, 0x10u);

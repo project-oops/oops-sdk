@@ -1,28 +1,14 @@
 /*
  * oops-gl: the GLSL expression parser
  *
- * Recursive descent over GLSL 1.10's expression grammar. One function per precedence
- * level, which is verbose and is the point: the alternative is a precedence table, and
- * a table with one wrong number in it produces a program that parses and computes
- * something else.
+ * Recursive descent over GLSL 1.10's grammar, one function per precedence level: the
+ * order of the functions is the precedence table. The binary levels loop, which builds
+ * left-associatively (`a - b - c` is `(a - b) - c`); assignment and the conditional
+ * recurse on the right, which builds right-associatively (`a = b = c` is
+ * `a = (b = c)`). The bitwise levels `|`, `^` and `&` are present although 1.10 only
+ * reserves them, since leaving a level out reassociates everything around it.
  *
- * # The two things this has to get right
- *
- * **Associativity.** `a - b - c` is `(a - b) - c` and `a = b = c` is `a = (b = c)`. The
- * binary levels loop, which builds left-associatively; assignment and the conditional
- * recurse into themselves on the right, which builds right-associatively. Getting one
- * of these backwards still parses every program - it just computes a different answer,
- * silently.
- *
- * **Precedence, including the levels nothing uses.** GLSL 1.10 has `|`, `^` and `&`
- * between the logical operators and equality even though 1.10 reserves them for
- * integers it barely has. Leaving a level out does not produce an error: it
- * reassociates everything around it.
- *
- * The parser stops at the first error. Unlike the lexer, which reports an error token
- * and keeps going, a syntax error leaves the parser with no idea where it is -
- * resynchronising is a real feature and is not written yet, so this says so rather than
- * producing a tree that is wrong in a way nothing downstream would notice.
+ * The parser stops at the first error; it does not resynchronise.
  */
 
 #include "glsl_internal.h"
@@ -36,14 +22,10 @@ static void fail(glsl_parser_t *p, const char *why) {
 }
 
 static void bump(glsl_parser_t *p) {
-    /* **The one place a token enters the parser**, which is what lets the preprocessor
-     * be slotted in front of the lexer rather than run as a separate pass over the
-     * text. With `pp` set, directives are obeyed and macros expanded before the grammar
-     * ever sees anything; with it null the raw lexer is read, which is how this file's
-     * own tests drive it.
-     *
-     * Either source writes EOF and returns false at the end, so the lookahead stays
-     * valid and every `accept` afterwards simply fails. */
+    /* The one place a token enters the parser. With `pp` set, directives are obeyed and
+     * macros expanded before the grammar sees anything; with it null the raw lexer is
+     * read, as this file's own tests do. Either source writes EOF at the end, so the
+     * lookahead stays valid and every later `accept` fails. */
     if (p->pp) {
         glsl_pp_next(p->pp, &p->tok);
         if (p->tok.type == GLSL_TOK_ERROR) {
@@ -81,9 +63,8 @@ static int32_t node_new(glsl_parser_t *p, glsl_node_kind_t kind) {
     n->a = n->b = n->c = n->d = GLSL_NO_NODE;
     n->sibling = GLSL_NO_NODE;
     n->type_tok = GLSL_TOK_EOF;
-    /* **Cleared here or it is whatever the arena held.** The node arena is reused
-     * across parses and is not zeroed, so a field added to this struct and set at only
-     * some of its call sites is read as a stale pointer at the others. */
+    /* Every field is cleared here: the node arena is reused across parses and is not
+     * zeroed. */
     n->type_name = (const char *)0;
     n->type_name_len = 0u;
     n->qualifier = GLSL_TOK_EOF;
@@ -109,9 +90,8 @@ void glsl_parser_init(glsl_parser_t *p, glsl_ast_t *ast, const char *source,
     p->error_column = 0;
     p->pp = (glsl_pp_t *)0;
     p->version = 0; /* not stated: enforce nothing - see glsl_parser_t */
-    /* **Cleared, because the caller's parser is not zeroed.** `starts_declaration`
-     * walks this list for every identifier it meets, so a stale count sends it through
-     * stale pointers on the first shader parsed - struct or not. */
+    /* Cleared, because the caller's parser is not zeroed and `starts_declaration` walks
+     * this list for every identifier. */
     p->struct_names = 0;
     glsl_lexer_init(&p->lx, source, length);
     bump(p);
@@ -132,12 +112,10 @@ void glsl_parser_init_pp(glsl_parser_t *p, glsl_ast_t *ast, glsl_pp_t *pp) {
     glsl_lexer_init(&p->lx, (const char *)0, 0);
     p->version = 0;
     p->struct_names = 0; /* as in glsl_parser_init, and for the same reason */
-    /* **This consumes every directive before the first real token**, so `#version` has
-     * already been read when this returns - which is what lets a caller refuse a
-     * language it does not implement before parsing a line of it. */
+    /* This consumes every directive before the first real token, so `#version` has been
+     * read when this returns and a caller can refuse the language before parsing it. */
     bump(p);
-    /* A shader that says nothing is GLSL 1.10, which the specification states outright.
-     */
+    /* A shader that says nothing is GLSL 1.10, as the specification states. */
     p->version = (pp && pp->version) ? pp->version : 110;
 }
 
@@ -219,8 +197,8 @@ static int32_t parse_primary(glsl_parser_t *p) {
             fail(p, "expected ')'");
             return GLSL_NO_NODE;
         }
-        /* **No node for the parentheses.** They grouped the parse and have no meaning
-         * afterwards; keeping one would make every consumer skip over it. */
+        /* No node for the parentheses: they grouped the parse and mean nothing after.
+         */
         return inner;
     }
     case GLSL_TOK_KW_RESERVED:
@@ -235,7 +213,7 @@ static int32_t parse_primary(glsl_parser_t *p) {
 /* postfix: indexing, calls, field selection, and `++`/`--` after the operand.
  *
  * A loop rather than recursion, because these chain left to right: `a[i].x++` is
- * `((a[i]).x)++` and nothing about that is right-associative. */
+ * `((a[i]).x)++`. */
 static int32_t parse_postfix(glsl_parser_t *p) {
     int32_t left = parse_primary(p);
     if (p->error)
@@ -247,10 +225,9 @@ static int32_t parse_postfix(glsl_parser_t *p) {
             int32_t at = node_new(p, GLSL_NODE_INDEX);
             if (at == GLSL_NO_NODE)
                 return at;
-            /* **`x[]` is never an expression**, so the one thing it can be is the
-             * unsized array constructor `float[](a, b)` - GLSL 1.30's form, which this
-             * does not implement. Saying so beats "expected an expression", which reads
-             * as a missing index and sends its author to look between the brackets. */
+            /* `x[]` is never an expression, so it can only be the unsized array
+             * constructor `float[](a, b)`, GLSL 1.30's form, which is named in the
+             * refusal. */
             if (check(p, GLSL_TOK_RBRACKET)) {
                 fail(p, "an array constructor needs a constant length here: "
                         "`float[2](a, b)`; "
@@ -327,8 +304,7 @@ static int32_t parse_postfix(glsl_parser_t *p) {
 }
 
 /* unary: `++ -- + - ! ~` before the operand. Recurses into itself, so `!!x` and `- -x`
- * work and the whole chain is right-associative, which is the only way prefix operators
- * can associate. */
+ * work. */
 static int32_t parse_unary(glsl_parser_t *p) {
     if (p->error)
         return GLSL_NO_NODE;
@@ -376,10 +352,8 @@ static int32_t parse_binary_level(glsl_parser_t *p, int32_t (*next)(glsl_parser_
         int32_t right = next(p);
         if (p->error)
             return GLSL_NO_NODE;
-        /* **`left` is the accumulated tree, not the fresh operand.** This is what makes
-         * the level left-associative: `a - b - c` becomes `(a - b) - c`. Assigning the
-         * other way round still parses every program and computes a different answer.
-         */
+        /* `left` is the accumulated tree, not the fresh operand, which makes the level
+         * left-associative: `a - b - c` becomes `(a - b) - c`. */
         p->ast->nodes[at].op = op;
         p->ast->nodes[at].a = left;
         p->ast->nodes[at].b = right;
@@ -387,8 +361,7 @@ static int32_t parse_binary_level(glsl_parser_t *p, int32_t (*next)(glsl_parser_
     }
 }
 
-/* The precedence ladder, tightest first. Each level names only its own operators; the
- * order of the functions *is* the precedence table, which is why there is no table. */
+/* The precedence ladder, tightest first. Each level names only its own operators. */
 static int32_t parse_multiplicative(glsl_parser_t *p) {
     static const glsl_token_type_t ops[] = {GLSL_TOK_STAR, GLSL_TOK_SLASH,
                                             GLSL_TOK_PERCENT};
@@ -407,9 +380,8 @@ static int32_t parse_equality(glsl_parser_t *p) {
     static const glsl_token_type_t ops[] = {GLSL_TOK_EQ, GLSL_TOK_NE};
     return parse_binary_level(p, parse_relational, ops, 2);
 }
-/* The bitwise levels sit between equality and the logical operators. GLSL 1.10 reserves
- * them rather than using them much - but **leaving a level out does not raise an error,
- * it silently reassociates everything around it**, so they are here. */
+/* The bitwise levels sit between equality and the logical operators. GLSL 1.10 only
+ * reserves them, but leaving a level out would reassociate everything around it. */
 static int32_t parse_bit_and(glsl_parser_t *p) {
     static const glsl_token_type_t ops[] = {GLSL_TOK_AMP};
     return parse_binary_level(p, parse_equality, ops, 1);
@@ -435,10 +407,9 @@ static int32_t parse_logical_or(glsl_parser_t *p) {
     return parse_binary_level(p, parse_logical_xor, ops, 1);
 }
 
-/* `a ? b : c`, **right-associative**: `a ? b : c ? d : e` is `a ? b : (c ? d : e)`. The
- * middle is a full expression because the `:` closes it unambiguously; the third branch
- * recurses here rather than into the level above, which is what the associativity
- * means. */
+/* `a ? b : c`, right-associative: `a ? b : c ? d : e` is `a ? b : (c ? d : e)`. The
+ * middle is a full expression because the `:` closes it; the third branch recurses
+ * here. */
 static int32_t parse_conditional(glsl_parser_t *p) {
     int32_t cond = parse_logical_or(p);
     if (p->error || !check(p, GLSL_TOK_QUESTION))
@@ -462,12 +433,9 @@ static int32_t parse_conditional(glsl_parser_t *p) {
     return at;
 }
 
-/* Assignment, **right-associative**: `a = b = c` is `a = (b = c)`.
- *
- * The left side is parsed as a conditional and then accepted as a target if an
- * assignment operator follows. Whether it is actually assignable - an l-value - is a
- * semantic question, not a grammatical one, and answering it here would reject `(a) =
- * b` which is legal. */
+/* Assignment, right-associative: `a = b = c` is `a = (b = c)`. The left side is parsed
+ * as a conditional; whether it is an l-value is the semantic stage's question, since
+ * `(a) = b` is legal. */
 static int32_t parse_assignment(glsl_parser_t *p) {
     int32_t left = parse_conditional(p);
     if (p->error)
@@ -530,30 +498,8 @@ static GLboolean is_qualifier(glsl_token_type_t t) {
                        t == GLSL_TOK_KW_INOUT);
 }
 
-/*
- * **GLSL 1.20's `invariant` and `centroid`**, which sit *before* the storage qualifier
- * rather than in place of it - `invariant centroid varying vec3 v;` is one declaration
- * with three qualifiers on it.
- *
- * Both are consumed and neither is recorded, because **neither has anything to change
- * here**, and that is a statement about this implementation rather than a shortcut:
- *
- *   - `invariant` asks that a value computed the same way in two shaders come out
- * bit-identical. There is one code path per stage and no optimiser reordering
- * arithmetic between them, so the guarantee already holds for everything.
- *   - `centroid` moves a varying's sample point inside the primitive under
- * multisampling. There is no multisample buffer - `GL_SAMPLE_BUFFERS` answers 0 - so
- * every sample is already at the pixel centre, which is where centroid sampling would
- * put it.
- *
- * Refused in a 1.10 shader by name, because they are 1.20's and a shader that uses one
- * has said which language it is written in.
- */
-/* **A precision qualifier in front of a type, dropped.** `uniform mediump float x;`
- * declares the same thing here as `uniform float x;` - this GL computes in single
- * precision throughout and the specification says the qualifiers are accepted with no
- * effect - so they are skipped wherever a type may begin rather than carried into the
- * type system, which has nothing that could act on them. */
+/* A precision qualifier in front of a type, dropped: this GL computes in single
+ * precision throughout, and the specification accepts the qualifiers with no effect. */
 static void skip_precision_qualifiers(glsl_parser_t *p) {
     while (check(p, GLSL_TOK_KW_LOWP) || check(p, GLSL_TOK_KW_MEDIUMP) ||
            check(p, GLSL_TOK_KW_HIGHP)) {
@@ -561,6 +507,11 @@ static void skip_precision_qualifiers(glsl_parser_t *p) {
     }
 }
 
+/* GLSL 1.20's `invariant` and `centroid`, which sit before the storage qualifier:
+ * `invariant centroid varying vec3 v;`. Both are consumed and not recorded. `invariant`
+ * already holds, with one code path per stage and no reordering optimiser; `centroid`
+ * changes nothing without a multisample buffer (`GL_SAMPLE_BUFFERS` is 0). Refused by
+ * name in a 1.10 shader. */
 static void parse_aux_qualifiers(glsl_parser_t *p) {
     skip_precision_qualifiers(p);
     while (check(p, GLSL_TOK_KW_INVARIANT) || check(p, GLSL_TOK_KW_CENTROID)) {
@@ -610,11 +561,8 @@ static GLboolean is_type_name(glsl_token_type_t t) {
     }
 }
 
-/* The six matrix types GLSL 1.20 added. `mat2x2` and its two siblings are not here
- * because the lexer folds them into the square tokens, so by this point they are
- * indistinguishable from `mat2`, `mat3` and `mat4` - the same looseness the keyword
- * table there already accepts for `invariant` and the precision words, and for the same
- * reason. */
+/* The six matrix types GLSL 1.20 added. `mat2x2` and its two siblings are not here:
+ * the lexer folds them into the square tokens, so a 1.10 shader may spell them. */
 static GLboolean is_nonsquare_matrix_name(glsl_token_type_t t) {
     switch (t) {
     case GLSL_TOK_KW_MAT2X3:
@@ -629,15 +577,6 @@ static GLboolean is_nonsquare_matrix_name(glsl_token_type_t t) {
     }
 }
 
-/* **Does a declaration start here?**
- *
- * This is the one genuinely ambiguous decision in the grammar as written, and it is
- * decided by one token of lookahead: a qualifier or a built-in type name begins a
- * declaration, anything else begins an expression. A user-defined type name would need
- * a symbol table to recognise - C's famous ambiguity - and GLSL 1.10 has `struct`, so
- * this will need revisiting when structs are parsed. Written as its own function so
- * that change has one place to happen.
- */
 /* Two names, both pointing into the source rather than copied. */
 static GLboolean same_text(const char *a, size_t an, const char *b, size_t bn) {
     if (an != bn)
@@ -649,8 +588,8 @@ static GLboolean same_text(const char *a, size_t an, const char *b, size_t bn) {
     return GL_TRUE;
 }
 
-/* **Does this identifier name a struct declared earlier in this unit?** The whole of
- * why the parser keeps a list of them: see `struct_name` on `glsl_parser_t`. */
+/* Whether this identifier names a struct declared earlier in this unit; see
+ * `struct_name` on `glsl_parser_t`. */
 static GLboolean is_struct_name(const glsl_parser_t *p, const char *t, size_t n) {
     for (int i = 0; i < p->struct_names; i++) {
         if (same_text(p->struct_name[i], p->struct_name_len[i], t, n))
@@ -674,13 +613,14 @@ static GLboolean remember_struct_name(glsl_parser_t *p, const char *t, size_t n)
     return GL_TRUE;
 }
 
+/* Whether a declaration starts here, by one token of lookahead: a qualifier, a type
+ * name or a known struct name begins a declaration, anything else an expression. */
 static GLboolean starts_declaration(const glsl_parser_t *p) {
     if (is_qualifier(p->tok.type) || is_type_name(p->tok.type))
         return GL_TRUE;
-    /* A precision qualifier begins a declaration the same way a storage one does -
-     * `mediump float x;` is a local in an ES shader - and `precision mediump float;` is
-     * a statement in its own right. Both are dropped once parsed; this only has to say
-     * they start something. */
+    /* A precision qualifier begins a declaration the same way a storage one does
+     * (`mediump float x;`), and `precision mediump float;` is a statement of its own.
+     */
     if (p->tok.type == GLSL_TOK_KW_LOWP || p->tok.type == GLSL_TOK_KW_MEDIUMP ||
         p->tok.type == GLSL_TOK_KW_HIGHP || p->tok.type == GLSL_TOK_KW_PRECISION) {
         return GL_TRUE;
@@ -689,7 +629,7 @@ static GLboolean starts_declaration(const glsl_parser_t *p) {
      * one. */
     if (p->tok.type == GLSL_TOK_KW_STRUCT)
         return GL_TRUE;
-    /* And the case that needed the list: `S s;` where `S` is a struct. */
+    /* `S s;` where `S` is a struct. */
     return (GLboolean)(p->tok.type == GLSL_TOK_IDENTIFIER &&
                        is_struct_name(p, p->tok.text, p->tok.length));
 }
@@ -719,9 +659,8 @@ static int32_t parse_array_suffix(glsl_parser_t *p, GLboolean *saw_bracket) {
 
 /* A declaration after its type has been read: one or more declarators, comma-separated.
  *
- * `float a, b = 1.0, c[4];` is three GLSL_NODE_DECLs chained through `sibling`, **each
- * carrying the shared type**. Storing the type once on the first and leaving the rest
- * to look backwards would work until something reordered or filtered the list.
+ * `float a, b = 1.0, c[4];` is three GLSL_NODE_DECLs chained through `sibling`, each
+ * carrying the shared type.
  */
 static int32_t parse_declarator_list(glsl_parser_t *p, glsl_token_type_t qualifier,
                                      glsl_token_type_t type_tok, const char *type_name,
@@ -731,21 +670,16 @@ static int32_t parse_declarator_list(glsl_parser_t *p, glsl_token_type_t qualifi
  * `struct Name { members }` - the definition, without the declarators that may follow
  * it.
  *
- * **The name is remembered before the body is read**, which is what lets a struct
- * contain a pointer-free reference to nothing at all and still refuse `struct S { S
- * next; };` further on: sema catches that, but the parser must already agree that `S`
- * is a type name or the member line would not parse as a declaration in the first
- * place.
+ * The name is remembered before the body is read, so `struct S { S next; };` parses
+ * and the semantic stage can refuse it.
  *
- * GLSL 1.10 allows no qualifiers and no initialisers on a member, and both are refused
- * here rather than parsed and dropped - a member that silently loses its `= 1.0` is
- * worse than one that will not compile.
+ * GLSL 1.10 allows no qualifiers and no initialisers on a member; both are refused
+ * rather than dropped.
  */
 static int32_t parse_struct_definition(glsl_parser_t *p) {
     bump(p); /* `struct` */
     if (!check(p, GLSL_TOK_IDENTIFIER)) {
-        /* An anonymous struct is legal in C and not in GLSL 1.10, where the name is how
-         * a variable of it is ever declared. */
+        /* An anonymous struct is legal in C and not in GLSL 1.10. */
         fail(p, "expected a name after `struct`");
         return GLSL_NO_NODE;
     }
@@ -798,8 +732,7 @@ static int32_t parse_struct_definition(glsl_parser_t *p) {
         int32_t m = parse_declarator_list(p, GLSL_TOK_EOF, mtok, mname, mname_len);
         if (p->error)
             return GLSL_NO_NODE;
-        /* An initialiser on a member is not GLSL 1.10, and dropping one silently would
-         * lose what its author wrote. */
+        /* An initialiser on a member is not GLSL 1.10. */
         for (int32_t k = m; k != GLSL_NO_NODE; k = p->ast->nodes[k].sibling) {
             if (p->ast->nodes[k].a != GLSL_NO_NODE) {
                 fail(p, "a struct member may not have an initialiser");
@@ -858,12 +791,8 @@ static int32_t parse_type_specifier(glsl_parser_t *p, glsl_token_type_t *type_to
         fail(p, "expected a type at the start of a declaration");
         return GLSL_NO_NODE;
     }
-    /* **The non-square matrices are 1.20's**, like `transpose` and `outerProduct`
-     * beside them, so a 1.10 shader is told which word it may not use rather than
-     * meeting the type and a surprise later. Recognised by the lexer whatever the
-     * version, for the reason the table there gives: a 1.10 shader using `mat2x3` as an
-     * identifier was already unportable, and naming it is the better diagnostic either
-     * way. */
+    /* The non-square matrices are 1.20's; the lexer recognises them whatever the
+     * version, and a 1.10 shader is told which word it may not use. */
     if (is_nonsquare_matrix_name(p->tok.type) && p->version != 0 && p->version < 120) {
         fail(p, "the non-square matrix types are GLSL 1.20; this shader is 1.10");
         return GLSL_NO_NODE;
@@ -901,9 +830,7 @@ static int32_t parse_declarator_list(glsl_parser_t *p, glsl_token_type_t qualifi
 
         if (accept(p, GLSL_TOK_ASSIGN)) {
             /* The initialiser is an assignment-expression, not a full expression: a
-             * comma here separates declarators. `float a = 1, b = 2;` is two
-             * declarations, and parsing the initialiser with the comma operator would
-             * make it one. */
+             * comma here separates declarators. */
             int32_t init = parse_assignment(p);
             if (p->error)
                 return GLSL_NO_NODE;
@@ -948,11 +875,9 @@ static int32_t parse_compound(glsl_parser_t *p) {
             first = s;
         else
             p->ast->nodes[prev].sibling = s;
-        /* **A declaration statement may already be a chain.** `float a, b;` returns two
-         * DECLs linked through `sibling`, the same field this list uses, so the tail
-         * has to be found rather than assumed to be the node just returned - otherwise
-         * the next statement overwrites the second declarator and `b` vanishes. The
-         * translation unit has the same hazard and the same fix. */
+        /* A declaration statement may already be a chain: `float a, b;` returns two
+         * DECLs linked through `sibling`, the field this list uses, so the tail is
+         * found rather than assumed. */
         prev = s;
         while (p->ast->nodes[prev].sibling != GLSL_NO_NODE)
             prev = p->ast->nodes[prev].sibling;
@@ -985,9 +910,8 @@ int32_t glsl_parse_statement(glsl_parser_t *p) {
         if (p->error)
             return GLSL_NO_NODE;
 
-        /* **`struct S { ... };` with no declarator is a whole statement**, and a legal
-         * one - it declares the type and nothing else. Only a name after the brace
-         * starts declarators. */
+        /* `struct S { ... };` with no declarator is a whole statement that declares
+         * only the type. */
         if (def != GLSL_NO_NODE && check(p, GLSL_TOK_SEMICOLON)) {
             bump(p);
             return def;
@@ -1027,15 +951,9 @@ int32_t glsl_parse_statement(glsl_parser_t *p) {
         if (p->error)
             return GLSL_NO_NODE;
         int32_t else_s = GLSL_NO_NODE;
-        /* **The dangling else binds to the nearest `if`**, and recursive descent gets
-         * that for free: the inner `if` is parsed by the recursive call above and
-         * consumes the `else` before this frame ever sees it.
-         *
-         * Worth saying plainly because it looks like a decision and is not one - it is
-         * structural, and an attempt to mutate it here has nothing to bite on. A future
-         * rewrite to a table-driven parser would have to choose deliberately, which is
-         * why the test asserting the shape is kept even though nothing here can
-         * currently break it. */
+        /* The dangling else binds to the nearest `if`: the inner `if` is parsed by the
+         * recursive call above and consumes the `else` first. A test asserts the
+         * shape. */
         if (accept(p, GLSL_TOK_KW_ELSE)) {
             else_s = glsl_parse_statement(p);
             if (p->error)
@@ -1227,11 +1145,9 @@ static int32_t parse_parameter_list(glsl_parser_t *p) {
         }
         /* `void f(in mediump float x)` - a parameter carries one the same way. */
         skip_precision_qualifiers(p);
-        /* **A parameter may be a struct**, so the same three-way type specifier the
-         * declarations use applies here. `struct S { ... } f(...)` - a definition in a
-         * parameter's type - is not GLSL, and `parse_type_specifier` would accept one;
-         * a definition here would also have nowhere to be chained. So it is refused by
-         * name rather than half-supported. */
+        /* A parameter may be a struct, so the declarations' type specifier applies.
+         * A struct definition in a parameter's type is not GLSL; `parse_type_specifier`
+         * would accept one, so it is refused here first. */
         if (check(p, GLSL_TOK_KW_STRUCT)) {
             fail(p, "a struct may not be defined in a parameter list");
             return GLSL_NO_NODE;
@@ -1275,17 +1191,11 @@ static int32_t parse_parameter_list(glsl_parser_t *p) {
 
 /* One external declaration: a function definition, a function prototype, or a variable
  * declaration. All three start with a type, so they are told apart by what follows the
- * name -
- * `(` means a function, anything else a variable. */
+ * name: `(` means a function, anything else a variable. */
 static int32_t parse_external_declaration(glsl_parser_t *p) {
-    /* **`precision mediump float;` is a whole declaration too**, and like the
-     * restatement below it declares nothing. ES makes a shader state the precision it
-     * wants; desktop GL has one precision and the specification says the qualifiers are
-     * accepted with no effect, so this consumes the statement and produces no node.
-     *
-     * It is taken before everything else because `precision` is followed by a type
-     * keyword, and every branch after this one would read that type as the start of a
-     * declaration. */
+    /* `precision mediump float;` declares nothing: the qualifiers have no effect here,
+     * so the statement is consumed and produces no node. Taken first, because every
+     * later branch would read the type after `precision` as a declaration. */
     if (check(p, GLSL_TOK_KW_PRECISION)) {
         bump(p);
         if (!accept(p, GLSL_TOK_KW_LOWP) && !accept(p, GLSL_TOK_KW_MEDIUMP) &&
@@ -1293,8 +1203,7 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
             fail(p, "expected `lowp`, `mediump` or `highp` after `precision`");
             return GLSL_NO_NODE;
         }
-        /* The type it applies to. Any type name is allowed to follow; nothing here
-         * needs to know which, because the statement has no effect either way. */
+        /* The type it applies to; which one does not matter. */
         if (check(p, GLSL_TOK_EOF) || check(p, GLSL_TOK_SEMICOLON)) {
             fail(p, "expected a type after a precision qualifier");
             return GLSL_NO_NODE;
@@ -1306,23 +1215,14 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
         return GLSL_NO_NODE;
     }
 
-    /* **`invariant name;` on its own is a whole declaration** in GLSL 1.20 - a
-     * restatement that a variable already declared, usually `gl_Position`, is
-     * invariant. It has no type and declares nothing new, so it is consumed and
-     * produces no node. Taken before the qualifier loop below, which expects a type to
-     * follow. */
+    /* `invariant name;` on its own is a whole declaration in GLSL 1.20: a restatement
+     * that a variable already declared, usually `gl_Position`, is invariant. It
+     * declares nothing new and produces no node. */
     parse_aux_qualifiers(p);
     if (p->error)
         return GLSL_NO_NODE;
-    /* An identifier where a type should be, after `invariant`, is the restatement form
-     * - `invariant gl_Position;` - which declares nothing and produces no node.
-     *
-     * **Unless it names a struct**, in which case it is a type after all and `S s;` is
-     * an ordinary declaration. Before structs existed every identifier here was a
-     * restatement, and this branch was allowed to be that broad; now the two forms
-     * start with the same token and the name list is what tells them apart. Without
-     * this check `S s;` is consumed as a restatement of `S` and then fails on `s` where
-     * a `;` was expected. */
+    /* An identifier where a type should be is that restatement form, unless it names a
+     * struct, in which case `S s;` is an ordinary declaration. */
     if (check(p, GLSL_TOK_IDENTIFIER) &&
         !is_struct_name(p, p->tok.text, p->tok.length)) {
         bump(p);
@@ -1366,9 +1266,7 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
         p->ast->nodes[at].text = name;
         p->ast->nodes[at].length = name_len;
         p->ast->nodes[at].type_tok = type_tok;
-        /* The return type, which may be a struct - `S bump(S v)`. Without this the
-         * function is declared with an unresolvable return type and every call to it
-         * fails. */
+        /* The return type, which may be a struct: `S bump(S v)`. */
         p->ast->nodes[at].type_name = type_name;
         p->ast->nodes[at].type_name_len = type_name_len;
         p->ast->nodes[at].qualifier = qualifier;
@@ -1389,8 +1287,8 @@ static int32_t parse_external_declaration(glsl_parser_t *p) {
             fail(p, "expected a body or ';' after a function header");
             return GLSL_NO_NODE;
         }
-        /* `c` left absent means a prototype. An empty body is a COMPOUND node with no
-         * statements, which is a different thing and reads differently. */
+        /* `c` left absent means a prototype; an empty body is a COMPOUND node with no
+         * statements. */
         return at;
     }
 
@@ -1448,10 +1346,9 @@ int32_t glsl_parse_translation_unit(glsl_parser_t *p) {
     while (!check(p, GLSL_TOK_EOF)) {
         if (p->error)
             return GLSL_NO_NODE;
-        /* The preprocessor is a separate stage and is not written. A `#` here is
-         * refused by name rather than skipped, because skipping it would silently
-         * ignore a `#version` or a `#ifdef` and compile something the program did not
-         * write. */
+        /* A `#` reaches here only when the raw lexer is read without the
+         * preprocessor. It is refused rather than skipped, since skipping would ignore
+         * a `#version` or a `#ifdef`. */
         if (check(p, GLSL_TOK_HASH)) {
             fail(p, "preprocessor directives are not handled yet");
             return GLSL_NO_NODE;
@@ -1459,10 +1356,9 @@ int32_t glsl_parse_translation_unit(glsl_parser_t *p) {
         int32_t d = parse_external_declaration(p);
         if (p->error)
             return GLSL_NO_NODE;
-        /* **No node and no error is a declaration that declares nothing** - GLSL 1.20's
-         * `invariant gl_Position;`. It is skipped rather than chained, because a
-         * GLSL_NO_NODE in the chain would end the list early and lose everything after
-         * it. */
+        /* No node and no error is a declaration that declares nothing, such as
+         * `invariant gl_Position;`. It is skipped, since GLSL_NO_NODE would end the
+         * chain. */
         if (d == GLSL_NO_NODE)
             continue;
         if (first == GLSL_NO_NODE)

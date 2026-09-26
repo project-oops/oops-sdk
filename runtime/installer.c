@@ -1,17 +1,15 @@
-/* installer.c - install a local package through the *ungated* path.
+/* installer.c - install a local package by path.
  *
- * shsrv's `pkg_install` calls `sceAppInstUtilInstallByPackage`, gated by a console's
- * PlayGo HTTP pre-flight (the `0x80b211c8` a correct fake package hits).
+ * `sceAppInstUtilInstallByPackage` (shsrv's `pkg_install`) runs a PlayGo HTTP
+ * pre-flight that refuses a locally built package with `0x80b211c8`.
  * `sceAppInstUtilAppInstallPkg` takes a bare local path, parses no URI and runs no HTTP
- * pre-flight, so it does not reach that gate - the path Itemzflow and elf-arsenal
- * install through.
+ * pre-flight, as Itemzflow and elf-arsenal use it.
  *
- * The library is loaded and its functions resolved **by hand** rather than declared as
- * imports, because obSCEne's crt0 auto-load of `libSceAppInstUtil.sprx` failed (rtld
- * "loadability error 13") before its three dependencies - `libSceLibcInternal`,
- * `libSceRegMgr`, `libSceIpmi` - were present. Loading those first, in dependency
- * order, then the library itself, is what a proper rtld does for a DT_NEEDED chain;
- * done here explicitly.
+ * The library is loaded and its functions resolved by hand rather than imported: an
+ * automatic load of `libSceAppInstUtil.sprx` fails (rtld "loadability error 13") until
+ * its three dependencies - `libSceLibcInternal`, `libSceRegMgr`, `libSceIpmi` - are
+ * present, so they are loaded first, in dependency order, as rtld would for a
+ * DT_NEEDED chain.
  */
 extern int sceKernelLoadStartModule(const char *path, unsigned long argc,
                                     const void *argv, unsigned int flags,

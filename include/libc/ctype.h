@@ -1,11 +1,9 @@
 /*
  * <ctype.h> - what a parser calls.
  *
- * Every OBJ loader, config reader and command-line splitter a port carries is built out
- * of these. They are the C locale's, which is the only locale here: no table, no
- * `setlocale`, and `isalpha` is the twenty-six letters. A port that needs more than
- * ASCII needs more than this header, and should say so rather than finding out from a
- * mis-parsed file.
+ * The C locale's classifiers, the only locale here: no table, no `setlocale`, and
+ * `isalpha` is the twenty-six letters. A port that needs more than ASCII needs more
+ * than this header.
  *
  * On the target include path only - see <libc/math.h>.
  */
@@ -61,25 +59,15 @@ static inline int toupper(int c) {
 }
 
 /*
- * **The character-class bitmasks, because C++'s `std::ctype_base` is defined in terms
- * of them** (2026-09-23, `REQ-20260923T1810Z-7d42`).
+ * The character-class bitmasks C++'s `std::ctype_base::mask` is defined from, a bit
+ * per class so `std::ctype<char>::is()` can test several at once. libc++ picks these
+ * names because the target is `x86_64-unknown-freebsd`.
  *
- * The functions above answer one question each. `std::ctype_base::mask` instead needs a
- * *bit per class*, so that `std::ctype<char>::is()` can test several at once and
- * `std::regex` and the numeric facets can build a class out of an `|`. libc++ picks
- * which set of names to use from the predefined macros, and this target is
- * `x86_64-unknown-freebsd`, so it reaches for these.
- *
- * **The values are FreeBSD's own, not ours to choose.** Taken from
- * `oops-mesa/toolchain/sysroot/usr/include/_ctype.h:47-58`, which is a real FreeBSD
- * header staged from the checkout oops-mesa pins - so a program that got a mask from
- * anywhere else on this target agrees with these. Inventing a private numbering would
- * compile equally well and disagree silently with anything that did not come through
- * this header, which is the failure this collection keeps a citation to avoid.
- *
- * `_CTYPE_G` (graph), `_CTYPE_I` (ideogram) and the classes above `_CTYPE_R` are in the
- * source header and omitted here: nothing declares them and an unused constant with a
- * value nobody checked is worse than an absent one.
+ * The values are FreeBSD's, from
+ * `oops-mesa/toolchain/sysroot/usr/include/_ctype.h:47-58`, so they agree with any mask
+ * from elsewhere on this target. `_CTYPE_G` (graph),
+ * `_CTYPE_I` (ideogram) and the classes above `_CTYPE_R` are omitted: nothing uses
+ * them.
  */
 #define _CTYPE_A 0x00000100L /* alpha   */
 #define _CTYPE_C 0x00000200L /* control */

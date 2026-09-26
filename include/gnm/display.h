@@ -1,3 +1,7 @@
+/*
+ * The Orbis/Neo display backend behind <oops/display.h>: two linear VideoOut scanout
+ * buffers, the framebuffer being one of them.
+ */
 #ifndef OOPS_GNM_DISPLAY_H
 #define OOPS_GNM_DISPLAY_H
 

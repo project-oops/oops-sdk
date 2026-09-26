@@ -2,12 +2,17 @@
 #include "oops/fs.h"
 #include "tests/test_common.h"
 
+/* Unit tests for `oops/savedata.h`. On host the platform library is absent, so slots
+ * fall back to directories on the filesystem. */
+
+/* The mode flags keep the platform's values. */
 static void test_savedata_modes(void) {
     ASSERT_EQ(OOPS_SAVEDATA_MODE_READ_ONLY, 0x01);
     ASSERT_EQ(OOPS_SAVEDATA_MODE_READ_WRITE, 0x02);
     ASSERT_EQ(OOPS_SAVEDATA_MODE_CREATE, 0x04);
 }
 
+/* NULL names, paths and buffers are refused. */
 static void test_savedata_null_safety(void) {
     char path[64];
     ASSERT_EQ(
@@ -23,6 +28,7 @@ static void test_savedata_null_safety(void) {
     ASSERT_EQ(oops_savedata_save_file(NULL, "f", "d", 1), -1);
 }
 
+/* Without the platform library, init fails and a missing slot does not mount. */
 static void test_savedata_unsupported(void) {
     char path[64];
     /* Weak symbols not present on host -> returns -1 */
@@ -35,6 +41,7 @@ static void test_savedata_unsupported(void) {
     oops_savedata_term();
 }
 
+/* The fallback creates a slot directory and mounts it again at the same path. */
 static void test_savedata_filesystem_fallback(void) {
     char path[128];
 
@@ -59,6 +66,7 @@ static void test_savedata_filesystem_fallback(void) {
     ASSERT_EQ(oops_savedata_unmount(path2, false), 0);
 }
 
+/* A file saved to a slot loads back byte for byte; a missing file is an error. */
 static void test_savedata_file_helpers(void) {
     const char test_data[] = "OOPS_PERSISTENT_SETTINGS_PAYLOAD_DATA";
     size_t test_size = sizeof(test_data);

@@ -5,25 +5,12 @@
  * this obeys any directives in the way, expands any macro it finds, and hands back the
  * next real one.
  *
- * # The two things a preprocessor has to get right
+ * Inside a false conditional the tokens are discarded but the conditional directives
+ * are still read, so nesting pairs correctly.
  *
- * **Skipping still has to parse.** Inside a false `#ifdef`, the tokens are discarded -
- * but the *directives* are not, because `#ifdef A` ... `#ifdef B` ... `#endif` ...
- * `#endif` must still pair correctly. A skipper that throws away everything until the
- * next `#endif` closes the wrong one, and the error surfaces hundreds of lines later as
- * a brace mismatch.
- *
- * **A macro must not expand itself.** `#define A A` is legal and means "A is A", and
- * expanding the body without guarding loops until something runs out.
- *
- * The guard is a flag per macro, and **when it is cleared is the whole of the
- * difficulty**. Clearing it as the expansion queue drains is too early: the drain
- * happens on the very read that yields the token which would re-trigger the expansion,
- * so `#define A A` still loops. Clearing it when the reader goes back to the *lexer* is
- * right - that is the moment the expansion is genuinely finished - and it makes mutual
- * recursion (`#define A B`,
- * `#define B A`) terminate too, because both flags are still set when the second name
- * comes round.
+ * A macro does not expand within its own expansion: `#define A A` leaves an `A`. The
+ * guard is a flag per macro, set when its body is queued and cleared by an end marker
+ * queued behind the body (see `expand`), so mutual recursion terminates too.
  */
 
 #include "glsl_internal.h"
@@ -103,9 +90,8 @@ static GLboolean raw_next(glsl_pp_t *pp, glsl_token_t *out) {
         if (pp->pending_head == pp->pending_tail) {
             pp->pending_head = pp->pending_tail = 0;
         }
-        /* **An end marker is where one macro's expansion stops**, and reading it is
-         * what clears that macro's flag - see `expand`. It is not a token any consumer
-         * has heard of, so it is swallowed here and the loop reads on. */
+        /* An end marker is where one macro's expansion stops; reading it clears that
+         * macro's flag (see `expand`). It is swallowed here. */
         if (out->type == GLSL_TOK_PP_MACRO_END) {
             const int mi = (int)out->value;
             if (mi >= 0 && mi < pp->macro_count)
@@ -114,10 +100,9 @@ static GLboolean raw_next(glsl_pp_t *pp, glsl_token_t *out) {
         }
         return GL_TRUE;
     }
-    /* **Here, not in the drain above.** Clearing the flags as the queue empties is one
-     * read too early - that read is the one that yields the token which would
-     * re-trigger the expansion, so `#define A A` loops forever rather than failing.
-     * Going back to the lexer is the moment an expansion is genuinely over. */
+    /* Going back to the lexer means every expansion is over, including an empty
+     * macro's, which queues no marker. Clearing as the queue empties would be one read
+     * too early and `#define A A` would loop. */
     for (int i = 0; i < pp->macro_count; i++)
         pp->macros[i].expanding = GL_FALSE;
     return glsl_lex_next(&pp->lx, out);
@@ -165,10 +150,9 @@ static void do_define(glsl_pp_t *pp, glsl_token_t *tok, int line) {
     m->param_count = 0;
 
     GLboolean have = raw_next(pp, tok);
-    /* **A `(` straight after the name makes it function-like**, and the adjacency is
-     * the whole test: `#define F(x) x` takes an argument, `#define F (x)` is
-     * object-like with a body that begins with a parenthesis. The two differ by one
-     * space and by everything else. */
+    /* A `(` straight after the name makes it function-like: `#define F(x) x` takes an
+     * argument, `#define F (x)` is object-like with a body that begins with a
+     * parenthesis. */
     if (have && tok->line == line && tok->type == GLSL_TOK_LPAREN &&
         tok->text == name + name_len) {
         m->function_like = GL_TRUE;
@@ -185,8 +169,7 @@ static void do_define(glsl_pp_t *pp, glsl_token_t *tok, int line) {
                     pp_fail(pp, "too many macro parameters", line);
                     return;
                 }
-                /* A parameter named twice would make substitution ambiguous, and the
-                 * first would silently win. */
+                /* A parameter named twice would make substitution ambiguous. */
                 for (int i = 0; i < m->param_count; i++) {
                     if (same_word(m->param_name[i], m->param_len[i], tok->text,
                                   tok->length)) {
@@ -232,8 +215,7 @@ static void do_undef(glsl_pp_t *pp, glsl_token_t *tok, int line) {
     glsl_macro_t *m = find_macro(pp, tok->text, tok->length);
     if (m)
         m->in_use = GL_FALSE;
-    /* `#undef` of something never defined is not an error, which is what the
-     * specification says and what every header relies on. */
+    /* `#undef` of something never defined is not an error. */
     if (!raw_next(pp, tok))
         tok->type = GLSL_TOK_EOF;
     skip_to_end_of_line(pp, tok, line);
@@ -254,30 +236,22 @@ static void do_version(glsl_pp_t *pp, glsl_token_t *tok, int line) {
  * `#if` and `#elif`: a constant expression over integers
  *
  * The grammar is C's, as the specification says, minus the parts GLSL 1.10 has no
- * tokens for - see the shift note in `pp_eval_shift_guard`. Evaluation is in three
- * passes over the directive's line, and the order of the first two is the whole of why
- * `defined` works:
+ * tokens for (see `pp_eval_shift_guard`). Three passes over the directive's line:
  *
- *   1. `defined X` and `defined(X)` become 1 or 0. **Before expansion**, because
- * `defined FOO` must ask whether FOO is a macro, not expand it first and ask about
- * whatever came out.
- *   2. Macros expand. What is left that is still an identifier is 0, which the
- * specification requires and which is what makes `#if UNSET_THING` take the else branch
- * rather than fail.
+ *   1. `defined X` and `defined(X)` become 1 or 0, before expansion, so `defined FOO`
+ *      asks about FOO itself.
+ *   2. Macros expand. An identifier left over is 0, as the specification requires.
  *   3. The result is evaluated by precedence.
  *
- * All of it happens in fixed arrays. A preprocessor expression that needs more than
- * `GLSL_PP_MAX_EXPR` tokens is refused rather than truncated, because a truncated
- * expression evaluates to something and silently picks a branch.
+ * All of it happens in fixed arrays. An expression longer than `GLSL_PP_MAX_EXPR`
+ * tokens is refused rather than truncated.
  * ------------------------------------------------------------------------- */
 
 #define GLSL_PP_MAX_EXPR 128
 #define GLSL_PP_MAX_EXPANSIONS 256
 
-/* **Declared here and defined below**, because a `#if` expression may call a
- * function-like macro and the argument machinery is written next to the stream path
- * that is its other caller. One substitution serves both, so `MAX(a,b)` means the same
- * thing in a condition as in code. */
+/* Declared here and defined below: a `#if` expression may call a function-like macro,
+ * and one substitution serves both it and the token stream. */
 #define GLSL_PP_MAX_ARG_TOKENS 128
 
 typedef struct pp_args {
@@ -298,8 +272,7 @@ static int pp_subst(glsl_pp_t *pp, const glsl_macro_t *m, const pp_args_t *a,
                     glsl_token_t *out, int max, int line);
 
 /* Collects what is left of a directive's line. `tok` holds the directive name on entry
- * and the first token of the next line on exit, which is the same contract every `do_*`
- * here keeps. */
+ * and the first token of the next line on exit, as with every `do_*` here. */
 static int pp_collect_line(glsl_pp_t *pp, glsl_token_t *tok, int line,
                            glsl_token_t *buf, int max) {
     int n = 0;
@@ -387,9 +360,8 @@ static int pp_expand_expr(glsl_pp_t *pp, glsl_token_t *buf, int n, int line) {
         glsl_token_t body[GLSL_PP_MAX_EXPR];
         int consumed = 1, produced;
         if (m->function_like) {
-            /* **A function-like macro's name with no `(` after it is not a call** and
-             * stays an identifier - which the evaluator then reads as 0, exactly as it
-             * does any other undefined name. */
+            /* A function-like macro's name with no `(` after it is not a call; it stays
+             * an identifier, which the evaluator reads as 0. */
             if (i + 1 >= n || buf[i + 1].type != GLSL_TOK_LPAREN)
                 continue;
             pp_args_t args;
@@ -463,15 +435,9 @@ static glsl_token_type_t pp_peek(const pp_eval_t *e) {
     return e->i < e->n ? e->t[e->i].type : GLSL_TOK_EOF;
 }
 
-/*
- * **`<<` and `>>` are refused rather than mis-read.**
- *
- * GLSL 1.10 has no shift operators, so the lexer has no token for them and `1 << 2`
- * arrives as two `<` in a row. Evaluated naively that is `(1 < (< 2))`, which is
- * nonsense that still produces a number and still picks a branch. The two are adjacent
- * in the source text, which is what tells them apart from `a < <b>` - impossible here
- * anyway - so they are detected and named.
- */
+/* `<<` and `>>` are refused rather than mis-read. GLSL 1.10 has no shift operators, so
+ * `1 << 2` arrives as two adjacent `<` tokens; they are detected by adjacency in the
+ * source text and named. */
 static GLboolean pp_eval_shift_guard(pp_eval_t *e) {
     if (e->i + 1 >= e->n)
         return GL_FALSE;
@@ -520,10 +486,7 @@ static int32_t pp_eval_primary(pp_eval_t *e) {
         return v;
     }
     case GLSL_TOK_IDENTIFIER:
-        /* **`__VERSION__`, because `#if __VERSION__ >= 120` is the commonest use of
-         * `#if` there is** and an undefined identifier is 0 - which would silently take
-         * the wrong branch rather than fail. The specification requires it to be
-         * predefined. */
+        /* `__VERSION__` is predefined, as the specification requires. */
         if (same_word(t->text, t->length, "__VERSION__", 11)) {
             e->i++;
             return (int32_t)(e->pp->version ? e->pp->version : 110);
@@ -659,11 +622,8 @@ static int32_t pp_eval_bor(pp_eval_t *e) {
     return e->bad ? 0 : v;
 }
 
-/* **Both sides are evaluated.** Short-circuiting would be wrong here in a way it is not
- * in the language: a preprocessor expression has no side effects, and evaluating the
- * right of a false
- * `&&` is how a malformed operand is still reported rather than hidden by the operand
- * before it. */
+/* Both sides are evaluated. A preprocessor expression has no side effects, and
+ * evaluating the right of a false `&&` still reports a malformed operand there. */
 static int32_t pp_eval_land(pp_eval_t *e) {
     int32_t v = pp_eval_bor(e);
     while (!e->bad && pp_peek(e) == GLSL_TOK_AND_AND) {
@@ -746,13 +706,10 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
     if (tok->type == GLSL_TOK_EOF || tok->line != line)
         return;
 
-    /* **Conditionals are read even while skipping**, so nesting stays balanced.
-     * Everything else is obeyed only when output is live. */
-    /* **`#if` is read even while skipping**, like `#ifdef`, so nesting stays balanced -
-     * but its *expression* is not evaluated in a dark region. That is not an
-     * optimisation: a branch that is not being compiled may well divide by zero or name
-     * a macro that only exists in the other arm, and evaluating it would fail the
-     * compile on an expression nobody asked for. */
+    /* Conditionals are read even while skipping, so nesting stays balanced; everything
+     * else is obeyed only when output is live. An `#if` expression in a dark region is
+     * not evaluated, since it may divide by zero or name a macro only the other arm
+     * defines. */
     if (tok_is(tok, "if")) {
         if (pp->cond_depth >= GLSL_MAX_COND_DEPTH) {
             pp_fail(pp, "conditionals nested too deeply", line);
@@ -788,9 +745,8 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
             if (!pp->emitting[i])
                 outer_live = GL_FALSE;
         }
-        /* **Only evaluated when it could matter**: the enclosing region is live and no
-         * earlier arm of this conditional has been taken. Otherwise the expression is
-         * skipped unread, for the same reason `#if` skips one in a dark region. */
+        /* Only evaluated when the enclosing region is live and no earlier arm of this
+         * conditional has been taken. */
         const GLboolean could = (GLboolean)(outer_live && !pp->taken[top]);
         GLboolean on = GL_FALSE;
         if (could) {
@@ -841,7 +797,7 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
             return;
         }
         int top = pp->cond_depth - 1;
-        /* Live only if no branch here has been taken *and* the enclosing region is
+        /* Live only if no branch here has been taken and the enclosing region is
          * live. */
         GLboolean outer_live = GL_TRUE;
         for (int i = 0; i < top; i++) {
@@ -870,9 +826,8 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
     }
 
     if (!emitting(pp)) {
-        /* Any other directive inside a dark region is ignored entirely - including ones
-         * this would otherwise refuse, because a `#extension` in a branch that is not
-         * compiled has not been asked for. */
+        /* Any other directive inside a dark region is ignored entirely, including ones
+         * this would otherwise refuse. */
         skip_to_end_of_line(pp, tok, line);
         return;
     }
@@ -894,22 +849,10 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
         return;
     }
 
-    /*
-     * **`#extension`, and the one behaviour that must still fail.**
-     *
-     * This front end implements no extensions, so the honest answer to every name is
-     * "you do not have it". The specification says how to say that: `require` on an
-     * unsupported extension is an error, and `enable` is a warning that compiles on
-     * without it. `warn` and `disable` ask for nothing. `all : require` and `all :
-     * enable` are errors by name.
-     *
-     * So `require` is refused and the rest are accepted and ignored - which is not the
-     * same as skipping the directive, the thing the comment here used to warn against.
-     * A skipped
-     * `#extension GL_OES_foo : require` compiles a shader that asked for something it
-     * did not get; refusing exactly that spelling is what stops it, and waving through
-     * `: enable` is what the specification asks for rather than a shortcut.
-     */
+    /* `#extension`. This front end implements no extensions. The specification makes
+     * `require` on an unsupported extension an error and `enable` a warning that
+     * compiles on; `warn` and `disable` ask for nothing. So `require` is refused and
+     * the rest are accepted and ignored. */
     if (tok_is(tok, "extension")) {
         glsl_token_t name = *tok;
         if (!raw_next(pp, tok) || tok->line != line ||
@@ -946,9 +889,8 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
         return;
     }
 
-    /* **`#pragma` is ignored, which is what the specification says to do with one you
-     * do not recognise** - and this recognises none. `optimize`, `debug` and `STDGL`
-     * all change nothing here, so obeying them and ignoring them are the same thing. */
+    /* `#pragma` is ignored, as the specification says to do with one not recognised;
+     * `optimize`, `debug` and `STDGL` change nothing here. */
     if (tok_is(tok, "pragma")) {
         if (!raw_next(pp, tok))
             tok->type = GLSL_TOK_EOF;
@@ -956,13 +898,8 @@ static void do_directive(glsl_pp_t *pp, glsl_token_t *tok) {
         return;
     }
 
-    /* **`#line` is accepted and does not move the line numbers**, and that is a real
-     * limitation rather than a silent one. Honouring it means renumbering what the
-     * lexer reports, and the only thing that reads those numbers here is a diagnostic -
-     * so the cost of ignoring it is that an error in a shader assembled from pieces
-     * names the physical line rather than the one `#line` claims. No shader compiles
-     * differently for it. Refusing the directive outright would be worse: a generated
-     * shader that carries `#line` is otherwise perfectly ordinary. */
+    /* `#line` is accepted and does not move the line numbers. Only diagnostics read
+     * them, so a diagnostic names the physical line; no shader compiles differently. */
     if (tok_is(tok, "line")) {
         if (!raw_next(pp, tok))
             tok->type = GLSL_TOK_EOF;
@@ -1008,9 +945,8 @@ static GLboolean pp_args_open(glsl_pp_t *pp, pp_args_t *a, int line) {
     return GL_TRUE;
 }
 
-/* Checks the count once the list is closed. An arity mismatch is a hard error rather
- * than a silent pad-or-drop, because both of those expand to something that compiles.
- */
+/* Checks the count once the list is closed. An arity mismatch is an error, not a pad
+ * or a drop. */
 static GLboolean pp_args_check(glsl_pp_t *pp, const glsl_macro_t *m, const pp_args_t *a,
                                int line) {
     int supplied = a->count;
@@ -1061,13 +997,9 @@ static int pp_subst(glsl_pp_t *pp, const glsl_macro_t *m, const pp_args_t *a,
     return n;
 }
 
-/*
- * Reads `( arg , arg )` off the stream. The caller has already seen the `(`.
- *
- * **Nesting is counted and commas inside it are not separators**, so `F(g(a,b), c)` is
- * two arguments and not three - the mistake that turns a working macro into a wrong one
- * rather than a failing one.
- */
+/* Reads `( arg , arg )` off the stream; the caller has already consumed the `(`.
+ * Nesting is counted and commas inside it are not separators, so `F(g(a,b), c)` is two
+ * arguments. */
 static GLboolean pp_read_args_stream(glsl_pp_t *pp, glsl_macro_t *m, pp_args_t *a,
                                      int line) {
     pp_args_begin(a);
@@ -1114,64 +1046,23 @@ static GLboolean expand(glsl_pp_t *pp, glsl_macro_t *m, const pp_args_t *args) {
         src = &pp->pool[m->first_token];
         count = (int)m->token_count;
     }
-    /*
-     * **The body goes in front of what is still queued, not after it.**
+    /* The body goes in front of what is still queued, not after it: when a macro
+     * inside a macro expands, the queue still holds the rest of the outer body, and the
+     * inner expansion belongs before it. `#define SCALE(x) ((x) * HALF)` depends on
+     * this.
      *
-     * Rescanning is what makes a macro inside a macro work: the body is queued, read
-     * back, and any macro in it expands in turn. But the queue already holds the *rest
-     * of the outer body* when that happens, and appending puts the inner expansion
-     * behind it - so
-     *
-     *     #define HALF 0.5
-     *     #define SCALE(x) ((x) * HALF)
-     *     SCALE(1.0)
-     *
-     * queued `( ( 1.0 ) * HALF )`, read as far as `HALF`, and appended `0.5` after the
-     * `)`. What the parser saw was `((1.0) * ) 0.5` - "expected an expression",
-     * reported against the
-     * `#define` line, because that is where the body's tokens come from.
-     *
-     * It only shows when the inner macro is not the *last* token of the outer body,
-     * which is why every macro in every port corpus expanded correctly: `#define F(x)
-     * G(x)` ends on the nested call and appending is indistinguishable from splicing
-     * there.
-     */
-    /*
-     * **And an end marker behind it, because `expanding` has to stop being true
-     * somewhere.**
-     *
-     * The flag exists so a macro cannot expand inside its own expansion - `#define A A`
-     * has to leave an `A` rather than loop. It used to be cleared only when `raw_next`
-     * went back to the lexer, which made it "this macro expands at most once before the
-     * next real token" rather than "not within itself". So
-     *
-     *     #define HALF 0.5
-     *     #define DUP(a) ((a) + (a))
-     *     DUP(HALF)
-     *
-     * substituted to `( ( HALF ) + ( HALF ) )`, expanded the first HALF, and left the
-     * second as a bare identifier for the parser to reject - because nothing between
-     * them came from the lexer. One argument used once hid it, which is every macro in
-     * every port corpus.
-     *
-     * The marker travels with the body: splices go in *front* of what is queued, so an
-     * expansion nested inside this one lands before this marker and the flag clears at
-     * exactly the right token. `#define A A` still terminates - the `A` is read while
-     * the flag is set, emitted as an identifier, and the marker after it clears the
-     * flag.
-     */
+     * An end marker follows the body and clears `expanding` when read. Because splices
+     * go in front, an expansion nested inside this one lands before the marker, so the
+     * flag means "not within itself": `DUP(HALF)` with `#define DUP(a) ((a) + (a))`
+     * expands both `HALF`s, and `#define A A` emits one `A` and stops. */
     const int left = pp->pending_tail - pp->pending_head;
     if (count + 1 + left > GLSL_MAX_PENDING) {
         pp_fail(pp, "macro expansion too large", pp->error_line);
         return GL_FALSE;
     }
-    /* **The tail moves over itself, so the direction is not a detail.** It lands at
-     * `count + 1` and starts at `pending_head`, and which of those is larger depends on
-     * how much of the queue had been read and how long this body is. Copying the wrong
-     * way round overwrites tokens that have not been moved yet - `DUP(HALF)` is three
-     * tokens deep when HALF's one-token body arrives, so the destination is *below* the
-     * source and only a forward copy is safe. This is what `memmove` does and what a
-     * loop in one fixed direction does not. */
+    /* The tail moves over itself, from `pending_head` to `count + 1`, and either may be
+     * larger; the copy direction is chosen as `memmove` would, so no token is
+     * overwritten before it moves. */
     if (count + 1 >= pp->pending_head) {
         for (int i = left - 1; i >= 0; i--) {
             pp->pending[count + 1 + i] = pp->pending[pp->pending_head + i];
@@ -1237,9 +1128,8 @@ GLboolean glsl_pp_next(glsl_pp_t *pp, glsl_token_t *out) {
             if (after.line == tok.line && after.type != GLSL_TOK_EOF) {
                 do_directive(pp, &after);
             }
-            /* **Whatever the directive stopped on belongs to the stream.** It is the
-             * first token of the next line, already taken off the lexer, and dropping
-             * it here loses the first token after every directive. */
+            /* Whatever the directive stopped on belongs to the stream: it is the first
+             * token of the next line, already taken off the lexer. */
             if (!pp->error && after.type != GLSL_TOK_EOF) {
                 pp->held = after;
                 pp->has_held = GL_TRUE;
@@ -1252,17 +1142,14 @@ GLboolean glsl_pp_next(glsl_pp_t *pp, glsl_token_t *out) {
 
         if (tok.type == GLSL_TOK_IDENTIFIER) {
             glsl_macro_t *m = find_macro(pp, tok.text, tok.length);
-            /* **Not while it is already expanding**: `#define A A` would otherwise
-             * loop. */
+            /* Not while it is already expanding: `#define A A` would otherwise loop. */
             if (m && !m->expanding) {
                 pp_args_t args;
                 if (m->function_like) {
-                    /* **A function-like macro's name on its own is not a call**, and
-                     * must be emitted unchanged - `#define F(x) x` leaves a bare `F`
-                     * alone, which is what lets a macro share a name with something
-                     * else that is not called. So the next token is read to look for
-                     * `(` and put back if it is not one. `held` is free here:
-                     * `raw_next` above has just drained it. */
+                    /* A function-like macro's name on its own is not a call and is
+                     * emitted unchanged. The next token is read to look for `(` and put
+                     * back if it is not one; `held` is free, as `raw_next` above has
+                     * just drained it. */
                     glsl_token_t after;
                     const GLboolean got = raw_next(pp, &after);
                     if (!got || after.type != GLSL_TOK_LPAREN) {

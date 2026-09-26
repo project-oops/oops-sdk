@@ -2,9 +2,7 @@
  * <assert.h>.
  *
  * A failed assertion writes the file, line and expression to the kernel log and then
- * ends the payload, which is what `abort` can honestly do here - see <libc/stdlib.h>.
- * It is not silent: a port whose assertion fires on a console leaves the reason in the
- * log, which is the only place anyone will look.
+ * ends the payload as `abort` does (see <libc/stdlib.h>), so the reason is in the log.
  *
  * `NDEBUG` removes them, as everywhere. On the target include path only - see
  * <libc/math.h>.

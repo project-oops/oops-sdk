@@ -1,3 +1,7 @@
+/*
+ * Direct memory: physical allocation, mapping and virtual-range reservation, and a
+ * managed allocator for memory both the CPU and the GPU can reach.
+ */
 #ifndef OOPS_MEMORY_H
 #define OOPS_MEMORY_H
 
@@ -39,8 +43,8 @@ int oops_mem_unmap(void *vaddr, size_t size);
 /* Virtual address range reservation without physical backing.
  * Reserves a virtual address range suitable for later mapping (e.g. via
  * oops_mem_batch_map or oops_mem_map_direct).
- * Confirmed on hardware (sweep 20260909-204626, check
- * 020-memory/reserve-virtual-range). If *addr_inout is NULL, kernel selects base
+ * Confirmed on hardware by the obSCEne probe 020-memory/reserve-virtual-range.
+ * If *addr_inout is NULL, kernel selects base
  * address and writes it back. Alignment must be page-aligned (e.g. 0x4000 or 0x40000).
  */
 int oops_mem_reserve_va(void **addr_inout, size_t len, int flags, size_t alignment);

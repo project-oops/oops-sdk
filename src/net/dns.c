@@ -1,6 +1,9 @@
 /*
- * Freestanding RFC 1035 DNS client and hostname resolver.
- * Zero libc dependencies on target.
+ * Freestanding RFC 1035 DNS client and hostname resolver, with no libc on target.
+ *
+ * A dotted quad and "localhost" resolve without a query. Otherwise the target sends an
+ * A query over UDP to the network's DNS servers, then to public resolvers; the host
+ * build uses `getaddrinfo`.
  */
 
 #include "oops/net.h"

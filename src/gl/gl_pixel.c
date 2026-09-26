@@ -1,39 +1,15 @@
 /*
  * oops-gl: pixel rectangles in client memory
  *
- * Every call that reads or writes an image in the program's memory - the texture
- * uploads, glDrawPixels, glReadPixels, glGetTexImage, glBitmap and the polygon stipple,
- * and the display lists that keep copies of them - describes it with a format, a type
- * and the glPixelStorei state. This is the one place that reads that description.
- *
- * # What a format and type mean
- *
- * The format names the components a pixel holds, in order: GL_RED, GL_GREEN, GL_BLUE,
- * GL_ALPHA, GL_RGB, GL_BGR, GL_RGBA, GL_BGRA, GL_LUMINANCE, GL_LUMINANCE_ALPHA. The
- * type says how each is stored: one element per component - GL_UNSIGNED_BYTE, GL_BYTE,
- * GL_UNSIGNED_SHORT, GL_SHORT, GL_UNSIGNED_INT, GL_INT, GL_FLOAT - or, for GL 1.2's
- * packed types, the whole pixel in one 8-, 16- or 32-bit element, the format's first
- * component in the most significant bits (the _REV types: the least). Mesa's table of
- * which packed type fits which format is the one used (main/glformats.c,
- * _mesa_format_from_format_and_type); a pair it does not have is GL_INVALID_OPERATION,
- * as GL 1.2 says.
- *
- * Integers become fractions of one as the specification converts them: an unsigned
- * value over 2^b - 1, a signed one as (2c + 1) / (2^b - 1) (the same macros the vertex
- * attributes use, gl_draw.c), a packed field over 2^bits - 1. Going out it is the
- * inverse, rounded.
- *
- * # Where a rectangle is
- *
- * Rows are GL_*_ROW_LENGTH pixels apart (the width, when that is 0) padded to
- * GL_*_ALIGNMENT; slices of a 3D image are GL_*_IMAGE_HEIGHT rows apart (the height,
- * when 0); and the rectangle starts GL_*_SKIP_PIXELS pixels, GL_*_SKIP_ROWS rows and
- * GL_*_SKIP_IMAGES slices in. With GL_*_SWAP_BYTES each multi-byte element is stored
- * the other way round. A bitmap's rows are bits, and GL_UNPACK_LSB_FIRST puts a byte's
- * first pixel in its lowest bit.
- *
- * Until 2026-09-19 only GL_UNSIGNED_BYTE was read, in six formats, with the alignment
- * and the unpack row length; everything else here was refused.
+ * The one reader of the format, type and glPixelStorei description that every image in
+ * program memory carries: texture uploads, glDrawPixels, glReadPixels, glGetTexImage,
+ * glBitmap, the polygon stipple and their display-list copies. Which packed type fits
+ * which format is Mesa's table (main/glformats.c, _mesa_format_from_format_and_type); a
+ * pair outside it is GL_INVALID_OPERATION, as GL 1.2 says. Integers become fractions of
+ * one as the specification converts them (the vertex attribute macros, gl_draw.c), and
+ * back, rounded. Rows, slices, skips, byte swapping and bitmap bit order follow the
+ * GL_*_ROW_LENGTH, _ALIGNMENT, _IMAGE_HEIGHT, _SKIP_*, _SWAP_BYTES and _LSB_FIRST
+ * state.
  */
 
 #include "gl_internal.h"
@@ -118,7 +94,7 @@ static size_t gl_type_bytes(GLenum type) {
 }
 
 GLenum gl_pixel_fmt(GLenum format, GLenum type, gl_pixel_fmt_t *out) {
-    /* **GL_BITMAP**: one bit a pixel, and only for indices - colour or stencil (Mesa
+    /* GL_BITMAP: one bit a pixel, and only for indices - colour or stencil (Mesa
      * main/glformats.c:1949-1953) - addressed as glBitmap's bits are. */
     if (type == GL_BITMAP) {
         if (format != GL_COLOR_INDEX && format != GL_STENCIL_INDEX)
@@ -657,11 +633,9 @@ void gl_pack_value(const gl_context_t *ctx, const gl_pixel_fmt_t *f, float v,
  * Copies for display lists
  * ------------------------------------------------------------------------- */
 
-/* **How many bytes the function below produced.** Beside it rather than at its call
- * sites, because the two must agree and the layout is this file's to know: tight rows
- * of `width * pixel_bytes`, except a GL_BITMAP image, which is packed to the bit like
- * glBitmap's. A capture has to write the blob's length down, and nothing else ever
- * needed it. */
+/* How many bytes the function below produces: tight rows of `width * pixel_bytes`,
+ * except a GL_BITMAP image, which is packed to the bit like glBitmap's. Kept beside it
+ * because the two must agree. */
 size_t gl_pixel_packed_bytes(const gl_pixel_fmt_t *f, GLsizei width, GLsizei height,
                              GLsizei depth) {
     if (!f || width <= 0 || height <= 0 || depth <= 0)

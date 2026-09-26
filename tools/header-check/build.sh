@@ -3,10 +3,8 @@
 #
 #   bash tools/header-check/build.sh
 #
-# Why this exists rather than a unit test: the mistakes it catches are not wrong *values*, they
-# are declarations and macros that only conflict when two headers meet. A test that includes only
-# our own header cannot see them, and the app that did see them found them by failing to build -
-# see tools/header-check/header_check.c.
+# It catches declarations and macros that only conflict when two headers meet, which a test
+# including only this SDK's header cannot see. See tools/header-check/header_check.c.
 #
 # The second compile needs a sibling `oops-mesa` checkout with Mesa's headers in it. Without one
 # it is skipped, loudly.
@@ -29,8 +27,7 @@ ${CC:-clang} $WARN \
 echo "header-check: passed - the SDK's GL headers compile on their own"
 
 # 2. The same translation unit with Mesa's `glext.h` after ours, which is the order a hosted
-#    title includes them in. Every extension name is then a redefinition, which is the case that
-#    broke both oops-mesa probes on 2026-09-20.
+#    title includes them in. Every extension name is then a redefinition.
 GLEXT_DIR=""
 for candidate in "$COLLECTION/oops-mesa/mesa/include" "$COLLECTION/oops-mesa/include"; do
     if [ -f "$candidate/GL/glext.h" ]; then

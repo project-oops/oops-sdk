@@ -1,36 +1,14 @@
 /*
- * oops-glut: enough of GLUT that a program written against it builds and runs.
+ * oops-glut: the subset of GLUT that GL 1.x programs use, over this SDK's display,
+ * input and timing.
  *
- * Most GL 1.x code in the world - the tutorials, the demos, the small games, the
- * homebrew - does not open a window or read input itself. It calls `glutCreateWindow`,
- * registers callbacks and hands control to `glutMainLoop`. Without that, every port
- * begins by rewriting the one part of the program that has nothing to do with what it
- * draws.
- *
- * This is **not** GLUT. It is the subset those programs use, over this SDK's own
- * display, input and timing:
- *
- * - one window, always the display's size. `glutInitWindowPosition` is accepted and
- * ignored, `glutInitWindowSize` is a request, and `glutGet(GLUT_WINDOW_WIDTH)` answers
- * what was opened.
- * - `glutInitDisplayMode` is recorded and mostly implied: the context is always RGBA
- * and double buffered, and depth and stencil always exist. A mode this cannot honour is
- * not refused - it is answered by `glutGet(GLUT_DISPLAY_MODE_POSSIBLE)`, which is what
- * a program that cares asks.
- * - the callbacks below, dispatched from `glutMainLoop`, which returns when
- *   `glutLeaveMainLoop()` is called. A console program that never leaves its loop has
- * no way to stop; freeglut's spelling is used because GLUT has none.
- *
- * **Not here:** subwindows, menus, overlays, the proportional fonts and the stroke
- * font, the teapot, `glutInit`'s display-string form, game mode, and the calls that
- * would move or resize a window that is the display
- * (`glutReshapeWindow`, `glutPositionWindow`, `glutWarpPointer`). A program calling one
- * of those fails to link, which says so where a stub that draws nothing would not.
- *
- * **The line between the two is whether the answer is exact.** `glutFullScreen` is here
- * because the window is permanently full screen, so the call gets what it asked for;
- * `glutReshapeWindow` is not, because it cannot. That is the same test `glutGet` is
- * answered by.
+ * There is one window, always the display's size. `glutInitDisplayMode` is recorded:
+ * the context is always RGBA and double buffered with depth and stencil, and
+ * `glutGet(GLUT_DISPLAY_MODE_POSSIBLE)` answers whether a mode can be honoured.
+ * `glutMainLoop` returns when freeglut's `glutLeaveMainLoop()` is called. A call is
+ * here only when its answer is exact; subwindows, menus, overlays, the proportional and
+ * stroke fonts, game mode and the calls that move or resize the window are absent, so a
+ * program needing them fails to link.
  */
 #ifndef __GLUT_H__
 #define __GLUT_H__
@@ -55,11 +33,9 @@ extern "C" {
 #define GLUT_MULTISAMPLE 0x0080
 
 /*
- * glutGet. **Every one of these has an exact answer here** - the window is the display,
- * its position is the origin, the channels are eight bits each and the accumulation
- * buffer's are sixteen - which is why they are answered rather than left out. A query
- * this cannot answer exactly is not in the list and reads as 0, GLUT's own answer for
- * one it does not know.
+ * glutGet's queries, each with an exact answer: the window is the display at the
+ * origin, colour channels are eight bits and accumulation channels sixteen. Any other
+ * query reads as 0, GLUT's answer for one it does not know.
  */
 #define GLUT_WINDOW_X 100
 #define GLUT_WINDOW_Y 101
@@ -94,10 +70,8 @@ extern "C" {
 #define GLUT_INIT_DISPLAY_MODE 504
 #define GLUT_ELAPSED_TIME 700
 
-/* glutSetCursor. **There is no cursor on a console**, so the state is always
- * GLUT_CURSOR_NONE and glutGet(GLUT_WINDOW_CURSOR) says so whatever was asked for - a
- * program that cares can see what it got rather than being told its request was
- * honoured. */
+/* glutSetCursor's shapes. There is no cursor on a console, so
+ * glutGet(GLUT_WINDOW_CURSOR) answers GLUT_CURSOR_NONE whatever was asked for. */
 #define GLUT_CURSOR_RIGHT_ARROW 0
 #define GLUT_CURSOR_LEFT_ARROW 1
 #define GLUT_CURSOR_INFO 2
@@ -112,8 +86,8 @@ extern "C" {
 #define GLUT_CURSOR_NONE 101
 #define GLUT_CURSOR_FULL_CROSSHAIR 102
 
-/* glutVisibilityFunc's states. The window is always visible here, so the callback is
- * called once with GLUT_VISIBLE when the main loop starts and never again. */
+/* glutVisibilityFunc's states. The window is always visible, so the callback is called
+ * once with GLUT_VISIBLE when the main loop starts. */
 #define GLUT_NOT_VISIBLE 0
 #define GLUT_VISIBLE 1
 
@@ -152,6 +126,8 @@ extern "C" {
 #define GLUT_ACTIVE_CTRL 2
 #define GLUT_ACTIVE_ALT 4
 
+/* Setup. `glutInitWindowPosition` is accepted and ignored and `glutInitWindowSize` is a
+ * request; `glutCreateWindow` opens the display and its GL context. */
 void glutInit(int *argcp, char **argv);
 void glutInitDisplayMode(unsigned int mode);
 void glutInitWindowSize(int width, int height);
@@ -159,6 +135,7 @@ void glutInitWindowPosition(int x, int y);
 int glutCreateWindow(const char *title);
 void glutDestroyWindow(int window);
 
+/* The callbacks, dispatched from `glutMainLoop`. */
 void glutDisplayFunc(void (*func)(void));
 void glutReshapeFunc(void (*func)(int width, int height));
 void glutIdleFunc(void (*func)(void));
@@ -173,6 +150,8 @@ void glutTimerFunc(unsigned int millis, void (*func)(int value), int value);
 
 void glutVisibilityFunc(void (*func)(int state));
 
+/* The main loop and its control: `glutLeaveMainLoop` (freeglut's) makes `glutMainLoop`
+ * return. */
 void glutMainLoop(void);
 void glutLeaveMainLoop(void);
 void glutPostRedisplay(void);
@@ -181,16 +160,10 @@ int glutGet(GLenum state);
 int glutGetModifiers(void);
 
 /*
- * **The one window, named and asked about.** These are here because on this SDK each
- * one is already true rather than approximated: there is exactly one window, it is the
- * display, and it fills it. `glutFullScreen` asks for a state the window is permanently
- * in; `glutSetWindow` accepts the only window there is; the titles have nowhere to go
- * and are accepted and ignored, as `glutInitWindowPosition` already is.
- *
- * **Not here, because they cannot be honoured:** `glutReshapeWindow` and
- * `glutPositionWindow`, which would have to lie about a window that is the display's
- * size at the display's origin; subwindows and menus; `glutWarpPointer`, there being no
- * pointer to warp. Each fails to link.
+ * The one window, named and asked about. Each call is already true here: there is one
+ * window, it is the display and it fills it. `glutFullScreen` asks for the state the
+ * window is always in; `glutSetWindow` accepts the only window; titles are accepted and
+ * ignored. `glutReshapeWindow`, `glutPositionWindow` and `glutWarpPointer` are absent.
  */
 int glutGetWindow(void);
 void glutSetWindow(int window);
@@ -200,27 +173,18 @@ void glutFullScreen(void);
 void glutSetCursor(int cursor);
 
 /*
- * **The pad as a keyboard** (this library's own, not GLUT's).
- *
- * A GLUT program has no idea what a controller is, and a console often has no keyboard
- * attached, so without this most ports run and cannot be controlled. On by default: the
- * d-pad arrives as GLUT_KEY_LEFT/UP/RIGHT/DOWN through the special callback, the cross
- * and circle buttons as
- * `\r` and `\033` through the keyboard callback, and the option button ends the main
+ * The pad as a keyboard (this library's own, not GLUT's), on by default: the d-pad
+ * arrives as GLUT_KEY_LEFT/UP/RIGHT/DOWN through the special callback, cross and circle
+ * as `\r` and `\033` through the keyboard callback, and the option button ends the main
  * loop. `glutOopsPadKeys(0)` turns it off for a program that reads the pad itself.
  */
 void glutOopsPadKeys(int on);
 
 /*
- * The solids, over the GLU quadrics: `glutSolidSphere` and its wire twin, the cube, the
- * cone and the torus.
- *
- * **And the teapot**, which is none of those. It is 129 control points in ten Bezier
- * patches, mirrored into thirty-two, evaluated through `glMap2f`/`glEvalMesh2` - the
- * data is transcribed from freeglut (MIT) and carries its provenance in
- * `src/gl/glut_teapot_data.h`. It is here because it is part of the GLUT API rather
- * than a nicety: every GLUT ships one, and a program ported to this platform that calls
- * `glutSolidTeapot` should link.
+ * The solids: the sphere, cube, cone and torus over the GLU quadrics, and the teapot,
+ * ten Bezier patches mirrored into thirty-two and evaluated through
+ * `glMap2f`/`glEvalMesh2`. The teapot data is transcribed from freeglut (MIT), with its
+ * provenance in `src/gl/glut_teapot_data.h`.
  */
 void glutSolidSphere(GLdouble radius, GLint slices, GLint stacks);
 void glutWireSphere(GLdouble radius, GLint slices, GLint stacks);
@@ -234,17 +198,10 @@ void glutSolidTeapot(GLdouble size);
 void glutWireTeapot(GLdouble size);
 
 /*
- * **The Platonic solids**, at the radii GLUT's own manual states: 1 for the octahedron
- * and the icosahedron, sqrt(3) for the tetrahedron and the dodecahedron. Each takes no
- * arguments, as GLUT's do - scale them with the modelview matrix.
- *
- * **Their faces are derived, not transcribed.** The vertices come out of the
- * definitions - the tetrahedron is four alternate corners of a cube, the octahedron the
- * six unit axes, the icosahedron three golden rectangles, the dodecahedron a cube with
- * three more - and the faces are found from them by adjacency, so nothing here was
- * copied from another implementation's tables and nothing can be wrong in a way that
- * reads as right. `test_gl_platonic_solids_are_the _solids_they_claim` checks the
- * counts, Euler's formula, the radii and the winding.
+ * The Platonic solids, at GLUT's documented radii: 1 for the octahedron and the
+ * icosahedron, sqrt(3) for the tetrahedron and the dodecahedron. They take no
+ * arguments; scale them with the modelview matrix. The faces are derived from the
+ * definitions, not transcribed (`test_gl_platonic_solids_are_the_solids_they_claim`).
  */
 void glutSolidTetrahedron(void);
 void glutWireTetrahedron(void);
@@ -256,23 +213,11 @@ void glutSolidIcosahedron(void);
 void glutWireIcosahedron(void);
 
 /*
- * **The bitmap font.** Most GLUT code that draws anything draws text too - a frame
- * counter, a key legend - and draws it with `glutBitmapCharacter`, so a port that
- * cannot call it has to have its text rewritten.
- *
- * The glyphs are drawn in `src/gl/glut_font.c` rather than taken from X11's `fixed`
- * fonts, which is what every other GLUT ships. They are not those shapes and do not
- * pretend to be; what they keep is what a program depends on - the advance (8 and 9),
- * the cell height (13 and 15), the baseline, and every character from space to `~`.
- *
- * **Only the two fixed-width fonts are here.** `GLUT_BITMAP_HELVETICA_*` and
- * `GLUT_BITMAP_TIMES_ROMAN_*` are proportional: offering a fixed-width font under those
- * names would return the wrong width from `glutBitmapWidth` and break the layout of
- * every program that measures before it draws. They are absent, and so is
- * `glutStrokeCharacter`, whose glyphs are line segments rather than pixels.
- *
- * `glutBitmapString` is freeglut's and is here because drawing a whole string in one
- * call is common enough that leaving it out means editing the port.
+ * The bitmap font: the two fixed-width fonts, with original glyphs in
+ * `src/gl/glut_font.c` that keep GLUT's advance (8 and 9), cell height (13 and 15),
+ * baseline and ASCII 32 to 126. The proportional fonts and `glutStrokeCharacter` are
+ * absent, since a fixed-width stand-in would report wrong widths. `glutBitmapString`
+ * is freeglut's.
  */
 extern void *const glutBitmapFixed8x13;
 extern void *const glutBitmapFixed9x15;
@@ -285,29 +230,17 @@ int glutBitmapLength(void *font, const unsigned char *string);
 int glutBitmapHeight(void *font);
 
 /*
- * Asking the driver what it supports.
- *
- * `glutExtensionSupported` is GLUT's own convenience over `glGetString(GL_EXTENSIONS)`,
- * and ports reach for it constantly - it is how a program decides whether to take an
- * extension path at all. It is here rather than left to each port because getting it
- * *right* is fiddly in a way that is quiet when got wrong: a plain `strstr` matches
- * `GL_EXT_texture` inside `GL_EXT_texture3D`, so a driver offering only the latter gets
- * reported as offering both, the port takes a path that is not there, and the screen
- * goes black with nothing in the log. This implementation matches whole words only, and
- * asks both the flat string and the indexed form, so it keeps answering on a core
- * profile where `glGetString(GL_EXTENSIONS)` returns NULL.
- *
- * Returns non-zero when present. With no current context it returns 0, which is the
- * honest answer and lets a port take its "not supported" path rather than fault.
+ * Non-zero when the current context offers extension `name`. Matches whole words only
+ * (a plain `strstr` finds `GL_EXT_texture` inside `GL_EXT_texture3D`), and asks both
+ * the flat string and the indexed form, so it answers on a core profile too. Returns 0
+ * with no current context.
  */
 int glutExtensionSupported(const char *name);
 
 /*
- * The GLUT version a port compiles against. Programs test it with `#ifdef
- * GLUT_API_VERSION` or compare it before calling something added later; mesa-demos'
- * `glinfo` is one. 4 is the last GLUT API version, and the subset here is a GLUT 3/4
- * subset, so 4 is what it reports - the alternative is a port silently taking a GLUT-2
- * path for a function that is present.
+ * The GLUT API version, for programs that test `GLUT_API_VERSION` before calling
+ * something added later. 4 is the last GLUT API version, and the subset here is a
+ * GLUT 3/4 one.
  */
 #define GLUT_API_VERSION 4
 

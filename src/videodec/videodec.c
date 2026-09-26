@@ -1,19 +1,18 @@
+/*
+ * Video decode over libSceVideodec2. Availability is real; open and decode refuse with
+ * OOPS_VIDEODEC_ELAYOUT because the decoder's config, input and output structure
+ * layouts are unconfirmed.
+ */
 #include "oops/videodec.h"
 #include "oops/sysmodule.h"
 #include "oops/system.h"
 #include <stddef.h>
 
 /*
- * Platform symbols from libSceVideodec2.
- *
- * All nine are confirmed to exist on hardware - obSCEne's 107-videodec census
- * resolved each one (ps4_mode, real addresses). The signatures below are
- * deliberately partial: the calls that only take scalars or opaque pointers are
- * declared with those, and the two that take layout-sensitive
- * config/input/output structures are declared with `void *` placeholders,
- * because this subsystem does not call them until a struct-layout probe
- * confirms the shapes. Declaring the true struct types now would invite
- * populating them from a guess.
+ * Platform symbols from libSceVideodec2. All nine resolve on hardware (the obSCEne
+ * probe 107-videodec, ps4_mode). The two that take layout-sensitive config, input and
+ * output structures are declared with `void *` placeholders, since declaring the true
+ * struct types would invite populating them from a guess.
  */
 __attribute__((weak)) int sceVideodec2QueryComputeMemoryInfo(void *info);
 __attribute__((weak)) int sceVideodec2AllocateComputeQueue(const void *queue_info,
@@ -34,8 +33,8 @@ struct oops_videodec {
     int codec;
     uint32_t width;
     uint32_t height;
-    /* The platform decoder handle and its compute queue live here once the create
-     * path is unblocked. Kept opaque and unused until then. */
+    /* The platform decoder handle and its compute queue, opaque; the create path
+     * does not fill them while the layouts are unconfirmed. */
     void *decoder;
     void *queue;
 };
@@ -47,15 +46,11 @@ int oops_videodec_last_error(void) {
 }
 
 int oops_videodec_available(void) {
-    /* Best-effort: the decode library is not resident by default in every
-     * context. In ps4_mode it already is (that is where the census resolved it);
-     * elsewhere a sysmodule load may bring it in. A failure here is not fatal -
-     * the weak symbols are the real test. */
+    /* The decode library is resident in ps4_mode; elsewhere a sysmodule load may
+     * bring it in. A failure here is not fatal, since the weak symbols are the test. */
     (void)oops_sysmodule_load(OOPS_SYSMODULE_VIDEODEC);
 
-    /* The capability is real iff the entry points that gate a decode resolved.
-     * This is the measured question, and it is the part of this subsystem that
-     * works today. */
+    /* Available when the entry points that gate a decode resolved. */
     if (sceVideodec2CreateDecoder && sceVideodec2Decode && sceVideodec2DeleteDecoder) {
         oops_log_trace("VIDEODEC", "available: entry points resolved");
         return 1;
@@ -86,11 +81,9 @@ oops_videodec_t *oops_videodec_open(int codec, uint32_t width, uint32_t height) 
         return NULL;
     }
 
-    /* The library is here and the symbols resolve, but sceVideodec2CreateDecoder
-     * takes a decoder-config structure whose layout OOPS has not confirmed.
-     * Passing a guessed layout would corrupt the stack rather than fail, so this
-     * refuses loudly instead. Completing it needs the obSCEne struct-layout probe
-     * (see the header). */
+    /* sceVideodec2CreateDecoder takes a decoder-config structure whose layout is
+     * unconfirmed, and a guessed layout would corrupt the stack rather than fail, so
+     * this refuses until a struct-layout probe confirms it (see the header). */
     oops_log_warn("VIDEODEC", "open: struct layout unconfirmed (ELAYOUT)");
     s_last_error = OOPS_VIDEODEC_ELAYOUT;
     return NULL;
@@ -126,7 +119,6 @@ void oops_videodec_close(oops_videodec_t *dec) {
         sceVideodec2ReleaseComputeQueue(dec->queue);
         dec->queue = NULL;
     }
-    /* No allocation was handed out while the create path is gated, so there is
-     * nothing to free here yet; kept for when open() begins returning a real
-     * handle. */
+    /* open() hands out no allocation while the create path is gated, so there is
+     * nothing to free. */
 }

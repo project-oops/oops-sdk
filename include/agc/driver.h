@@ -9,34 +9,28 @@ extern "C" {
 #endif
 
 /*
- * Hardware-confirmed libSceAgc / libSceAgcDriver bindings for the direct GPU
- * submission path.
+ * libSceAgc / libSceAgcDriver bindings for the direct GPU submission path.
  *
- * Every symbol and arity here was exercised on retail prospero (firmware 12.40,
- * Oberon RDNA2) by obSCEne sweep 20260910-203426-eboot, section 166-agc:
- * subsystem init, queue creation, PM4 DCB submission, compute dispatch and
- * end-of-pipe fence retirement each returned rc 0x0, and the GPU retired the
- * fence (fence-val 0xbeefcafe, fence-hit 0x1) in coherent Onion memory. See
- * obscene/docs/worklog/169-hardware-compute-dispatch-and-fence-retirement.md
- * and this repo's docs/worklog/001-hardware-accelerated-agc-presentation.md.
+ * Every symbol and arity here is exercised on retail Prospero (firmware 12.40,
+ * Oberon RDNA2) by the obSCEne probe 166-agc: subsystem init, queue creation, PM4
+ * DCB submission, compute dispatch and end-of-pipe fence retirement each return 0,
+ * and the GPU writes the fence in coherent Onion memory.
  *
  * These are the raw platform entry points, declared weak so a host build or a
- * payload that does not resolve libSceAgc still links; a caller must test the
- * pointer before use, exactly as the VideoOut and Kernel externs in
- * agc_display.c do. The loader binds each by NID (recorded beside it) - the
- * SHA-1-derived hash oops-sdk already pins in test_freestd.
+ * payload that does not resolve libSceAgc still links; a caller tests the pointer
+ * before use, as agc_display.c does for its VideoOut and kernel externs. The loader
+ * binds each by NID (recorded beside it), the SHA-1-derived hash test_freestd pins.
  */
 
 /*
  * The descriptor sceAgcDriverSubmitDcb reads. Sixteen bytes. The field that
- * must be exact is `size`: the command-buffer length in DWORDs, NOT bytes.
+ * must be exact is `size`: the command-buffer length in dwords, not bytes.
  * libSceAgcDriver+0x1100 loads it from +0x08 and shifts it left by 4 into the
  * IB_SIZE field (bits 19:0) of the PM4 PACKET3_INDIRECT_BUFFER; a byte count
  * there makes the command processor run past the buffer into uninitialised
- * memory and fault before the fence retires - the defect that held fence-hit at
- * 0x0 until sweep 20260910-203426 (obSCEne worklog 169). gpu_addr (+0x00) and
- * size (+0x08) are disassembly-confirmed; flags and pad are the trailing four
- * bytes, zero on the traced submit and not read by the driver on that path.
+ * memory and fault before the fence retires. gpu_addr (+0x00) and size (+0x08)
+ * are disassembly-confirmed; flags and pad are the trailing four bytes, zero on
+ * the traced submit and not read by the driver on that path.
  */
 typedef struct oops_agc_dcb_desc {
     uint64_t gpu_addr; /* +0x00  GPU virtual address of the DCB, in mapped Onion

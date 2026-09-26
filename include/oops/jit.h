@@ -1,3 +1,7 @@
+/*
+ * Executable memory for code generation: a writable and an executable view of the
+ * same pages, and the instruction-cache flush between writing and running.
+ */
 #ifndef OOPS_JIT_H
 #define OOPS_JIT_H
 

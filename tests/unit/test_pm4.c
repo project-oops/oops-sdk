@@ -71,8 +71,7 @@ static int oops_pm4_validate_stream(const uint32_t *words, size_t word_count,
     while (idx < word_count) {
         uint32_t header = words[idx];
 
-        /* Prospero libSceAgc single-dword prefetch NOP pad (measured on hardware, D565)
-         */
+        /* libSceAgc's single-dword prefetch NOP pad, measured on hardware (D565). */
         if (header == 0xffff1000u) {
             report->nop_count++;
             report->total_packets++;
@@ -373,10 +372,7 @@ static int oops_pm4_validate_stream(const uint32_t *words, size_t word_count,
     return 0;
 }
 
-/* =========================================================================
- * UNIT TESTS
- * ========================================================================= */
-
+/* A well-formed hand-built stream validates and every packet is counted. */
 static void test_pm4_synthetic_valid_stream(void) {
     uint32_t stream[] = {
         /* SET_CONTEXT_REG: reg 0x200 (DB_DEPTH_CONTROL), count 1, val 0 */
@@ -419,25 +415,10 @@ static void test_pm4_synthetic_valid_stream(void) {
     ASSERT_EQ(report.last_draw_index_count, 3u);
 }
 
-/*
- * Confirms the 5 core PM4 packet headers and dword lengths emitted by agc_draw.c
- * and agc_compute.c match the vendor library (libSceAgc) output measured on physical
- * hardware during obSCEne sweep 20260914-100833 (REQ-20260914T0946Z-50f6):
- *
- * 1. sceAgcCbReleaseMem:          0xc0064900 (32 B, 8 dwords: header + 7 payload
- * dwords)
- * 2. sceAgcDcbDrawIndexAuto:       0xc0012d00 (12 B, 3 dwords: header + 2 payload
- * dwords)
- * 3. sceAgcDcbSetNumInstances:     0xc0002f00 ( 8 B, 2 dwords: header + 1 payload
- * dword)
- * 4. sceAgcDcbSetCxRegisterDirect: 0xc0016900 (12 B, 3 dwords: header + 2 payload
- * dwords)
- * 5. sceAgcDcbSetUcRegisterDirect: 0xc0017900 (12 B, 3 dwords: header + 2 payload
- * dwords)
- *
- * Verifies count field encoding: Type-3 header bits [29:16] store (total_payload_dwords
- * - 1).
- */
+/* The core packet headers agc_draw.c and agc_compute.c emit match libSceAgc's output
+ * measured on hardware: sceAgcCbReleaseMem, DcbDrawIndexAuto, DcbSetNumInstances,
+ * DcbSetCxRegisterDirect and DcbSetUcRegisterDirect. A Type-3 header's bits [29:16]
+ * hold the payload dword count minus one. */
 static void test_pm4_vendor_measured_packet_headers(void) {
     /* 1. ReleaseMem: opcode 0x49, count 6 -> 8 dwords total (32 bytes) */
     const uint32_t hdr_release_mem = 0xc0064900u;
@@ -470,6 +451,7 @@ static void test_pm4_vendor_measured_packet_headers(void) {
     ASSERT_EQ(((hdr_set_uc >> 16) & 0x3fffu) + 2u, 3u);
 }
 
+/* A header whose count runs past the end of the buffer is rejected. */
 static void test_pm4_detects_truncated_buffer(void) {
     uint32_t truncated[] = {
         /* Header claims 4 words payload (count field 3), but only 2 follow */
@@ -483,6 +465,7 @@ static void test_pm4_detects_truncated_buffer(void) {
     ASSERT_TRUE(strstr(report.last_error, "Truncated packet") != NULL);
 }
 
+/* A context register write outside the context range is rejected. */
 static void test_pm4_detects_invalid_reg_bounds(void) {
     uint32_t bad_reg[] = {/* SET_CONTEXT_REG with base reg 0x405 (beyond 0x400 range) */
                           0xc0016900u, 0x405u, 0x12345678u};
@@ -495,8 +478,8 @@ static void test_pm4_detects_invalid_reg_bounds(void) {
     ASSERT_TRUE(strstr(report.last_error, "Context reg out of range") != NULL);
 }
 
+/* Z_ENABLE with an INVALID Z_INFO format is rejected. */
 static void test_pm4_detects_depth_invariants(void) {
-    /* Test: Z_ENABLE is set (bit 1), but Z_INFO format is INVALID (0) */
     uint32_t invalid_depth[] = {
         /* SET_UCONFIG_REG: VGT_PRIMITIVE_TYPE */
         0xc0017900u,
@@ -525,6 +508,7 @@ static void test_pm4_detects_depth_invariants(void) {
     ASSERT_TRUE(strstr(report.last_error, "Z_INFO format is INVALID") != NULL);
 }
 
+/* A DRAW_INDEX_AUTO of zero vertices is rejected. */
 static void test_pm4_detects_zero_vertex_draw(void) {
     uint32_t zero_draw[] = {
         /* SET_UCONFIG_REG: VGT_PRIMITIVE_TYPE */
@@ -545,6 +529,7 @@ static void test_pm4_detects_zero_vertex_draw(void) {
     ASSERT_TRUE(strstr(report.last_error, "0 indices") != NULL);
 }
 
+/* A RELEASE_MEM destination that is not 8-byte aligned is rejected. */
 static void test_pm4_detects_unaligned_release_mem(void) {
     uint32_t unaligned_fence[] = {
         /* RELEASE_MEM with unaligned destination address 0x10000003 in addr_lo
@@ -561,6 +546,7 @@ static void test_pm4_detects_unaligned_release_mem(void) {
     ASSERT_TRUE(strstr(report.last_error, "unaligned") != NULL);
 }
 
+/* oops_agc_draw_primitive's depth-tested draw stream passes the validator. */
 static void test_pm4_real_sdk_draw_stream(void) {
     uint32_t dcb_words[1024];
     __attribute__((aligned(8))) uint32_t fence_val = 0;
@@ -615,6 +601,7 @@ static void test_pm4_real_sdk_draw_stream(void) {
     ASSERT_EQ(report.db_z_info & 0x3u, OOPS_AGC_Z_32_FLOAT);
 }
 
+/* GL depth test, function and mask changes reach DB_DEPTH_CONTROL draw by draw. */
 static void test_pm4_gl_hardware_depth_stream(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     ASSERT_TRUE(disp != NULL);
@@ -626,10 +613,8 @@ static void test_pm4_gl_hardware_depth_stream(void) {
     uint32_t dcb[4096];
     uint8_t payload[0x4000];
     uint8_t vbo[65536];
-    /* Sized to what gl_hw_flush writes, not to one word each: the fence at [0] and the
-     * GPU clock at [2..3], and eight canary words reset before every submission. As a
-     * single uint32_t each, this fixture was written 12 and 28 bytes past its ends by
-     * every flush - on the stack - which AddressSanitizer found on 2026-09-19. */
+    /* Sized to what gl_hw_flush writes: the fence at [0], the GPU clock at [2..3], and
+     * eight canary words reset before every submission. */
     __attribute__((aligned(8))) uint32_t fence[4] = {0x11111111u};
     __attribute__((aligned(8))) uint32_t canary[16] = {0xaaaaaaaau};
 
@@ -753,30 +738,11 @@ static void test_pm4_gl_hardware_depth_stream(void) {
     oops_display_close(disp);
 }
 
-/* A mipmapped texture reaches the hardware as a chain, laid out as addrlib lays out a
- * linear GFX10 surface, with the descriptor fields radeonsi fills for one.
- *
- * The layout is the part with no second chance: smallest level first and the base level
- * last (gfx10addrlib.cpp:5082-5104), each level's rows padded to 64 texels. For a 4x4
- * texture that is level 2 (1x1) at byte 0, level 1 (2x2) at 256, level 0 (4x4) at 256 +
- * 512 = 768, 1792 bytes in all - checked here byte by byte, because the sampler finds
- * each level by that arithmetic and reads whatever is there.
- */
-/*
- * **The two targets that sample with three coordinates**, on the hardware path
- * (2026-09-20). Both were drawn untextured here until that day, and this test was what
- * said so.
- *
- * A volume is sampled with `dim:SQ_RSRC_IMG_3D`, its r interpolated from the third
- * parameter and divided by q; a cube map with `dim:SQ_RSRC_IMG_CUBE`, its face found
- * from the direction. Both therefore export at least three parameters, and both leave
- * the sample slot holding their own form until a draw with another target resets it -
- * which the 2D draw at the end checks.
- *
- * What a volume still has no line for is the mip chain: none is built for it, so a
- * minifying filter reads the base level and the log says so once. The volume here
- * filters GL_NEAREST, so nothing is logged.
- */
+/* Volumes and cube maps sample with three coordinates on the hardware path. A volume
+ * uses `dim:SQ_RSRC_IMG_3D` with r interpolated from the third parameter and divided by
+ * q; a cube map uses `dim:SQ_RSRC_IMG_CUBE` with the face found from the direction.
+ * Each leaves the sample slot in its own form until a draw with another target resets
+ * it. */
 static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -814,8 +780,7 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
     glVertex3f(0.0f, 0.5f, 0.5f);
     glEnd();
     ASSERT_EQ(ctx->triangles_drawn, 1u);
-    /* GL_NEAREST reads no mip chain, so the one line a volume can earn is not earned.
-     */
+    /* GL_NEAREST reads no mip chain, so the missing-chain line is not logged. */
     ASSERT_EQ(ctx->hw_3d_logged, GL_FALSE);
     ASSERT_EQ(ctx->hw_frame_tex, t);
     uint32_t last_ps_lo = 0u;
@@ -827,8 +792,8 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
               (uint32_t)(((uint64_t)(uintptr_t)payload + OOPS_GL_PS_TEX_OFFSET) >> 8));
     {
         /* The sample slot holds the volume form, and the draw exports the third
-         * parameter r rides in. The descriptor's TYPE is 0xa and WORD4 is the last
-         * slice - one, for two slices. */
+         * parameter that carries r. The descriptor's TYPE is 0xa and WORD4 is the last
+         * slice: one, for two slices. */
         const uint32_t *const ps_tex =
             (const uint32_t *)(payload + OOPS_GL_PS_TEX_OFFSET);
         ASSERT_EQ(ps_tex[GL_PS_SAMPLE_SLOT_TEX],
@@ -845,15 +810,9 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
         ASSERT_EQ(vol_obj->img_desc[3] >> 28, 0xau);
         ASSERT_EQ(vol_obj->img_desc[4], 1u);
     }
-    /* **A mipmapped volume gets a chain** (since 2026-09-21). This block asserted the
-     * opposite until then - that a volume earned the "no mip chain" line - because the
-     * chain layout was two dimensional and `gl_tex_chain_levels` refused a volume
-     * outright. It halves depth with width and height now, and the copy walks slices.
-     *
-     * `hw_failed` is cleared before each draw from here on, as the LOD-bias test does
-     * and for the same reason: a change to the descriptors submits the frame, and this
-     * fence is not a real one, so every submission records a failure that would
-     * silently drop the next draw. */
+    /* `hw_failed` is cleared before each draw from here on: a descriptor change submits
+     * the frame, this fence is not a real one, and the failure it records would drop
+     * the next draw. */
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
     glTexImage3D(GL_TEXTURE_3D, 1, GL_RGBA, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol);
     ctx->hw_failed = GL_FALSE;
@@ -863,13 +822,10 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
     glVertex3f(0.5f, -0.5f, 0.5f);
     glVertex3f(0.0f, 0.5f, 0.5f);
     glEnd();
-    /* **The line is earned, because no chain is built for a volume** - and since
-     * 2026-09-21 that is a measured refusal rather than a structural one. The layout
-     * can describe a volume now
-     * (`gl_tex_chain_layout_3d`, asserted below), and the console read the base level
-     * anyway: `volume-mipmap` answered `saw 0xffff0000`, red, level 0, with
-     * `LAST_LEVEL` 1 in the descriptor. `REQ-20260921T1300Z-9b73` asks where a level
-     * sits inside a 3D image. */
+    /* No chain is built for a volume, so the line is logged. The layout can describe
+     * one (`gl_tex_chain_layout_3d`, below), but the hardware sampled the base level
+     * with `LAST_LEVEL` 1 in the descriptor; where a level sits inside a 3D image is
+     * not known. */
     ASSERT_EQ(ctx->hw_3d_logged, GL_TRUE);
     {
         const gl_texture_object_t *v2 = gl_lookup_texture(ctx, t);
@@ -879,12 +835,10 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
         ASSERT_EQ(v2->img_desc[4], 1u);         /* two slices */
         ASSERT_EQ((v2->img_desc[3] >> 16) & 0xfu,
                   0u); /* LAST_LEVEL, the base level alone */
-        /* **The layout is ready for the answer.** Smallest first, each level's slices
-         * one after another at that level's own `pitch * height`: a 2x2x2 base puts
-         * level 1 - one texel, padded to a 64-texel row, one slice deep - at offset 0,
-         * and level 0's two slices after it. A 2D chain is this with the depth term at
-         * one, which is why the old two-dimensional form is now a wrapper and its
-         * chains are byte for byte what they were. */
+        /* Smallest level first, each level's slices one after another at that level's
+         * `pitch * height`: a 2x2x2 base puts level 1 (one texel, padded to a 64-texel
+         * row) at offset 0 and level 0's two slices after it. A 2D chain is the same
+         * layout with depth one. */
         size_t offs[OOPS_GL_MAX_TEXTURE_LEVELS];
         uint32_t pitch[OOPS_GL_MAX_TEXTURE_LEVELS];
         const size_t total = gl_tex_chain_layout_3d(2, 2, 2, 2, offs, pitch);
@@ -910,10 +864,8 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
         glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)f, 0, GL_RGBA, 1, 1, 0,
                      GL_RGBA, GL_UNSIGNED_BYTE, one);
     }
-    /* **A complete cube map is sampled here since 2026-09-20**: the six faces as one
-     * array, the face found from the direction in the shader's sample slot. So this
-     * draw is textured, the shader is the textured one, and nothing is logged about a
-     * unit being dropped. */
+    /* A complete cube map is sampled as one six-face array, the face found from the
+     * direction in the sample slot, so nothing is logged about a dropped unit. */
     glEnable(GL_TEXTURE_CUBE_MAP);
     ASSERT_EQ(gl_effective_texture_id(ctx), cube);
     ASSERT_EQ(ctx->hw_cube_logged, GL_FALSE);
@@ -924,11 +876,8 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
     glVertex3f(0.5f, -0.5f, 0.5f);
     glVertex3f(0.0f, 0.5f, 0.5f);
     glEnd();
-    /* **Three, not one** (since 2026-09-21). Binding a second texture in a frame used
-     * to submit the draws built against the first one's descriptors, which reset the
-     * count; the ring gives the new texture its own slot and the stream carries on, so
-     * the volume's two triangles and the cube's one are all in it. That is the change,
-     * stated where it is visible. */
+    /* The descriptor ring gives the new texture its own slot without a submission, so
+     * the volume's two triangles and the cube's one are all in the stream. */
     ASSERT_EQ(ctx->triangles_drawn, 3u);
     ASSERT_TRUE(ctx->hw_desc_slot > 0u);
     ASSERT_EQ(ctx->hw_cube_logged, GL_FALSE);
@@ -941,7 +890,7 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
               (uint32_t)(((uint64_t)(uintptr_t)payload + OOPS_GL_PS_TEX_OFFSET) >> 8));
     {
         /* The sample slot holds the cube form, and the draw exports the third parameter
-         * its direction's r rides in. */
+         * that carries the direction's r. */
         const uint32_t *const ps_tex =
             (const uint32_t *)(payload + OOPS_GL_PS_TEX_OFFSET);
         ASSERT_EQ(ps_tex[GL_PS_SAMPLE_SLOT_TEX],
@@ -954,10 +903,8 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
     }
     glDisable(GL_TEXTURE_CUBE_MAP);
     glDeleteTextures(1, &cube);
-    /* **And a 2D draw after it stops looking for a face.** It has to be a *textured*
-     * draw: an untextured one runs the untextured shader, which has no sample slot, so
-     * what the textured shader holds does not matter until a texture is bound again -
-     * and then it is set. */
+    /* A textured 2D draw afterwards resets the sample slot to the 2D form. An
+     * untextured draw would not show it: its shader has no sample slot. */
     {
         GLuint flat = 0;
         glGenTextures(1, &flat);
@@ -991,19 +938,9 @@ static void test_pm4_gl_volume_and_cube_sample_on_hardware(void) {
     oops_display_close(disp);
 }
 
-/*
- * **A smooth point and a smooth line on the hardware path** (2026-09-20).
- *
- * The coverage slot in the untextured pixel shader is half of it; the other half is the
- * CPU putting the right numbers in the vertex, and that is the half a shader test would
- * miss. So this checks both: the slot holds the assembled words, and the widened quad's
- * corners carry their offset from the centre in the texture-coordinate parameter with
- * the radius plus a half beside it - which is the constant the shader subtracts the
- * distance from.
- *
- * Then the two cases that must stay aliased: a textured smooth point, whose coverage
- * has nowhere to ride, and a plain triangle after a smooth one, which must stop
- * weighing its alpha by a texture coordinate.
+/* Smooth points and lines carry their coverage: the pixel shader's coverage slot holds
+ * the assembled words, and the widened quad's corners carry their offset from the
+ * centre plus the radius-plus-a-half constant the shader subtracts the distance from.
  */
 static void test_pm4_gl_smooth_points_and_lines_carry_their_coverage(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
@@ -1028,9 +965,8 @@ static void test_pm4_gl_smooth_points_and_lines_carry_their_coverage(void) {
     ctx->use_hardware = GL_TRUE;
     ctx->hw_frame_active = GL_FALSE;
 
-    /* The payload here is the test's own and was never built into, so the slot's
-     * *initial* state is not what a context creates - the "off" checks below are after
-     * a draw has set it, which is the state that matters anyway. */
+    /* The payload is the test's own and starts empty, so the "off" checks below all
+     * follow a draw that has set the slot. */
     const uint32_t *const ps = (const uint32_t *)(payload + OOPS_GL_PS_UNTEX_OFFSET);
 
     glPointSize(5.0f);
@@ -1049,11 +985,10 @@ static void test_pm4_gl_smooth_points_and_lines_carry_their_coverage(void) {
     ASSERT_EQ(ps[GL_PS_COVERAGE_SLOT_UNTEX + 14u],
               0x100e1907u); /* v_mul_f32 v7, v7, v12 */
     {
-        /* **The vertex carries the geometry.** Each corner is 48 bytes - position,
-         * colour, the texture parameter - and the parameter's x and y are the corner's
-         * offset from the centre in pixels while its w is the radius plus a half. A
-         * point of size 5 widened by a pixel either side gives +-3.5, and 3.0 as the
-         * constant. */
+        /* Each corner is 48 bytes (position, colour, texture parameter). The
+         * parameter's x and y are the corner's offset from the centre in pixels and its
+         * w is the radius plus a half: a point of size 5 widened by a pixel either side
+         * gives +-3.5 and 3.0. */
         const float *v0 = (const float *)(vbo + 32);
         ASSERT_FLOAT_NEAR(v0[0], -3.5f, 1e-4f);
         ASSERT_FLOAT_NEAR(v0[1], -3.5f, 1e-4f);
@@ -1065,7 +1000,7 @@ static void test_pm4_gl_smooth_points_and_lines_carry_their_coverage(void) {
     }
     glDisable(GL_POINT_SMOOTH);
 
-    /* **A plain triangle after it turns the slot off again.** */
+    /* A plain triangle afterwards turns the slot off. */
     ctx->hw_failed = GL_FALSE;
     glBegin(GL_TRIANGLES);
     glVertex3f(-0.5f, -0.5f, 0.5f);
@@ -1074,8 +1009,8 @@ static void test_pm4_gl_smooth_points_and_lines_carry_their_coverage(void) {
     glEnd();
     ASSERT_EQ(ps[GL_PS_COVERAGE_SLOT_UNTEX] & 0xffff0000u, 0xbf820000u);
 
-    /* **A smooth line**: the two long edges of the quad carry +-(half-width + 1) across
-     * and zero along, which is what makes one shader form serve both kinds. */
+    /* A smooth line's long edges carry +-(half-width + 1) across and zero along, so one
+     * shader form serves points and lines. */
     ctx->hw_vbo_cursor = 0;
     ctx->hw_failed = GL_FALSE;
     memset(vbo, 0, sizeof(vbo));
@@ -1096,13 +1031,9 @@ static void test_pm4_gl_smooth_points_and_lines_carry_their_coverage(void) {
     }
     glDisable(GL_LINE_SMOOTH);
 
-    /* **A textured smooth point smooths too** (since 2026-09-21), in the *other*
-     * shader's slot and from the *other* interpolant. This block asserted the opposite
-     * until then - that such a draw was aliased and said so once - because the offset
-     * rode in the texture coordinate and a textured draw reads all four of its
-     * components. It now rides in the second texture unit's parameter, which a one-unit
-     * draw has spare, and the draw escalates to four parameters for it: eighty bytes a
-     * vertex, the fourth vec4 at offset 64. */
+    /* A textured smooth point uses the textured shader's slot. The offset rides in the
+     * second texture unit's parameter, which a one-unit draw has spare, so the draw
+     * uses four parameters: eighty bytes a vertex, the fourth vec4 at offset 64. */
     {
         static const GLubyte one[4] = {255, 255, 255, 255};
         GLuint t = 0;
@@ -1143,9 +1074,9 @@ static void test_pm4_gl_smooth_points_and_lines_carry_their_coverage(void) {
             ASSERT_FLOAT_NEAR(along, 2.5f, 1e-4f);
             ASSERT_FLOAT_NEAR(p3[3], 2.0f, 1e-4f);
         }
-        /* **Two units is the case that is still aliased**, and the one that logs: the
-         * fourth parameter is the second texture's coordinate then, and only its z is
-         * spare - one float where three are needed. */
+        /* With two units the point is aliased and logged: the fourth parameter is the
+         * second texture's coordinate, and only its z is spare - one float where three
+         * are needed. */
         {
             GLuint t1 = 0;
             glGenTextures(1, &t1);
@@ -1186,23 +1117,12 @@ static void test_pm4_gl_smooth_points_and_lines_carry_their_coverage(void) {
     oops_display_close(disp);
 }
 
-/*
- * **An occlusion query counted by the GPU** (2026-09-20). Four things have to be in the
- * stream and one must not be:
- *
- *  - `DB_COUNT_CONTROL` raised to `0x11000106` - the plain recipe plus
- * `PERFECT_ZPASS_COUNTS` and `DISABLE_CONSERVATIVE_ZPASS_COUNTS` - **after** the depth
- * surface is bound, never before, because ZPASS_ENABLE with no depth target stalls the
- * depth block (`-e3a7`);
- *  - a `ZPASS_DONE` `EVENT_WRITE` (`0xc0024600`, `0x00000115`) aimed at the slot base;
- *  - a second one at the base plus eight, which is where each backend's end count goes;
- *  - `DB_COUNT_CONTROL` put back to `0x11000100`, so the next frame is the stream it
- * always was.
- *
- * And the sum: sixteen slots, `end - begin` each, bit 63 masked off as the hardware's
- * valid marker. The slots are filled here the way `-4d19` measured them - most backends
- * carrying equal work and the last two none - so a sum that only read slot 0, or that
- * took bit 63 for count, comes out wrong rather than plausible.
+/* An occlusion query is counted by the GPU. `DB_COUNT_CONTROL` rises to `0x11000106`
+ * only after the depth surface is bound, because ZPASS_ENABLE with no depth target
+ * stalls the depth block; `ZPASS_DONE` events go to the slot base and base plus eight;
+ * the register returns to `0x11000100`. The result sums `end - begin` over sixteen
+ * slots with bit 63, the valid marker, masked off. The slots are filled unevenly, as
+ * measured on hardware, so reading slot 0 alone or counting bit 63 gives a wrong sum.
  */
 static void test_pm4_gl_occlusion_query_counts_on_the_gpu(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
@@ -1230,8 +1150,8 @@ static void test_pm4_gl_occlusion_query_counts_on_the_gpu(void) {
     GLuint q = 0;
     glGenQueries(1, &q);
 
-    /* GL_QUERY_COUNTER_BITS was 0 on this path and is 32 now, which is what tells a
-     * program the count means something (GL 1.5, 4.1.6). */
+    /* A nonzero GL_QUERY_COUNTER_BITS tells a program the count is real (GL 1.5,
+     * 4.1.6). */
     GLint bits = -1;
     glGetQueryiv(GL_SAMPLES_PASSED, GL_QUERY_COUNTER_BITS, &bits);
     ASSERT_EQ(bits, 32);
@@ -1265,9 +1185,9 @@ static void test_pm4_gl_occlusion_query_counts_on_the_gpu(void) {
     ASSERT_TRUE(at_raise > at_zinfo);
     ASSERT_TRUE(at_begin > at_raise);
 
-    /* The counters as `-4d19` saw them: thirteen backends with equal work, one with
-     * half of it, two with none, and bit 63 set on every slot at both ends. 13 * 0x20 +
-     * 0x10 = 0x1b0. */
+    /* The counters as measured on hardware: thirteen backends with equal work, one
+     * with half of it, two with none, and bit 63 set on every slot at both ends.
+     * 13 * 0x20 + 0x10 = 0x1b0. */
     {
         uint32_t *slots = (uint32_t *)(payload + OOPS_GL_ZPASS_OFFSET);
         for (unsigned i = 0; i < OOPS_GL_ZPASS_BACKENDS; i++) {
@@ -1305,9 +1225,8 @@ static void test_pm4_gl_occlusion_query_counts_on_the_gpu(void) {
     ASSERT_TRUE(at_restore > at_end);
     ASSERT_EQ(ctx->hw_query_counting, GL_FALSE);
 
-    /* **A query whose draws never test depth does not count**, and says so once.
-     * Nothing new is aimed at the slot base, which is the packet that would have hung
-     * the GPU. */
+    /* A query whose draws never test depth does not count, and logs once. No ZPASS_DONE
+     * is emitted, since one with no depth surface hangs the GPU. */
     memset(dcb, 0, sizeof(dcb));
     ctx->dcb_words = 0;
     ctx->hw_frame_active = GL_FALSE;
@@ -1341,20 +1260,10 @@ static void test_pm4_gl_occlusion_query_counts_on_the_gpu(void) {
     oops_display_close(disp);
 }
 
-/*
- * **A depth texture on the hardware path** (2026-09-20), with GL 1.4's comparison and
- * without.
- *
- * Three things have to agree for one to sample at all, and this checks each: the image
- * format is `32_FLOAT` (22) rather than `8_8_8_8_UNORM` (56), because a depth texel is
- * one float; the sampler's DEPTH_COMPARE_FUNC carries GL_TEXTURE_COMPARE_FUNC; and the
- * sample slot asks for one channel and spreads it across v4..v7 the way
- * GL_DEPTH_TEXTURE_MODE says.
- *
- * The spread is the part worth pinning per mode, because the three forms differ in
- * which register gets what - and GL_ALPHA's has to write v7 before it zeroes v4, which
- * is the kind of ordering a reader cannot check by eye.
- */
+/* A depth texture samples with and without GL 1.4's comparison: the image format is
+ * `32_FLOAT` (22), the sampler's DEPTH_COMPARE_FUNC carries GL_TEXTURE_COMPARE_FUNC,
+ * and the sample slot reads one channel and spreads it across v4..v7 per
+ * GL_DEPTH_TEXTURE_MODE. GL_ALPHA's form writes v7 before it zeroes v4. */
 static void test_pm4_gl_depth_texture_samples_and_compares_on_hardware(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -1388,8 +1297,7 @@ static void test_pm4_gl_depth_texture_samples_and_compares_on_hardware(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glEnable(GL_TEXTURE_2D);
 
-    /* **No comparison**: the stored depth itself, one channel, luminance - (v, v, v,
-     * 1). */
+    /* No comparison: the stored depth as luminance, (v, v, v, 1). */
     glBegin(GL_TRIANGLES);
     glTexCoord3f(0.5f, 0.5f, 0.5f);
     glVertex3f(-0.5f, -0.5f, 0.5f);
@@ -1411,8 +1319,8 @@ static void test_pm4_gl_depth_texture_samples_and_compares_on_hardware(void) {
         ASSERT_EQ((obj->samp_desc[0] >> 12) & 7u, 0u);     /* no comparison yet */
     }
 
-    /* **The comparison**, GL_LEQUAL - the sampler's function 3, and the shader's
-     * reference. */
+    /* The comparison: GL_LEQUAL is the sampler's function 3, and the shader supplies
+     * the reference. */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_R_TO_TEXTURE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
     ctx->hw_failed = GL_FALSE;
@@ -1440,7 +1348,7 @@ static void test_pm4_gl_depth_texture_samples_and_compares_on_hardware(void) {
         ASSERT_EQ((obj->samp_desc[0] >> 12) & 7u, 3u); /* DEPTH_COMPARE_FUNC = LEQUAL */
     }
 
-    /* **GL_ALPHA**: (0, 0, 0, v), and v7 is written before v4 is zeroed. */
+    /* GL_ALPHA: (0, 0, 0, v), and v7 is written before v4 is zeroed. */
     glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_TEXTURE_MODE, GL_ALPHA);
     ctx->hw_failed = GL_FALSE;
     glBegin(GL_TRIANGLES);
@@ -1455,8 +1363,8 @@ static void test_pm4_gl_depth_texture_samples_and_compares_on_hardware(void) {
     ASSERT_EQ(ps_tex[GL_PS_SAMPLE_SLOT_TEX + 12u], 0x7e0a0280u); /* v_mov_b32 v5, 0 */
     ASSERT_EQ(ps_tex[GL_PS_SAMPLE_SLOT_TEX + 13u], 0x7e0c0280u); /* v_mov_b32 v6, 0 */
 
-    /* **And a colour texture after it** goes back to the four-channel sample and to
-     * RGBA8 - the reason every slot is set on every draw. */
+    /* A colour texture afterwards goes back to the four-channel sample and RGBA8, which
+     * is why every slot is set on every draw. */
     {
         static const GLubyte one[4] = {255, 255, 255, 255};
         GLuint flat = 0;
@@ -1493,10 +1401,9 @@ static void test_pm4_gl_depth_texture_samples_and_compares_on_hardware(void) {
 static uint32_t last_context_reg(const uint32_t *w, size_t n, uint32_t offset);
 static uint32_t last_sh_reg(const uint32_t *w, size_t n, uint32_t offset);
 
-/* Wrap modes and the border colour as the sampler descriptor carries them - CLAMP_X/Y
- * from radeonsi's si_tex_wrap, BORDER_COLOR_TYPE from si_translate_border_color - and a
- * border colour none of the three built-in ones reaching the table TA_BC_BASE_ADDR
- * points at. */
+/* Wrap modes and the border colour reach the sampler descriptor (CLAMP_X/Y as
+ * radeonsi's si_tex_wrap, BORDER_COLOR_TYPE as si_translate_border_color), and a border
+ * colour that is not built in reaches the table TA_BC_BASE_ADDR points at. */
 static void test_pm4_gl_texture_wrap_and_border_reach_the_sampler(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -1590,10 +1497,9 @@ static void test_pm4_gl_texture_wrap_and_border_reach_the_sampler(void) {
     /* GL 1.4's level-of-detail bias joins SQ_IMG_SAMP_WORD2's LOD_BIAS [0,13] at the
      * draw - the texture's 1.5 and the unit's 0.5 as 2.0 in signed fixed point with
      * eight fraction bits, 0x200 - while the texture's own descriptor stays without it.
-     * Then -1.0, 0x3f00. A change in what the descriptors hold takes the next ring slot
-     * (since 2026-09-21), so each draw's bias is read from the slot that draw was
-     * handed rather than from a fixed table. `hw_failed` is still cleared between
-     * draws, for the submissions the ring does not remove. */
+     * Then -1.0, 0x3f00. A descriptor change takes the next ring slot, so each draw's
+     * bias is read from the slot that draw was handed. `hw_failed` is cleared between
+     * draws for the submissions the ring does not remove. */
 #define SLOT_NOW                                                                       \
     ((const uint32_t *)(payload + gl_hw_desc_slot_offset(ctx->hw_desc_slot)))
     const uint32_t *slot = SLOT_NOW;
@@ -1631,10 +1537,9 @@ static void test_pm4_gl_texture_wrap_and_border_reach_the_sampler(void) {
     oops_display_close(disp);
 }
 
-/* A clear that keeps to a scissor box or goes through a colour mask is drawn: two
- * triangles on the frame, through CB_TARGET_MASK and the scissor registers the draw
- * path already emits. A DMA fill of the whole allocation - what the unscissored,
- * unmasked clear still is on the hardware - could do neither. */
+/* A scissored or colour-masked clear is drawn as two triangles, through CB_TARGET_MASK
+ * and the scissor registers; a DMA fill of the whole allocation could honour neither.
+ */
 static void test_pm4_gl_scissored_clear_is_drawn(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -1686,10 +1591,8 @@ static void test_pm4_gl_scissored_clear_is_drawn(void) {
     oops_display_close(disp);
 }
 
-/* A linked GL 2.0 program, for the two tests below. `test_gl2.c` has a fuller version
- * of this; here it is three calls and the check that they worked, because a program
- * that failed to link would draw the fixed-function path and the register assertions
- * would be about nothing. */
+/* A linked GL 2.0 program. The link is asserted because a program that failed to link
+ * draws the fixed-function path and the register assertions would check nothing. */
 static GLuint pm4_linked_program(const char *vs_src, const char *fs_src) {
     const GLuint vs = glCreateShader(GL_VERTEX_SHADER);
     const GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
@@ -1726,7 +1629,7 @@ static void pm4_draw_quad(GLuint prog) {
     glEnd();
 }
 
-/* And the same quad with no program at all, for the fixed-function path. */
+/* The same quad with no program, for the fixed-function path. */
 static void pm4_draw_plain_quad(void) {
     const float xs[6] = {-0.8f, 0.8f, 0.8f, -0.8f, 0.8f, -0.8f};
     const float ys[6] = {-0.8f, -0.8f, 0.8f, -0.8f, 0.8f, 0.8f};
@@ -1736,24 +1639,10 @@ static void pm4_draw_plain_quad(void) {
     glEnd();
 }
 
-/* **A shader that discards has to tell the depth block, and `exec` is not how.**
- *
- * `DB_SHADER_CONTROL.KILL_ENABLE` (bit 6 of context register 0x203) is what says the
- * shader can throw a fragment away. Without it the block runs early Z: it tests, writes
- * and retires the pixel before the shader has run, on the understanding that the shader
- * cannot change the answer - so a discarded fragment keeps its colour *and* its depth,
- * and the next draw behind it is rejected by a depth value that should never have been
- * written.
- *
- * That is gl2-probe's `discard` on hardware (2026-09-22): the discarded half came back
- * holding the first draw's blue instead of the second draw's yellow. `discard-in-loop`
- * passed in the same run and is the reason this is the explanation rather than "discard
- * is broken" - it draws with no depth test, so there is no early Z to retire anything
- * and the export's mask is the only thing deciding.
- *
- * From `uses_discard` in radeonsi, `si_state_shaders.cpp:1711`. Neither this register
- * nor `SPI_SHADER_Z_FORMAT` had any test before this one, which is how it stayed quiet.
- */
+/* A shader that discards sets `DB_SHADER_CONTROL.KILL_ENABLE` (bit 6 of context
+ * register 0x203). Without it early Z tests, writes and retires the pixel before the
+ * shader runs, so a discarded fragment keeps its depth and rejects the draw behind it.
+ * radeonsi sets it from `uses_discard` (`si_state_shaders.cpp:1711`). */
 static void test_pm4_gl_a_discarding_shader_sets_kill_enable(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -1779,8 +1668,7 @@ static void test_pm4_gl_a_discarding_shader_sets_kill_enable(void) {
     glContextSetVersion(2, 0);
     glEnable(GL_DEPTH_TEST);
 
-    /* The same shape as the probe's check: a varying decides, and half the quad goes.
-     */
+    /* A varying decides, and half the quad is discarded. */
     const GLuint prog = pm4_linked_program(
         "attribute vec3 pos;\n"
         "varying float side;\n"
@@ -1801,16 +1689,14 @@ static void test_pm4_gl_a_discarding_shader_sets_kill_enable(void) {
     }
     ASSERT_TRUE(last_dbsc != 0xffffffffu); /* it was written at all */
     ASSERT_EQ(last_dbsc & 0x40u, 0x40u);   /* KILL_ENABLE */
-    /* And Z_ORDER is still EARLY_Z_THEN_LATE_Z - radeonsi's case 1. A shader that kills
-     * does not move to late Z; the bit above is the whole of it. */
+    /* Z_ORDER stays EARLY_Z_THEN_LATE_Z, radeonsi's case 1: a shader that kills does
+     * not move to late Z. */
     ASSERT_EQ((last_dbsc >> 4) & 0x3u, 1u);
     /* No depth export, so the format register stays at zero. */
     ASSERT_EQ(last_dbsc & 0x1u, 0u);
 
-    /* **A program that does not discard puts the bit back.** The register is state, so
-     * a draw that inherits a previous draw's kill would give up early Z for nothing -
-     * and, more to the point, this is what proves the emission is driven by the program
-     * and not written once. */
+    /* A program that does not discard clears the bit, so the emission follows the
+     * program and a later draw does not inherit the kill and lose early Z. */
     const GLuint plain = pm4_linked_program(
         "attribute vec3 pos;\n"
         "void main() { gl_Position = vec4(pos, 1.0); }\n",
@@ -1826,10 +1712,8 @@ static void test_pm4_gl_a_discarding_shader_sets_kill_enable(void) {
         if (dcb[i] == 0xc0016900u && dcb[i + 1] == 0x203u)
             last_dbsc = dcb[i + 2];
     }
-    /* **This is the case the old cache could not see.** Neither program exports depth,
-     * so `SPI_SHADER_Z_FORMAT` does not move between the two draws - and the register
-     * was emitted only when the format changed. Keyed that way, the kill bit would
-     * still be set here. */
+    /* Neither program exports depth, so `SPI_SHADER_Z_FORMAT` is unchanged between the
+     * draws; emission keyed on the format alone would leave the kill bit set here. */
     ASSERT_TRUE(last_dbsc != 0xffffffffu);
     ASSERT_EQ(last_dbsc & 0x40u, 0u);
 
@@ -1843,21 +1727,11 @@ static void test_pm4_gl_a_discarding_shader_sets_kill_enable(void) {
     oops_display_close(disp);
 }
 
-/* **RB+ has to be programmed, not inherited.**
- *
- * This part has RB+ (`rbplus_allowed` for every `gfx_level >= GFX10_3`,
- * `ac_gpu_info.c:1122`), which is a second description of the blend in five registers
- * beside `CB_BLEND0_CONTROL`. radeonsi writes all of them on every framebuffer change;
- * oops-gl wrote none, so a draw blended under whatever the previous process had left in
- * the context - which on a console is nobody's idea of a default.
- *
- * Zero is radeonsi's own off switch rather than a shrug: `OPT_COMB_NONE` in both
- * combine fields is what it writes to get RB+ out of the way, and with the combine
- * disabled the `SRC_OPT`/`DST_OPT` fields are not read - which is what makes the
- * all-zero word safe even though `PRESERVE_NONE_IGNORE_ALL` happens to be zero too.
- *
- * The test is that they are *written*. Inheriting the right value by luck on one
- * console is the failure this is here to stop. */
+/* The five RB+ blend registers are written, as zero, rather than inherited from the
+ * previous context. This part has RB+ (`rbplus_allowed` for `gfx_level >= GFX10_3`,
+ * `ac_gpu_info.c:1122`), a second description of the blend beside `CB_BLEND0_CONTROL`.
+ * Zero is radeonsi's off switch: `OPT_COMB_NONE` in both combine fields, and with the
+ * combine off the `SRC_OPT`/`DST_OPT` fields are not read. */
 static void test_pm4_gl_rbplus_blend_opt_is_written_off(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -1880,9 +1754,8 @@ static void test_pm4_gl_rbplus_blend_opt_is_written_off(void) {
     ctx->use_hardware = GL_TRUE;
     ctx->hw_frame_active = GL_FALSE;
 
-    /* Blending on, and the two equations different - the shape that made green follow
-     * alpha on hardware, so this is the state the registers most need to be right for.
-     */
+    /* Blending on with the colour and alpha equations different, the state in which a
+     * wrong RB+ setting shows on hardware. */
     glEnable(GL_BLEND);
     glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_ADD);
     glBlendFunc(GL_ONE, GL_ONE);
@@ -1914,25 +1787,8 @@ static void test_pm4_gl_rbplus_blend_opt_is_written_off(void) {
     oops_display_close(disp);
 }
 
-/* **`SEPARATE_ALPHA_BLEND` is set only when the alpha state differs from the colour
- * state.**
- *
- * It used to be set always, on the grounds that oops-gl tracks a separate alpha factor
- * pair and letting the block infer alpha would ignore it. That is true of the *fields*
- * and the wrong conclusion about the *bit*: with the two sets equal the inference is
- * exact, and radeonsi sets it under the same condition (`si_state.c:499`).
- *
- * **The bit is not free on this part.** With it set, the colour block applies
- * `COLOR_COMB_FCN` to channels 0 and 2 and `ALPHA_COMB_FCN` to channels 1 and 3 -
- * alternating by position rather than by channel identity, measured three ways by
- * obSCEne (`-9c31`). So a draw whose alpha matches its colour must not set it, or green
- * runs an equation GL never asked for - which is invisible exactly while the two
- * equations agree, and is why this went unnoticed.
- */
-/* The last value written to `CB_BLEND0_CONTROL`, whichever packet carried it. **The
- * frame's opening table writes it one register at a time and a later draw writes it
- * with MRT1 in the same packet**, so a scan that knew only the one-register form would
- * see the frame's value and miss every change after it. */
+/* The last value written to `CB_BLEND0_CONTROL`, in either packet form: the frame's
+ * opening table writes it alone, and a later draw writes it together with MRT1. */
 static uint32_t pm4_last_blend0(const uint32_t *dcb, uint32_t words) {
     uint32_t last = 0xffffffffu;
     for (uint32_t i = 0; i + 2 < words; i++) {
@@ -1944,6 +1800,11 @@ static uint32_t pm4_last_blend0(const uint32_t *dcb, uint32_t words) {
     return last;
 }
 
+/* `SEPARATE_ALPHA_BLEND` is set only when the alpha state differs from the colour
+ * state, as radeonsi does (`si_state.c:499`). With it set, this part applies
+ * `COLOR_COMB_FCN` to channels 0 and 2 and `ALPHA_COMB_FCN` to channels 1 and 3, by
+ * position rather than channel identity, so setting it needlessly gives green the alpha
+ * equation. */
 static void test_pm4_gl_separate_alpha_blend_only_when_alpha_differs(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -1966,13 +1827,11 @@ static void test_pm4_gl_separate_alpha_blend_only_when_alpha_differs(void) {
     ctx->use_hardware = GL_TRUE;
     ctx->hw_frame_active = GL_FALSE;
 
-    /* **2.0, because `glBlendEquationSeparate` is a 2.0 entry point** and a 1.1 context
-     * refuses it - correctly, and quietly enough that a test which forgot would measure
-     * the default equation twice and conclude the bit never moves. */
+    /* `glBlendEquationSeparate` is a 2.0 entry point; a 1.1 context refuses it and the
+     * test would measure the default equation twice. */
     glContextSetVersion(2, 0);
 
-    /* The same equation and the same factors for both: no separate behaviour was asked
-     * for. */
+    /* The same equation and factors for colour and alpha. */
     glEnable(GL_BLEND);
     glBlendEquation(GL_FUNC_ADD);
     glBlendFunc(GL_ONE, GL_ONE);
@@ -1983,15 +1842,14 @@ static void test_pm4_gl_separate_alpha_blend_only_when_alpha_differs(void) {
               1u << 30);              /* ENABLE, so this is a blending draw at all */
     ASSERT_EQ(last & (1u << 29), 0u); /* and SEPARATE_ALPHA_BLEND is not set */
 
-    /* Different equations: now it is asked for, and the bit has to go out. */
+    /* Different equations set the bit. */
     glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_ADD);
     pm4_draw_plain_quad();
     last = pm4_last_blend0(dcb, ctx->dcb_words);
     ASSERT_TRUE(last != 0xffffffffu);
     ASSERT_EQ(last & (1u << 29), 1u << 29);
 
-    /* And different *factors* with the same equation counts too - the bit covers both.
-     */
+    /* Different factors with the same equation set it too. */
     glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
     glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
     pm4_draw_plain_quad();
@@ -1999,8 +1857,8 @@ static void test_pm4_gl_separate_alpha_blend_only_when_alpha_differs(void) {
     ASSERT_TRUE(last != 0xffffffffu);
     ASSERT_EQ(last & (1u << 29), 1u << 29);
 
-    /* And back to matching state clears it again, mid-frame - the per-draw path has to
-     * put it back rather than leave the frame on the value the last draw needed. */
+    /* Matching state clears it again mid-frame: the per-draw path writes it every
+     * time. */
     glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
     pm4_draw_plain_quad();
     last = pm4_last_blend0(dcb, ctx->dcb_words);
@@ -2018,24 +1876,11 @@ static void test_pm4_gl_separate_alpha_blend_only_when_alpha_differs(void) {
     oops_display_close(disp);
 }
 
-/* **`SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS` decides what kind of number the face register
- * is, and it has to be clear.**
- *
- * Set, the SPI delivers an integer mask: all zeros for a front-facing primitive, all
- * ones for a back-facing one. Clear, it delivers a float that is positive at the front
- * - which is the form `glsl_ps.c` compiles for, because Mesa lowers `load_front_face`
- * to `fgt(reg, 0)`
- * (`ac_nir_lower_intrinsics_to_args.c:361`) and this back end emits the same
- * `v_cmp_gt_f32`.
- *
- * **The wrong setting is false for both windings**, which is the part that made it
- * invisible: `0.0 > 0.0` is false, and all-ones read as a float is a NaN, which is not
- * greater than anything either. `gl_FrontFacing` came back false for the whole screen -
- * gl2-probe's `front-facing`, failing since it was written, with `gt-zero-selected`
- * measured as 0 for *both* windings on hardware (`166-agc/compiled-ps` arm10,
- * 2026-09-23).
- *
- * radeonsi writes the whole register as zero (`si_state.c:4895`) and so does this. */
+/* `SPI_BARYC_CNTL` is written as zero, as radeonsi does (`si_state.c:4895`), so
+ * FRONT_FACE_ALL_BITS is clear and the face register is a float positive at the front.
+ * `glsl_ps.c` compiles `gl_FrontFacing` as `v_cmp_gt_f32` against zero, as Mesa lowers
+ * `load_front_face` (`ac_nir_lower_intrinsics_to_args.c:361`). With the bit set the
+ * register is an integer mask, and the compare is false for both windings. */
 static void test_pm4_gl_baryc_cntl_delivers_a_float_face(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -2068,9 +1913,7 @@ static void test_pm4_gl_baryc_cntl_delivers_a_float_face(void) {
             seen = GL_TRUE;
         }
     }
-    ASSERT_EQ(
-        seen,
-        GL_TRUE); /* written at all: inheriting it would be the same bug, silently */
+    ASSERT_EQ(seen, GL_TRUE); /* written, not inherited */
 
     ctx->use_hardware = GL_FALSE;
     ctx->dcb_mem = NULL;
@@ -2082,9 +1925,8 @@ static void test_pm4_gl_baryc_cntl_delivers_a_float_face(void) {
     oops_display_close(disp);
 }
 
-/* The fixed-function path kills as well - the alpha test and the polygon stipple both
- * clear `exec` - and had the same register wrong for the same reason. No GL 1.x check
- * combines either with a depth test, so nothing had measured it. */
+/* The fixed-function alpha test sets KILL_ENABLE, since it discards fragments by
+ * clearing `exec`; `GL_ALWAYS` keeps every fragment and does not. */
 static void test_pm4_gl_alpha_test_sets_kill_enable(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -2120,9 +1962,7 @@ static void test_pm4_gl_alpha_test_sets_kill_enable(void) {
     ASSERT_TRUE(last_dbsc != 0xffffffffu);
     ASSERT_EQ(last_dbsc & 0x40u, 0x40u);
 
-    /* **`GL_ALWAYS` is not a kill.** A test that keeps every fragment has nothing to
-     * tell the depth block, and saying otherwise gives up early Z on every draw for
-     * nothing. */
+    /* `GL_ALWAYS` is not a kill, and setting the bit would give up early Z. */
     glAlphaFunc(GL_ALWAYS, 0.0f);
     ctx->dcb_words = 0;
     memset(dcb, 0, sizeof(dcb));
@@ -2147,6 +1987,11 @@ static void test_pm4_gl_alpha_test_sets_kill_enable(void) {
     oops_display_close(disp);
 }
 
+/* A mipmapped texture reaches the hardware as a chain laid out as addrlib lays out a
+ * linear GFX10 surface: smallest level first, base level last, each level's rows padded
+ * to 64 texels (gfx10addrlib.cpp:5082-5104). A 4x4 texture puts level 2 at byte 0,
+ * level 1 at 256 and level 0 at 768, 1792 bytes in all, checked byte by byte because
+ * the sampler finds each level by that arithmetic. */
 static void test_pm4_gl_mip_chain_reaches_the_descriptor(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -2224,13 +2069,10 @@ static void test_pm4_gl_mip_chain_reaches_the_descriptor(void) {
     ASSERT_EQ((dt[5] >> 4) & 0xfu, 2u);    /* MAX_MIP */
     ASSERT_EQ((dt[8 + 2] >> 26) & 3u, 2u); /* MIP_FILTER LINEAR */
 
-    /* A filter that reads no mipmaps: back to the base level's own storage and
-     * descriptors - which is a change to the descriptors mid-frame.
-     *
-     * **That used to submit the frame, and since 2026-09-21 it takes the next ring
-     * slot.** The draws already built keep pointing at slot 0 and sample what they were
-     * built with; this one is handed slot 1. The tell is the stream's triangle count,
-     * which a submission would have reset to one and which now reaches two. */
+    /* A filter that reads no mipmaps goes back to the base level's own descriptors, a
+     * mid-frame descriptor change that takes the next ring slot. Draws already built
+     * keep slot 0; this one is handed slot 1, and the triangle count reaching two shows
+     * no submission happened. */
     ASSERT_EQ(ctx->triangles_drawn, 1u);
     ASSERT_EQ(ctx->hw_desc_slot, 0u);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -2244,33 +2086,28 @@ static void test_pm4_gl_mip_chain_reaches_the_descriptor(void) {
     glEnd();
     ASSERT_EQ(ctx->triangles_drawn, 2u);
     ASSERT_EQ(ctx->hw_desc_slot, 1u);
-    /* **Slot 0 still holds the chain the first draw was given.** Overwriting it is the
-     * bug the submission existed to prevent, and the ring is what removes the
-     * submission without reintroducing it. */
+    /* Slot 0 still holds the chain the first draw was given. */
     ASSERT_EQ((dt[3] >> 16) & 0xfu, 2u);
     ASSERT_EQ((dt[8 + 2] >> 26) & 3u, 2u);
     /* The second draw's own slot carries the single-level descriptors. */
     const uint32_t *dt1 = (const uint32_t *)(payload + gl_hw_desc_slot_offset(1u));
     ASSERT_EQ((dt1[3] >> 16) & 0xfu, 0u);
     ASSERT_EQ((dt1[8 + 2] >> 26) & 3u, 0u);
-    ASSERT_EQ(dt1[3],
-              0x90000facu); /* exactly the single-level descriptor word it always was */
+    ASSERT_EQ(dt1[3], 0x90000facu); /* the single-level descriptor word */
     ASSERT_EQ(dt1[8 + 1],
               0x00fff000u); /* MIN_LOD 0, MAX_LOD the field's maximum, by default */
-    /* And the draw was handed that slot's address, not the table's. */
+    /* The draw is handed that slot's address, not the table's. */
     ASSERT_EQ(last_sh_reg(ctx->dcb_mem, ctx->dcb_words, 0x0cu),
               (uint32_t)((uint64_t)(uintptr_t)payload + gl_hw_desc_slot_offset(1u)));
 
-    /* **GL_TEXTURE_BASE_LEVEL 1**: a chain from level 1 - two levels, the descriptor
-     * 2x2, level 1 last in memory - and GL_TEXTURE_MIN_LOD / _MAX_LOD in the
-     * sampler's 4.8 fixed point (ac_descriptors.c:139-140).
+    /* GL_TEXTURE_BASE_LEVEL 1: a chain from level 1 - two levels, the descriptor 2x2,
+     * level 1 last in memory - and GL_TEXTURE_MIN_LOD / _MAX_LOD in the sampler's 4.8
+     * fixed point (ac_descriptors.c:139-140).
      *
-     * Each descriptor change below takes the next ring slot rather than submitting the
-     * frame (since 2026-09-21), so `DT_NOW` is what the draw just built was handed -
-     * the fixed `dt` above is slot 0 and stays as the first draw left it. `hw_failed`
-     * is still cleared before each draw: the ring wrapping, or any other submission,
-     * has no GPU here to write its fence, and a marked failure would make the next draw
-     * do nothing. */
+     * Each descriptor change below takes the next ring slot, so `DT_NOW` is the slot
+     * the last draw was handed; `dt` stays slot 0. `hw_failed` is cleared before each
+     * draw because any submission here has no GPU to write its fence, and a marked
+     * failure would make the next draw do nothing. */
 #define DT_NOW ((const uint32_t *)(payload + gl_hw_desc_slot_offset(ctx->hw_desc_slot)))
     ctx->hw_failed = GL_FALSE;
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
@@ -2334,9 +2171,8 @@ static void test_pm4_gl_mip_chain_reaches_the_descriptor(void) {
     ASSERT_TRUE(tex->chain_base == 0 && tex->chain_levels == 2);
     ASSERT_EQ((DT_NOW[3] >> 16) & 0xfu, 1u);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
-    /* **Five draws, four descriptor changes, one stream.** Each change took the next
-     * slot instead of a submission, which is the whole point of the ring; before
-     * 2026-09-21 this test submitted the frame four times over. */
+    /* Five draws, four descriptor changes, one stream: each change took the next slot
+     * instead of a submission. */
     ASSERT_EQ(ctx->hw_desc_slot, 4u);
 #undef DT_NOW
 
@@ -2352,6 +2188,8 @@ static void test_pm4_gl_mip_chain_reaches_the_descriptor(void) {
     oops_display_close(disp);
 }
 
+/* Enabling a texture switches the pixel shader and points user SGPRs 0/1 at the
+ * descriptor table. */
 static void test_pm4_gl_hardware_texture_stream(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -2409,8 +2247,8 @@ static void test_pm4_gl_hardware_texture_stream(void) {
                  tex_data);
     glEnable(GL_TEXTURE_2D);
 
-    /* Draw textured triangle: shader should switch to the textured one (0x400; 0x200
-     * until 2026-09-19), User SGPR 0/1 to descriptor table 0x900 */
+    /* Draw textured triangle: shader switches to the textured one, User SGPR 0/1 to
+     * descriptor table 0x900 */
     glBegin(GL_TRIANGLES);
     glTexCoord2f(0.0f, 0.0f);
     glVertex3f(-0.5f, -0.5f, 0.5f);
@@ -2458,6 +2296,7 @@ static void test_pm4_gl_hardware_texture_stream(void) {
     oops_display_close(disp);
 }
 
+/* Face culling and the colour mask reach PA_SU_SC_MODE_CNTL and CB_TARGET_MASK. */
 static void test_pm4_gl_hardware_cull_and_color_mask_stream(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -2608,11 +2447,9 @@ static void test_pm4_gl_hardware_cull_and_color_mask_stream(void) {
     oops_display_close(disp);
 }
 
-/* The last value written to one context register in a stream, or `absent` if never
- * written.
- *
- * Walks the type-3 packets rather than searching for a value, so a register offset that
- * happens to appear as somebody else's payload cannot be mistaken for a write to it. */
+/* The last value written to one context register in a stream, or `REG_ABSENT`. Walks
+ * the type-3 packets, so a register offset appearing in another packet's payload is not
+ * mistaken for a write. */
 #define REG_ABSENT 0xdeadbeefu
 static uint32_t last_context_reg(const uint32_t *w, size_t n, uint32_t offset) {
     uint32_t found = REG_ABSENT;
@@ -2637,21 +2474,10 @@ static uint32_t last_context_reg(const uint32_t *w, size_t n, uint32_t offset) {
     return found;
 }
 
-/*
- * **The gl-cube oracle record's facts, asserted against the stream oops-gl emits
- * today.**
- *
- * `docs/hardware/agc-gl-cube-oracle-fw1240.md` is the whole reason this subsystem
- * exists (D007): a frame measured on retail firmware 12.40, with the register facts
- * that made it draw written underneath it. Every one of those facts was prose and
- * nothing checked that the code still honoured them - so a register could be edited and
- * the document would go on describing a frame the code no longer produces, which is the
- * documented-but-unchecked failure this repository keeps meeting.
- *
- * Each assertion below is one line of that record. The display is 640x480 on purpose:
- * it is not square, so the extent fields cannot be transposed without this failing,
- * which is exactly the bug the record says was measured and fixed once already.
- */
+/* The stream honours every register fact in
+ * `docs/hardware/agc-gl-cube-oracle-fw1240.md`, a frame measured on retail
+ * firmware 12.40; each assertion is one line of that record. The display is 640x480 so
+ * that transposed extent fields fail. */
 static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -2677,9 +2503,8 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
     ctx->use_hardware = GL_TRUE;
     ctx->hw_frame_active = GL_FALSE;
 
-    /* Depth on, because the depth block is emitted only when it is - without this the
-     * DB_Z_INFO line of the record has nothing to check and the test would quietly
-     * cover five facts while claiming six. */
+    /* Depth on, because the depth block (and the record's DB_Z_INFO line) is emitted
+     * only then. */
     glEnable(GL_DEPTH_TEST);
 
     glBegin(GL_TRIANGLES);
@@ -2694,9 +2519,7 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
     ASSERT_TRUE(n > 0);
 
     /* Record: "CB_COLOR0_ATTRIB2: width - 1 in bits 27:14, height - 1 in bits 13:0; the
-     * colour block takes the row pitch from bits 27:14." Measured 2026-09-14 by putting
-     * them the other way round and watching a 1920x1080 target get a 1088-pixel row
-     * pitch. */
+     * colour block takes the row pitch from bits 27:14." */
     uint32_t attrib2 = last_context_reg(w, n, 0x3b0u);
     ASSERT_NE(attrib2, REG_ABSENT);
     ASSERT_EQ((attrib2 >> 14) & 0x3fffu, 639u); /* width - 1, NOT height */
@@ -2711,17 +2534,10 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
     /* Record: "BLEND_BYPASS must be clear on an 8_8_8_8 UNORM target, or the blender is
      * skipped whatever CB_BLEND0_CONTROL says."
      *
-     * This bit was set here until 2026-09-17, inherited from the measured
-     * primitive-draw recipe, and it cost three identical hardware runs: gl1-probe's
-     * `blend` and `blend-equation` failed while clear, rect and depth passed, and
-     * correcting CB_BLEND0_CONTROL changed nothing because the bypass is read first.
-     * Mesa derives the pair together and never emits this combination -
      * mesa/src/amd/common/ac_descriptors.c:1426-1438 sets blend_clamp for NORM/SRGB
      * types and blend_bypass only for UINT/SINT or the 8_24/24_8/X24_8_32_FLOAT
-     * formats, clearing blend_clamp when it does.
-     *
-     * Asserted by name as well as by value: the whole-register check below catches a
-     * regression, but prints two integers. This says which bit moved. */
+     * formats, clearing blend_clamp when it does. The bits are asserted by name so a
+     * failure says which one moved. */
     ASSERT_EQ((cb_info >> 16) & 0x1u, 0u); /* BLEND_BYPASS clear    */
     ASSERT_EQ((cb_info >> 15) & 0x1u, 1u); /* BLEND_CLAMP set       */
     ASSERT_EQ((cb_info >> 7) & 0x1u, 0u);  /* LINEAR_GENERAL clear  */
@@ -2735,16 +2551,10 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
     ASSERT_TRUE((yscale & 0x80000000u) != 0u);
     ASSERT_NE(
         yscale,
-        0x80000000u); /* negative *zero* would pass the sign test and draw nothing */
+        0x80000000u); /* negative zero would pass the sign test and draw nothing */
 
     /* Record: "VGT_GS_OUT_PRIM_TYPE must be TRISTRIP (2) for triangles; POINTLIST turns
-     * each triangle into a point and starves the compositor."
-     *
-     * There is now a measured negative behind this too: obSCEne's
-     * `166-agc/primitive-draw` (sweep 20260916-223136) sets this register to 0, submits
-     * three vertices, retires its fence, and its 64x64 target comes back with 4,095
-     * background pixels and exactly one red one. A point, from a triangle, exactly as
-     * the record says. */
+     * each triangle into a point and starves the compositor." */
     uint32_t gs_out = last_context_reg(w, n, 0x29bu);
     ASSERT_NE(gs_out, REG_ABSENT);
     ASSERT_EQ(gs_out, 2u);
@@ -2757,49 +2567,25 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
     ASSERT_EQ((z_info >> 4) & 0x1fu, 24u); /* SW_MODE = 24, 64KB_Z_X */
     ASSERT_EQ((z_info >> 29) & 0x1u, 0u);  /* TILE_SURFACE_ENABLE: no HTILE */
 
-    /* **The colour target is LINEAR, and that is a deliberate difference from the
-     * capture.**
-     *
-     * `CB_COLOR0_ATTRIB3` bits 18:14 are COLOR_SW_MODE. oops-gl writes 0 on this, the
-     * linear path the oracle frame was recorded on, because 0x08c6c000 carries 27
-     * (64KB_R_X) and streaked this scratch buffer when it was used. That value is
-     * agc_draw.c's, and no log records where it came from. Pinned because the two
-     * values differ in one field and are easy to copy across by mistake - the
-     * arithmetic is (v >> 14) & 0x1f. The scanout path writes 27 on purpose, into a
+    /* The colour target is LINEAR, unlike the capture. `CB_COLOR0_ATTRIB3` bits 18:14
+     * are COLOR_SW_MODE: 0 on this path, while agc_draw.c's 0x08c6c000 carries 27
+     * (64KB_R_X), which streaks this scratch buffer. The scanout path writes 27 into a
      * scanout buffer; test_pm4_gl_scanout_path_targets pins that. */
     uint32_t attrib3 = last_context_reg(w, n, 0x3b8u);
     ASSERT_NE(attrib3, REG_ABSENT);
     ASSERT_EQ((attrib3 >> 14) & 0x1fu, 0u);
     ASSERT_NE((attrib3 >> 14) & 0x1fu, 27u);
 
-    /* **The depth range the oracle frame was recorded with.**
-     *
-     * `PA_CL_VPORT_ZSCALE` and `ZOFFSET` were literal `0.5f` constants when that frame
-     * was captured; they are now computed from `glDepthRange`, whose default is 0..1.
-     * The arithmetic is `(far - near) / 2` and `(far + near) / 2`, so the default has
-     * to come back to the same two words - and if it does not, every depth-tested frame
-     * differs from the record while nothing else in this test would notice. */
+    /* The depth range the oracle frame was recorded with. `PA_CL_VPORT_ZSCALE` and
+     * `ZOFFSET` are `(far - near) / 2` and `(far + near) / 2` from `glDepthRange`, so
+     * the default 0..1 gives the record's 0.5 and 0.5. */
     ASSERT_EQ(last_context_reg(w, n, 0x113u), 0x3f000000u); /* 0.5f */
     ASSERT_EQ(last_context_reg(w, n, 0x114u), 0x3f000000u); /* 0.5f */
 
-    /* **The shader interface: what the vertex shader exports and what the pixel shader
-     * is handed.**
-     *
-     * This block was missing. `docs/GL_ROADMAP.md` claimed these registers were pinned
-     * here and used that as the reason fog and multitexture are blocked - "that test
-     * failing is the point". They were not pinned, by this test or any other, so the
-     * safety net the document described did not exist: moving the shader interface
-     * would have passed the whole suite and produced a wrong frame on hardware, which
-     * is the one place nothing here can check.
-     *
-     * It matters because **the shaders are hand-written binaries**. Adding an
-     * interpolated input renumbers the VGPRs the pixel shader already uses, and adding
-     * a parameter export changes what the vertex shader has to write - so these four
-     * registers and the shader code have to move together or not at all. Pinning them
-     * makes that a build failure rather than a bad frame, and a change that
-     * deliberately moves them updates this test and re-records the oracle frame on
-     * hardware.
-     */
+    /* The shader interface: what the vertex shader exports and what the pixel shader
+     * is handed. The shaders are hand-written binaries, so an added interpolated input
+     * renumbers the pixel shader's VGPRs and an added export changes what the vertex
+     * shader writes; these registers and the shader code move together. */
     uint32_t vs_out = last_context_reg(w, n, 0x1b1u); /* SPI_VS_OUT_CONFIG */
     ASSERT_NE(vs_out, REG_ABSENT);
     ASSERT_EQ((vs_out >> 1) & 0x1fu,
@@ -2809,28 +2595,19 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
     ASSERT_NE(ps_in, REG_ABSENT);
     ASSERT_EQ(ps_in & 0x3fu,
               2u); /* NUM_INTERP = 2: colour and texcoord, and nothing else */
-    /*
-     * **PS_W32_EN, bit 15, because the generated shaders are wave32 and the hardware is
-     * not told so by the code.** Clear, the pixel shader is dispatched wave64 and
-     * `exec_lo` narrows half the wave: every `if`, `break` and `discard` is then
-     * honoured in the first four rows of each 8x8 wave footprint and ignored in the
-     * second four. That is what gl2-probe measured as alternating four-row bands across
-     * the whole region, and nothing without exec-masked control flow can see it - which
-     * is why it survived so long.
-     */
+    /* PS_W32_EN, bit 15: the generated shaders are wave32. Clear, the pixel shader is
+     * dispatched wave64 and `exec_lo` covers half the wave, so every `if`, `break` and
+     * `discard` applies to the first four rows of each 8x8 footprint only. */
     ASSERT_EQ((ps_in >> 15) & 0x1u, 1u);
 
-    /* PERSP_CENTER_ENA and nothing else. Enabling POS_Z here - which is what fog would
-     * need - adds VGPRs *before* the ones the pixel shader already reads, so the colour
-     * it currently finds in v4..v7 would move. */
+    /* PERSP_CENTER_ENA and nothing else. Enabling POS_Z adds VGPRs before the ones the
+     * pixel shader reads, moving the colour out of v4..v7. */
     uint32_t ps_ena = last_context_reg(w, n, 0x1b3u); /* SPI_PS_INPUT_ENA */
     ASSERT_NE(ps_ena, REG_ABSENT);
     ASSERT_EQ(ps_ena, 0x00000002u);
 
     /* The two interpolation slots, in the order the shaders assume: parameter 0 is the
-     * colour, parameter 1 is the texture coordinate. Swapping them draws a
-     * texture-coloured triangle with its colour used as coordinates and nothing else in
-     * this test would notice. */
+     * colour, parameter 1 is the texture coordinate. */
     ASSERT_EQ(last_context_reg(w, n, 0x191u),
               0x00000000u); /* SPI_PS_INPUT_CNTL_0: param 0 */
     ASSERT_EQ(last_context_reg(w, n, 0x192u),
@@ -2840,39 +2617,10 @@ static void test_pm4_gl_honours_the_gl_cube_oracle_record(void) {
     oops_display_close(disp);
 }
 
-/* glScissor reaches PA_SC_VPORT_SCISSOR_0_TL/_BR.
- *
- * Until 2026-09-17 all four scissor rectangles were patched to the render target's
- * extent and ctx->cap_scissor_test was read only by the software rasteriser, so the box
- * was silently ignored on hardware - the same shape of bug as the viewport, and
- * gl1-probe's `scissor` check failed on the console while passing on the host for
- * exactly that reason.
- *
- * The target here is 640x480, and GL measures its box from the bottom-left while the
- * scan converter's rectangle is y-down, so the y coordinates come back flipped against
- * 480.
- */
-/* The texture environment reaches the textured pixel shader's combine slot.
- *
- * Until 2026-09-17 `tex_env_mode` was read only by the software rasteriser, so the
- * hardware path multiplied whatever the mode said - GL_REPLACE returned the texel
- * scaled by the vertex colour. That is invisible whenever the colour is white, which is
- * why gl-cube never showed it and gl1-probe's `tex-env-modes` did: it draws the same
- * white texel under REPLACE and MODULATE with a dark red colour and requires the two to
- * differ.
- */
-/* User clip planes reach PA_CL_UCP_0_X and PA_CL_CLIP_CNTL.
- *
- * Two registers and no shader change, because the fixed-function clipper applies
- * whenever the vertex shader exports no clip distances - which these hand-written
- * shaders do not (mesa/src/gallium/drivers/radeonsi/si_state.c, si_emit_clip_regs).
- *
- * **The plane the hardware wants is in clip space, not eye space** - "Clip-Space Plane
- * = Eye-Space Plane * Projection Matrix", mesa/src/mesa/main/clip.c:40-51. With an
- * identity projection the two coincide, which is why this test also checks a
- * non-identity one: an implementation that skipped the projection transform entirely
- * would pass the first and fail the second.
- */
+/* User clip planes reach PA_CL_UCP_0_X and PA_CL_CLIP_CNTL. The fixed-function clipper
+ * applies whenever the vertex shader exports no clip distances (radeonsi si_state.c,
+ * si_emit_clip_regs). The plane is in clip space, eye-space plane times projection
+ * (mesa/src/mesa/main/clip.c:40-51), so a non-identity projection is checked too. */
 static void test_pm4_gl_clip_planes_reach_their_registers(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -2945,9 +2693,7 @@ static void test_pm4_gl_clip_planes_reach_their_registers(void) {
     glVertex3f(0.0f, 0.5f, 0.5f);
     glEnd();
     /* Plane n occupies four consecutive registers from 0x16f + 4n, so plane 2 starts at
-     * 0x177 -
-     * **not** 0x178, which is its y. Getting that wrong reads a neighbouring component
-     * and passes or fails for the wrong reason. */
+     * 0x177; 0x178 is its y. */
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x204u),
               0x5u); /* planes 0 and 2 */
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x177u), 0u); /* 2.x = 0 */
@@ -2955,9 +2701,8 @@ static void test_pm4_gl_clip_planes_reach_their_registers(void) {
               0x3f800000u);                                                /* 2.y = 1 */
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x179u), 0u); /* 2.z = 0 */
 
-    /* **A non-identity projection must change the register**, because the plane is
-     * transformed into clip space. glScalef on the projection by 2 in x halves the x
-     * term. */
+    /* A non-identity projection changes the register, because the plane is transformed
+     * into clip space: scaling the projection by 2 in x halves the x term. */
     memset(dcb, 0, sizeof(dcb));
     ctx->dcb_words = 0;
     ctx->hw_frame_active = GL_FALSE;
@@ -2983,6 +2728,7 @@ static void test_pm4_gl_clip_planes_reach_their_registers(void) {
     oops_display_close(disp);
 }
 
+/* The texture environment reaches the textured pixel shader's combine slot. */
 static void test_pm4_gl_tex_env_reaches_the_combine_slot(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -3009,16 +2755,15 @@ static void test_pm4_gl_tex_env_reaches_the_combine_slot(void) {
     for (size_t i = 0; i < 4; i++)
         ASSERT_EQ(ps_tex[GL_PS_COMBINE_SLOT_TEX + i], 0xbf800000u);
 
-    /* And back, because a mode is not a one-way door. */
+    /* And back again. */
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     for (size_t i = 0; i < 4; i++)
         ASSERT_EQ(ps_tex[GL_PS_COMBINE_SLOT_TEX + i], modulate[i]);
 
-    /* GL_ADD adds the colour and multiplies the alpha (tools/shader/tex-env.s), and
-     * since the slot grew clamps the sums: v_min_f32 v4..v6, 1.0
-     * (tools/shader/combine.s), then the branch over the slot's other 56 words.
-     * GL_DECAL of an RGBA texture is a program since 2026-09-19 - it modulated until
-     * then - which test_pm4_gl_combine_programs_compute_what_software_does runs. */
+    /* GL_ADD adds the colour and multiplies the alpha (tools/shader/tex-env.s), then
+     * clamps the sums: v_min_f32 v4..v6, 1.0 (tools/shader/combine.s), then the branch
+     * over the slot's other 56 words. GL_DECAL of an RGBA texture is a program, which
+     * test_pm4_gl_combine_programs_compute_what_software_does runs. */
     static const uint32_t add_rgb[3] = {0x06081104u, 0x060a1305u, 0x060c1506u};
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD);
     for (size_t i = 0; i < 3; i++)
@@ -3031,7 +2776,7 @@ static void test_pm4_gl_tex_env_reaches_the_combine_slot(void) {
     ASSERT_TRUE(ps_tex[GL_PS_COMBINE_SLOT_TEX + 0] != modulate[0]);
     ASSERT_EQ(gl_ps_patch_tex_env(ctx), GL_TRUE);
 
-    /* **The texture's base format picks the words too.** An RGB texture keeps the
+    /* The texture's base format picks the words too. An RGB texture keeps the
      * fragment's alpha under GL_REPLACE - v_mov_b32 v7, v11 - and an alpha texture its
      * colour under GL_MODULATE. */
     static const uint8_t texel[4] = {255, 255, 255, 255};
@@ -3078,10 +2823,8 @@ static void test_pm4_gl_tex_env_reaches_the_combine_slot(void) {
     oops_display_close(disp);
 }
 
-/* The general combine's encoder against the assembler: each call below, beside the
- * words `tools/shader/combine.s` assembled to for the same instruction, in that file's
- * order. This is what lets the generator compose words rather than look them up - every
- * form and operand kind it emits is here. */
+/* The combine encoder produces the words `tools/shader/combine.s` assembles to, for
+ * every form and operand kind the generator emits, in that file's order. */
 static void test_pm4_gl_combine_encoder_matches_the_assembler(void) {
     const struct {
         uint32_t encoded, assembled;
@@ -3187,12 +2930,10 @@ static GLboolean run_combine_slot(const uint32_t *w, size_t n, float v[32]) {
     return (pc == n) ? GL_TRUE : GL_FALSE;
 }
 
-/* **The console's combine computes what the software rasteriser's does.** Every texture
- * function on every base format, and GL_COMBINE through each of its functions, sources,
- * operands and scales: the slot gl_ps_patch_tex_env writes is run by the reader above
- * on a texel and a fragment colour, and the result compared with gl_tex_env_apply's on
- * the same two. The short forms are held to it too, which is how GL_ADD's missing clamp
- * showed. */
+/* The hardware combine slot computes what the software rasteriser does, for every
+ * texture function on every base format and GL_COMBINE through its functions, sources,
+ * operands and scales: the slot is run by the reader above and compared with
+ * gl_tex_env_apply on the same texel and colour. */
 static void test_pm4_gl_combine_programs_compute_what_software_does(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -3321,6 +3062,9 @@ static void test_pm4_gl_combine_programs_compute_what_software_does(void) {
     oops_display_close(disp);
 }
 
+/* glScissor reaches PA_SC_VPORT_SCISSOR_0_TL/_BR. GL measures the box from the
+ * bottom-left and the scan converter's rectangle is y-down, so y comes back flipped
+ * against the 480-line target. */
 static void test_pm4_gl_scissor_reaches_its_registers(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -3340,16 +3084,14 @@ static void test_pm4_gl_scissor_reaches_its_registers(void) {
         uint32_t tl, br;
         const char *what;
     } cases[] = {
-        /* Disabled: the full target, which is what the measured recipe wrote
-           unconditionally. */
+        /* Disabled: the full target. */
         {GL_FALSE, 0, 0, 0, 0, 0x80000000u, 0x01e00280u, "disabled"},
-        /* The lower-left quarter in GL terms is the *bottom* rows in window terms. */
+        /* The lower-left quarter in GL terms is the bottom rows in window terms. */
         {GL_TRUE, 0, 0, 320, 240, 0x80f00000u, 0x01e00140u, "lower-left quarter"},
         /* An interior box: x 100..300, GL y 50..150 -> window y 330..430. */
         {GL_TRUE, 100, 50, 200, 100, 0x814a0064u, 0x01ae012cu, "interior box"},
         /* Hanging off the left and bottom. The register fields are unsigned, so a
-         * negative coordinate left alone would wrap to an enormous one and the box
-         * would vanish. */
+         * negative coordinate is clamped rather than wrapped. */
         {GL_TRUE, -50, -50, 100, 100, 0x81ae0000u, 0x01e00032u,
          "clamped to the target"},
     };
@@ -3392,9 +3134,7 @@ static void test_pm4_gl_scissor_reaches_its_registers(void) {
         ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x091u), 0x01e00280u);
     }
 
-    /* A box changed *after* the frame opened has to be re-emitted before the next draw,
-     * or the draw runs against the rectangle the frame started with. Same failure the
-     * viewport had. */
+    /* A box changed after the frame opened is re-emitted before the next draw. */
     memset(dcb, 0, sizeof(dcb));
     ctx->dcb_words = 0;
     ctx->hw_frame_active = GL_FALSE;
@@ -3407,7 +3147,7 @@ static void test_pm4_gl_scissor_reaches_its_registers(void) {
     glEnd();
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x094u), 0x80000000u);
 
-    /* Frame still open - no hw_frame_active reset here, which is the whole point. */
+    /* The frame stays open: no hw_frame_active reset. */
     glEnable(GL_SCISSOR_TEST);
     glScissor(10, 20, 30, 40);
     glBegin(GL_TRIANGLES);
@@ -3423,17 +3163,9 @@ static void test_pm4_gl_scissor_reaches_its_registers(void) {
     oops_display_close(disp);
 }
 
-/* glDepthRange reaches the viewport registers, and a reversed range is accepted.
- *
- * The three cases are chosen so no two share a ZSCALE or a ZOFFSET: 0..1 gives (0.5,
- * 0.5), 0..0.5 gives (0.25, 0.25), and the reversed 1..0 gives (-0.5, 0.5). A build
- * that swapped the two registers, or that sorted the arguments, fails on one of them.
- *
- * **And a range changed inside a frame reaches the next draw.** Every case above opens
- * a fresh frame, which is the one situation the frame's register table covers by itself
- * - so this test passed while a mid-frame glDepthRange did nothing on hardware until
- * the frame after.
- */
+/* glDepthRange reaches the viewport registers, a reversed range is accepted, and a
+ * range changed inside a frame reaches the next draw. The cases give distinct ZSCALE
+ * and ZOFFSET pairs, so swapped registers or sorted arguments fail. */
 static void test_pm4_gl_depth_range_reaches_the_viewport(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -3482,9 +3214,8 @@ static void test_pm4_gl_depth_range_reaches_the_viewport(void) {
                   cases[c].offset);
     }
 
-    /* The last case left the frame open with the reversed range. Narrow it without
-     * reopening - no hw_frame_active reset, which is the point - and the next draw must
-     * carry 0..0.5. */
+    /* The last case left the frame open with the reversed range. Narrowed without
+     * reopening the frame, the next draw carries 0..0.5. */
     ASSERT_EQ(ctx->hw_frame_active, GL_TRUE);
     glDepthRange(0.0, 0.5);
     glBegin(GL_TRIANGLES);
@@ -3518,7 +3249,7 @@ static void test_pm4_gl_depth_range_reaches_the_viewport(void) {
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x113u), 0x3e800000u);
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x114u), 0x3e800000u);
 
-    /* Out of range is clamped rather than refused - the specification says clamp. */
+    /* Out of range is clamped rather than refused, as the specification says. */
     glDepthRange(-5.0, 7.0);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
@@ -3557,21 +3288,9 @@ static void pm4_draw_one_triangle(void) {
     glEnd();
 }
 
-/*
- * **Two depth ranges in one frame reach the GPU as two writes**, which is what
- * gl1-probe's `depth-range-in-frame` asks of a console and has now failed there twice.
- *
- * The check draws a red rectangle under `glDepthRange(0.5, 1.0)` and a green one under
- * `glDepthRange(0.0, 0.5)` at the same NDC z, with `GL_LESS`. Window z is `z_ndc *
- * ZSCALE + ZOFFSET`, so at z_ndc 0 the red lands at 0.75 and the green at 0.25, and the
- * green wins. Its `saw` on hardware is `0xffff0000` - **red**, the colour that survives
- * when both rectangles land at the same depth and the second fails `GL_LESS` on
- * equality. That is the pixel a lost second write produces.
- *
- * ZSCALE is `(f - n) / 2` and ZOFFSET `(f + n) / 2`, so between those two calls the
- * scale is 0.25 both times and only the offset moves, 0.75 to 0.25. A test that watched
- * the scale would see nothing.
- */
+/* Two depth ranges in one frame reach the GPU as two writes. Between `glDepthRange(0.5,
+ * 1.0)` and `glDepthRange(0.0, 0.5)` ZSCALE stays 0.25 and only ZOFFSET moves, 0.75 to
+ * 0.25, so the offset is what is checked. */
 static void test_pm4_gl_depth_range_changes_within_a_frame(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -3604,7 +3323,7 @@ static void test_pm4_gl_depth_range_changes_within_a_frame(void) {
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x114u),
               0x3f400000u); /* 0.75 */
 
-    /* The second range, in the same frame - no flush between, as in the check. */
+    /* The second range, in the same frame with no flush between. */
     const uint32_t before = ctx->dcb_words;
     glDepthRange(0.0, 0.5);
     pm4_draw_one_triangle();
@@ -3623,26 +3342,12 @@ static void test_pm4_gl_depth_range_changes_within_a_frame(void) {
     oops_display_close(disp);
 }
 
-/*
- * **GL_POLYGON_SMOOTH's three edge distances** (since 2026-09-21), and the widening
- * that gives the fade somewhere to land.
- *
- * The roadmap said this could not be done, for two reasons that were both true when
- * written: a coverage of three edge fades is a different shape of slot from one
- * distance, and the outer half of every fade is on pixels the hardware rasteriser never
- * raises. The slot is twenty-eight words now and holds either form, and the CPU widens
- * the triangle by a pixel about its incenter - the same trick that already widens a
- * point and a line into a quad, which moves every edge outward by the same amount.
- *
- * The attribute is one-hot on purpose: the signed distance to edge *i* is `λ_i * h_i`,
- * so vertex *j* carries its own height in component *j* and zero in the others, and the
- * interpolator does the rest. Times `w`, with `w` in the fourth slot, because
- * `v_interp` is perspective-correct and a distance to a line is not.
- *
- * A right triangle with legs along the axes is used because its heights are arithmetic
- * worth asserting: in a 640x480 viewport the unit square from NDC (-1,-1) to (0,0) is
- * 320 by 240 pixels, so the two legs are the heights from the far vertices.
- */
+/* GL_POLYGON_SMOOTH carries three edge distances and widens the triangle by a pixel
+ * about its incenter so the outer half of each fade has pixels to land on. The
+ * attribute is one-hot: the distance to edge i is `λ_i * h_i`, so vertex j carries its
+ * own height in component j. It is multiplied by `w`, in the fourth component, because
+ * `v_interp` is perspective-correct and a distance to a line is not. The right triangle
+ * spans 320 by 240 pixels, so its heights are easy to assert. */
 static void test_pm4_gl_smooth_polygon_carries_three_edge_distances(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -3666,9 +3371,8 @@ static void test_pm4_gl_smooth_polygon_carries_three_edge_distances(void) {
     ctx->hw_frame_active = GL_FALSE;
     ctx->hw_vbo_cursor = 0;
 
-    /* The payload is this test's own zeroed array rather than the one context creation
-     * laid the shaders into, as every test here does - so the slot is zero until a draw
-     * patches it, and what is asserted is what the draws write. */
+    /* The payload is this test's own zeroed array, so what is asserted is what the
+     * draws write. */
     const uint32_t *const ps = (const uint32_t *)(payload + OOPS_GL_PS_UNTEX_OFFSET);
 
     glEnable(GL_POLYGON_SMOOTH);
@@ -3679,15 +3383,13 @@ static void test_pm4_gl_smooth_polygon_carries_three_edge_distances(void) {
     glEnd();
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* The polygon form, reading attr3 - the same first word in either shader, because
-     * one program serves both. */
+    /* The polygon form, reading attr3; the first word is the same in either shader. */
     ASSERT_EQ(ps[GL_PS_COVERAGE_SLOT_UNTEX],
               0xc8300c00u); /* v_interp_p1 v12, attr3.x */
     ASSERT_EQ(ps[GL_PS_COVERAGE_SLOT_UNTEX + 6u],
               0xc83c0f00u); /* v_interp_p1 v15, attr3.w */
     ASSERT_EQ(ps[GL_PS_COVERAGE_SLOT_UNTEX + 8u], 0x7e1e550fu); /* v_rcp_f32 v15, v15 */
-    /* Four parameters, so an eighty-byte vertex with the distances in the fourth vec4.
-     */
+    /* Four parameters: an eighty-byte vertex with the distances in the fourth vec4. */
     ASSERT_EQ(ctx->hw_params, 4u);
     {
         const float *a0 = (const float *)(vbo + 64);
@@ -3706,18 +3408,17 @@ static void test_pm4_gl_smooth_polygon_carries_three_edge_distances(void) {
         ASSERT_FLOAT_NEAR(a1[2], 0.0f, 1e-3f);
         ASSERT_FLOAT_NEAR(a2[0], 0.0f, 1e-3f);
         ASSERT_FLOAT_NEAR(a2[1], 0.0f, 1e-3f);
-        /* Vertex 1 and vertex 2 sit at the ends of the two legs, 320 and 240 pixels
-         * from the opposite edge - so those are their heights, before the widening
-         * moves them. The widening scales about the incenter, which lengthens both by
-         * the same ratio, so each is at least its original height. */
+        /* Vertices 1 and 2 sit at the ends of the legs, 320 and 240 pixels from the
+         * opposite edge. Widening about the incenter lengthens both by the same ratio,
+         * so each is at least its original height. */
         ASSERT_TRUE(a1[1] >= 320.0f && a1[1] < 340.0f);
         ASSERT_TRUE(a2[2] >= 240.0f && a2[2] < 260.0f);
         /* The right angle is at vertex 0, whose height to the hypotenuse is the usual
          * product over the hypotenuse: 320*240/400 = 192. */
         ASSERT_TRUE(a0[0] >= 192.0f && a0[0] < 212.0f);
     }
-    /* **The triangle was widened**, so its vertices are outside the ones GL was given -
-     * which is what puts a fragment on the pixels the edges only partly cover. */
+    /* The triangle is widened, so its vertices lie outside the ones GL was given and
+     * the partly covered pixels get fragments. */
     {
         const float *p0 = (const float *)(vbo + 0);
         ASSERT_TRUE(p0[0] < -1.0f && p0[1] < -1.0f);
@@ -3743,17 +3444,9 @@ static void test_pm4_gl_smooth_polygon_carries_three_edge_distances(void) {
     oops_display_close(disp);
 }
 
-/*
- * **The descriptor ring wraps into a submission**, which is the one thing that must
- * still work the old way.
- *
- * A frame gets 64 textures - slot 0 at the original table and 63 in the ring - and the
- * 65th change has nowhere to go. That case has to submit, exactly as *every* change did
- * before 2026-09-21, because the alternative is overwriting a slot some built draw
- * still points at. Driven by setting the cursor rather than by binding 64 textures:
- * what is under test is the boundary, and 64 uploads would test the texture table
- * instead.
- */
+/* A descriptor change with the ring full submits the frame rather than overwrite a slot
+ * a built draw still points at. The cursor is set by hand, since the boundary is what
+ * is under test. */
 static void test_pm4_gl_descriptor_ring_wraps_into_a_submission(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -3775,22 +3468,18 @@ static void test_pm4_gl_descriptor_ring_wraps_into_a_submission(void) {
     ctx->use_hardware = GL_TRUE;
     ctx->hw_frame_active = GL_FALSE;
 
-    /* **The ring fits inside the payload.** The textured pixel shader ends at 0x1500
-     * and the allocation is 0x4000, so the last slot must land between them - the
-     * arithmetic that keeps the ring from writing over a shader. */
+    /* The ring fits between the end of the textured pixel shader (0x1500) and the end
+     * of the 0x4000 allocation. */
     ASSERT_TRUE(gl_hw_desc_slot_offset(OOPS_GL_DESC_RING_SLOTS) +
                     OOPS_GL_DESC_SLOT_STRIDE <=
                 0x4000u);
     ASSERT_TRUE(gl_hw_desc_slot_offset(1u) >= 0x1500u);
-    /* Slot 0 is the original table, which is what keeps a one-texture frame's stream
-     * unchanged. */
+    /* Slot 0 is the descriptor table itself, so a one-texture frame uses no ring. */
     ASSERT_EQ(gl_hw_desc_slot_offset(0u), OOPS_GL_DESC_TABLE_OFFSET);
 
-    /* **Two different sizes, on purpose.** The slot is compared against the texture's
-     * descriptors, and two 1x1 textures with the same parameters describe identically
-     * here - the host's allocator hands them the same address, so there is no
-     * difference to notice and no slot is taken. A console would differ in the address
-     * alone; this differs in WIDTH and HEIGHT, which is a difference on both. */
+    /* Two different sizes: the host allocator can give two 1x1 textures the same
+     * address, making their descriptors identical, while WIDTH and HEIGHT differ on
+     * every platform. */
     static const GLubyte red[4] = {255, 0, 0, 255};
     static const GLubyte green[2 * 2 * 4] = {0, 255, 0, 255, 0, 255, 0, 255,
                                              0, 255, 0, 255, 0, 255, 0, 255};
@@ -3827,9 +3516,7 @@ static void test_pm4_gl_descriptor_ring_wraps_into_a_submission(void) {
     ASSERT_EQ(ctx->hw_desc_slot, 1u);
     ASSERT_EQ(ctx->triangles_drawn, 2u);
 
-    /* **At the cap it submits instead.** The cursor is put at the last slot by hand and
-     * one more texture asked for; the frame runs, and the new frame starts back at slot
-     * 0. */
+    /* At the cap it submits instead, and the new frame starts back at slot 0. */
     ctx->hw_desc_slot = OOPS_GL_DESC_RING_SLOTS;
     glBindTexture(GL_TEXTURE_2D, t[0]);
     ctx->hw_failed = GL_FALSE;
@@ -3851,32 +3538,10 @@ static void test_pm4_gl_descriptor_ring_wraps_into_a_submission(void) {
     oops_display_close(disp);
 }
 
-/*
- * **A slot is two descriptors, and the second one has to be able to move it.**
- *
- * The ring's change detection compared unit 0's descriptor against the slot and nothing
- * else until 2026-09-24. That is correct whenever the texture that varies is the one on
- * unit 0, which is every arrangement the suite had - and wrong for the one a real port
- * uses.
- *
- * Neverball's is this: `tex_env_shadow` puts a single shadow texture on unit 0 for the
- * whole of a pass and the per-surface material on unit 1, which `tex_env_select` picks
- * whenever `GL_MAX_TEXTURE_UNITS` is at least 2 - and this library honestly reports 2.
- * So unit 0's descriptor was identical on every draw, the slot never advanced, and each
- * draw overwrote the previous one's unit-1 descriptor in the slot they all pointed at.
- * At the submit they sampled whichever material was written last, so the whole shadowed
- * level wore one texture.
- *
- * The signature that made it hard to see: every direct read-back said the descriptors
- * were correct, and they were - at the moment they were written. What was wrong was
- * *when* the GPU read them, which no read-back from the CPU can show. The thing that
- * moved the fault was the vertex ring's size, because that sets how many draws share a
- * submit and therefore how many surfaces share one stale descriptor.
- *
- * So: unit 0 fixed, unit 1 changed, and the slot must advance. Two sizes rather than
- * two names, as the test above uses, because the host allocator hands two 1x1 textures
- * the same address and there would be no difference in the descriptor to notice.
- */
+/* A change on unit 1 alone advances the descriptor slot. A slot holds both units'
+ * descriptors; if only unit 0 were compared, draws that keep unit 0 and rebind unit 1
+ * (a shadow pass with per-surface materials) would share one slot and all sample the
+ * last material written. Sizes differ for the reason given in the test above. */
 static void test_pm4_gl_second_unit_moves_the_descriptor_slot(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -3915,12 +3580,11 @@ static void test_pm4_gl_second_unit_moves_the_descriptor_slot(void) {
                      GL_UNSIGNED_BYTE, src[i]);
     }
 
-    /* Unit 0: the shadow texture, bound once and never changed - as `shad_draw_set`
-     * binds it. */
+    /* Unit 0: a shadow texture, bound once and never changed. */
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, t[0]);
     glEnable(GL_TEXTURE_2D);
-    /* Unit 1: the material, which `r_apply_mtrl` rebinds per mesh. */
+    /* Unit 1: a material, rebound per mesh. */
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, t[1]);
     glEnable(GL_TEXTURE_2D);
@@ -3943,22 +3607,19 @@ static void test_pm4_gl_second_unit_moves_the_descriptor_slot(void) {
     ctx->hw_failed = GL_FALSE;
     TRI2();
     ASSERT_EQ(ctx->hw_desc_slot, 0u);
-    /* The draw really did take two units, or the rest of this test is about one. */
+    /* The draw takes two units. */
     ASSERT_EQ(gl_unit_texture_id(ctx, 0u), t[0]);
     ASSERT_EQ(gl_unit_texture_id(ctx, 1u), t[1]);
 
-    /* **Only the material changes.** Unit 0 is untouched, so the comparison that looked
-     * at unit 0 alone answered "nothing moved" here and left this draw in slot 0 with
-     * the one above it. */
+    /* Only the material changes; unit 0 is untouched. */
     glBindTexture(GL_TEXTURE_2D, t[2]);
     ctx->hw_failed = GL_FALSE;
     TRI2();
     ASSERT_EQ(ctx->hw_desc_slot, 1u);
     ASSERT_EQ(ctx->triangles_drawn, 2u);
 
-    /* And the two slots hold the two materials, which is the property the slot index
-     * stands for: the first draw's descriptor is still there for the GPU to read at the
-     * submit. */
+    /* The two slots hold the two materials, so the first draw's descriptor is still
+     * there for the GPU to read at the submit. */
     {
         const uint32_t *s0u1 = (const uint32_t *)(payload + gl_hw_desc_slot_offset(0u) +
                                                   OOPS_GL_DESC_UNIT_STRIDE);
@@ -3967,9 +3628,8 @@ static void test_pm4_gl_second_unit_moves_the_descriptor_slot(void) {
         ASSERT_TRUE(memcmp(s0u1, s1u1, 32) != 0);
     }
 
-    /* **And the detector that missed it now fires.** Put both draws in one slot by hand
-     * and the unit-1 half re-points: the arm has to report that, because reporting zero
-     * through exactly this is what it did for a day. */
+    /* The slot-collision counter fires when both draws are forced into one slot and
+     * the unit-1 half re-points. */
     ctx->hw_slot_collisions = 0u;
     ctx->hw_slot_tex[1] = t[0];
     ctx->hw_slot_tex1[1] = t[1];
@@ -3999,14 +3659,11 @@ static void test_pm4_gl_second_unit_moves_the_descriptor_slot(void) {
  *
  * The logic op's register value is radeonsi's (si_state.c:341, :365-368, :545-549): the
  * Mesa four-bit mode repeated into both halves of ROP3, DISABLE_DUAL_QUAD with it, and
- * GL_COPY the same as off. The mode is **not** `opcode - GL_CLEAR` - GL's enum orders
- * the truth table the other way - so the cases here are the ones where that mistake
- * shows: GL_XOR is 6 either way and proves nothing on its own, GL_AND_REVERSE is 2 in
- * GL's order and 4 in the table.
+ * GL_COPY the same as off. The mode is not `opcode - GL_CLEAR`, since GL's enum orders
+ * the truth table the other way; GL_AND_REVERSE is 2 in GL's order and 4 in the table.
  *
- * The blend constant is not in the frame's register table, so the stream gl-cube's
- * oracle recorded is unchanged: it goes out only for a draw that reads it, and only
- * once per value.
+ * The blend constant is not in the frame's register table: it goes out only for a draw
+ * that reads it, once per value.
  */
 static void test_pm4_gl_logic_op_and_blend_constant_reach_their_registers(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
@@ -4031,8 +3688,7 @@ static void test_pm4_gl_logic_op_and_blend_constant_reach_their_registers(void) 
     ctx->use_hardware = GL_TRUE;
     ctx->hw_frame_active = GL_FALSE;
 
-    /* Default: the constant the frame table always carried, and no blend constant at
-     * all. */
+    /* Default: the frame table's constant, and no blend constant. */
     pm4_draw_one_triangle();
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x202u), 0x00cc0010u);
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x105u), REG_ABSENT);
@@ -4086,31 +3742,17 @@ static void test_pm4_gl_logic_op_and_blend_constant_reach_their_registers(void) 
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x107u),
               0x3f400000u); /* 0.75 */
 
-    /*
-     * **`0x108` carries green here, not alpha**, and this line used to expect 1.0.
-     *
-     * obSCEne measured (`-2e9f`, sweep 20260921-run17, firmware 12.40) that the green
-     * channel of a `BLEND_CONSTANT_COLOR` blend reads `CB_BLEND_ALPHA` at `0x108` and
-     * ignores `CB_BLEND_GREEN` at `0x106` - four arms, same pixel every time. So
-     * `gl_draw.c` writes green into the alpha slot for any draw that reads the colour
-     * constant, which is the only way `glBlendColor` can mean what GL says.
-     *
-     * `0x106` above is still written with green, and is still ignored by the part. It
-     * goes out because it is the register GL names and because a future part may read
-     * it.
-     */
+    /* `0x108` carries green here, not alpha: on firmware 12.40 the green channel of a
+     * `BLEND_CONSTANT_COLOR` blend reads `CB_BLEND_ALPHA` at `0x108` and ignores
+     * `CB_BLEND_GREEN` at `0x106`, measured on hardware. `gl_draw.c` writes green into
+     * the alpha slot for any draw that reads the colour constant. `0x106` is written
+     * with green too, as the register GL names. */
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x108u),
               0x3f000000u); /* green, 0.5 */
 
-    /*
-     * **And this pair cannot be served, so it is refused.** The draw above asks for
-     * `GL_CONSTANT_COLOR` as source and `GL_ONE_MINUS_CONSTANT_ALPHA` as destination:
-     * the first needs green in `0x108` and the second needs alpha there. Legal GL,
-     * impossible on this part, and `D009` says a wrong channel is worse than a loud
-     * failure.
-     *
-     * The test used to pass because it assumed both halves worked. They never did.
-     */
+    /* This pair cannot be served, so it is refused: `GL_CONSTANT_COLOR` needs green in
+     * `0x108` and `GL_ONE_MINUS_CONSTANT_ALPHA` needs alpha there. A wrong channel is
+     * worse than a loud failure (D009). */
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
 
     /* Once per value, not once per draw. */
@@ -4125,29 +3767,20 @@ static void test_pm4_gl_logic_op_and_blend_constant_reach_their_registers(void) 
               0x3f800000u);                                                /* 1.0 */
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x106u), 0u); /* 0.0 */
 
-    /* And a new frame sends it again, because nothing says the registers survived. */
+    /* A new frame sends it again, since the registers are not assumed to survive. */
     memset(dcb, 0, sizeof(dcb));
     ctx->dcb_words = 0;
     ctx->hw_frame_active = GL_FALSE;
     pm4_draw_one_triangle();
     ASSERT_EQ(count_context_reg_writes(ctx->dcb_mem, ctx->dcb_words, 0x105u), 1u);
 
-    /*
-     * **One constant family at a time is served, and the choice follows the blend
-     * function.**
-     *
-     * With only the alpha constant read, `0x108` carries alpha again rather than green
-     * - so the value in that register depends on `glBlendFunc` and not only on
-     * `glBlendColor`, which is why both setters mark the constant dirty. Without that,
-     * this draw would reuse the green the colour-constant draws above left there, and
-     * blend against the wrong channel with nothing to show for it.
-     */
+    /* One constant family is served at a time, chosen by the blend function. With only
+     * the alpha constant read, `0x108` carries alpha, so both `glBlendFunc` and
+     * `glBlendColor` mark the constant dirty. */
     memset(dcb, 0, sizeof(dcb));
     ctx->dcb_words = 0;
     ctx->hw_frame_active = GL_FALSE;
-    /* The draws above kept asking for the impossible pair, and a GL error latches until
-       it is read. Drain it, so the assertions below are about these draws and not
-       those. */
+    /* Drain the latched error from the impossible pair above. */
     (void)glGetError();
     glBlendColor(0.25f, 0.5f, 0.75f, 1.0f);
     glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
@@ -4156,7 +3789,7 @@ static void test_pm4_gl_logic_op_and_blend_constant_reach_their_registers(void) 
               0x3f800000u); /* 1.0, alpha */
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* And switching family re-sends it, with green in the alpha slot this time. */
+    /* Switching family re-sends it, with green in the alpha slot. */
     glBlendFunc(GL_CONSTANT_COLOR, GL_ONE_MINUS_CONSTANT_COLOR);
     pm4_draw_one_triangle();
     ASSERT_EQ(last_context_reg(ctx->dcb_mem, ctx->dcb_words, 0x108u),
@@ -4188,14 +3821,8 @@ static void test_pm4_gl_logic_op_and_blend_constant_reach_their_registers(void) 
 }
 
 /* A frame of more triangles than the vertex ring holds is submitted before the ring is
- * reused.
- *
- * Each triangle's vertices sit in their own ring slot until the stream runs at the
- * flush, so the last triangle of a stream must not land in the 1st one's slot while the
- * 1st is still unread. Driven by setting the cursor to the last slot, like the
- * descriptor ring test: what is under test is the boundary, and 29,127 draws would test
- * the command buffer limit instead.
- */
+ * reused, since each triangle's vertices stay in their slot until the stream runs. The
+ * cursor is set near the end by hand, since the boundary is what is under test. */
 static void test_pm4_gl_vertex_ring_submits_before_it_wraps(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -4219,11 +3846,8 @@ static void test_pm4_gl_vertex_ring_submits_before_it_wraps(void) {
     ctx->use_hardware = GL_TRUE;
     ctx->hw_frame_active = GL_FALSE;
 
-    /* **The bound this test is about, set rather than assumed.** `gl_vbo_ring_bytes`
-     * defaults to 64 KiB and not to the whole ring - correct beats fast until the fault
-     * that appears at one flush a frame is found, see its definition. This test is
-     * about the wrap itself, so it drives the full allocation, which is what it has
-     * already allocated above. */
+    /* `gl_vbo_ring_bytes` defaults to less than the whole ring (see its definition);
+     * this test drives the full allocation. */
     gl_vbo_ring_bytes = OOPS_GL_VBO_RING_BYTES;
 
     /* Put cursor near the end to test the wrap boundary without overflowing DCB */
@@ -4237,8 +3861,7 @@ static void test_pm4_gl_vertex_ring_submits_before_it_wraps(void) {
     ASSERT_TRUE(words_full + OOPS_GL_DCB_DRAW_MAX_DW + OOPS_GL_DCB_TRAILER_DW <
                 ctx->dcb_capacity_dw);
 
-    /* One more: the full stream is submitted and the new triangle opens the next one.
-     */
+    /* One more: the full stream is submitted and the new triangle opens the next. */
     pm4_draw_one_triangle();
     ASSERT_EQ(ctx->triangles_drawn, 1u);
     ASSERT_TRUE(ctx->dcb_words < words_full);
@@ -4255,14 +3878,9 @@ static void test_pm4_gl_vertex_ring_submits_before_it_wraps(void) {
 }
 
 /* glPolygonOffset reaches its four registers, and the enable reaches
- * PA_SU_SC_MODE_CNTL.
- *
- * The factor is scaled by 16 and the units are not, which is the part worth pinning:
- * those are different multipliers taken from Mesa's radeonsi for a 32-bit float
- * z-buffer, and a build that applied one scaling to both would pass a test that used
- * equal values. So factor and units are deliberately different here, and neither is a
- * value the other's scaling could produce.
- */
+ * PA_SU_SC_MODE_CNTL. The factor is scaled by 16 and the units are not, as radeonsi
+ * does for a 32-bit float z-buffer; factor and units differ here so one scaling applied
+ * to both fails. */
 static void test_pm4_gl_polygon_offset_reaches_its_registers(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -4305,7 +3923,7 @@ static void test_pm4_gl_polygon_offset_reaches_its_registers(void) {
     ASSERT_EQ(last_context_reg(w, n, 0x2e1u), 0x40400000u); /* FRONT_OFFSET */
     ASSERT_EQ(last_context_reg(w, n, 0x2e3u), 0x40400000u); /* BACK_OFFSET */
     ASSERT_EQ(last_context_reg(w, n, 0x2dfu), 0u);          /* CLAMP: GL has none */
-    /* The DB format this was derived for has not moved. */
+    /* The DB format the scaling was derived for. */
     ASSERT_EQ(last_context_reg(w, n, 0x2deu), 0x000001e9u);
 
     /* Enabled: front, back and para bits all set (11, 12, 13). */
@@ -4385,10 +4003,9 @@ static void test_pm4_gl_color_sum_reaches_the_vertex_colour(void) {
     oops_display_close(disp);
 }
 
-/* Fog on the console: the factor per vertex in the texture coordinate's z, and the
- * blend in both pixel shaders' fog slots with the fog colour as its three literals -
- * the words `tools/shader/fog.s` assembles to. Off, the slots are s_nop and nothing
- * else moved. */
+/* Fog on the hardware path: the factor per vertex in the texture coordinate's z, and
+ * the blend in both pixel shaders' fog slots with the fog colour as its three literals,
+ * the words `tools/shader/fog.s` assembles to. Off, the slots are s_nop. */
 static void test_pm4_gl_fog_reaches_both_shaders_and_the_vertex(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -4485,14 +4102,12 @@ static void test_pm4_gl_fog_reaches_both_shaders_and_the_vertex(void) {
     glContextDestroy(ctx_handle);
     oops_display_close(disp);
 }
-/* **The stencil test on the console** (since 2026-09-19; written, not yet seen -
- * gl1-probe's `stencil` is the measurement). A frame that tests stencil binds the
- * stencil surface live - DB_STENCIL_INFO FORMAT STENCIL_8 at the depth surface's
- * 64KB_Z_X, and its bases - and every stencil-tested draw carries the function in
- * DB_DEPTH_CONTROL and the operations, reference and masks in DB_STENCIL_CONTROL and
- * DB_STENCILREFMASK(_BF); a frame that does not leaves the measured recipe's stencil
- * registers as they were. A whole stencil clear is a fill, and the pixel operations
- * read and write the surfaces through their tiling. */
+/* A frame that tests stencil binds the stencil surface (DB_STENCIL_INFO FORMAT
+ * STENCIL_8 at the depth surface's 64KB_Z_X, and its bases), and every stencil-tested
+ * draw carries the function in DB_DEPTH_CONTROL and the operations, reference and masks
+ * in DB_STENCIL_CONTROL and DB_STENCILREFMASK(_BF). A frame that does not test stencil
+ * writes no stencil registers. A whole stencil clear is a fill, and the pixel
+ * operations read and write the surfaces through their tiling. */
 static void test_pm4_gl_stencil_reaches_its_registers(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -4544,11 +4159,8 @@ static void test_pm4_gl_stencil_reaches_its_registers(void) {
     ASSERT_EQ(dc & 1u, 1u);        /* STENCIL_ENABLE */
     ASSERT_EQ((dc >> 8) & 7u, 2u); /* STENCILFUNC FRAG_EQUAL */
     ASSERT_EQ(dc & 2u, 0u);        /* the depth test stays off */
-    /* **BACKFACE_ENABLE is set, and the back fields carry the back state.**
-     * `glStencilFunc` and `glStencilOp` write *both* faces - that is what the
-     * non-separate entry points mean - so the two halves are identical here and the
-     * register values below are unchanged by it. What the bit buys is the separate arm
-     * further down, where they differ. */
+    /* BACKFACE_ENABLE is set and the back fields carry the back state. The
+     * non-separate entry points write both faces, so the halves are identical here. */
     ASSERT_EQ((dc >> 7) & 1u, 1u);
     ASSERT_EQ((dc >> 20) & 7u, 2u); /* STENCILFUNC_BF, the same FRAG_EQUAL */
     /* fail KEEP 0, zpass REPLACE_TEST 3, zfail ADD_CLAMP 5; the back-face copies at
@@ -4558,16 +4170,11 @@ static void test_pm4_gl_stencil_reaches_its_registers(void) {
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x10cu), 0x013c0f01u);
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x10du), 0x013c0f01u);
 
-    /* **The two faces apart**, which is GL 2.0's `glStencilOpSeparate` and the whole
-     * reason the back fields exist. The shadow-volume idiom is the case: a front face
-     * increments where it passes and a back face decrements, so the stencil returns to
-     * where it started over a rectangle covered by both. A path that copied the front
-     * state into the back fields increments twice and leaves 2 - which is what
-     * gl2-probe's `separate-stencil` measured on hardware before this. */
+    /* The two faces apart, with GL 2.0's separate entry points: the shadow-volume idiom
+     * increments on a front face and decrements on a back face. A path that copied the
+     * front state into the back fields would increment twice. */
     /* The separate entry points are GL 2.0's and `gl_require_version` gates them, so
-     * this context has to say what it targets first - otherwise the calls below are
-     * refused with GL_INVALID_OPERATION and the registers keep the values above, which
-     * is what a first run of this arm measured. */
+     * the context targets 2.0 first; a 1.x context refuses them. */
     glContextSetVersion(2, 0);
     glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR);
     glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR);
@@ -4584,9 +4191,8 @@ static void test_pm4_gl_stencil_reaches_its_registers(void) {
         const uint32_t dc2 = last_context_reg(dcb, ctx->dcb_words, 0x200u);
         ASSERT_EQ((dc2 >> 7) & 1u,
                   1u); /* BACKFACE_ENABLE, or the back fields are ignored */
-        ASSERT_EQ((dc2 >> 8) & 7u, 7u); /* front GL_ALWAYS */
-        ASSERT_EQ((dc2 >> 20) & 7u,
-                  0u); /* back GL_NEVER - and not a copy of the front */
+        ASSERT_EQ((dc2 >> 8) & 7u, 7u);  /* front GL_ALWAYS */
+        ASSERT_EQ((dc2 >> 20) & 7u, 0u); /* back GL_NEVER, not a copy of the front */
     }
     glStencilFunc(GL_EQUAL, 1, 0x0f);
     glStencilOp(GL_KEEP, GL_INCR, GL_REPLACE);
@@ -4615,8 +4221,8 @@ static void test_pm4_gl_stencil_reaches_its_registers(void) {
 #undef TRI
     glDisable(GL_STENCIL_TEST);
 
-    /* **The pixel operations address the surfaces as the DB tiles them** (since
-     * 2026-09-19). The mock's buffers are read as the console's here. A value drawn at
+    /* The pixel operations address the surfaces as the DB tiles them, with the mock's
+     * buffers read as the hardware's. A value drawn at
      * a window pixel lands at gl_zs_tiling.h's offset for surface row 479 - y, and only
      * there. The stencil surface's pitch is 640 padded to 768, depth's to 640. The
      * value reads back and copies elsewhere the same way. */
@@ -4665,11 +4271,10 @@ static void test_pm4_gl_stencil_reaches_its_registers(void) {
     oops_display_close(disp);
 }
 
-/* **gl_zs_tiling.h's vectors address a 64 KiB block one to one**: every pixel of a 128
- * x 128 depth block has its own float and every pixel of a 256 x 256 stencil block its
- * own byte. That is what a swizzle is; tools/zs-tiling checks the vectors against
- * addrlib itself. Pinned alongside are a few offsets read off the vectors, and the
- * blocks' row-by-row order. */
+/* gl_zs_tiling.h's vectors address a 64 KiB block one to one: every pixel of a 128 x
+ * 128 depth block has its own float and every pixel of a 256 x 256 stencil block its
+ * own byte. tools/zs-tiling checks the vectors against addrlib. A few offsets and the
+ * blocks' row-by-row order are pinned alongside. */
 static void test_pm4_gl_zs_tiling_is_a_permutation(void) {
     static uint8_t seen[65536];
     memset(seen, 0, sizeof(seen));
@@ -4721,10 +4326,9 @@ static uint32_t last_sh_reg(const uint32_t *w, size_t n, uint32_t offset) {
     return found;
 }
 
-/* **The three-parameter vertex shader is tools/shader/vs-param3.s, assembled** (since
- * 2026-09-19). These are the words `clang -mcpu=gfx1030` gave for the lines that differ
- * from the two-parameter shader and for its ends, with the four address literals where
- * the builder patches them. */
+/* The three-parameter vertex shader is tools/shader/vs-param3.s, assembled: the words
+ * `clang -mcpu=gfx1030` gives for the lines that differ from the two-parameter shader
+ * and for its ends, with the four address literals where the builder patches them. */
 static void test_pm4_gl_param3_vertex_shader_is_the_assembled_one(void) {
     static uint32_t vs[OOPS_GL_VS_P3_WORDS];
     gl_vs_build_param3(vs, 0x0000001122334400ull, 0x0000005566778800ull);
@@ -4746,17 +4350,10 @@ static void test_pm4_gl_param3_vertex_shader_is_the_assembled_one(void) {
     ASSERT_EQ(vs[63], 0xbf810000u); /* s_endpgm, the last of 64 */
 }
 
-/*
- * The descriptors for a 3D image, a cube map and a depth comparison - **checked against
- * the words obSCEne sampled with**, not against a reading of the register tables.
- *
- * `REQ-20260920T0745Z-6c80` (sweep `20260920-103636`, `166-agc/texture-extended`)
- * sampled all three on the part and reported every descriptor and sampler word. Its 3D
- * arm and its 2D control describe the *same memory*, so the only difference between a
- * green texel and nothing is the TYPE field; its two depth arms put one reference
- * either side of the stored depth and came back passing and failing. Those are the
- * numbers below.
- */
+/* The descriptors for a 3D image, a cube map and a depth comparison match the words
+ * measured sampling on hardware. The 3D arm and its 2D control describe the same
+ * memory, so they differ only in TYPE; the depth arms put one reference either side of
+ * the stored depth. */
 static void test_pm4_gl_extended_texture_descriptors_match_the_measured_words(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -4791,18 +4388,9 @@ static void test_pm4_gl_extended_texture_descriptors_match_the_measured_words(vo
     ASSERT_EQ(o3d->img_desc[4] & 0x1fffu, 1u); /* two slices, so the last is 1 */
     ASSERT_EQ(o3d->samp_desc[0], 0x92u);       /* the 3D arm's sampler word, exactly */
 
-    /*
-     * A cube map gets TYPE 0xb **when it has an image to describe, and it has none
-     * yet**. Its six faces live on the CPU (`gl_texture_object_t::cube`, and the
-     * object's own image fields stay empty for one), so there is no GPU storage for a
-     * descriptor to point at - which is why a cube-textured draw is still dropped on
-     * this path with a line in the log. `-6c80` settles the *hardware* half - TYPE 0xb
-     * samples, and it named the face its texel came from - so what is left is uploading
-     * the faces as one array, not finding out what the field is.
-     *
-     * This asserts the gap rather than the descriptor, because asserting words for an
-     * image that does not exist would pass and mean nothing.
-     */
+    /* A cube map's six faces live in `gl_texture_object_t::cube` and the object's own
+     * image fields stay empty. The six-slice array and its TYPE 0xb descriptor are
+     * built at draw time (test_pm4_gl_cube_faces_upload_as_one_array). */
     GLuint tcm = 0;
     glGenTextures(1, &tcm);
     glBindTexture(GL_TEXTURE_CUBE_MAP, tcm);
@@ -4837,17 +4425,9 @@ static void test_pm4_gl_extended_texture_descriptors_match_the_measured_words(vo
     oops_display_close(disp);
 }
 
-/*
- * **The six faces uploaded as one array** (2026-09-20). A cube map's faces arrive one
- * at a time as their own images, because that is what the software rasteriser samples;
- * the hardware wants one image of six slices. `gl_tex_hw_prepare` builds it.
- *
- * Each face is given a colour of its own, so the check is where each one *landed*: face
- * f at slice f, in GL's order. A single-colour cube would pass with every face written
- * to slice 0, which is exactly the mistake worth catching - and the slice stride this
- * reads is derived rather than measured (see gl_tex_cube_upload), so it is the thing
- * most worth pinning here.
- */
+/* `gl_tex_hw_prepare` uploads a cube map's six faces as one image of six slices, face f
+ * at slice f in GL's order. Each face has its own colour so a misplaced face fails; the
+ * slice stride is derived rather than measured (see gl_tex_cube_upload). */
 static void test_pm4_gl_cube_faces_upload_as_one_array(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -4874,8 +4454,7 @@ static void test_pm4_gl_cube_faces_upload_as_one_array(void) {
 
     gl_texture_object_t *o = (gl_texture_object_t *)gl_lookup_texture(ctx, tcm);
     ASSERT_TRUE(o != (gl_texture_object_t *)0);
-    /* Nothing is built until a draw needs it: six faces arriving must not each
-     * allocate. */
+    /* Nothing is built until a draw needs it, so six faces do not each allocate. */
     ASSERT_TRUE(o->garlic_data == (void *)0);
     ASSERT_EQ(o->cube_hw_dirty, GL_TRUE);
 
@@ -4899,15 +4478,14 @@ static void test_pm4_gl_cube_faces_upload_as_one_array(void) {
         }
     }
 
-    /* And the descriptor now describes that array rather than nothing: TYPE 0xb, six
-     * slices, the face size, and the image's own address. */
+    /* The descriptor describes that array: TYPE 0xb, six slices, the face size, and the
+     * image's own address. */
     ASSERT_EQ(o->img_desc[3] & 0xf0000fffu, 0xb0000facu);
     ASSERT_EQ(o->img_desc[4] & 0x1fffu, 5u);
     ASSERT_EQ(o->img_desc[0], (uint32_t)(o->garlic_va >> 8));
     ASSERT_EQ((o->img_desc[1] >> 30) & 3u, ((uint32_t)DIM - 1u) & 3u); /* WIDTH_LO */
 
-    /* A face given again marks the array stale, and rebuilding it takes the new face.
-     */
+    /* A face given again marks the array stale, and rebuilding takes the new face. */
     GLubyte again[DIM * DIM * 4];
     for (int p = 0; p < DIM * DIM; p++) {
         again[p * 4 + 0] = 200;
@@ -4928,17 +4506,10 @@ static void test_pm4_gl_cube_faces_upload_as_one_array(void) {
     oops_display_close(disp);
 }
 
-/*
- * The second texture unit's sample slot (tools/shader/tex-prolog2.s).
- *
- * This drives the patcher directly, because a draw's own path reaches it only with two
- * textures bound. What it pins is the placement, which is the part that would be wrong
- * silently: the slot must sit *before* the prolog's exec restore, because a sample
- * taken outside whole-quad mode has no helper pixels and its level of detail is wrong
- * along every quad edge - a seam of the wrong mip level, not a missing picture. Off,
- * the slot is a branch over itself rather than twenty nops, because every fragment of
- * every textured draw runs through it.
- */
+/* The second texture unit's sample slot (tools/shader/tex-prolog2.s) sits before the
+ * prolog's exec restore, inside whole-quad mode: outside it there are no helper pixels
+ * and the level of detail is wrong along every quad edge. Off, the slot is one branch
+ * over itself, since every textured fragment runs through it. */
 static void test_pm4_gl_second_unit_samples_inside_whole_quad_mode(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -4975,10 +4546,8 @@ static void test_pm4_gl_second_unit_samples_inside_whole_quad_mode(void) {
     ASSERT_EQ(s[12], 0xfa000060u);
     ASSERT_EQ(s[14], 0xf0800f08u); /* image_sample - the same opcode word unit 0 uses */
     /* Into v28..v31, clear of v16..v27 where the general combine form gathers its
-     * arguments: a texel left there is overwritten by unit 0's own combine under
-     * GL_COMBINE, GL_BLEND and GL_DECAL, and survives under GL_MODULATE - right in the
-     * common case, wrong in the ones that need a program. The destination is the
-     * operand word's low byte of the second field. */
+     * arguments and would overwrite the texel. The destination is the operand word's
+     * second byte. */
     ASSERT_EQ(s[15], 0x00e51c02u);
     ASSERT_EQ((s[15] >> 8) & 0xffu, 28u);
     ASSERT_EQ(s[16], 0xbf8c3f70u); /* and the wait, still inside whole-quad mode */
@@ -4986,12 +4555,11 @@ static void test_pm4_gl_second_unit_samples_inside_whole_quad_mode(void) {
     ASSERT_EQ(s[10] & 0xffu, (uint32_t)OOPS_GL_DESC_UNIT_STRIDE);
     ASSERT_EQ(s[12] & 0xffu, (uint32_t)(OOPS_GL_DESC_UNIT_STRIDE + 0x20u));
 
-    /* And back off again, because a draw that stops using the second unit must stop
-     * sampling it. */
+    /* Off again: a draw that stops using the second unit stops sampling it. */
     gl_ps_patch_unit1(ctx, GL_FALSE);
     ASSERT_EQ(ps[GL_PS_UNIT1_SLOT_TEX], gl_ps_s_branch(GL_PS_UNIT1_WORDS - 1u));
 
-    /* **The second combine stage** reads what the first one left. Its slot follows the
+    /* The second combine stage reads what the first one left. Its slot follows the
      * first, and off it is a branch over itself. */
     ASSERT_TRUE(GL_PS_COMBINE2_SLOT_TEX >=
                 GL_PS_COMBINE_SLOT_TEX + GL_PS_COMBINE_WORDS);
@@ -5009,8 +4577,8 @@ static void test_pm4_gl_second_unit_samples_inside_whole_quad_mode(void) {
     /* GL_MODULATE of unit 1: its texel times what came in. Every argument this gathers
      * must name v28..v31 or v4..v7 - unit 1's own texel, or unit 0's result as
      * GL_PREVIOUS - and never v8..v11 except where the primary colour is asked for by
-     * name. The registers are the whole difference between the two stages, so this
-     * reads them out of the emitted words. */
+     * name. The registers are the difference between the two stages, so this reads
+     * them out of the emitted words. */
     int saw_texel = 0, saw_prev = 0, saw_unit0_texel = 0;
     for (size_t i = 0; i < GL_PS_COMBINE_WORDS; i++) {
         const uint32_t word = ps[GL_PS_COMBINE2_SLOT_TEX + i];
@@ -5021,8 +4589,7 @@ static void test_pm4_gl_second_unit_samples_inside_whole_quad_mode(void) {
                 saw_texel = 1;
             if (word == gl_ps_v_mov(16u + k, GL_PS_SRC_V(4u + (k & 3u))))
                 saw_prev = 1;
-            /* v8..v11 is the primary colour - unit 0's *stage* is v4..v7, and reading
-             * the colour here would be the stage-0 mapping left in place. */
+            /* v8..v11 is the primary colour; unit 0's stage result is v4..v7. */
             if (word == gl_ps_v_mov(16u + k, GL_PS_SRC_V(8u + (k & 3u))))
                 saw_unit0_texel = 1;
         }
@@ -5031,22 +4598,16 @@ static void test_pm4_gl_second_unit_samples_inside_whole_quad_mode(void) {
     ASSERT_TRUE(saw_prev);
     ASSERT_TRUE(!saw_unit0_texel);
     /* Off again: the branch, so a draw that drops to one unit stops combining a texel
-     * it no longer samples - the same hazard the colour sum's slot had. */
+     * it no longer samples. */
     gl_ps_patch_tex_env_unit1(ctx, GL_FALSE);
     ASSERT_EQ(ps[GL_PS_COMBINE2_SLOT_TEX], gl_ps_s_branch(GL_PS_COMBINE_WORDS - 1u));
     glContextDestroy(ctx_handle);
     oops_display_close(disp);
 }
 
-/*
- * A two-unit draw end to end, with the gate opened the way only a test may.
- *
- * `ctx->hw_multitex` is `OOPS_GL_MULTITEX_MEASURED` in every real context, so no draw
- * takes this path on a console yet (gl_multitex.h). Setting it here is what lets the
- * whole thing be checked before the measurement lands: the four-parameter shader bound,
- * the registers `-8b1c` retired with, an 80-byte vertex carrying the second unit's
- * coordinate, and the second descriptor pair where tex-prolog2.s loads it from.
- */
+/* A two-unit draw binds the four-parameter shader and its registers, carries the second
+ * unit's coordinate in an 80-byte vertex, and fills the second descriptor pair where
+ * tex-prolog2.s loads it from. */
 static void test_pm4_gl_two_unit_draw_binds_the_fourth_parameter(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -5068,8 +4629,7 @@ static void test_pm4_gl_two_unit_draw_binds_the_fourth_parameter(void) {
     ctx->canary = &canary;
     ctx->use_hardware = GL_TRUE;
     ctx->hw_frame_active = GL_FALSE;
-    /* Measured since 2026-09-20 (REQ-9a41), so a real context has this on; it was set
-     * by hand here while the gate was closed. */
+    /* A real context has the gate from `OOPS_GL_MULTITEX_MEASURED` (gl_multitex.h). */
     ASSERT_EQ(ctx->hw_multitex, (GLboolean)(OOPS_GL_MULTITEX_MEASURED != 0));
     ctx->hw_multitex = GL_TRUE;
 
@@ -5102,16 +4662,14 @@ static void test_pm4_gl_two_unit_draw_binds_the_fourth_parameter(void) {
     glEnd();
     ASSERT_TRUE(ctx->triangles_drawn >= 1u);
 
-    /* Four parameters: the shader and the three registers, as `-8b1c` set them. */
+    /* Four parameters: the shader and the three registers, as measured on hardware. */
     ASSERT_EQ(ctx->hw_params, 4u);
     const uint64_t vs4 = ((uint64_t)(uintptr_t)payload + OOPS_GL_VS_P4_OFFSET) >> 8;
     ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0x88u), (uint32_t)vs4);
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b1u),
               0x6u); /* SPI_VS_OUT_CONFIG */
-    /* SPI_PS_IN_CONTROL: the interpolant count *and* PS_W32_EN (bit 15), which selects
-     * the wave width the generated shaders are written for. The register is written
-     * whole, so a draw that changes the parameter count must not drop the width with it
-     * - which is what this asserts. */
+    /* SPI_PS_IN_CONTROL: the interpolant count and PS_W32_EN (bit 15). The register is
+     * written whole, so changing the parameter count keeps the wave width. */
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b6u), 0x8000u | 0x4u);
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x194u),
               0x3u); /* SPI_PS_INPUT_CNTL_3 */
@@ -5141,9 +4699,8 @@ static void test_pm4_gl_two_unit_draw_binds_the_fourth_parameter(void) {
     ASSERT_TRUE(ps[GL_PS_COMBINE2_SLOT_TEX] !=
                 gl_ps_s_branch(GL_PS_COMBINE_WORDS - 1u));
 
-    /* Dropping the second unit puts both slots back and rebinds the shorter shader,
-     * because a stale slot would sample a descriptor pair this draw no longer writes.
-     */
+    /* Dropping the second unit puts both slots back and rebinds the shorter shader, so
+     * no slot samples a descriptor pair the draw no longer writes. */
     glActiveTexture(GL_TEXTURE1);
     glDisable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -5165,20 +4722,10 @@ static void test_pm4_gl_two_unit_draw_binds_the_fourth_parameter(void) {
     oops_display_close(disp);
 }
 
-/*
- * The four-parameter vertex shader, for a second texture unit: the same program with an
- * 80-byte vertex and a fifth vec4 exported as param3 (tools/shader/vs-param4.s).
- *
- * **This test passed for a day while the program was never in the payload** -
- * `glContextCreate` built the three-parameter shader and not this one, so a draw
- * needing four parameters jumped into an unwritten region and took the GPU down on
- * 2026-09-20. A builder checked against a scratch buffer says the words are right and
- * nothing about whether anyone writes them; that is the gap, and it is named here
- * because this test is where a reader would expect it to be closed. The 80-byte stride
- * is the part worth pinning: it is not a shift, so it is lane * 64 plus lane * 16, and
- * a program that kept the 64-byte shift would read every vertex but the first from the
- * wrong place.
- */
+/* The four-parameter vertex shader is tools/shader/vs-param4.s, assembled: an 80-byte
+ * vertex and a fifth vec4 exported as param3. The stride is not a shift, so it is
+ * lane * 64 plus lane * 16. This checks the builder's words, not that the context
+ * writes them into the payload. */
 static void test_pm4_gl_param4_vertex_shader_is_the_assembled_one(void) {
     static uint32_t vs[OOPS_GL_VS_P4_WORDS];
     gl_vs_build_param4(vs, 0x0000001122334400ull, 0x0000005566778800ull);
@@ -5204,14 +4751,12 @@ static void test_pm4_gl_param4_vertex_shader_is_the_assembled_one(void) {
     ASSERT_EQ(vs[69], 0xbf810000u); /* s_endpgm, the last of 70 */
 }
 
-/* **The colour sum after texturing, through the third parameter** (since 2026-09-19). A
- * textured draw with a secondary colour runs the three-parameter vertex shader - the
- * program address, then SPI_VS_OUT_CONFIG 0x4, SPI_PS_IN_CONTROL 0x3 and
- * SPI_PS_INPUT_CNTL_2 0x2, the unpacked interface obSCEne measured
- * (REQ-20260919T1745Z-9c3e). Its vertices are 64 bytes, the secondary colour in the
- * fourth vec4, and the textured shader's sum slot holds tools/shader/colour-sum.s. A
- * draw after it without a secondary colour switches back. A frame that never sums emits
- * none of it. */
+/* The colour sum after texturing goes through the third parameter. A textured draw with
+ * GL_COLOR_SUM runs the three-parameter vertex shader with SPI_VS_OUT_CONFIG 0x4,
+ * SPI_PS_IN_CONTROL 0x3 and SPI_PS_INPUT_CNTL_2 0x2, the unpacked interface measured on
+ * hardware. Its vertices are 64 bytes, the secondary colour in the fourth vec4, and the
+ * textured shader's sum slot holds tools/shader/colour-sum.s. A frame that never sums
+ * emits none of it. */
 static void test_pm4_gl_colour_sum_takes_the_third_parameter(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -5254,7 +4799,7 @@ static void test_pm4_gl_colour_sum_takes_the_third_parameter(void) {
         glEnd();                                                                       \
     } while (0)
 
-    /* A textured frame without the sum: two parameters, and nothing of the switch. */
+    /* A textured frame without the sum: two parameters, and no switch. */
     TRI();
     ASSERT_EQ(ctx->hw_params, 2u);
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x193u), 0u);
@@ -5302,21 +4847,11 @@ static void test_pm4_gl_colour_sum_takes_the_third_parameter(void) {
         ASSERT_TRUE(colour[0] == 1.0f && colour[1] == 1.0f && colour[2] == 1.0f);
     }
 
-    /*
-     * **A zero secondary colour does not turn the sum off** (changed 2026-09-24).
-     *
-     * It did until then: the draw scanned its three vertices and dropped back to two
-     * parameters when none of them carried a highlight. That is per-triangle, and under
-     * specular lighting it alternates across a lit surface - so the slot was rewritten
-     * 686 times in a Neverball frame, and each rewrite calls `gl_ps_flush_shaders`,
-     * which evicts all three shader ranges. Forty thousand cache lines a frame to avoid
-     * adding zero.
-     *
-     * So the slot now follows `GL_COLOR_SUM` itself. The third parameter stays, the
-     * vertex stays 64 bytes, and the shader adds the zero the vertex carries - which is
-     * what the assertion on `p2` below is for: the sum is still *correct*, it is merely
-     * no longer switched.
-     */
+    /* A zero secondary colour does not turn the sum off: the slot follows
+     * `GL_COLOR_SUM`, not the per-triangle colour, because each slot rewrite calls
+     * `gl_ps_flush_shaders` and under specular lighting the colour alternates across a
+     * surface. The third parameter stays and the shader adds the zero the vertex
+     * carries. */
     glSecondaryColor3f(0.0f, 0.0f, 0.0f);
     TRI();
     ASSERT_EQ(ctx->hw_params, 3u);
@@ -5325,17 +4860,15 @@ static void test_pm4_gl_colour_sum_takes_the_third_parameter(void) {
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b1u), 4u);
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x193u), 2u);
     ASSERT_EQ(ps_tex[GL_PS_SUM_SLOT_TEX], 0xc8300800u);
-    /* And the zero really is in the vertex, so what the shader adds is nothing rather
-     * than whatever the last draw left in attr2. */
+    /* The zero is in the vertex, so the shader adds nothing rather than whatever the
+     * last draw left in attr2. */
     for (int k = 0; k < 3; k++) {
         float p2[4];
         memcpy(p2, vbo + 144 + 192 + 64 * k + 48, sizeof(p2));
         ASSERT_TRUE(p2[0] == 0.0f && p2[1] == 0.0f && p2[2] == 0.0f);
     }
-    /* **The slot is still emptied when the sum is switched off**, which is the case it
-     * exists to get right: a slot left holding the sum would add whatever attr2 reads
-     * on a draw that exports two parameters. That is a `glDisable`, not a black vertex.
-     */
+    /* `glDisable(GL_COLOR_SUM)` empties the slot, or it would add whatever attr2 reads
+     * on a draw that exports two parameters. */
     glDisable(GL_COLOR_SUM);
     TRI();
     ASSERT_EQ(ctx->hw_params, 2u);
@@ -5364,9 +4897,8 @@ static void test_pm4_gl_colour_sum_takes_the_third_parameter(void) {
     oops_display_close(disp);
 }
 
-/* **The scanout path** (gl_rx.h; written 2026-09-19, off on the console until REQ-7e21
- * reports). With the colour buffers made scanout buffers, in the GPU's 64KB_R_X
- * swizzle:
+/* The scanout path (gl_rx.h). With the colour buffers made scanout buffers, in the
+ * GPU's 64KB_R_X swizzle:
  * - a frame draws into the back one, `CB_COLOR0_ATTRIB3` taking OOPS_GL_RX_ATTRIB3 (the
  * linear path keeps 0);
  * - a clear fills it whole, padding to 128 x 128 blocks included;
@@ -5414,11 +4946,9 @@ static void test_pm4_gl_scanout_path_targets(void) {
     TRI();
     ASSERT_EQ((last_context_reg(dcb, ctx->dcb_words, 0x3b8u) >> 14) & 0x1fu, 0u);
 
-    /* Onto the scanout path, as gl_scanout_begin puts a console there - **including the
-     * pair `gl_draw_targets` restores from**. The tiling belongs to the display's
-     * buffers and is cleared while a framebuffer object is bound, so the live flags are
-     * derived and these are where the display's own answer is kept. Setting only the
-     * live pair left this test being undone by the very call it was setting up for. */
+    /* Onto the scanout path, as gl_scanout_begin sets it, including the `fb0_` pair
+     * `gl_draw_targets` restores from: the tiling belongs to the display's buffers and
+     * is cleared while a framebuffer object is bound, so the live flags are derived. */
     ctx->hw_frame_active = GL_FALSE;
     ctx->dcb_words = 0;
     ctx->hw_rx = GL_TRUE;
@@ -5497,20 +5027,9 @@ static void test_pm4_gl_scanout_path_targets(void) {
     glReadPixels(130, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
     ASSERT_TRUE(out[0] == 255u && out[2] == 0u);
 
-    /*
-     * **A copy that is no longer current must not be handed out.**
-     *
-     * The CP makes it at a submit, and a CPU pixel rectangle builds no command stream -
-     * so nothing re-copies the buffer after one, and the copy is a picture of the frame
-     * *before* those pixels. The `memcpy` above hides that by syncing it by hand;
-     * poisoning it here is what the console does by simply not submitting.
-     *
-     * This is what six of gl1-probe's eight hardware failures were - `raster-ops`,
-     * `pixel-transfer`, `pixel-fragments`, `index-pixels`, `accumulation` and
-     * `array-types`, all reading through `frame()` - while `read-pixels` passed beside
-     * them, because glReadPixels already asked `gl_color_read_source` which buffer was
-     * current and this did not.
-     */
+    /* A copy that is no longer current is not handed out. The CP makes it at a submit,
+     * and a CPU pixel rectangle builds no command stream, so after one the copy shows
+     * the frame before those pixels. The copy is poisoned here to stand for that. */
     for (size_t i = 0; i < sizeof(copy) / sizeof(copy[0]); i++)
         copy[i] = 0xdeadbeefu;
     ctx->readback_of = back; /* the copy claims to be current ... */
@@ -5533,11 +5052,10 @@ static void test_pm4_gl_scanout_path_targets(void) {
     oops_display_close(disp);
 }
 
-/* **The front buffer on the console** (since 2026-09-19). A frame begun after
- * glDrawBuffer(GL_FRONT) draws into the front surface: CB_COLOR0_BASE is its address. A
- * clear under GL_FRONT_AND_BACK fills both buffers. And the CP's copy of a buffer goes
- * stale when the CPU writes into it, so a glReadPixels after a glDrawPixels reads the
- * buffer, not a copy made before the write - which it did until then. */
+/* The front buffer on the hardware path. A frame begun after glDrawBuffer(GL_FRONT)
+ * draws into the front surface: CB_COLOR0_BASE is its address. A clear under
+ * GL_FRONT_AND_BACK fills both buffers. The CP's copy of a buffer goes stale when the
+ * CPU writes into it, so a glReadPixels after a glDrawPixels reads the buffer. */
 static void test_pm4_gl_front_buffer_targets(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -5576,7 +5094,7 @@ static void test_pm4_gl_front_buffer_targets(void) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     const uint64_t front = (uint64_t)(uintptr_t)ctx->front_fb;
     ASSERT_TRUE(front != 0u && front != back);
-    /* The console submits the open frame here; the mock has no queue, so its frame is
+    /* The hardware submits the open frame here; the mock has no queue, so its frame is
      * ended by hand, and the next draw begins one on the front. */
     ctx->hw_frame_active = GL_FALSE;
     ctx->dcb_words = 0;
@@ -5602,11 +5120,10 @@ static void test_pm4_gl_front_buffer_targets(void) {
     }
     ASSERT_EQ(fills, 2u);
     ASSERT_TRUE(saw_back && saw_front);
-    /* **And a draw reaches both**, since 2026-09-20: the second colour target is bound
-     * to the front, both masks carry MRT1, the export format carries COL1, and the
-     * pixel shaders export twice. The values are the ones obSCEne's `-3f62` drew with.
-     * The clear above left a frame open, and the colour targets are bound where a frame
-     * begins, so it is ended by hand here as it was for the front. */
+    /* A draw reaches both: the second colour target is bound to the front, both masks
+     * carry MRT1, the export format carries COL1, and the pixel shaders export twice,
+     * with the values measured drawing on hardware. The colour targets are bound where
+     * a frame begins, so the open frame is ended by hand. */
     ctx->hw_frame_active = GL_FALSE;
     ctx->dcb_words = 0;
     TRI();
@@ -5630,13 +5147,9 @@ static void test_pm4_gl_front_buffer_targets(void) {
     ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX + 2u], 0xf800140fu);
     ASSERT_EQ(ps_untex[GL_PS_EXPORT_UNTEX + 4u], 0xf8001c1fu);
 
-    /* **And it blends there too** (since 2026-09-21). Blending is per target on this
-     * part - one CB_BLENDn_CONTROL each, `R_028780_CB_BLEND0_CONTROL + i * 4` in
-     * radeonsi's own loop - and only MRT0's was ever written, so a draw under
-     * GL_FRONT_AND_BACK blended into the back and *replaced* in the front. That is what
-     * gl1-probe's `front-and-back` measured on hardware: its back was the colour GL
-     * asks for and its front was not. Both registers now carry the one blend state GL
-     * has. */
+    /* It blends there too. Blending is per target, one CB_BLENDn_CONTROL each
+     * (`R_028780_CB_BLEND0_CONTROL + i * 4` in radeonsi's loop), so both registers
+     * carry GL's one blend state. */
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE);
     ctx->hw_frame_active = GL_FALSE;
@@ -5647,10 +5160,8 @@ static void test_pm4_gl_front_buffer_targets(void) {
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1e1u), blend0);
 
     /* Back to one buffer: the second target is unbound - out of both masks and with no
-     * format - and the export is the single one again. A stale second target would keep
-     * writing a buffer GL no longer names. Its blend control goes back to zero with it,
-     * for the same reason the format does: no register left pointing at a buffer GL
-     * stopped naming. */
+     * format - and the export is the single one again, so nothing writes a buffer GL no
+     * longer names. Its blend control goes back to zero with it. */
     glDrawBuffer(GL_BACK);
     ctx->hw_frame_active = GL_FALSE;
     ctx->dcb_words = 0;
@@ -5690,8 +5201,7 @@ static void test_pm4_gl_front_buffer_targets(void) {
     GLubyte out[4] = {0, 0, 0, 0};
     glReadPixels(5, 5, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
     ASSERT_TRUE(out[0] == 255u && out[1] == 0u && out[2] == 0u);
-    /* And a copy that is current is what a read takes - the front's is not the back's.
-     */
+    /* A current copy is what a read takes, and the front's is not the back's. */
     ctx->readback_of = ctx->back_fb;
     glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
     ASSERT_TRUE(out[0] == 0u && out[1] == 255u && out[2] == 0u);
@@ -5707,39 +5217,10 @@ static void test_pm4_gl_front_buffer_targets(void) {
     oops_display_close(disp);
 }
 
-/*
- * **A two-target submission copies both targets back** (since 2026-09-23), so
- * `glReadPixels` of either one reads the CP's copy rather than the surface.
- *
- * The submission copied `framebuffer` alone, and `gl_color_read_source` hands back the
- * copy only for the buffer it is tagged as being of - so under GL_FRONT_AND_BACK, where
- * `gl_draw_targets` puts the back in `framebuffer` and the front in `fb_also`, every
- * read of the front fell through to the raw pointer. Not a stale frame with a name on
- * it: the CPU's view of a surface the GPU had written, which is why gl1-probe's
- * `front-and-back` reported a byte that drifted between runs - `0x14`, `0x56`, `0xb9`,
- * `0xd3`, `0x4e` - and held still within one, while the same pixel read through
- * `glGetFrameReadback` was the colour GL asks for. Four checks across two suites were
- * reading an instrument, not a result.
- *
- * The test is the stream, not the pixels: two `DMA_DATA` packets after the fence wait,
- * one per target, and a tag on each copy naming the buffer it holds.
- */
-/*
- * **A compiled shader drawing into two colour buffers exports to both of them.**
- *
- * The payload's two fixed-function pixel shaders have had a two-target export since
- * 2026-09-20, patched in by `gl_ps_patch_export`. A *compiled* GL 2.0 shader did not:
- * `glsl_ps.c` emitted one `exp mrt0 ... done` and the draw path uploaded it unchanged,
- * while the same draw set `CB_SHADER_MASK` to 0xff and `SPI_SHADER_COL_FORMAT` to 0x44
- * - telling the colour block to expect two exports from a shader that made one.
- *
- * gl2-probe's `two-draw-buffers` measured that on hardware as a front buffer holding
- * *exactly* its pre-draw colour after a blended two-target draw: not a wrong blend, an
- * absent write. This is that check's unit-test half, and it asserts the two things the
- * hardware cannot show separately - that the two-target words go in, and that they come
- * back out again when the draw returns to one buffer, because the slot is state and a
- * stale second export writes a buffer GL no longer names.
- */
+/* A compiled shader drawing into two colour buffers exports to both, matching the
+ * `CB_SHADER_MASK` 0xff and `SPI_SHADER_COL_FORMAT` 0x44 the draw sets, and returns to
+ * one export when the draw goes back to one buffer: the slot is state, and a stale
+ * second export writes a buffer GL no longer names. */
 static void test_pm4_gl_compiled_shader_exports_to_both_colour_targets(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -5788,9 +5269,8 @@ static void test_pm4_gl_compiled_shader_exports_to_both_colour_targets(void) {
         ASSERT_EQ(tail[i], gl_ps_export_words(GL_FALSE)[i]);
     }
 
-    /* Two buffers, same program: the serial has not changed, so only the target count
-     * can have made the slot stale - which is the case the residency check exists for.
-     */
+    /* Two buffers, same program: the serial is unchanged, so only the target count
+     * makes the slot stale. */
     glDrawBuffer(GL_FRONT_AND_BACK);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     pm4_draw_quad(prog);
@@ -5802,9 +5282,9 @@ static void test_pm4_gl_compiled_shader_exports_to_both_colour_targets(void) {
      * here. */
     ASSERT_EQ(tail[2], 0xf800140fu); /* exp mrt0, v4, v5 compr vm - not done */
     ASSERT_EQ(tail[4], 0xf8001c1fu); /* exp mrt1, v4, v5 done compr vm */
-    ASSERT_EQ(tail[6], 0xbf810000u); /* s_endpgm, now the seventh word */
+    ASSERT_EQ(tail[6], 0xbf810000u); /* s_endpgm, the seventh word */
 
-    /* And back to one, because the slot is state. */
+    /* Back to one. */
     glDrawBuffer(GL_BACK);
     pm4_draw_quad(prog);
     ASSERT_TRUE(ctx->fb_also == NULL);
@@ -5824,6 +5304,9 @@ static void test_pm4_gl_compiled_shader_exports_to_both_colour_targets(void) {
     oops_display_close(disp);
 }
 
+/* A two-target submission copies both targets back, so `glReadPixels` of either reads
+ * the CP's copy rather than the surface: two `DMA_DATA` packets after the fence wait,
+ * one per target, and a tag on each copy naming the buffer it holds. */
 static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -5856,8 +5339,7 @@ static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
     const uint64_t back = (uint64_t)(uintptr_t)ctx->back_fb;
     const uint64_t front = (uint64_t)(uintptr_t)ctx->front_fb;
     ASSERT_TRUE(front != 0u && front != back);
-    /* `gl_draw_targets`' arrangement, which is what makes the second copy necessary
-     * rather than tidy: the front is the one that is never `framebuffer`. */
+    /* `gl_draw_targets` puts the back in `framebuffer` and the front in `fb_also`. */
     ASSERT_TRUE(ctx->framebuffer == ctx->back_fb);
     ASSERT_TRUE(ctx->fb_also == ctx->front_fb);
 
@@ -5867,19 +5349,16 @@ static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
     glVertex3f(0.5f, -0.5f, 0.5f);
     glVertex3f(0.0f, 0.5f, 0.5f);
     glEnd();
-    /* `gl_hw_flush` rather than `glFlush`, because `glFlush`'s submit is compiled out
-     * of a host build - the stream is still built here, so it is the submit that has to
-     * be asked for. */
+    /* `gl_hw_flush` rather than `glFlush`, whose submit is compiled out of a host
+     * build. */
     gl_hw_flush(ctx);
 
     /* One `DMA_DATA` per target, each from its surface to its own copy. The fills a
      * clear emits share the packet header, so the source address is what tells them
      * apart - a fill's second word is the colour, and these carry the CP_SYNC/TC_L2
      * selectors. */
-    /* **Scanned over the whole buffer, not `dcb_words`**, because the submit that
-     * emitted these packets also reset the count - the stream is spent. `dcb` is zeroed
-     * above and nothing else writes it, so what is left in it is exactly the
-     * submission. */
+    /* Scanned over the whole buffer, not `dcb_words`, because the submit reset the
+     * count. `dcb` was zeroed above, so what is left in it is the submission. */
     size_t copies = 0;
     GLboolean back_copied = GL_FALSE, front_copied = GL_FALSE;
     for (uint32_t i = 0; i + 6 < (uint32_t)(sizeof(dcb) / sizeof(dcb[0])); i++) {
@@ -5903,8 +5382,7 @@ static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
     ASSERT_TRUE(ctx->readback_of == ctx->back_fb);
     ASSERT_TRUE(ctx->readback_also_of == ctx->front_fb);
 
-    /* And a read of either buffer takes its own copy. Two sentinels, so a read that
-     * took the wrong one is a wrong colour rather than a coincidence. */
+    /* A read of either buffer takes its own copy; the two sentinels differ. */
     ctx->hw_frames_confirmed = 1u;
     for (size_t i = 0; i < 64u * 64u; i++) {
         readback[i] = 0xff00ff00u;      /* the back's copy: green */
@@ -5918,9 +5396,8 @@ static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
     glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, out);
     ASSERT_TRUE(out[0] == 0u && out[1] == 0u && out[2] == 255u);
 
-    /* A CPU write into the colour buffer drops **both** tags, not just the primary's -
-     * the CPU path writes `fb_also` too, so a surviving second tag would answer the
-     * next read from a copy made before the write. */
+    /* A CPU write into the colour buffer drops both tags, since the CPU path writes
+     * `fb_also` too. */
     glReadBuffer(GL_BACK);
     glDrawBuffer(GL_FRONT_AND_BACK);
     const GLubyte red[4] = {255, 0, 0, 255};
@@ -5940,10 +5417,9 @@ static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
     oops_display_close(disp);
 }
 
-/* The textured pixel shader samples with a level of detail and divides q per fragment
- * (since 2026-09-19). Its sampling words are `tools/shader/tex-prolog.s`'s, assembled -
- * the file also assembles the image_sample_lz this replaced to the word the tree had -
- * and the vertex carries s, t and q undivided, q in the texture parameter's w. */
+/* The textured pixel shader samples with a level of detail and divides q per fragment.
+ * Its sampling words are `tools/shader/tex-prolog.s`'s, assembled, and the vertex
+ * carries s, t and q undivided, q in the texture parameter's w. */
 static void test_pm4_gl_textured_shader_samples_with_lod_and_divides_q(void) {
     static uint32_t ps[OOPS_GL_PS_TEX_WORDS];
     gl_ps_build_textured(ps, 0x0000000123456700ull);
@@ -6037,17 +5513,11 @@ static void test_pm4_gl_textured_shader_samples_with_lod_and_divides_q(void) {
     oops_display_close(disp);
 }
 
-/*
- * The polygon stipple on the console: the discard in both pixel shaders, the fragment's
- * position turned on for it, and the mask in the form the shader reads.
- *
- * The mask check is the one that matters. The shader does two operations where the
- * software rasteriser does four, because gl_ps_patch_stipple rotates the rows for the
- * window height and reverses each row's bits first. This asserts the two agree for
- * every pixel of a 32x32 window of the framebuffer - if the rotation or the reversal
- * were dropped, a stippled polygon would come out stippled *differently* on the
- * console, which is exactly the kind of wrong that looks right in a screenshot.
- */
+/* The polygon stipple on the hardware path: the discard in both pixel shaders, the
+ * fragment's position turned on for it, and the mask in the form the shader reads.
+ * gl_ps_patch_stipple rotates the rows for the window height and reverses each row's
+ * bits, and the table must agree with the software rasteriser for every pixel of a
+ * 32x32 window. */
 static void test_pm4_gl_polygon_stipple_discards_in_the_shader(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -6096,7 +5566,7 @@ static void test_pm4_gl_polygon_stipple_discards_in_the_shader(void) {
     const uint32_t *const ps_untex =
         (const uint32_t *)(payload + OOPS_GL_PS_UNTEX_OFFSET);
     const uint32_t *const table = (const uint32_t *)(payload + OOPS_GL_STIPPLE_OFFSET);
-    /* The fragment's position, in both registers, as `-c7d4` set them. */
+    /* The fragment's position, in both registers, as measured on hardware. */
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b3u), 0x00000302u);
     ASSERT_EQ(last_context_reg(dcb, ctx->dcb_words, 0x1b4u), 0x00000302u);
     /* The discard, in both shaders: tools/shader/polygon-stipple.s, with the table's
@@ -6117,7 +5587,7 @@ static void test_pm4_gl_polygon_stipple_discards_in_the_shader(void) {
     /* It runs before the interpolation that uses v2 and v3 as scratch. */
     ASSERT_TRUE(GL_PS_STIPPLE_SLOT + GL_PS_STIPPLE_WORDS <= GL_PS_COMBINE_SLOT_TEX);
 
-    /* **The table says what the software rasteriser says.** The shader keeps the
+    /* The table says what the software rasteriser says. The shader keeps the
      * fragment at (x, y) when bit `x & 31` of row `y & 31` is set, with y counting down
      * from the top; the rasteriser keeps it when bit `31 - (x & 31)` of
      * `polygon_stipple[(height - 1 - y) & 31]` is.
@@ -6131,8 +5601,7 @@ static void test_pm4_gl_polygon_stipple_discards_in_the_shader(void) {
         }
     }
 
-    /* Off again: no discard, and the position is not asked for. A draw that kept the
-     * slot would stipple a polygon GL no longer stipples. */
+    /* Off again: no discard, and the position is not asked for. */
     glDisable(GL_POLYGON_STIPPLE);
     ctx->hw_frame_active = GL_FALSE;
     ctx->dcb_words = 0;
@@ -6156,9 +5625,8 @@ static void test_pm4_gl_polygon_stipple_discards_in_the_shader(void) {
     oops_display_close(disp);
 }
 
-/* A second texture unit on the console: left out of the draw, said once - the pixel
- * shader samples one texture until it takes a second coordinate. Unit 0 still draws as
- * it did. */
+/* With unit 0 disabled and unit 1 textured, unit 1 is the base stage and the draw is
+ * textured: a disabled unit passes the fragment colour through. */
 static void test_pm4_gl_unit1_is_the_base_when_unit0_has_no_texture(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 640, 480);
     void *ctx_handle = glContextCreate(disp);
@@ -6197,13 +5665,7 @@ static void test_pm4_gl_unit1_is_the_base_when_unit0_has_no_texture(void) {
     glVertex3f(0.0f, 0.5f, 0.5f);
     glEnd();
     ASSERT_EQ(ctx->triangles_drawn, 1u);
-    /* **Unit 1 is the base stage here, and the draw is textured.**
-     *
-     * This asserted the opposite until 2026-09-22 - that the unit was logged as left
-     * out and the draw went untextured - which recorded the old behaviour as though it
-     * were intended. It was a bug: a disabled unit passes the fragment colour through,
-     * so unit 0 need not be textured for unit 1 to apply. Neverball puts its surface
-     * texture on unit 1 and its whole world drew flat because of this. */
+    /* Unit 1 is the base stage here, and the draw is textured. */
     ASSERT_EQ(ctx->hw_unit_logged, GL_FALSE); /* nothing was left out */
     ASSERT_NE(ctx->hw_frame_tex, 0u);         /* the draw sampled unit 1's texture */
 

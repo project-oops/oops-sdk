@@ -1,3 +1,7 @@
+/*
+ * A webview: QuickJS (`oops/js.h`) and litehtml (`oops/html.h`) assembled into a page
+ * that loads, runs its scripts, takes input and renders onto an `oops_surface_t`.
+ */
 #ifndef OOPS_WEBVIEW_H
 #define OOPS_WEBVIEW_H
 

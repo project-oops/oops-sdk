@@ -13,12 +13,9 @@ extern "C" {
  * time_t undefined for a consumer that reaches <sys/time.h> first (e.g. QuickJS). */
 #include <time.h>
 
-/* **Guarded, because `oops-apps/common/posix` ships a `<sys/time.h>` too** and the two
- * have different include guards, so a compile that reaches both would define this
- * twice. This one is meant to win - it sits at include position 24 against the shim's
- * 37 - but Neverball reached the shim's `<sys/types.h>` rather than the SDK's, so
- * "meant to" is not something to rely on. The
- * `_*_DECLARED` convention is the same one `<sys/types.h>` uses for its typedefs. */
+/* Guarded, because `oops-apps/common/posix` ships a `<sys/time.h>` too with a different
+ * include guard, and a compile can reach both despite this one being earlier on the
+ * include path. The `_*_DECLARED` convention is the one `<sys/types.h>` uses. */
 #ifndef _TIMEVAL_DECLARED
 #define _TIMEVAL_DECLARED
 struct timeval {
@@ -38,16 +35,12 @@ struct timezone {
 int gettimeofday(struct timeval *tv, void *tz);
 
 /*
- * **Setting a file's times, and it always fails** - defined in
- * `oops-apps/common/posix/posix.c`, which is where the reasoning lives. The SDK's
- * filesystem cannot set them, and `sys/stat.h` in that same layer reports all three as
- * zero for the same reason.
+ * Setting a file's times always fails: the SDK's filesystem cannot set them (defined
+ * in `oops-apps/common/posix/posix.c`, whose `sys/stat.h` reports all three as zero).
  *
- * Declared *here* rather than only in the shim's `<sys/time.h>` because this is the
- * copy a compile reaches: libc++'s `src/filesystem/time_utils.h:32` includes
- * `<sys/time.h>` for
- * `::utimes`, and with the declaration in the shadowed copy three of its filesystem
- * sources do not compile. The same trap `fcntl.h` records for the `F_*` commands.
+ * Declared here rather than only in the shim's `<sys/time.h>` because this is the copy
+ * a compile reaches: libc++'s `src/filesystem/time_utils.h:32` includes `<sys/time.h>`
+ * for `::utimes`. `fcntl.h` has the same arrangement for the `F_*` commands.
  */
 int utimes(const char *path, const struct timeval times[2]);
 

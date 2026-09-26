@@ -3,6 +3,10 @@
 #include "tests/test_common.h"
 #include <string.h>
 
+/* Unit tests for the HTTP client, `oops/http.h`: URL parsing, request building,
+ * response parsing and chunked decoding, with no network. */
+
+/* URLs split into scheme, host, port and path; bad schemes and ports are refused. */
 static void test_http_url_parse(void) {
     char scheme[16];
     char host[64];
@@ -66,6 +70,7 @@ static void test_http_url_parse(void) {
               -1);
 }
 
+/* A GET request is built in full, and a buffer too small for it is refused. */
 static void test_http_build_request(void) {
     char buf[256];
     int n = oops_http_build_request("example.com", "/index.html", buf, sizeof(buf));
@@ -80,6 +85,8 @@ static void test_http_build_request(void) {
               -1);
 }
 
+/* Status, length, Location and chunked encoding are read from a header block, and an
+ * unterminated block is incomplete. */
 static void test_http_parse_headers(void) {
     const char resp1[] = "HTTP/1.1 200 OK\r\n"
                          "Content-Type: application/json\r\n"
@@ -140,6 +147,7 @@ static void test_http_parse_headers(void) {
               -1);
 }
 
+/* A chunked body decodes to its payload, and a malformed one is refused. */
 static void test_http_decode_chunked(void) {
     /* RFC 7230 Chunked stream:
      * 4\r\nWiki\r\n6\r\npedia \r\n9\r\nin chunks.\r\n0\r\n\r\n
@@ -165,6 +173,7 @@ static void test_http_decode_chunked(void) {
               -1);
 }
 
+/* HTTPS reports TLS unavailable without the platform, and freeing is NULL-safe. */
 static void test_http_api_contracts(void) {
     ASSERT_EQ(oops_http_get(NULL, NULL), OOPS_HTTP_ERR_PARAM);
 

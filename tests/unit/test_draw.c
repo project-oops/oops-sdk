@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Unit tests for the 2D software renderer, `oops/draw.h`, linear and tiled. */
+
+/* Clear fills every pixel, and an out-of-bounds pixel write is ignored. */
 static void test_draw_surface_clear_and_pixel(void) {
     uint32_t buf[32 * 32];
     oops_surface_t surf = {buf, 32, 32, 32, OOPS_SURFACE_LINEAR};
@@ -24,6 +27,7 @@ static void test_draw_surface_clear_and_pixel(void) {
     oops_draw_pixel(&surf, 5, 32, OOPS_COLOR_GREEN);
 }
 
+/* Rectangles are clipped to the surface. */
 static void test_draw_rect_clipping(void) {
     uint32_t buf[20 * 20];
     oops_surface_t surf = {buf, 20, 20, 20, OOPS_SURFACE_LINEAR};
@@ -74,6 +78,7 @@ static void test_draw_rect_extreme_extents(void) {
     ASSERT_EQ(buf[0], before);
 }
 
+/* A 50% source blends source-over onto the destination. */
 static void test_draw_alpha_blend(void) {
     uint32_t buf[10 * 10];
     oops_surface_t surf = {buf, 10, 10, 10, OOPS_SURFACE_LINEAR};
@@ -93,6 +98,7 @@ static void test_draw_alpha_blend(void) {
     ASSERT_TRUE(b >= 127 && b <= 129);
 }
 
+/* A line reaches both endpoints and a filled circle covers its centre. */
 static void test_draw_line_and_circle(void) {
     uint32_t buf[20 * 20];
     oops_surface_t surf = {buf, 20, 20, 20, OOPS_SURFACE_LINEAR};
@@ -108,6 +114,7 @@ static void test_draw_line_and_circle(void) {
     ASSERT_EQ(buf[10 * 20 + 10], OOPS_COLOR_CYAN);
 }
 
+/* Text advances eight pixels a glyph, and a blit copies a sub-surface. */
 static void test_draw_text_and_blit(void) {
     uint32_t buf[64 * 64];
     oops_surface_t surf = {buf, 64, 64, 64, OOPS_SURFACE_LINEAR};
@@ -176,6 +183,7 @@ static void test_draw_sprite_and_blit_blend(void) {
               OOPS_RGBA(0, 0, 0, 0)); /* copied verbatim, not composited */
 }
 
+/* A horizontal gradient runs black to white monotonically. */
 static void test_draw_gradient(void) {
     uint32_t buf[1 * 16];
     oops_surface_t s = {buf, 16, 1, 16, OOPS_SURFACE_LINEAR};
@@ -189,6 +197,7 @@ static void test_draw_gradient(void) {
     ASSERT_TRUE((buf[8] & 0xFF) > (buf[4] & 0xFF));
 }
 
+/* Text width follows the longest line, and lower case has its own glyphs. */
 static void test_draw_text_width_and_lowercase(void) {
     /* Longest line drives the width; \n resets. "AB\nCDE" -> 3 glyphs * 8 = 24 at
      * scale 1. */
@@ -196,8 +205,8 @@ static void test_draw_text_width_and_lowercase(void) {
     ASSERT_EQ(oops_draw_text_width("hi", 2), 2 * 8 * 2);
     ASSERT_EQ(oops_draw_text_width(NULL, 1), 0);
 
-    /* Lower case is no longer folded to upper: 'a' and 'A' render differently,
-     * and 'a' is not the blank glyph. */
+    /* Lower case is not folded to upper: 'a' and 'A' render differently, and 'a' is
+     * not the blank glyph. */
     uint32_t a[8 * 8], A[8 * 8];
     oops_surface_t sa = {a, 8, 8, 8, OOPS_SURFACE_LINEAR},
                    sA = {A, 8, 8, 8, OOPS_SURFACE_LINEAR};
@@ -259,6 +268,7 @@ static void test_draw_blend_primitives(void) {
     ASSERT_EQ(buf[0], OOPS_COLOR_BLACK); /* corner outside the circle untouched */
 }
 
+/* The PNG decoder refuses bad arguments and decodes a 1x1 RGBA image. */
 static void test_draw_png_decode(void) {
     /* Null / invalid parameter rejections */
     uint32_t out[16];
@@ -306,11 +316,11 @@ static void draw_rx_scene(oops_surface_t *s, const oops_surface_t *sprite) {
     oops_draw_blit_blend(s, 120, 125, sprite, 4, 4, 12, 12);
 }
 
-/* **Drawing in the GPU's 64KB_R_X layout** (OOPS_SURFACE_RX, since 2026-09-19): the
- * same scene drawn on a linear surface and on a tiled one comes out the same pixel for
- * pixel, the tiled one read through agc_tile_pixel. It is 200 x 150, so blocks reach
- * past it on both axes, and the padding the scene cannot reach keeps its fill. Blits
- * run both ways between the layouts. */
+/* Drawing in the GPU's 64KB_R_X layout (OOPS_SURFACE_RX): the same scene drawn on a
+ * linear surface and on a tiled one comes out the same pixel for pixel, the tiled one
+ * read through agc_tile_pixel. It is 200 x 150, so blocks reach past it on both axes,
+ * and the padding the scene cannot reach keeps its fill. Blits run both ways between
+ * the layouts. */
 static void test_draw_rx_layout_matches_linear(void) {
     enum { W = 200, H = 150, PITCH = 256, WORDS = 4 * 16384 };
     uint32_t *lin = (uint32_t *)malloc((size_t)W * H * sizeof(uint32_t));

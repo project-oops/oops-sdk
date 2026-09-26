@@ -1,10 +1,7 @@
 /*
- * hud.c - the GPU 2D overlay declared in <oops/hud.h>.
- *
- * Fixed-function OpenGL 1.1, immediate mode, one texture. The design and the reason it
- * is drawn on the GPU rather than with `oops_draw_text` are in the header. The short
- * version: a Mesa title scans out a tiled buffer the CPU cannot write into, so text has
- * to be drawn the way the scene is.
+ * The GPU 2D overlay declared in <oops/hud.h>: fixed-function OpenGL 1.1, immediate
+ * mode, one texture. It draws on the GPU because a Mesa title scans out a tiled buffer
+ * the CPU cannot write into (see the header).
  *
  * The glyphs are the collection's one 8x8 font (`../draw/font8x8.h`), baked once into a
  * texture atlas of 16 columns by 6 rows of 8x8 cells - 96 cells for the 95 printable
@@ -98,21 +95,10 @@ oops_hud_t *oops_hud_create(int fb_width, int fb_height) {
         return NULL;
     }
 
-    /* What the caller had bound, so it can be put back. Building the atlas has to bind
-     * something, and this function used to end with `glBindTexture(GL_TEXTURE_2D, 0)` -
-     * leaving the caller's active unit empty rather than as it was found.
-     * `oops_hud_begin`/`_end` below already save and restore exactly this for the
-     * drawing pass, so the contract was stated and then broken a hundred lines above
-     * it.
-     *
-     * It cost a hardware session to find, which is the reason for the length of this
-     * comment. `mesa-cube` binds its texture once at setup, points its sampler at unit
-     * 0 and then creates the overlay; from the first frame it sampled an empty unit,
-     * `texture()` returned zero, and the cube drew as a solid black silhouette - with
-     * the geometry, the spin, the depth test, the direct scanout and the 59.94 fps
-     * pacing all exactly right, and the overlay itself drawing perfectly on top of it.
-     * It read as a driver or compiler fault rather than a state leak, and was nearly
-     * filed as a clang 21 regression. (REQ-20260922T0040Z-c93d) */
+    /* Building the atlas binds a texture, so the caller's binding is saved and put
+     * back, as `oops_hud_begin`/`_end` do for the drawing pass. A title that binds its
+     * texture once at setup and then creates the overlay (`mesa-cube` does) would
+     * otherwise sample an empty unit and draw black. */
     GLint prev_tex = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
 

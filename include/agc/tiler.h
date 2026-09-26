@@ -1,3 +1,8 @@
+/*
+ * The Prospero scanout tiling (64KB_R_X): CPU tile and detile of whole surfaces and
+ * single pixels, buffer resource constants, and the dispatch interface of the compute
+ * tiler in <agc/shader_tiler.h>.
+ */
 #ifndef OOPS_AGC_TILER_H
 #define OOPS_AGC_TILER_H
 
@@ -15,14 +20,12 @@ extern "C" {
  * not a multiple of 128: 1920x1080 is 15x9 tiles, 8,847,360 bytes against
  * 8,294,400 linear.
  *
- * Both halves are measured, as of 2026-09-20. The vectors *inside* a tile are
- * addrlib's for 64KB_R_X under the part's derived GB_ADDR_CONFIG, and obSCEne's
- * `-2d7f` has a 128 x 128 render dumped whole agreeing with them on every one of
- * its 16,384 pixels (`-a91a` had anchored one: dword 0x43f is texel (15,15)).
- * The order of the tiles *across* a surface was addrlib's computation - a linear
- * run of 64 KB blocks, pipeBankXor 0 - until `-4b19` dumped a 2x2-block render
- * whole: tools/rx-check detiles it under every block order and only this one
- * gives a shape the draw could have made. See src/gl/gl_rx.h for both.
+ * Both halves are measured. The vectors inside a tile are addrlib's for 64KB_R_X
+ * under the part's derived GB_ADDR_CONFIG, and a 128 x 128 render dumped whole on
+ * hardware agrees with them on every pixel. The order of the tiles across a surface
+ * (a linear run of 64 KB blocks, pipeBankXor 0) is the only block order under which
+ * tools/rx-check detiles a dumped 2x2-block render into a shape the draw could have
+ * made. See src/gl/gl_rx.h for both.
  */
 #define AGC_TILE_DIM 128u
 #define AGC_TILE_BYTES 0x10000u /* 128 * 128 * 4 */
@@ -83,11 +86,9 @@ static inline void agc_detile_pixel(uint32_t offset_dwords, uint32_t *out_x,
  * The other direction: the 32-bit dword offset within a 64KB macro-tile of the
  * pixel at (x, y), each in [0..127]. It is the XOR of one basis vector per set
  * bit, and the vectors are agc_tiler.c's (there as byte addresses, here in
- * dwords). test_agc_tiler.c checks every one of the 16,384 pixels round-trips
- * through agc_detile_pixel, so the two directions cannot drift apart. For a
- * caller that addresses single pixels of a tiled surface in place - oops-gl's
- * CPU paths into a scanout buffer it draws - rather than converting a whole
- * surface.
+ * dwords). test_agc_tiler.c checks that every pixel round-trips through
+ * agc_detile_pixel. For a caller that addresses single pixels of a tiled surface
+ * in place, such as oops-gl's CPU paths into a scanout buffer.
  */
 static inline uint32_t agc_tile_pixel(uint32_t x, uint32_t y) {
     static const uint32_t x_dw[7] = {0x0001u, 0x0002u, 0x0020u, 0x0040u,
@@ -111,17 +112,14 @@ static inline uint32_t agc_tile_pixel(uint32_t x, uint32_t y) {
  */
 void agc_detile_surface(void *dest, const void *src, uint32_t width, uint32_t height);
 
-/* ---- buffer resource constants (V#) ----------------------------------------
+/* Buffer resource constants (V#).
  *
  * A buffer access on this generation names four consecutive scalar registers
  * holding a 128-bit resource constant. agc_buffer_descriptor() packs one.
  *
- * # Where each field's position comes from
- *
- * Corroborated by this collection's own descriptor decoder, which reads the
- * same constant back out of a translated shader (orbistoun, the buffer-resource
- * reader in the shader model - base address 47:0, stride 61:48, swizzle enable
- * at 63, record count 95:64, add-thread-id at 119, out-of-bounds mode 125:124):
+ * These positions agree with orbistoun's buffer-resource reader in its shader model
+ * (base address 47:0, stride 61:48, swizzle enable at 63, record count 95:64,
+ * add-thread-id at 119, out-of-bounds mode 125:124):
  *
  *   word 0      base address, low 32
  *   word 1      [15:0]  base address, high 16   -> 47:0 overall
@@ -131,21 +129,18 @@ void agc_detile_surface(void *dest, const void *src, uint32_t width, uint32_t he
  *   word 3      [23]    add-thread-id enable
  *               [29:28] out-of-bounds select
  *
- * The rest of word 3 is the *conversion* half of the descriptor, which the
- * decoder above deliberately does not read because untyped accesses ignore it.
- * Its positions here are from the published instruction-set reference for this
- * generation, not from anything this collection has measured:
+ * The rest of word 3 is the conversion half of the descriptor, which the reader
+ * above does not read because untyped accesses ignore it. Its positions are from
+ * the published instruction-set reference for this generation, not measured:
  *
  *   word 3      [11:0]  four 3-bit destination channel selects, x,y,z,w
  *               [18:12] format
  *               [31:30] resource type, 0 for a buffer
  *
  * A typed access (the *_FORMAT_* opcodes) converts through that format, so it
- * is the field that decides whether a 32-bit pixel arrives in a register
- * unaltered. The format *codes* are measured - see AGC_BUF_FMT_* below - but
- * the bit position they are written to is not. Treat a first bring-up that
- * produces a correctly-addressed but wrongly-converted surface as evidence
- * about this field.
+ * decides whether a 32-bit pixel arrives in a register unaltered. The format codes
+ * are measured (AGC_BUF_FMT_* below); the bit position they are written to is not,
+ * so a correctly addressed but wrongly converted surface points at this field.
  */
 
 /* Channel select: 0 zero, 1 one, 4 R, 5 G, 6 B, 7 A. Identity for four
@@ -153,40 +148,36 @@ void agc_detile_surface(void *dest, const void *src, uint32_t width, uint32_t he
 #define AGC_BUF_DST_SEL_IDENTITY 0x00000FACu /* (7<<9)|(6<<6)|(5<<3)|4 */
 
 /*
- * Typed-buffer format codes, for gfx1030, taken from this collection's measured
- * format table (orbistoun, crates/orbistoun-shader/data/buffer-formats.toml -
- * every row observed by assembling the code and reading back the name the
- * reference disassembler prints). Only the two the scanout tiler needs are
- * named here.
+ * Typed-buffer format codes for gfx1030, from orbistoun's measured format table
+ * (crates/orbistoun-shader/data/buffer-formats.toml). Only the two the scanout
+ * tiler needs are named here.
  */
 #define AGC_BUF_FMT_32_UINT 20u    /* one 32-bit component, no conversion */
 #define AGC_BUF_FMT_32_32_UINT 62u /* two 32-bit components, no conversion */
 
 /* Out-of-bounds select 3: an access past the record count reads zero and drops
- * writes, rather than clamping. The honest failure of the four. */
+ * writes, rather than clamping. */
 #define AGC_BUF_OOB_STRUCTURED 3u
 
 /*
  * Packs a buffer resource constant into `out`, four 32-bit words in the order a
  * shader's s[n:n+3] expects.
  *
- * `base` is a GPU virtual byte address and is truncated to 48 bits. `stride` is
- * bytes per record and must be 0..16383; `num_records` is in units of stride
- * when there is one and bytes when there is not. `format` is an AGC_BUF_FMT_*
- * code. Swizzle and add-thread-id are left clear: both change where an access
- * lands, and neither is wanted by anything here.
+ * `base` is a GPU virtual byte address of at most 48 bits. `stride` is bytes per
+ * record and must be 0..16383; `num_records` is in units of stride when there is
+ * one and bytes when there is not. `format` is an AGC_BUF_FMT_* code. Swizzle and
+ * add-thread-id are left clear: both change where an access lands.
  *
- * Returns 0, or -1 without writing `out` when `out` is null, `stride` exceeds
- * 16383, or `format` does not fit the 7-bit field.
+ * Returns 0, or -1 without writing `out` when `out` is null, `base` is wider than
+ * 48 bits, `stride` exceeds 16383, or `format` does not fit the 7-bit field.
  */
 int agc_buffer_descriptor(uint32_t out[4], uint64_t base, uint32_t stride,
                           uint32_t num_records, uint32_t format);
 
-/* ---- the compute tiler's dispatch interface ---------------------------------
+/* The compute tiler's dispatch interface.
  *
- * What the shader in <agc/shader_tiler.h> expects, recovered by decoding the
- * container header and walking the payload rather than from any vendor source.
- * Every line is a statement about bytes already in this repository:
+ * What the shader in <agc/shader_tiler.h> expects, decoded from its container
+ * header and payload:
  *
  *   COMPUTE_PGM_RSRC2 = 0x00000992 -> 9 user scalar registers, s0..s8, with
  *   both workgroup-id-x and workgroup-id-y enabled (they arrive in s9, s10, and
@@ -195,19 +186,17 @@ int agc_buffer_descriptor(uint32_t out[4], uint64_t base, uint32_t stride,
  *
  *   The payload moves s1,s2,s3,s4 into s12..s15 and s5,s6,s7,s8 into s0..s3,
  *   then uses s[12:15] for eight single-component typed loads and s[0:3] for
- *   four two-component typed stores - so user data 1..4 is the *source*
- *   descriptor and user data 5..8 the *destination* one. Eight dwords in and
+ *   four two-component typed stores - so user data 1..4 is the source
+ *   descriptor and user data 5..8 the destination one. Eight dwords in and
  *   eight dwords out per thread agree.
  *
- *   User data 0 is read once, early, and never again. Its meaning is NOT
- *   established: the surface width in pixels is the obvious candidate and the
- *   one AGC_TILER_USER_DATA_ARG0_IS_WIDTH assumes, but nothing here proves it.
+ *   User data 0 is read once, early. Its meaning is unestablished: the surface
+ *   width in pixels is the candidate AGC_TILER_USER_DATA_ARG0_IS_WIDTH assumes.
  *
- * Hence: this interface is a decode, not a measurement. It has never been
- * dispatched on hardware. agc_display_flip() still tiles on the CPU, and the
- * acceleration flag stays clear until agc_display_try_gpu_tiler() has compared
- * a GPU-produced surface against agc_tile_surface() byte for byte on a real
- * device. Do not enable it on the strength of this comment.
+ * The interface is a decode, not a measurement. agc_display_flip() tiles on the
+ * CPU, and the acceleration flag is set only once agc_display_try_gpu_tiler() has
+ * matched a GPU-produced surface against agc_tile_surface() byte for byte on the
+ * device.
  */
 #define AGC_TILER_USER_DATA_COUNT 9u
 #define AGC_TILER_SRC_DESC_SLOT 1u /* user data 1..4 */

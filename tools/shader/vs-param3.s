@@ -1,10 +1,9 @@
 .text
-// The vertex shader for a draw that needs a third interpolant (since 2026-09-19): the NGG
-// program oops-gl has drawn with since 2026-09-14, with a 64-byte vertex instead of 48 and a
-// fourth vec4 loaded and exported as param2. obSCEne measured the interface
-// (REQ-20260919T1745Z-9c3e, sweep 20260919-212620): SPI_VS_OUT_CONFIG 0x4, SPI_PS_IN_CONTROL
-// 0x3 and SPI_PS_INPUT_CNTL_2 0x2 - the *unpacked* form - carry a third parameter's value to the
-// pixel shader byte for byte. The packed form hung the GPU in the same sweep, and is not used.
+// The vertex shader for a draw that needs a third interpolant: oops-gl's two-parameter NGG
+// program with a 64-byte vertex instead of 48 and a fourth vec4 loaded and exported as param2.
+// SPI_VS_OUT_CONFIG 0x4, SPI_PS_IN_CONTROL 0x3 and SPI_PS_INPUT_CNTL_2 0x2 - the unpacked form -
+// carry a third parameter's value to the pixel shader byte for byte. The packed form hangs the
+// GPU and is not used.
 //
 // The vertex: position (0), colour (16), unit 0's texture parameter {s, t, fog, q} (32), and
 // param2 (48) - {secondary r, g, b, unit 0's r}.

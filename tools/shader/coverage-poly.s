@@ -1,5 +1,5 @@
 .text
-// **GL_POLYGON_SMOOTH's coverage**: the product of three edge fades, where `coverage.s` and
+// GL_POLYGON_SMOOTH's coverage: the product of three edge fades, where `coverage.s` and
 // `coverage-tex.s` use one distance.
 //
 // GL's coverage for a smooth polygon is the fraction of the pixel the polygon covers, and the
@@ -8,7 +8,7 @@
 // side as `clamp(d + 1/2, 0, 1)`, and the three multiplied. `gl_draw.c` computes exactly that,
 // which is what this has to agree with.
 //
-// **The three distances are screen-space linear, and the interpolator is not.** A signed
+// The three distances are screen-space linear, and the interpolator is not. A signed
 // distance to a line is affine in window coordinates, so it wants linear interpolation; RDNA2's
 // `v_interp_*` use the perspective-correct barycentrics, which is a different function wherever
 // the triangle's three w differ. Enabling the linear barycentrics would move the shader
@@ -22,16 +22,15 @@
 // second texture unit's, so a smooth polygon using two units is refused, exactly as a smooth
 // textured point or line is.
 //
-// **An edge that is not antialiased carries a large distance**, so its fade clamps to one and
-// multiplies by nothing. A polygon triangulated into several triangles antialiases only its own
-// outline, and `gl_draw_polygon_tri`'s edge mask is what says which those are; the CPU turns a
-// masked-out edge into a distance no fade can reach.
+// An edge that is not antialiased carries a large distance, so its fade clamps to one. A
+// polygon triangulated into several triangles antialiases only its own outline, which
+// `gl_draw_polygon_tri`'s edge mask names; the CPU turns a masked-out edge into a distance no
+// fade can reach.
 //
-// **The fragments outside the edge have to exist.** The hardware rasteriser raises a fragment
-// only where the pixel centre is inside the triangle, so the outer half of every fade would
-// simply not be drawn - which is what the roadmap gave as the reason this could not be done. The
-// CPU widens the triangle outward instead, the way it already widens a point and a line into a
-// quad, and the kill below removes whatever the widening added beyond the fade.
+// The fragments outside the edge have to exist. The hardware rasteriser raises a fragment only
+// where the pixel centre is inside the triangle, so the CPU widens the triangle outward, as it
+// widens a point and a line into a quad, and the kill below removes whatever the widening added
+// beyond the fade.
 //
 // v12..v15 are scratch: fog uses v13 and v14 above this slot, and the textured shader's combine
 // has finished with v16..v27 by the time this runs.

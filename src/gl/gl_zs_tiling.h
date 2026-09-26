@@ -5,17 +5,15 @@
  * out row by row across the surface's pitch, and inside a block a pixel's offset is the
  * XOR of one vector per set bit of its in-block x and y. The vectors are addrlib's,
  * under the chip identity and the GB_ADDR_CONFIG oops-mesa derived from the display
- * tiler, set up as ac_surface.c sets up a depth-stencil pair - and **tools/zs-tiling
- * checks every pixel of a 3 x 2 block surface against addrlib** for both, with an
- * eight-pipe control that disagrees. Its tracked output,
- * tools/zs-tiling/zs_tiling_gfx1013.txt, is where the numbers below come from; change
- * them there.
+ * tiler, set up as ac_surface.c sets up a depth-stencil pair. tools/zs-tiling checks
+ * every pixel of a 3 x 2 block surface against addrlib for both, with an eight-pipe
+ * control that disagrees. Its tracked output, tools/zs-tiling/zs_tiling_gfx1013.txt, is
+ * where the numbers below come from; change them there.
  *
  * The depth vectors share their upper four bits a coordinate with the display tiler's
  * 32-bit ones (agc_tiler.c) - the pipe and bank bits of the same configuration - and
  * differ in the lower three, which order the pixels of a 256-byte micro-tile: Z
- * interleaves x and y there, the display's R swizzle does not. (This said "x and y
- * exchanged" until 2026-09-19, which the two tables contradict.)
+ * interleaves x and y there, the display's R swizzle does not.
  *
  * Coordinates are the surface's: row 0 is the top, as the GPU draws it, so a GL window
  * row y is surface row height - 1 - y. `pitch` is the surface's width in pixels, padded

@@ -1,10 +1,8 @@
 // The arithmetic a GLSL 2.0 vertex shader's `mvp * vec4(pos, 1.0)` becomes.
 //
-// Assembled to get ground truth for the code generator's encodings, the same way alpha-test.s
-// was. Nothing here ships as a literal: what ships is an *encoder*, and these words are what
-// the encoder's tests assert against. A wrong encoding cannot fail loudly - it assembles into
-// the payload and the hardware does something else - so the encoder is checked against a real
-// assembler rather than against itself.
+// Ground truth for the code generator's encodings. Nothing here ships as a literal: what ships
+// is an encoder, and these words are what the encoder's tests assert against. A wrong encoding
+// cannot fail loudly, so the encoder is checked against a real assembler rather than itself.
 //
 //   clang -target amdgcn-amd-amdhsa -mcpu=gfx1030 -c tools/shader/gl2-transform.s -o /tmp/t.o
 //   objdump -s -j .text /tmp/t.o
@@ -35,8 +33,8 @@ v_fmac_f32 v5, v9, v1
 // The w column is added with an implicit 1.0, so it is a plain add rather than a multiply.
 v_add_f32 v4, v8, v4
 
-// Subtraction. **Not a negated add**: VOP2 subtracts vsrc1 from src0, so the operand order is
-// part of the meaning and getting it backwards computes b - a with no complaint from anything.
+// Subtraction, not a negated add: VOP2 subtracts vsrc1 from src0, so the operand order is part
+// of the meaning and getting it backwards computes b - a silently.
 v_sub_f32 v4, v8, v9
 
 // Unary minus, as the generator emits it: zero minus the operand, with the zero as an inline

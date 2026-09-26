@@ -1,3 +1,7 @@
+/*
+ * Save data: mount a title's save slot (libSceSaveData, or a persistent directory
+ * where that is unavailable) and load or save whole files in it.
+ */
 #ifndef OOPS_SAVEDATA_H
 #define OOPS_SAVEDATA_H
 

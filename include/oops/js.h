@@ -1,3 +1,7 @@
+/*
+ * JavaScript through QuickJS: contexts, evaluation, native functions, globals, and a
+ * plain C value type.
+ */
 #ifndef OOPS_JS_H
 #define OOPS_JS_H
 

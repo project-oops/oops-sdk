@@ -6,11 +6,9 @@
  * so a title written against that header runs on oops-gl without knowing it, and the
  * same source runs on Mesa (whose backend lives in oops-mesa) by a build switch.
  *
- * It is a faithful wrapper, not a rewrite: it opens the display exactly as a title did
- * by hand, so behaviour is unchanged. The reason the display open moved inside `create`
- * - naming scanout buffers at open for a copy-free present (D011, D012) - is an
- * optimisation the oops-gl swap path can take later behind this same call; nothing here
- * forecloses it.
+ * It opens the display exactly as a title does by hand. The display open sits inside
+ * `create` so the swap path can name scanout buffers at open for a copy-free present
+ * (D012) behind this same call.
  */
 
 #include "oops/gfx.h"
@@ -32,8 +30,8 @@ struct oops_gfx {
 /*
  * One instance, not a heap allocation. oops-gl has exactly one display and one context
  * - the current context is global state (`glContextMakeCurrent`) - so a second live gfx
- * could not mean anything here. A file-static handle is the honest shape of that, and
- * it keeps this backend from pulling in the heap: `oops/gfx.h` is compiled into every
+ * could not mean anything here. A file-static handle also keeps this backend from
+ * pulling in the heap: `oops/gfx.h` is compiled into every
  * oops-gl app's host self-test through `OOPS_GL_SRCS`, and those tests do not link an
  * allocator.
  */

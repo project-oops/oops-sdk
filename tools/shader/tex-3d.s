@@ -1,10 +1,9 @@
 .text
-// Sampling a 3D texture (since 2026-09-20): the third texture coordinate interpolated, divided
-// by q with the same reciprocal the prolog already computed, and sampled with
-// dim:SQ_RSRC_IMG_3D against a descriptor whose TYPE is 0xa and whose WORD4 holds the last
-// slice.
+// Sampling a 3D texture: the third texture coordinate interpolated, divided by q with the same
+// reciprocal the prolog already computed, and sampled with dim:SQ_RSRC_IMG_3D against a
+// descriptor whose TYPE is 0xa and whose WORD4 holds the last slice.
 //
-// **Unlike a cube map's, this coordinate is divided.** A cube map takes (s, t, r) as a
+// Unlike a cube map's, this coordinate is divided. A cube map takes (s, t, r) as a
 // direction, which scaling leaves alone, so tex-cube.s interpolates all three fresh; a volume
 // takes them as a position in [0, 1]^3, and GL 1.2's projective texturing divides every one of
 // them by q. The prolog leaves 1 / q in v12 and never overwrites it, so the divide here is one
@@ -18,11 +17,7 @@
 // register and building the address across v[2:4] would name it twice. v16..v18 are the general
 // combine's argument registers, which it fills after the sample and not before.
 //
-// obSCEne's REQ-20260920T0745Z-6c80 (sweep 20260920-103636, 166-agc/texture-extended) sampled a
-// two-slice volume on this part with TYPE 0xa and WORD4 0x1 and reported its texel, so the
-// descriptor side is measured. This is the shader side of the same draw. The slice stride the
-// upload writes - pitch * height, consecutive - is derived rather than measured and is asked
-// about in REQ-20260920T1050Z-5d7c.
+// The slice stride the upload writes - pitch * height, consecutive - is derived, not measured.
 v_interp_p1_f32 v18, v0, attr2.w        // r
 v_interp_p2_f32 v18, v1, attr2.w
 v_mul_f32_e32 v18, v18, v12             // r/q

@@ -1,3 +1,7 @@
+/*
+ * Audio output through libSceAudioOut: one 16-bit stereo port, fed in whole chunks,
+ * with a staging buffer for writes that do not end on a chunk boundary.
+ */
 #include "oops/audio.h"
 #include "oops/system.h"
 #include "audio_port.h"
@@ -15,20 +19,14 @@ __attribute__((weak)) int sceUserServiceGetInitialUser(int32_t *userId);
 __attribute__((weak)) int sceUserServiceInitialize(const void *param);
 
 /*
- * The sample-format selector handed to the platform's open call. The write path
- * produces 16-bit signed interleaved stereo and nothing else, so this must
- * select exactly that.
+ * The sample-format selector handed to the platform's open call: 16-bit signed
+ * interleaved stereo, the only format the write path produces.
  *
- * Measured, not assumed: obSCEne 090-audio/format-selector on 12.40 opened a
- * port with each selector and read the port state back (16 bytes; byte 2 is the
- * channel count). Selector 0 gave 1 channel, selector 1 gave 2, in both the
- * eboot and app contexts. Until that capture this wrapper passed 0, so it
- * opened a mono port and fed it stereo frames.
- *
- * The same run settled the rest of the open call: 48000 Hz is accepted with
- * chunks of 256, 512, 1024 and 2048 frames, and 44100 Hz is refused with
- * 0x80260008 at every chunk size, so the platform code a caller sees for a
- * rejected rate is that one.
+ * Measured by the obSCEne probe 090-audio/format-selector on 12.40, reading the
+ * port state back (byte 2 is the channel count): selector 0 gives 1 channel,
+ * selector 1 gives 2, in both the eboot and app contexts. 48000 Hz is accepted
+ * with chunks of 256, 512, 1024 and 2048 frames; 44100 Hz is refused with
+ * 0x80260008 at every chunk size.
  */
 #define OOPS_AUDIO_FORMAT_PARAM 1u
 
@@ -86,7 +84,7 @@ oops_audio_port_t *oops_audio_open(int sample_rate, int channels, int buffer_fra
         }
     }
 
-    /* Ensure buffer frames is a multiple of 256 within [256, 2048] */
+    /* A multiple of 256 frames within [256, OOPS_AUDIO_MAX_CHUNK]. */
     int frames = buffer_frames;
     if (frames <= 0)
         frames = OOPS_AUDIO_DEFAULT_FRAMES;
@@ -99,12 +97,11 @@ oops_audio_port_t *oops_audio_open(int sample_rate, int channels, int buffer_fra
     int rate = (sample_rate <= 0) ? 48000 : sample_rate;
 
     int handle = -1;
-    /* Try with resolved user first */
     if (user >= 0) {
         handle = sceAudioOutOpen(user, 0, 0, (unsigned int)frames, (unsigned int)rate,
                                  OOPS_AUDIO_FORMAT_PARAM);
     }
-    /* Fallback with system user 0xFF if failed */
+    /* Fall back to the system user, 0xFF. */
     if (handle < 0) {
         handle = sceAudioOutOpen(0xFF, 0, 0, (unsigned int)frames, (unsigned int)rate,
                                  OOPS_AUDIO_FORMAT_PARAM);
@@ -234,13 +231,12 @@ void oops_audio_close(oops_audio_port_t *port) {
         return;
     if (port->handle >= 0) {
         oops_log_info("AUDIO", "audio_close handle=%d", port->handle);
-        /* Emit any held partial chunk first, then drain what is queued. The
-         * platform refuses sceAudioOutClose with SCE_AUDIO_OUT_ERROR_BUSY
-         * (0x80260002) while unplayed chunks remain, and sceAudioOutOutput(handle,
-         * NULL) blocks until one queued chunk finishes (obSCEne
-         * 090-audio/drain, 12.40). So close by playing the queue out: try to close,
-         * and on BUSY drain one chunk and retry. The bound is the hardware queue
-         * depth (26 frames of headroom, measured), so a handful of chunks at most.
+        /* Emit any held partial chunk, then play the queue out. The platform refuses
+         * sceAudioOutClose with SCE_AUDIO_OUT_ERROR_BUSY (0x80260002) while unplayed
+         * chunks remain, and sceAudioOutOutput(handle, NULL) blocks until one queued
+         * chunk finishes (obSCEne probe 090-audio/drain, 12.40), so on BUSY this
+         * drains one chunk and retries. The hardware queue is shallow, so this takes
+         * a handful of chunks at most.
          */
         (void)oops_audio_flush(port);
         if (sceAudioOutClose && sceAudioOutOutput) {

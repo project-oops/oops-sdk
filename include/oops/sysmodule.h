@@ -1,3 +1,6 @@
+/*
+ * Loading platform system modules by identifier through libSceSysmodule.
+ */
 #ifndef OOPS_SYSMODULE_H
 #define OOPS_SYSMODULE_H
 

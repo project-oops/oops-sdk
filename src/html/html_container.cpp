@@ -1,3 +1,13 @@
+/*
+ * litehtml's document container: the drawing and metrics back end, onto an
+ * `oops_surface_t` through oops/draw.h.
+ *
+ * Text uses the built-in bitmap font scaled by size/8, and its width is estimated at
+ * 0.6 em per byte. Radial and conic gradients fill with their first colour, linear
+ * ones with their end colours. Images are drawn only from `m_image_cache`, which
+ * `load_image` does not fill, and clip rectangles are tracked but not applied.
+ */
+
 #include "html_container.hpp"
 #include <algorithm>
 #include <cstring>
@@ -42,7 +52,7 @@ litehtml::uint_ptr oops_container::create_font(const litehtml::font_description 
 }
 
 void oops_container::delete_font(litehtml::uint_ptr /*hFont*/) {
-    // Managed by m_fonts vector lifetime
+    // Fonts are owned by m_fonts and freed with the container.
 }
 
 litehtml::pixel_t oops_container::text_width(const char *text,
@@ -51,7 +61,7 @@ litehtml::pixel_t oops_container::text_width(const char *text,
         return 0;
     auto *font = reinterpret_cast<oops_font_desc *>(hFont);
     int size = font ? font->size : 16;
-    // Proportional character width estimation
+    // No glyph metrics: every byte is 0.6 em, at least 4 pixels.
     size_t len = strlen(text);
     int char_w = std::max(4, (size * 6) / 10);
     return litehtml::pixel_t(static_cast<int>(len * (size_t)char_w));

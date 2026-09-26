@@ -1,41 +1,15 @@
 /*
  * oops-glut's bitmap font: `glutBitmapCharacter` and the calls that measure it.
  *
- * # Why there is a font here at all
+ * The glyphs are original, drawn in a 5x7 box with two descender rows, not X11's
+ * `fixed` data. They keep what a program depends on: the advance (8 and 9 pixels), the
+ * cell height (13 and 15), the baseline, and ASCII 32 to 126. Each glyph is written as
+ * rows of
+ * `#` and `.`, top row first, so the font can be proofread by reading it.
  *
- * Most GLUT code that draws anything also draws text - a frame counter, a key legend, a
- * score - and it draws it with `glutBitmapCharacter`. A port that cannot call it has to
- * have its text rewritten, which is the one thing this library exists to avoid.
- *
- * # Why it is this font and not X11's
- *
- * GLUT's `GLUT_BITMAP_8_BY_13` and `GLUT_BITMAP_9_BY_15` are the X11 `fixed` fonts, and
- * every GLUT ships their glyph data as a table. **Copying one would be taking someone
- * else's font**, so the glyphs below are drawn here, in a 5x7 box with two rows of
- * descender under it. They are not X11's shapes and do not pretend to be: what they
- * keep is the part a program depends on - the advance (8 and 9 pixels), the cell height
- * (13 and 15), the baseline, and ASCII 32 to 126 all being present and legible.
- *
- * A program that lays text out by `glutBitmapWidth` gets the same layout it would
- * anywhere, because both fonts are fixed-width and the widths are GLUT's own.
- *
- * # Why the glyphs are pictures in the source
- *
- * A font is the kind of data that is wrong in one glyph and looks right everywhere: a
- * hex table cannot be proofread, only tested one character at a time. So each glyph
- * below is nine rows of
- * `#` and `.` in source order, top row first, which is a picture of the letter - and
- * `glut_font_bits` turns it into the bytes `glBitmap` wants. A reader checks the font
- * by reading it.
- *
- * # What is not here
- *
- * `GLUT_BITMAP_HELVETICA_*` and `GLUT_BITMAP_TIMES_ROMAN_*` are **proportional** fonts,
- * and a fixed-width font offered under those names would return the wrong width from
- * `glutBitmapWidth` and break the layout of every program that measures before it
- * draws. They are absent, so such a program fails to link and knows.
- * `glutStrokeCharacter` is absent for the same reason: its glyphs are line segments,
- * which these are not.
+ * The proportional fonts (`GLUT_BITMAP_HELVETICA_*`, `GLUT_BITMAP_TIMES_ROMAN_*`) and
+ * `glutStrokeCharacter` are absent: a fixed-width stand-in would report wrong widths,
+ * so a program needing them fails to link instead.
  */
 #include "GL/glut.h"
 #include "gl_internal.h"
@@ -253,12 +227,8 @@ static const char *const glut_font_art[GLUT_FONT_COUNT][GLUT_FONT_ROWS] = {
 };
 
 /*
- * One glyph as `glBitmap` wants it: nine rows of eight bits, **bottom row first**,
- * because a bitmap's first row is its bottom one. The art above is written top row
- * first, which is how a letter is read, so this reverses it.
- *
- * Built once into a static table rather than on every character, since a frame counter
- * draws a dozen glyphs sixty times a second.
+ * One glyph as `glBitmap` wants it: nine rows of eight bits, bottom row first, because
+ * a bitmap's first row is its bottom one. Built once, not per character.
  */
 static GLubyte glut_font_bits[GLUT_FONT_COUNT][GLUT_FONT_ROWS];
 static int glut_font_ready = 0;
@@ -295,14 +265,13 @@ void glutBitmapCharacter(void *font, int character) {
         return;
     glut_font_build();
     if (character < GLUT_FONT_FIRST || character > GLUT_FONT_LAST) {
-        /* Outside the range this font has - the position still moves, so a string with
-         * a tab or a stray byte in it stays aligned rather than collapsing. */
+        /* Outside the font's range the position still advances, so a string with a
+         * tab or a stray byte stays aligned. */
         glBitmap(0, 0, 0.0f, 0.0f, (GLfloat)adv, 0.0f, (const GLubyte *)0);
         return;
     }
-    /* **The unpack state is the caller's**, and one row here is one byte, so an
-     * alignment of 4 - the default - would have glBitmap read four bytes a row. Set to
-     * 1 around the call and put back, which is what a font in a library has to do. */
+    /* One row here is one byte, so the default alignment of 4 would misread it. The
+     * unpack state is the caller's: set to 1 around the call and put back. */
     GLint align = 4;
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
     if (align != 1)
@@ -315,8 +284,7 @@ void glutBitmapCharacter(void *font, int character) {
         glPixelStorei(GL_UNPACK_ALIGNMENT, align);
 }
 
-/* freeglut's, and the reason it is here: a program that draws a whole string in one
- * call is common enough that leaving it out means editing the port. */
+/* freeglut's extension: a whole string in one call. */
 void glutBitmapString(void *font, const unsigned char *string) {
     if (!string)
         return;
@@ -325,8 +293,7 @@ void glutBitmapString(void *font, const unsigned char *string) {
 }
 
 int glutBitmapWidth(void *font, int character) {
-    (void)character; /* both fonts are fixed-width, which is what makes them these two
-                        fonts */
+    (void)character; /* both fonts are fixed-width */
     return glut_font_advance(font);
 }
 
@@ -340,8 +307,8 @@ int glutBitmapLength(void *font, const unsigned char *string) {
     return n * adv;
 }
 
-/* The cell height GLUT's names carry - 13 and 15 - not the nine rows drawn. A program
- * spacing lines uses this, and spacing them by the ink would run them together. */
+/* The cell height the font names carry (13 and 15), not the nine rows drawn, so lines
+ * spaced by it do not run together. */
 int glutBitmapHeight(void *font) {
     if (font == glutBitmapFixed9x15)
         return 15;

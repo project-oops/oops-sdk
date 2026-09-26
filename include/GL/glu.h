@@ -1,5 +1,6 @@
 /*
- * oops-gl: OpenGL Utility Library (GLU) for OOPS SDK
+ * oops-gl: the OpenGL Utility Library (GLU 1.3) - projection helpers, mipmap builders,
+ * project/unproject and quadrics, built on public GL calls only.
  */
 
 #ifndef __GLU_H__
@@ -11,14 +12,19 @@
 extern "C" {
 #endif
 
+/* Multiplies a perspective projection onto the current matrix; `fovy` is in degrees. */
 void gluPerspective(GLdouble fovy, GLdouble aspect, GLdouble zNear, GLdouble zFar);
+/* Multiplies a viewing transform looking from the eye towards the centre, `up` upward.
+ */
 void gluLookAt(GLdouble eyeX, GLdouble eyeY, GLdouble eyeZ, GLdouble centerX,
                GLdouble centerY, GLdouble centerZ, GLdouble upX, GLdouble upY,
                GLdouble upZ);
+/* glOrtho with near -1 and far 1. */
 void gluOrtho2D(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top);
 /* Restricts drawing to a dx by dy window rectangle centred on (x, y) - multiplied onto
  * the projection before it, for picking with GL_SELECT. */
 void gluPickMatrix(GLdouble x, GLdouble y, GLdouble dx, GLdouble dy, GLint *viewport);
+/* A readable name for a GL or GLU error code. */
 const GLubyte *gluErrorString(GLenum error);
 
 /* GLU's own return codes. A GLU function answers 0 or one of these and records nothing
@@ -31,9 +37,8 @@ const GLubyte *gluErrorString(GLenum error);
 #define GLU_VERSION 100800
 #define GLU_EXTENSIONS 100801
 
-/* GLU_VERSION gives "1.3" - the version whose functions are here. The quadrics, the
- * tessellator and the NURBS interfaces are not: a program needing them fails to link,
- * which says so plainly where a stub that draws nothing would not. */
+/* GLU_VERSION gives "1.3". The tessellator and the NURBS interfaces are absent, so a
+ * program needing them fails to link rather than drawing nothing. */
 const GLubyte *gluGetString(GLenum name);
 
 /*

@@ -2,6 +2,9 @@
 #include "oops/freestd.h"
 #include "tests/test_common.h"
 
+/* Unit tests for the userland heap allocator, `oops/heap.h`. */
+
+/* Zero-size requests return NULL, NULL is freeable, and realloc to 0 frees. */
 static void test_heap_null_and_zero(void) {
     ASSERT_TRUE(oops_malloc(0) == NULL);
     oops_free(NULL);
@@ -18,17 +21,16 @@ static void test_heap_null_and_zero(void) {
     ASSERT_EQ(oops_heap_get_stats(NULL), -1);
 }
 
+/* Slab allocations do not overlap, and freed slots are reused. */
 static void test_heap_slabs_and_reuse(void) {
     void *ptrs[10];
 
-    /* Allocate 10 chunks of 128 bytes */
     for (int i = 0; i < 10; i++) {
         ptrs[i] = oops_malloc(128);
         ASSERT_TRUE(ptrs[i] != NULL);
         memset(ptrs[i], (uint8_t)(i + 1), 128);
     }
 
-    /* Verify integrity */
     for (int i = 0; i < 10; i++) {
         uint8_t *b = (uint8_t *)ptrs[i];
         for (int j = 0; j < 128; j++) {
@@ -36,19 +38,18 @@ static void test_heap_slabs_and_reuse(void) {
         }
     }
 
-    /* Free all */
     for (int i = 0; i < 10; i++) {
         oops_free(ptrs[i]);
     }
 
-    /* Re-allocate should succeed and recycle from freelist */
+    /* Recycled from the freelist. */
     void *re_p = oops_malloc(128);
     ASSERT_TRUE(re_p != NULL);
     oops_free(re_p);
 }
 
+/* calloc zeroes, and realloc to a larger size keeps the contents. */
 static void test_heap_calloc_and_realloc(void) {
-    /* Calloc test */
     size_t count = 32;
     uint32_t *arr = (uint32_t *)oops_calloc(count, sizeof(uint32_t));
     ASSERT_TRUE(arr != NULL);
@@ -57,12 +58,10 @@ static void test_heap_calloc_and_realloc(void) {
         arr[i] = (uint32_t)(i + 100);
     }
 
-    /* Realloc to expand */
     size_t new_count = 64;
     arr = (uint32_t *)oops_realloc(arr, new_count * sizeof(uint32_t));
     ASSERT_TRUE(arr != NULL);
 
-    /* Verify original elements preserved */
     for (size_t i = 0; i < count; i++) {
         ASSERT_EQ(arr[i], (uint32_t)(i + 100));
     }
@@ -70,12 +69,12 @@ static void test_heap_calloc_and_realloc(void) {
     oops_free(arr);
 }
 
+/* A large allocation, past the slabs, is usable across every page. */
 static void test_heap_large_mmap(void) {
-    size_t big_sz = 128 * 1024; /* 128 KB */
+    size_t big_sz = 128 * 1024;
     uint8_t *big = (uint8_t *)oops_malloc(big_sz);
     ASSERT_TRUE(big != NULL);
 
-    /* Write test pattern */
     for (size_t i = 0; i < big_sz; i += 4096) {
         big[i] = 0x5a;
     }
@@ -86,15 +85,14 @@ static void test_heap_large_mmap(void) {
     oops_free(big);
 }
 
+/* aligned_alloc honours power-of-two alignments and refuses C11's invalid arguments. */
 static void test_heap_aligned_alloc(void) {
-    /* Invalid arguments */
     ASSERT_TRUE(oops_aligned_alloc(0, 64) == NULL);
     ASSERT_TRUE(oops_aligned_alloc(64, 0) == NULL);
     ASSERT_TRUE(oops_aligned_alloc(15, 60) == NULL); /* not a power of 2 */
     ASSERT_TRUE(oops_aligned_alloc(64, 50) ==
                 NULL); /* size not multiple of alignment */
 
-    /* Various valid alignments: 16, 32, 64, 128, 256, 1024, 4096 */
     size_t alignments[] = {16, 32, 64, 128, 256, 1024, 4096};
     for (size_t i = 0; i < sizeof(alignments) / sizeof(alignments[0]); i++) {
         size_t align = alignments[i];
@@ -103,7 +101,6 @@ static void test_heap_aligned_alloc(void) {
         ASSERT_TRUE(ptr != NULL);
         ASSERT_EQ(((uintptr_t)ptr % align), 0ULL);
 
-        /* Write pattern and verify */
         memset(ptr, 0x7c, size);
         uint8_t *b = (uint8_t *)ptr;
         ASSERT_EQ(b[0], 0x7c);
@@ -113,9 +110,8 @@ static void test_heap_aligned_alloc(void) {
     }
 }
 
+/* Every malloc is 16-byte aligned (x86-64 max_align_t), slab or large. */
 static void test_heap_malloc_alignment(void) {
-    /* Verify 16-byte alignment across slab and large mmap allocations (x86-64
-     * max_align_t) */
     size_t sizes[] = {1,   3,   7,   8,   15,   16,   24,   32,   63,    64,
                       127, 128, 255, 256, 1000, 2048, 4096, 8192, 16384, 65536};
     for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {

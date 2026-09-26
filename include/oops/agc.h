@@ -1,3 +1,8 @@
+/*
+ * AGC (Prospero GPU) definitions: PM4 opcodes, register offsets and field packers, the
+ * libSceAgc entry points the SDK binds weakly, and the compute and draw helpers built
+ * on `oops/gpu.h`.
+ */
 #ifndef OOPS_AGC_H
 #define OOPS_AGC_H
 
@@ -13,8 +18,8 @@ extern "C" {
 #endif
 
 /*
- * RDNA2 (GFX10.3) PM4 Packet 3 Opcodes.
- * Confirmed on retail Prospero FW 12.40 hardware sweeps (obSCEne 166-agc).
+ * RDNA2 (GFX10.3) PM4 type-3 opcodes, confirmed on retail Prospero FW 12.40 by the
+ * obSCEne probe 166-agc.
  */
 #define OOPS_AGC_PM4_NOP 0x10u
 #define OOPS_AGC_PM4_DRAW_INDEX_AUTO 0x2Du
@@ -30,9 +35,7 @@ extern "C" {
 #define OOPS_AGC_PM4_SET_UCONFIG_REG_INDEX                                             \
     0x7Au /* bits 31:28 of the offset word carry the index */
 
-/*
- * Hardware Register Offsets across the 4 register spaces.
- */
+/* Register offsets, relative to their register space. */
 #define OOPS_AGC_REG_CB_TARGET_MASK 0x08eu /* Context space */
 #define OOPS_AGC_REG_CB_SHADER_MASK 0x08fu
 #define OOPS_AGC_REG_CB_COLOR0_BASE 0x200u
@@ -48,14 +51,9 @@ extern "C" {
 #define OOPS_AGC_REG_CB_BLEND0_CONTROL 0x1e0u
 
 /*
- * CB_COLOR0_ATTRIB2 surface extent macro:
- * Bits [27:14] = (width - 1)
- * Bits [13:0]  = (height - 1)
- * Physical Prospero verification: omitting the register makes the GFX10 CB treat the
- * surface as 0x0 and drop every pixel write. With the fields the other way round
- * (height in 27:14) a 1920 x 1080 LINEAR_GENERAL target was written with a row
- * pitch of 1088 pixels (1080 rounded up to 64), measured 2026-09-14: the colour
- * block takes the row pitch from bits 27:14.
+ * CB_COLOR0_ATTRIB2 surface extent: bits 27:14 = width - 1, bits 13:0 = height - 1.
+ * Measured on Prospero: without the register the CB treats the surface as 0x0 and
+ * drops every pixel write, and the colour block takes the row pitch from bits 27:14.
  */
 #define OOPS_AGC_CB_COLOR_ATTRIB2(w, h)                                                \
     ((((uint32_t)(w) - 1u) << 14) | ((uint32_t)(h) - 1u))
@@ -183,8 +181,8 @@ extern "C" {
 #define OOPS_AGC_PRIM_TRISTRIP 0x5u
 
 /*
- * Measured Hardware Shader Stages (sceAgcCreateShader 0..7).
- * Ground truth from libSceAgc jump table and silicon sweeps.
+ * Shader stages as sceAgcCreateShader numbers them (0..7), from libSceAgc's jump
+ * table and measured on hardware.
  */
 #define OOPS_AGC_STAGE_COMPUTE 0u   /* CS */
 #define OOPS_AGC_STAGE_PIXEL 1u     /* PS */
@@ -196,8 +194,8 @@ extern "C" {
 #define OOPS_AGC_STAGE_HULL 7u      /* HS (Hull shader) */
 
 /*
- * Retail libSceAgc Direct PM4 Emitters and Shader Functions.
- * Calling convention: register emitters take (dcb, ((uint64_t)val << 32) | reg_offset).
+ * libSceAgc's direct PM4 emitters and shader functions. The register emitters take
+ * (dcb, ((uint64_t)val << 32) | reg_offset).
  */
 __attribute__((weak)) void *sceAgcDcbSetCfRegisterDirect(void *dcb, uint64_t reg_val);
 __attribute__((weak)) void *sceAgcDcbSetCxRegisterDirect(void *dcb, uint64_t reg_val);
@@ -224,10 +222,7 @@ __attribute__((weak)) int sceAgcLinkShaders(void *out_link_state, const void *vs
                                             const void *ps_shader,
                                             const void *interpolants);
 
-/*
- * High-level AGC compute dispatch helper. Wraps oops_gpu_dispatch() with
- * explicit grid dimensions and user data registers.
- */
+/* `oops_gpu_dispatch` with the grid and user data registers as arguments. */
 static inline int oops_agc_dispatch_compute(oops_gpu_queue_t *queue,
                                             const oops_gpu_shader_t *shader,
                                             uint32_t grid_x, uint32_t grid_y,
@@ -243,9 +238,7 @@ static inline int oops_agc_dispatch_compute(oops_gpu_queue_t *queue,
     return oops_gpu_dispatch(queue, &d);
 }
 
-/*
- * High-level AGC 3D primitive draw descriptor and submission helper.
- */
+/* One draw for `oops_agc_draw_primitive`. */
 typedef struct oops_agc_draw_desc {
     void *color_buffer;      /* Direct coherent / Onion memory buffer */
     uint32_t width;          /* Target width (e.g. 1920) */
@@ -260,11 +253,10 @@ typedef struct oops_agc_draw_desc {
 } oops_agc_draw_desc_t;
 
 /*
- * Emit hardware 3D primitive draw packets to a Type 0 Universal Graphics Queue.
- * Configures fixed-function context registers, UCONFIG parameter cache,
- * shader bindings, issues DRAW_INDEX_AUTO, flushes via RELEASE_MEM EOP event,
- * and awaits fence retirement.
- * Returns 0 on success, negative on error.
+ * Draws on a graphics queue (type 0): sets the fixed-function context, binds the
+ * shaders, issues DRAW_INDEX_AUTO, flushes with a RELEASE_MEM end-of-pipe event and
+ * waits for the fence. Returns 0 on success, -2 on a fence timeout, -1 on any other
+ * error.
  */
 int oops_agc_draw_primitive(oops_gpu_queue_t *queue, const oops_agc_draw_desc_t *desc);
 

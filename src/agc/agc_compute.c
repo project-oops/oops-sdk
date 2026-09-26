@@ -1,3 +1,8 @@
+/*
+ * The `oops/gpu.h` compute interface on AGC: queues with a command buffer and fence in
+ * coherent Onion memory, shaders created from a container header and payload, and
+ * synchronous DISPATCH_DIRECT submissions waited on through a RELEASE_MEM fence.
+ */
 #include "oops/agc.h"
 #include "oops/gpu.h"
 #include "oops/memory.h"
@@ -249,7 +254,7 @@ int oops_gpu_dispatch(oops_gpu_queue_t *queue, const oops_gpu_dispatch_t *dispat
 
     oops_agc_dcb_desc desc;
     desc.gpu_addr = (uint64_t)(uintptr_t)queue->dcb_mem;
-    desc.size = dcb_dwords; /* STRICTLY in DWORDs */
+    desc.size = dcb_dwords; /* in dwords, not bytes */
     desc.flags = 0;
     desc.pad = 0;
 

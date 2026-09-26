@@ -3,8 +3,11 @@
 #include "tests/test_common.h"
 #include <stdio.h>
 
+/* Unit tests for the filesystem layer, `oops/fs.h`, against the host's /tmp. */
+
 #define TEST_PATH "/tmp/test_oops_fs.tmp"
 
+/* Every call refuses NULL paths and bad descriptors. */
 static void test_fs_null_safety(void) {
     ASSERT_EQ(oops_fs_open(NULL, 0, 0), -1);
     ASSERT_EQ(oops_fs_close(-1), -1);
@@ -21,6 +24,7 @@ static void test_fs_null_safety(void) {
     oops_fs_free_data(NULL);
 }
 
+/* Write, read, seek, tell and the whole-file helpers agree on one file's contents. */
 static void test_fs_read_write_seek(void) {
     /* Clean up any leftover file */
     (void)oops_fs_unlink(TEST_PATH);
@@ -87,6 +91,7 @@ static void test_fs_read_write_seek(void) {
     ASSERT_EQ(oops_fs_exists(TEST_PATH), 0);
 }
 
+/* The app-data directory exists, and a path resolved under it is writable. */
 static void test_fs_storage_dir(void) {
     char dir[256];
     ASSERT_EQ(oops_fs_get_storage_dir(OOPS_STORAGE_APP_DATA, NULL, 0), -1);

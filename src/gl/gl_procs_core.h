@@ -1,42 +1,17 @@
 /*
- * The **core** entry points a title can resolve by name, as opposed to the extensions
- * in `gl_procs.h`.
- *
- * # Why core GL is in a lookup table at all
- *
- * `gl_procs.h` says the list holds extensions because "core GL 1.1 is linked directly,
- * by symbol, and never goes through here". That is true of Neverball, which calls
- * `glBegin` and looks up only what it might not get. **It is not true of an engine that
- * resolves everything by string**, and ioquake3 is one: `sdl_glimp.c:269` fills every
- * `qgl*` pointer through `SDL_GL_GetProcAddress`, core names included, and a single
- * NULL makes `GLimp_GetProcAddresses` return false and the renderer refuse to start:
- *
- *     #define GLE( ret, name, ... ) qgl##name = (name##proc *)
- * SDL_GL_GetProcAddress("gl" #name); \ if ( qgl##name == NULL ) { ...ERROR: Missing
- * OpenGL function...; success = qfalse; }
- *
- * Measured on q3rally before this file existed: it links with nothing undefined - every
- * one of those functions *is* in the payload - and asks for 66 of them by name, of
- * which the table answered **none**. A title in exactly that state boots, opens the
- * display, prints 66 "Missing OpenGL function" lines and stops.
- * `oops-apps/src/oops-titles/q3rally/scripts/gl-surface.sh` is the measurement, and it
- * is worth running for any port that binds GL through a pointer table.
- *
- * # What is in here
- *
- * **Every entry point `GL/gl.h` declares that the always-linked GL objects define** -
- * the set `common/app.mk` calls `OOPS_GL_SRCS`, so not `glut.c` or `gl_glu.c`, whose
- * names would be undefined for a title that does not take those features and would fail
- * its link. 485 of them, derived rather than chosen; `gl_procs.h` keeps the extensions
+ * The core entry points a title can resolve by name; `gl_procs.h` keeps the extensions
  * and their suffixed spellings.
  *
- * oops-gl's own entry points are here too - `glContextSetVersion`,
- * `glGetFrameReadback`, `glGetHardwareStatus` and the rest. They are declared in the
- * same header and they resolve, so a program that asks for one by name should get it.
+ * An engine that resolves everything by string needs core names too: ioquake3's
+ * `sdl_glimp.c:269` fills every `qgl*` pointer through `SDL_GL_GetProcAddress`, and a
+ * single NULL makes the renderer refuse to start.
+ * `oops-apps/src/oops-titles/q3rally/scripts/gl-surface.sh` lists the names a port asks
+ * for.
  *
- * **A name here that does not exist is a compile error**, because each appears as an
- * identifier as well as a string. That is what keeps the list from rotting, and it is
- * the same property `gl_procs.h` relies on.
+ * The list is every entry point `GL/gl.h` declares that the always-linked GL objects
+ * define - `common/app.mk`'s `OOPS_GL_SRCS`, so not `glut.c` or `gl_glu.c` - including
+ * oops-gl's own (`glContextSetVersion`, `glGetFrameReadback`). Each name appears as an
+ * identifier as well as a string, so a name that does not exist is a compile error.
  */
 #ifndef OOPS_GL_PROCS_CORE_H
 #define OOPS_GL_PROCS_CORE_H

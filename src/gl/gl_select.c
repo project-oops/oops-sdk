@@ -1,53 +1,16 @@
 /*
  * oops-gl: selection and feedback
  *
- * GL has three render modes. GL_RENDER draws. In GL_SELECT and GL_FEEDBACK every
- * primitive goes through the same transform, lighting and clipping, and then **is
- * reported instead of drawn**:
- *
- * - GL_SELECT keeps a stack of names the program pushes around each object, and records
- * a *hit*
- *   - the names on the stack, with the nearest and farthest window depth - whenever a
- * primitive survives clipping and culling. Drawn again under a pick matrix that shrinks
- * the view to a few pixels around the cursor, the scene's hits are what is under the
- * mouse. That is how a great many GL 1.x programs pick.
- * - GL_FEEDBACK writes each primitive as a token and its clipped vertices - window
- * coordinates, and optionally colour and texture coordinate - into a float buffer. It
- * is how a program turns what it would draw into vectors: PostScript and PDF export are
- * built on it.
- *
- * Nothing reaches the framebuffer in either mode, glClear included (Mesa
- * main/clear.c:185).
- *
- * # Where this sits
- *
- * Primitive assembly (gl_assemble) calls in here instead of the rasteriser, per
- * triangle of a polygon and per line and point **before** a line or point is widened
- * into the triangles that draw it. So the geometry reported is GL's - a line is two
- * endpoints, not a quad - and the one path serves glBegin/glEnd, the vertex arrays,
- * display lists and evaluators alike.
- *
- * # Clipping is real here
- *
- * The drawing path does not clip geometrically: it interpolates clip distances and
- * rejects per fragment, which gives the same pixels. Selection and feedback have no
- * pixels - they report geometry, and a hit's depth range and a feedback polygon's
- * vertices are those *after clipping*. So this clips properly, in homogeneous clip
- * space against the six view-volume planes and every enabled user plane (in eye space),
- * carrying the colour and texture coordinate along: a polygon with Sutherland-Hodgman,
- * a line by its entry and exit parameters.
- *
- * # What follows Mesa, and what cannot
- *
- * The semantics are Mesa's main/feedback.c: the hit record's layout and its depths
- * scaled to 2^32-1, the counts that run on past a full buffer so glRenderMode can
- * answer -1, the name-stack calls ignored outside GL_SELECT, and a triangle at a time
- * reported as GL_POLYGON_TOKEN (Mesa's state_tracker/st_cb_feedback.c does the same).
- * Two things differ, both from how vertices are kept here: a feedback texture
- * coordinate is (s/q, t/q, 0, 1) - the vertex carries its coordinate already divided,
- * which is the same point projectively and loses only r, which no texture here reads -
- * and the pixel-rectangle tokens report the raster colour and coordinate as glRasterPos
- * latched them.
+ * In GL_SELECT and GL_FEEDBACK every primitive is transformed, lit and clipped, then
+ * reported instead of drawn: GL_SELECT records a hit (the name stack and the depth
+ * range) for each surviving primitive, GL_FEEDBACK writes tokens and clipped vertices
+ * into a float buffer. Nothing reaches the framebuffer, glClear included (Mesa
+ * main/clear.c:185). Primitive assembly calls in here before lines and points are
+ * widened, so the reported geometry is GL's. Unlike the drawing path, this clips
+ * geometrically in clip space (Sutherland-Hodgman for polygons), because hits and
+ * feedback report post-clip vertices. The semantics follow Mesa main/feedback.c and
+ * state_tracker/st_cb_feedback.c; pixel-rectangle tokens report the raster colour and
+ * coordinate as glRasterPos latched them.
  */
 
 #include "gl_internal.h"
@@ -106,8 +69,8 @@ static void gl_fb_put(gl_context_t *ctx, float value) {
 }
 
 /* glRenderMode answers for the mode being left: the hit count, the number of feedback
- * values, or 0 from GL_RENDER - and -1 for a buffer that overflowed. **A refused call
- * changes nothing**: the new mode is checked before the old one is left, so GL_SELECT
+ * values, or 0 from GL_RENDER - and -1 for a buffer that overflowed. A refused call
+ * changes nothing: the new mode is checked before the old one is left, so GL_SELECT
  * without a selection buffer is GL_INVALID_OPERATION and the program stays where it
  * was. (Mesa raises the error and switches anyway, main/feedback.c _mesa_RenderMode.)
  */
@@ -320,10 +283,8 @@ static void gl_fb_vertex(gl_context_t *ctx, const gl_vertex_t *v, const float *f
     } else {
         gl_fb_colour(ctx, v, out->col);
     }
-    /* The vertex's texture coordinate, all four and undivided - what GL's feedback
-     * reports. This was s/q and t/q with r 0 and q 1 until the rasteriser took the
-     * divide over (2026-09-19). Unit 0's, as Mesa's feedback takes it
-     * (state_tracker/st_cb_feedback.c:114-118). */
+    /* Unit 0's texture coordinate, all four components undivided, as Mesa's feedback
+     * reports it (state_tracker/st_cb_feedback.c:114-118). */
     for (int i = 0; i < 4; i++)
         out->tc[i] = v->tc[0][i];
 }
@@ -550,9 +511,8 @@ void gl_fb_point(gl_context_t *ctx, const gl_vertex_t *p) {
 
 /* One triangle of a polygon primitive. Clipped first, because the facing is decided on
  * what is left of it in window space and a triangle wholly outside is no hit at all;
- * then culled, since
- * **a culled polygon is no hit** either; then reported the way glPolygonMode says for
- * its face - as a polygon, as its boundary edges, or as the vertices that start them.
+ * then culled, since a culled polygon is no hit either; then reported the way
+ * glPolygonMode says for its face - as a polygon, its boundary edges, or its vertices.
  */
 void gl_fb_polygon_tri(gl_context_t *ctx, const gl_vertex_t *v0, const gl_vertex_t *v1,
                        const gl_vertex_t *v2, unsigned edges, GLboolean use_flags,

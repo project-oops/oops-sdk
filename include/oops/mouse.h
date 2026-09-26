@@ -13,18 +13,13 @@ extern "C" {
  *
  * Relative motion, buttons, wheel and tilt in OOPS's own shape.
  *
- * # State of this subsystem, honestly
- *
- * obSCEne's 101-input-ext measured it on 12.40. The library and its four entry
- * points resolve in the app context. In the payload context the mouse symbols
- * in libkernel are unlinked stubs (obSCEne 101-input-ext, sweep
- * 20260909-090807), and in the eboot context nothing resolves. So availability
- * below is real detection, and a payload should expect it to say no. The record
- * (documented at 40 bytes) is still unconfirmed: with no mouse attached the
- * read wrote nothing, so its extent was not measured. The read path is
- * capture-gated and refuses with OOPS_MOUSE_ELAYOUT rather than parse a guess.
- * A distinct code, not zero samples, so a caller can tell "no motion" from "no
- * reader".
+ * On 12.40 (obSCEne probe 101-input-ext) the library and its four entry points
+ * resolve in the app context; in the payload context the mouse symbols in
+ * libkernel are unlinked stubs, and in the eboot context nothing resolves, so a
+ * payload should expect availability to say no. The record (documented at 40
+ * bytes) is unconfirmed: with no mouse attached the read writes nothing. The read
+ * refuses with OOPS_MOUSE_ELAYOUT rather than parse a guess, a distinct code so a
+ * caller can tell "no motion" from "no reader".
  */
 
 enum {
@@ -74,9 +69,8 @@ int oops_mouse_available(void);
  * Drain up to `max_samples` (cap OOPS_MAX_MOUSE_SAMPLES) mouse samples, oldest
  * first, and return the count. Negative is one of the codes above.
  *
- * NOTE: capture-gated. The platform mouse-record layout is unconfirmed, so this
- * returns OOPS_MOUSE_ELAYOUT until the obSCEne capture lands, never a
- * fabricated count.
+ * The platform mouse-record layout is unconfirmed, so this returns
+ * OOPS_MOUSE_ELAYOUT until a capture confirms it, never a fabricated count.
  */
 int oops_mouse_read(oops_mouse_state_t *out_samples, unsigned int max_samples);
 

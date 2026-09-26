@@ -1,12 +1,14 @@
+/*
+ * CPU 2D rasteriser for `oops_surface_t`: fills, lines, circles, 8x8 text and blits, in
+ * linear or 64KB_R_X tiled layout, opaque or straight-alpha source-over.
+ */
 #include "oops/draw.h"
 #include "agc/tiler.h"
 #include <stddef.h>
 #include <stdint.h>
 
-/* The 8x8 bitmap font now lives in a shared header, so the GL overlay (`src/hud/hud.c`)
- * bakes the same glyphs into a texture that this rasteriser draws a pixel at a time.
- * The local `FONT_*` spellings below are kept so the body of this file reads unchanged.
- */
+/* The 8x8 font is shared with the GL overlay (`src/hud/hud.c`), which bakes the same
+ * glyphs into a texture. */
 #include "font8x8.h"
 
 #define FONT_FIRST OOPS_FONT8X8_FIRST
@@ -14,11 +16,8 @@
 #define FONT_WIDTH OOPS_FONT8X8_WIDTH
 #define FONT_HEIGHT OOPS_FONT8X8_HEIGHT
 
-/* oops_display_get_surface is the display's (src/display.c): which buffer the
- * next flip shows is its to know. Nothing here reaches the display. */
-
 /*
- * **A pixel's index in a surface, in either layout** (<oops/draw.h>). Linear
+ * A pixel's index in a surface, in either layout (<oops/draw.h>). Linear
  * is rows `pitch` apart. OOPS_SURFACE_RX is 128 x 128 blocks row by row, `pitch`
  * pixels to a row of blocks, each block in the GPU's 64KB_R_X order.
  * agc_tile_pixel gives that order as the XOR of one term per coordinate bit, so
@@ -49,8 +48,7 @@ static inline size_t oops_surf_index(const oops_surface_t *s, uint32_t x, uint32
     return (size_t)y * s->pitch + (size_t)x;
 }
 
-/* One row's span [x0, x1) set to `color`, or `color` composited over it. The
- * linear case keeps the row pointer it always had. */
+/* One row's span [x0, x1) set to `color`. */
 static void oops_span_fill(oops_surface_t *s, int y, int x0, int x1,
                            oops_color_t color) {
     if (s->layout == OOPS_SURFACE_RX) {

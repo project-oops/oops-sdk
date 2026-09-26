@@ -2,6 +2,9 @@
 #include "tests/test_common.h"
 #include <math.h>
 
+/* Unit tests for `oops/math.h` and the libc math replacements. */
+
+/* The scalar helpers (abs, min/max, clamp, rounding, sqrt) give exact answers. */
 static void test_math_scalar_basic(void) {
     ASSERT_FLOAT_NEAR(oops_fabsf(-5.5f), 5.5f, 1e-6f);
     ASSERT_FLOAT_NEAR(oops_fabsf(5.5f), 5.5f, 1e-6f);
@@ -33,6 +36,7 @@ static void test_math_scalar_basic(void) {
     ASSERT_FLOAT_NEAR(oops_fmodf(10.0f, 5.0f), 0.0f, 1e-4f);
 }
 
+/* The float trigonometric functions agree with known values. */
 static void test_math_trigonometry(void) {
     ASSERT_FLOAT_NEAR(oops_sinf(0.0f), 0.0f, 1e-5f);
     ASSERT_FLOAT_NEAR(oops_sinf(OOPS_HALF_PI), 1.0f, 1e-4f);
@@ -55,6 +59,7 @@ static void test_math_trigonometry(void) {
     ASSERT_FLOAT_NEAR(oops_atan2f(0.0f, -1.0f), OOPS_PI, 1e-3f);
 }
 
+/* exp, log and pow agree with known values. */
 static void test_math_exp_log_pow(void) {
     ASSERT_FLOAT_NEAR(oops_expf(0.0f), 1.0f, 1e-5f);
     ASSERT_FLOAT_NEAR(oops_expf(1.0f), 2.71828182f, 1e-3f);
@@ -71,6 +76,7 @@ static void test_math_exp_log_pow(void) {
     ASSERT_FLOAT_NEAR(oops_powf(-2.0f, 3.0f), -8.0f, 1e-3f);
 }
 
+/* Vector arithmetic, dot, cross and normalise give exact results. */
 static void test_math_vector3(void) {
     oops_vec3_t a = oops_vec3_make(1.0f, 2.0f, 3.0f);
     oops_vec3_t b = oops_vec3_make(4.0f, -5.0f, 6.0f);
@@ -94,6 +100,7 @@ static void test_math_vector3(void) {
     ASSERT_FLOAT_NEAR(oops_vec3_length(norm), 1.0f, 1e-5f);
 }
 
+/* Matrix construction, multiplication and transforms give exact results. */
 static void test_math_matrix4(void) {
     oops_mat4_t id;
     oops_mat4_identity(&id);
@@ -139,18 +146,10 @@ static void test_math_matrix4(void) {
 }
 
 /*
- * `ldexp` and `frexp`, which are written out in `src/system/libc.c` rather than handed
- * to a builtin.
- *
- * They were `__builtin_ldexp` and `__builtin_frexp`, which have no inline lowering on
- * x86-64: clang emitted a call to `ldexp` from inside `ldexp`. **A host test cannot
- * catch that** - the host compiles with a different baseline and lowers the builtin
- * inline - so what is checked here is the arithmetic of the replacements, and the
- * recursion is caught by sweeping the built objects for a function that relocates
- * against itself.
- *
- * The pairs matter more than the individual answers: `frexp` promises a significand in
- * [0.5, 1) and an exponent that puts it back, and `ldexp` is what puts it back.
+ * `ldexp` and `frexp` (written out in `src/system/libc.c`) round-trip: `frexp` gives a
+ * significand in [0.5, 1) and an exponent, and `ldexp` puts them back. The builtins
+ * lower to a call to the function itself on the target, which a host test cannot see;
+ * that recursion is caught by sweeping the built objects instead.
  */
 static void test_math_ldexp_and_frexp_round_trip(void) {
     int e = 12345;
@@ -202,26 +201,17 @@ static void test_math_ldexp_and_frexp_round_trip(void) {
 }
 
 /*
- * The double kernels, against the host's own libm.
- *
- * **The first case is the one that matters and it is not about accuracy.** Extreme Tux
- * Racer's quaternion interpolation asks `acos` for an argument a hair below 1 -
- * upstream guards the singularity at 1e-13, which is generous for a double and
- * invisible to a float. A float-backed `acos` returns a flat 0 there, so upstream's
- * `sin(acos(x))` divisor is 0, the interpolation is `0/0`, and a NaN quaternion reaches
- * the course lookup and faults two layers down. The assertion below fails on the old
- * implementation and passes on this one.
- *
- * The rest compare against `<math.h>` because the host build has a real libm and a
- * hand-written kernel is exactly the kind of code that is wrong in the third digit of
- * the fifth case.
+ * The double kernels are double precision and agree with the host's libm. `acos` of an
+ * argument a hair below 1 must not be 0: quaternion interpolation guards its
+ * singularity at 1e-13, and a float-backed `acos` turns `sin(acos(x))` into a zero
+ * divisor there.
  */
 static void test_math_double_precision(void) {
-    /* The case that cost a day on hardware. */
+    /* Just below 1, where float precision rounds to 0. */
     const double near_one = 1.0 - 1e-13;
     ASSERT_TRUE(oops_acos(near_one) > 1e-7);
     ASSERT_TRUE(fabs(oops_acos(near_one) - acos(near_one)) < 1e-9);
-    ASSERT_TRUE(oops_sin(oops_acos(near_one)) > 1e-7); /* the divisor that was zero */
+    ASSERT_TRUE(oops_sin(oops_acos(near_one)) > 1e-7); /* the divisor, not zero */
 
     /* sqrt is exact, so it is compared exactly. */
     ASSERT_TRUE(oops_sqrt(2.0) == sqrt(2.0));

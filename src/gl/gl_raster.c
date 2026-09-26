@@ -1,30 +1,14 @@
 /*
  * oops-gl: the raster position, and the pixel operations that draw at it
  *
- * `glRasterPos` is a vertex that is never drawn. It goes through the whole transform -
- * modelview, projection, the clip test, the viewport map - and what comes out is
- * remembered in window coordinates, together with the colour and texture coordinate
- * current at the time. `glDrawPixels` and `glBitmap` then draw there.
- *
- * # An invalid position draws nothing
- *
- * If the point clips, the raster position is marked **invalid** and every subsequent
- * `glDrawPixels` and `glBitmap` is a no-op until a valid position is set. That is the
- * specification's rule and it is worth stating because the tempting alternative - clamp
- * to the nearest edge and draw anyway - puts an image somewhere the program never asked
- * for. A program that scrolls text off the side of the screen would get it piled up
- * against the edge instead of disappearing.
- *
- * # Their pixels are fragments
- *
- * There is no primitive assembly here and nothing goes through the triangle rasteriser,
- * but each pixel of a rectangle is a **fragment**, and it meets what any fragment does
- * - the texture environment, fog, the scissor, alpha, stencil and depth tests,
- * blending, the logic op and the masks - through gl_pixel_fragment, the triangle
- * rasteriser's own tail. (Until 2026-09-19 they were written into the colour buffer
- * directly, past all of it.) On the hardware path that means the CPU touches the render
- * target, so a frame that has draws built but not submitted must be flushed first - the
- * same rule the shader payload and texture storage follow.
+ * `glRasterPos` is a vertex that is never drawn: it is transformed, clip-tested and
+ * mapped to the window, and remembered with the colour and texture coordinate current
+ * at the time. `glDrawPixels` and `glBitmap` then draw there. If the point clips, the
+ * position is invalid and those calls draw nothing until a valid one is set, as the
+ * specification says. Each pixel of a rectangle is a fragment and meets every fragment
+ * operation through gl_pixel_fragment, the triangle rasteriser's tail. On the hardware
+ * path the CPU then touches the render target, so a frame with unsubmitted draws is
+ * flushed first, as for the shader payload and texture storage.
  */
 
 #include "gl_internal.h"
@@ -61,12 +45,11 @@ static int gl_ceil_i(float v) {
     return ((float)i < v) ? i + 1 : i;
 }
 
-/* **The window columns (or rows) pixel `n` of a rectangle covers**, zoomed by `z` from
+/* The window columns (or rows) pixel `n` of a rectangle covers, zoomed by `z` from
  * the raster coordinate `r`: those whose centres lie in [r + z n, r + z (n + 1)),
  * GL 1.x 3.6.5's rule. A zoom of 1 is one fragment a pixel, a larger one a block, a
  * fractional one sometimes none, and a negative one a mirror. `*lo > *hi` when it
- * covers none. This truncated the raster position and stepped by whole pixels until
- * 2026-09-19, which put a mirrored image one column over. */
+ * covers none. */
 static void gl_zoom_span(float r, float z, int n, int *lo, int *hi) {
     float a = r + z * (float)n, b = r + z * (float)(n + 1);
     if (a > b) {
@@ -125,12 +108,8 @@ static void gl_raster_frag_colour(const gl_context_t *ctx, float c[4]) {
     }
 }
 
-/* The transform, shared by every spelling.
- *
- * The clip test is the ordinary one: a point is inside when each of its clip
- * coordinates is within +/- w. Failing it sets the position invalid rather than
- * recording an error - GL has no error for a clipped raster position, it simply stops
- * drawing. */
+/* The transform, shared by every spelling. A point is inside when each clip coordinate
+ * is within +/- w; failing that sets the position invalid, which is not an error. */
 void glRasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     if (gl_list_recording() && GL_LIST_REC(GL_LIST_OP_RASTER_POS, gl_la_f(x),
                                            gl_la_f(y), gl_la_f(z), gl_la_f(w)))
@@ -139,10 +118,8 @@ void glRasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     if (!ctx)
         return;
 
-    /* The combined matrix is computed lazily and only the draw path used to ask for it.
-     * A raster position is a vertex too, so it has to ask as well - without this it
-     * transforms through whatever the last draw left behind, or through zeroes if
-     * nothing has drawn yet. */
+    /* The combined matrix is computed lazily, so a raster position asks for it as a
+     * draw does. */
     gl_update_mvp(ctx);
 
     const float obj[4] = {x, y, z, w};
@@ -161,14 +138,10 @@ void glRasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     }
 
     /* The colour and texture coordinate are latched whether or not the position is
-     * valid: the specification says they are always updated, and a program may read
-     * them back.
-     *
-     * **They are a vertex's, processed as a vertex's are**: the colour lit when
-     * lighting is on, the texture coordinate through generation and the texture matrix
-     * (Mesa main/rastpos.c, shade_rastpos and the TRANSFORM_POINT after
-     * compute_texgen). Both were the current values copied raw until 2026-09-19, so a
-     * glBitmap label under lighting came out in its unlit colour. */
+     * valid, as the specification says. They are processed as a vertex's are: the
+     * colour lit when lighting is on, the texture coordinate through generation and the
+     * texture matrix (Mesa main/rastpos.c, shade_rastpos and the TRANSFORM_POINT after
+     * compute_texgen). */
     if (ctx->cap_lighting) {
         gl_compute_lighting(ctx, obj, ctx->cur_normal, ctx->cur_color,
                             ctx->raster_color);
@@ -204,8 +177,7 @@ void glRasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     ctx->raster_pos[2] = ndc_z * (ctx->depth_far - ctx->depth_near) * 0.5f +
                          (ctx->depth_far + ctx->depth_near) * 0.5f;
     /* The clip w itself, as Mesa keeps it (main/rastpos.c:454) and
-     * GL_CURRENT_RASTER_POSITION reports it. This held 1/w until 2026-09-19, which
-     * nothing read but the query. */
+     * GL_CURRENT_RASTER_POSITION reports it. */
     ctx->raster_pos[3] = cw;
     /* The eye-space distance, which is what GL_CURRENT_RASTER_DISTANCE reports and what
      * fog would use. Computed from the modelview alone, not the combined matrix. Under
@@ -305,7 +277,7 @@ void glRasterPos4sv(const GLshort *v) {
         glRasterPos4s(v[0], v[1], v[2], v[3]);
 }
 
-/* **glWindowPos** (GL 1.4): the raster position in window coordinates, set rather than
+/* glWindowPos (GL 1.4): the raster position in window coordinates, set rather than
  * transformed - Mesa's window_pos3f (main/rastpos.c). Always valid; z clamped to [0, 1]
  * and put through the depth range; w 1; the colour and texture coordinate the current
  * ones, neither lit nor generated nor put through the texture matrix; the raster
@@ -390,10 +362,8 @@ void glWindowPos3sv(const GLshort *v) {
         glWindowPos3s(v[0], v[1], v[2]);
 }
 
-/* **GL_ARB_window_pos' own spellings** (2026-09-19): the extension came before GL 1.4
- * took it into the core, and a program of that era - one drawing a bitmap font,
- * typically - calls these names after finding the extension in glGetString's list. Each
- * is the core function. */
+/* GL_ARB_window_pos' spellings, for programs written before GL 1.4. Each is the core
+ * function. */
 void glWindowPos2dARB(GLdouble x, GLdouble y) {
     glWindowPos2d(x, y);
 }
@@ -455,39 +425,27 @@ void glPixelZoom(GLfloat xfactor, GLfloat yfactor) {
 }
 
 /* The colour buffer is about to be written by the CPU, so a frame with draws built into
- * it has to be submitted first - the same rule glDeleteTextures and the shader payload
- * follow. **And the CP's copy of it goes stale.** A read after this one would otherwise
- * take a copy made before the write (gl_color_read_source). glDrawPixels and
- * glReadPixels with no draw between them read the old pixels on the console until
- * 2026-09-19. */
+ * it is submitted first, the rule glDeleteTextures and the shader payload follow. The
+ * CP's readback copy goes stale, so a later read does not take a copy made before the
+ * write (gl_color_read_source). */
 static void gl_raster_sync(gl_context_t *ctx) {
 #ifndef OOPS_HOST_BUILD
     if (ctx->use_hardware && ctx->hw_frame_active) {
         gl_hw_flush(ctx);
     }
 #endif
-    /* **Both copies go stale**, because the CPU writes a two-target draw's pixels into
-     * both buffers (gl_draw_targets' `fb_also`). Dropping only the primary's tag would
-     * leave the second target answering reads from a copy made before the write. */
+    /* Both copies go stale, because the CPU writes a two-target draw's pixels into both
+     * buffers (gl_draw_targets' `fb_also`). */
     ctx->readback_of = NULL;
     ctx->readback_also_of = NULL;
 }
 
 /*
- * **The other end of gl_raster_sync**: the CPU has finished putting pixels into the
- * colour buffer, so the frame is no longer the clear it started as, and the words owe a
- * drain before anything reads them back.
- *
- * On the scanout path the colour buffer is write-combined display memory, and a WC
- * store is not ordered against a later load, so the CP's DMA in `gl_hw_flush` can read
- * a store that has not drained. **That is a real hazard and it was not the one that
- * made six of these checks fail** - the console returned the same eight pixels with
- * this in place and without it. The reason was `glGetFrameReadbackSampled` handing back
- * a copy taken at the last submit; see gl_context.c.
- *
- * Every path in this file that wrote a fragment ends here. That is six places rather
- * than four, because glDrawPixels and glCopyPixels each have a depth-or-stencil arm
- * that returns early.
+ * The other end of gl_raster_sync: the CPU has finished putting pixels into the colour
+ * buffer, so the frame is no longer a bare clear, and the stores are drained before
+ * anything reads them back. On the scanout path the colour buffer is write-combined,
+ * and a WC store is not ordered against the CP's later DMA in `gl_hw_flush`. Every path
+ * in this file that wrote a fragment ends here.
  */
 static void gl_raster_wrote(gl_context_t *ctx) {
     ctx->fb_cleared = GL_TRUE;
@@ -510,9 +468,7 @@ void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type,
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
-    /* Every format and type gl_pixel.c reads - GL_RGBA, GL_RGB and GL_LUMINANCE bytes
-     * were the only ones until 2026-09-19, so a BGRA, alpha or float image was refused
-     * here while the same image uploaded as a texture. */
+    /* Every format and type gl_pixel.c reads. */
     gl_pixel_fmt_t f;
     const GLenum fmt_err = gl_pixel_fmt(format, type, &f);
     if (fmt_err != GL_NO_ERROR) {
@@ -527,8 +483,7 @@ void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type,
     }
     if (!pixels || width == 0 || height == 0)
         return;
-    /* Not an error - the specification says an invalid raster position simply draws
-     * nothing. */
+    /* Not an error: an invalid raster position draws nothing. */
     if (!ctx->raster_valid || !ctx->framebuffer)
         return;
 
@@ -540,11 +495,10 @@ void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type,
     gl_pixel_frags_t pf;
     gl_pixel_frags_begin(ctx, &pf);
 
-    /* **Depth and stencil rectangles** (GL 1.0; refused until 2026-09-19). A depth
-     * pixel is a fragment in the raster colour at its own z, through every fragment
-     * operation - so the depth test decides whether it lands, and a disabled one writes
-     * no depth at all, as GL says. A stencil index is written straight into the stencil
-     * buffer. */
+    /* Depth and stencil rectangles (GL 1.0). A depth pixel is a fragment in the raster
+     * colour at its own z, through every fragment operation - so the depth test decides
+     * whether it lands, and a disabled one writes no depth at all, as GL says. A
+     * stencil index is written straight into the stencil buffer. */
     if (f.kind == GL_DEPTH || f.kind == GL_STENCIL) {
         float colour[4];
         gl_raster_frag_colour(ctx, colour);
@@ -569,8 +523,8 @@ void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type,
         for (int sx = 0; sx < width; sx++) {
             float c[4];
             if (f.kind == GL_COLOR_INDEX) {
-                /* A colour index, through the index maps - GL 1.0 in an RGBA context,
-                 * refused until 2026-09-19. The maps stand in for the RGBA transfer. */
+                /* A colour index, through the index maps, which stand in for the RGBA
+                 * transfer. */
                 gl_unpack_index_rgba(ctx, &f, row, sx, s.swap, c);
             } else {
                 gl_unpack_pixel_f(&f, row + (size_t)sx * f.pixel_bytes, s.swap, c);
@@ -606,8 +560,7 @@ void glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type) 
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
-    /* GL_COLOR, GL_DEPTH or GL_STENCIL - the last two refused until 2026-09-19, though
-     * they are GL 1.0's. */
+    /* GL_COLOR, GL_DEPTH or GL_STENCIL. */
     if (type != GL_COLOR && type != GL_DEPTH && type != GL_STENCIL) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
@@ -628,7 +581,7 @@ void glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type) 
 
     gl_raster_sync(ctx);
 
-    /* **A depth or stencil copy**: the source rectangle read whole first, as the colour
+    /* A depth or stencil copy: the source rectangle read whole first, as the colour
      * copy is, then each value through its transfer once - GL_DEPTH_SCALE/BIAS and the
      * clamp, or the index shift, offset and map - and drawn as glDrawPixels draws that
      * format. */
@@ -684,13 +637,10 @@ void glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type) 
         return;
     }
 
-    /* **The whole source is read before anything is written.** GL defines the copy as a
-     * glReadPixels followed by a glDrawPixels, and the two rectangles may overlap: this
-     * read and wrote pixel by pixel until 2026-09-19, so a copy one row up - or one
-     * column right - read back pixels it had just written and smeared the first row or
-     * column across the rest. Source pixels outside the buffer are undefined in GL;
-     * they are left out here. The source is the buffer glReadBuffer names, the
-     * destination the ones glDrawBuffer does. */
+    /* The whole source is read before anything is written: GL defines the copy as a
+     * glReadPixels followed by a glDrawPixels, and the rectangles may overlap. Source
+     * pixels outside the buffer are undefined in GL and left out here. The source is
+     * the buffer glReadBuffer names, the destination the ones glDrawBuffer does. */
     const size_t n = (size_t)width * (size_t)height;
     uint32_t *src = (uint32_t *)gl_raster_scratch(n * sizeof(uint32_t));
     if (!src) {
@@ -741,22 +691,17 @@ void glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type) 
     gl_raster_wrote(ctx);
 }
 
-/* A bitmap is one bit per pixel, drawn in the current raster colour, and it **moves the
- * raster position** by (xmove, ymove) afterwards. That last part is what makes a string
- * of glBitmap calls lay out text, and leaving it out gives a program that draws every
- * glyph on top of the first one.
- *
- * Rows are packed most-significant-bit first and padded to the unpack alignment, like
- * any other pixel rectangle. A zero-sized bitmap is legal and still moves the position
- * - that is how a space character is drawn. */
+/* A bitmap is one bit per pixel, drawn in the current raster colour, and it moves the
+ * raster position by (xmove, ymove) afterwards, which is how glBitmap lays out text.
+ * Rows are packed most-significant-bit first and padded to the unpack alignment. A
+ * zero-sized bitmap is legal and still moves the position. */
 void glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig,
               GLfloat xmove, GLfloat ymove, const GLubyte *bitmap) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
         return;
     /* Compiled with the bits copied - one bit per pixel, read through the unpack state
-     * of now, packed tight and most significant bit first for the replay. This is how
-     * bitmap fonts in display lists work, which is most of what glBitmap is used for.
+     * of now, packed tight and most significant bit first for the replay.
      */
     if (gl_list_recording()) {
         void *bits = (void *)0;
@@ -794,8 +739,7 @@ void glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig,
         gl_raster_sync(ctx);
 
         /* The raster colour, clamped as a fragment's is - the raster position keeps it
-         * unclamped when unlit, as Mesa's does (main/rastpos.c:497-499). A negative
-         * channel came out at full intensity here until 2026-09-19. */
+         * unclamped when unlit, as Mesa's does (main/rastpos.c:497-499). */
         float c[4];
         for (int i = 0; i < 4; i++) {
             const float k = ctx->raster_color[i];
@@ -830,16 +774,13 @@ void glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig,
  * The accumulation buffer
  *
  * RGBA as signed 16-bit fractions of one - Mesa's MESA_FORMAT_RGBA_SNORM16
- * (main/accum.c) - on the CPU, allocated on first use. Every operation reads or writes
- * the colour buffer through the same doors glReadPixels and glDrawPixels use: a flush
- * first, so what the GPU drew has landed, then the readback copy (or, on the host, the
- * framebuffer) to read and the framebuffer to write. That makes it work on the hardware
- * path as it stands, with no register or shader involved.
+ * (main/accum.c) - on the CPU, allocated on first use. Every operation reaches the
+ * colour buffer as glReadPixels and glDrawPixels do: a flush first, then the readback
+ * copy (or, on the host, the framebuffer) to read and the framebuffer to write.
  *
  * Mesa's arithmetic, with two differences: products are rounded rather than truncated,
  * and every result is clamped to the buffer's range where Mesa's GLshort arithmetic
- * wraps - a GL_ACCUM that overflowed used to come back as a large negative value, which
- * is the one answer nothing could want.
+ * wraps.
  * ------------------------------------------------------------------------- */
 
 static void *gl_accum_alloc(size_t bytes) {
@@ -1114,9 +1055,8 @@ void glGetPolygonStipple(GLubyte *mask) {
  * it (_mesa_map_rgba, _mesa_lroundevenf).
  *
  * The other half of the state - the index shift and offset, the colour-index and
- * stencil maps, GL_MAP_STENCIL, the depth scale and bias - is kept, compiled, saved and
- * queried, and acts on nothing: it applies to colour-index, stencil and depth
- * rectangles, and those formats are refused by every pixel entry point here.
+ * stencil maps, GL_MAP_STENCIL, the depth scale and bias - applies to colour-index,
+ * stencil and depth rectangles (gl_pixel.c).
  * ------------------------------------------------------------------------- */
 
 GLboolean gl_pixel_transfer_active(const gl_context_t *ctx) {
@@ -1260,8 +1200,8 @@ static GLboolean gl_pixel_map_is_index(GLenum map) {
 }
 
 /* Checked in Mesa's order - the size, then the map, then a size that must be a power of
- * two (main/pixel.c, _mesa_PixelMapfv). **Every map indexed by a colour index or a
- * stencil index must be a power of two in size, GL_PIXEL_MAP_I_TO_I included**: Mesa's
+ * two (main/pixel.c, _mesa_PixelMapfv). Every map indexed by a colour index or a
+ * stencil index must be a power of two in size, GL_PIXEL_MAP_I_TO_I included: Mesa's
  * range check starts at GL_PIXEL_MAP_S_TO_S and so lets an I_TO_I of any size through.
  * A null array with a valid size does nothing, as it does in Mesa without a pixel
  * buffer bound.

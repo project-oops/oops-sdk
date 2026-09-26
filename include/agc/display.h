@@ -1,3 +1,7 @@
+/*
+ * The Prospero display backend behind <oops/display.h>: a linear framebuffer tiled
+ * onto VideoOut scanout buffers, or scanout buffers drawn in place.
+ */
 #ifndef OOPS_AGC_DISPLAY_H
 #define OOPS_AGC_DISPLAY_H
 
@@ -37,9 +41,9 @@ int agc_display_wait_scanout(agc_display_t *disp);
 int agc_display_flip_scanout(agc_display_t *disp);
 /* Open the display naming buffers the caller allocated alongside its own pair,
  * so a renderer can be scanned out of its own target with no copy. VideoOut
- * registration is single-shot (obSCEne `-9a4c`), so this is the only chance to
- * name them - there is no adding one later. `adopt` may be null with a count of
- * zero, which is exactly agc_display_open. */
+ * registration is single-shot (see oops_display_open_adopting), so this is the
+ * only chance to name them. `adopt` may be null with a count of zero, which is
+ * exactly agc_display_open. */
 agc_display_t *agc_display_open_adopting(unsigned int width, unsigned int height,
                                          void *const *adopt, int adopt_count);
 /* The flip index the nth adopted buffer was given, or -1. */
@@ -49,8 +53,8 @@ int agc_display_flip_index(agc_display_t *disp, int index);
 void agc_display_close(agc_display_t *disp);
 
 /*
- * Hardware bring-up for the RDNA2 compute tiler. NOT called by agc_display_open
- * and not called by anything else in this SDK: a caller has to ask for it.
+ * Hardware bring-up for the RDNA2 compute tiler. Nothing in this SDK calls it,
+ * agc_display_open included: a caller has to ask for it.
  *
  * Fills the linear surface with a pattern, tiles it onto one scanout buffer with
  * the compute shader and onto the other with agc_tile_surface(), and compares
@@ -62,9 +66,8 @@ void agc_display_close(agc_display_t *disp);
  *
  * The shader's dispatch interface was recovered by decoding the payload in
  * <agc/shader_tiler.h>, not measured (see the note in <agc/tiler.h>), and one
- * argument's meaning is still a guess. A wrong guess here is a malformed
- * dispatch, and a malformed dispatch can wedge the GPU - which a comparison
- * after the fact cannot undo. Run it on a device you can recover.
+ * argument's meaning is a guess. A wrong guess is a malformed dispatch, which can
+ * wedge the GPU before any comparison runs. Run it on a device you can recover.
  *
  * Returns 1 if GPU tiling is now enabled, 0 if it is not, negative on a bad
  * argument.

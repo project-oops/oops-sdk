@@ -1,30 +1,23 @@
 .text
-// The second texture unit's sample (since 2026-09-20): unit 1's coordinate interpolated from the
-// fourth parameter, its own image and sampler descriptors loaded from the second pair in the
-// table, and the texel left in v28..v31 for the second combine stage - see the paragraph on the
-// register range below, which is the reason it is not v16..v19.
+// The second texture unit's sample: unit 1's coordinate interpolated from the fourth parameter,
+// its own image and sampler descriptors loaded from the second pair in the table, and the texel
+// left in v28..v31 for the second combine stage.
 //
-// **Where it sits, and why there.** Inside the prolog's whole-quad region, immediately after
-// unit 0's sample and *before* exec is restored from s16. A sample taken outside whole-quad mode
-// has no helper pixels, so its implicit derivatives - its level of detail - are wrong along every
-// quad edge, which shows as a seam of the wrong mip level. Hoisting both samples above both
-// combines costs nothing: a sample depends on the coordinate, not on the combine before it, and
-// GL's order (unit 0 combined, then unit 1 against that result) is kept by the combine slots
-// that follow.
+// It sits inside the prolog's whole-quad region, immediately after unit 0's sample and before
+// exec is restored from s16. A sample outside whole-quad mode has no helper pixels, so its level
+// of detail is wrong along every quad edge. Hoisting both samples above both combines is free: a
+// sample depends on the coordinate, not on the combine before it, and the combine slots that
+// follow keep GL's order.
 //
 // The descriptors are the second pair of the table at 0x900: image at +0x40, sampler at +0x60,
-// where unit 0's are at +0x00 and +0x20 - the layout obSCEne's REQ-20260919T2258Z-8b1c asked
-// about and REQ-20260920T0745Z-9a41 re-asks, because that sweep reported no descriptor words at
-// all for its two-sample arm.
+// where unit 0's are at +0x00 and +0x20.
 //
 // v2 and v3 are unit 0's coordinate registers, dead once its sample has retired; v13 is fog's
-// scratch, which fog writes later. The texel goes to **v28..v31**, and the range matters: the
-// general combine form gathers its arguments into v16..v27 (gl_ps_combine_program), so a texel
-// left in v16..v19 would be overwritten by unit 0's own combine whenever its environment is
-// GL_COMBINE, GL_BLEND or GL_DECAL of an RGBA texture - correct for GL_MODULATE, wrong for the
-// modes that need a program, which is the worst shape a bug can have. The pixel shader's
-// SPI_SHADER_PGM_RSRC1 is 0x000c0010: VGPRS 0x10, which is 136 registers in wave32, so v28..v31
-// are allocated.
+// scratch, which fog writes later. The texel goes to v28..v31 because the general combine form
+// gathers its arguments into v16..v27 (gl_ps_combine_program), so a texel in v16..v19 would be
+// overwritten by unit 0's own combine under GL_COMBINE, GL_BLEND or GL_DECAL of an RGBA
+// texture. The pixel shader's SPI_SHADER_PGM_RSRC1 is 0x000c0010: VGPRS 0x10, which is 136
+// registers in wave32, so v28..v31 are allocated.
 v_interp_p1_f32 v2, v0, attr3.x         // unit 1's s
 v_interp_p2_f32 v2, v1, attr3.x
 v_interp_p1_f32 v3, v0, attr3.y         // t

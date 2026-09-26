@@ -2,6 +2,9 @@
 #include "oops/freestd.h"
 #include "tests/test_common.h"
 
+/* Unit tests for the RFC 1035 DNS client in `oops/net.h`, on in-memory packets. */
+
+/* NULL, empty and too-small arguments are refused by every entry point. */
 static void test_dns_null_and_bounds(void) {
     uint8_t buf[256];
     char ip[32];
@@ -21,6 +24,7 @@ static void test_dns_null_and_bounds(void) {
     ASSERT_EQ(oops_net_resolve("example.com", ip, 5), -1);
 }
 
+/* A query for an A record is laid out byte for byte as RFC 1035 4.1 says. */
 static void test_dns_build_query(void) {
     uint8_t buf[256];
     int len = oops_dns_build_query("example.com", 0x1234, buf, sizeof(buf));
@@ -56,6 +60,7 @@ static void test_dns_build_query(void) {
     ASSERT_EQ(buf[28], 0x01);
 }
 
+/* A response yields its A record's address; a wrong ID or an error RCODE is refused. */
 static void test_dns_parse_response(void) {
     uint8_t pkt[128];
     char ip[32];
@@ -120,6 +125,7 @@ static void test_dns_parse_response(void) {
     ASSERT_EQ(oops_dns_parse_response(pkt, pos, 0x5053, ip, sizeof(ip)), -1);
 }
 
+/* Dotted addresses resolve to themselves and "localhost" to 127.0.0.1 with no query. */
 static void test_dns_passthrough_and_localhost(void) {
     char ip[32];
 

@@ -1,3 +1,8 @@
+/*
+ * USB keyboard input through libSceKeyboard: key events for ports
+ * (`oops_keyboard_read`) and a keyboard-to-pad button mapping for menus
+ * (`oops_keyboard_poll_buttons`).
+ */
 #include "oops/keyboard.h"
 #include "oops/input.h"
 #include "oops/system.h"
@@ -27,43 +32,19 @@ __attribute__((weak)) int sceSysmoduleLoadModule(uint16_t id);
 #define OOPS_KEY_RECORD_BYTES 96
 
 /*
- * The record's fields, confirmed 2026-09-22 - **by an application, not a capture.**
- *
- * This was 0 for as long as the subsystem existed, on the reasoning that the 96-byte
- * size was measured but the meaning of the bytes was not, so a read would be parsing a
- * guess. That was right when it was written and had stopped being true without anyone
- * noticing.
- *
- * `oops_keyboard_poll_buttons` below reads this same record through the same
- * `sceKeyboardReadState` call and has never been gated. `oops-apps`' SeaShell has been
- * calling it in its input loop (`src/oops-utilities/seashell/home_main.c`), and its
- * `decode_keycode` maps
- * **22 distinct USB HID usage codes** - arrows, WASD, Enter, Escape, Backspace, F1-F3,
- * Page Up/Down, Q/E, Tab, Space, Pause, Home. Those do not come out of a wrong offset,
- * a wrong stride or a wrong `connected`/`intercepted`: the navigation would be noise,
- * and it is not.
- *
- * So `keycodes` at 0x20, `connected` at 0x10 and `intercepted` at 0x08 are confirmed in
- * the strongest way available - a shipping application depending on them on this
- * hardware. `modifiers` at 0x1c is **not**, and is gated separately at
- * `OOPS_KEY_MODIFIERS_CONFIRMED`; `timestamp_us` and `leds` are read by nothing and
- * reported as zero.
- *
- * The cost of the old arrangement, for the record: `oops_keyboard_read` is the only
- * route a character has into a GLUT, SDL2 or GLFW program, so every port framework in
- * the collection had a dead keyboard, while the one application that happened to take
- * the button path worked.
- * (`REQ-20260922T2015Z-b4d7`.)
+ * The record's fields are confirmed by an application rather than a capture: oops-apps'
+ * SeaShell navigates through `oops_keyboard_poll_buttons`
+ * (`src/oops-utilities/seashell/home_main.c`), which reads `keycodes` at 0x20,
+ * `connected` at 0x10 and `intercepted` at 0x08 through this same record. `modifiers`
+ * at 0x1c is not confirmed and is gated by `OOPS_KEY_MODIFIERS_CONFIRMED`;
+ * `timestamp_us` and `leds` are read by nothing and reported as zero.
  */
 #define OOPS_KEY_RECORD_FIELDS_CONFIRMED 1
 
 #define OOPS_MAX_HW_KEYS 16
 #define OOPS_KEYBOARD_MAX_HANDLES 2
 
-/*
- * Verified 96-byte Prospero native hardware keyboard report layout
- * (from native-gamepad-input-research hardware measurements).
- */
+/* The 96-byte keyboard report, as measured on hardware. */
 typedef struct {
     uint64_t timestamp_us;               /* 0x00: Native report timestamp */
     uint8_t intercepted;                 /* 0x08: Nonzero when system owns report */
@@ -80,8 +61,8 @@ typedef struct {
 static int s_kbd_handles[OOPS_KEYBOARD_MAX_HANDLES] = {-1, -1};
 /* Held keys as `oops_keyboard_poll_buttons` last saw them. */
 static uint16_t s_kbd_previous_keys[OOPS_KEYBOARD_MAX_HANDLES][OOPS_MAX_HW_KEYS];
-/* And as `oops_keyboard_read` last saw them. Two histories on purpose - see that
- * function. */
+/* Held keys as `oops_keyboard_read` last saw them; see that function for why the two
+ * histories are separate. */
 static uint16_t s_kbd_event_keys[OOPS_KEYBOARD_MAX_HANDLES][OOPS_MAX_HW_KEYS];
 static int s_kbd_init_rc = OOPS_KEYBOARD_EUNAVAIL;
 static int s_keyboard_module_loaded = 0;
@@ -127,8 +108,6 @@ static uint32_t decode_keycode(uint16_t code) {
     /* PS Button: Pause/Break key and Home key */
     case 72: /* Pause / Break (0x48) */
     case 74: /* Home key (0x4A) */
-        /* `oops/input.h` is included above and owns this bit; it was a bare literal
-         * here, with a comment naming a constant private to one application. */
         return OOPS_BUTTON_BIT16;
 
     /* L1 / R1: Page Up / Page Down, Q / E */
@@ -192,8 +171,7 @@ int oops_keyboard_available(void) {
 }
 
 int oops_keyboard_init(void) {
-    /* The `input` channel of `/app0/oops-log` - see `oops_log_channel_level`. Same
-     * arrangement as oops-gl's: asked for here, so logging depends on nothing, and an
+    /* The `input` channel of `/app0/oops-log` (see `oops_log_channel_level`). An
      * explicit `oops_input_set_log_level` afterwards still wins. */
     s_input_log_level =
         (int)oops_log_channel_level("input", (oops_log_level_t)s_input_log_level);
@@ -321,9 +299,7 @@ int oops_keyboard_init(void) {
 }
 
 /* One record from a handle, newest first: the polled state if it answers, else the
- * newest sample from the event queue. 1 when `out` was filled. The same two-step
- * `oops_keyboard_poll_buttons` uses, factored out so the two readers cannot drift
- * apart. */
+ * newest sample from the event queue. 1 when `out` was filled. */
 static int kbd_read_record(int handle, oops_kbd_hw_record_t *out) {
     for (size_t s = 0; s < sizeof(*out); s++) {
         ((uint8_t *)out)[s] = 0;
@@ -360,17 +336,10 @@ static int kbd_usage_present(const uint16_t *keys, uint16_t usage) {
 /*
  * The modifier mask for an event.
  *
- * `modifiers` at 0x1c is the **one field of the record nothing has ever exercised**.
- * SeaShell validates `keycodes`, `connected` and `intercepted` by using them; it never
- * reads this. So it is reported as zero rather than decoded, which costs shifted
- * characters and costs nothing else - a caller sees "no modifier held", which is wrong
- * only in the same direction as a keyboard with no shift key, never in the direction of
- * a character that was not typed.
- *
- * Flip this when `REQ-20260922T1905Z-9c31` lands. The decode below is written against
- * the USB HID boot-protocol modifier byte (bit 0 LCtrl … bit 7 RGUI), which is what a
- * 96-byte report of this shape would carry, and it is a prediction until that capture
- * agrees with it.
+ * `modifiers` at 0x1c is unconfirmed, so it is reported as zero rather than decoded: a
+ * caller sees "no modifier held", which loses shifted characters but never reports a
+ * character that was not typed. The decode below assumes the USB HID boot-protocol
+ * modifier byte (bit 0 LCtrl ... bit 7 RGUI) and is enabled once a capture confirms it.
  */
 #define OOPS_KEY_MODIFIERS_CONFIRMED 0
 
@@ -397,17 +366,13 @@ static uint8_t kbd_event_modifiers(const oops_kbd_hw_record_t *rec) {
  * Key transitions, by diffing the active-key set against the one this function last
  * saw.
  *
- * The platform reports which keys are *down*, not which changed, so the edges are ours
- * to find. `s_kbd_event_keys` is this function's own history and is deliberately
- * **not** `s_kbd_previous_keys`: `oops_keyboard_poll_buttons` owns that one, and an
- * application calling both - SeaShell does - must not have one reader eat the other's
- * edges.
+ * The platform reports which keys are down, not which changed. `s_kbd_event_keys` is
+ * this function's own history, separate from `oops_keyboard_poll_buttons`'
+ * `s_kbd_previous_keys`, so an application calling both does not lose edges.
  *
- * A handle is emitted whole or not at all. A handle can produce at most
- * `OOPS_MAX_HW_KEYS` releases plus as many presses, so it is counted before anything is
- * written and skipped if it will not fit; the next call re-diffs against an unchanged
- * history and reports it then. Emitting half a handle and advancing the history would
- * drop the remainder silently, which is the one failure a caller could not see.
+ * A change is emitted whole or not at all: it is counted before anything is written and
+ * left for the next call if it does not fit, since emitting part of it and advancing
+ * the history would drop the rest silently.
  */
 int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
     if (!out_events || max_events == 0) {
@@ -437,29 +402,12 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
     unsigned int n = 0u;
 
     /*
-     * **The handles are merged into one keyboard, and the edges are found once.**
-     *
-     * `sceKeyboardOpen` is called for index 0 and index 1 of the same user, because a
-     * user may have more than one keyboard. With one attached, index 1 opens anyway and
-     * mirrors index 0 - the log shows both succeeding with different handles. This used
-     * to keep a history per handle and walk them in turn, so one press produced one
-     * event per handle and every keypress was delivered twice.
-     *
-     * Suppressing the repeat within a call was not enough, and the reason is worth
-     * keeping: the two handles are sampled independently, so the same press can arrive
-     * from one of them in this call and the other in the next. A duplicate separated by
-     * a poll looks exactly like a real second press. Only one history can settle that,
-     * so there is one - the union of what every handle reports is what "the keyboard"
-     * is holding, and an edge against that is a keypress.
-     *
-     * Two real keyboards still work, and the same key held on both is one key held,
-     * which is the only answer that means anything to a caller.
-     *
-     * What this cost before it was found: Neverball's on-screen keyboard typed `YY` for
-     * one press of `Y`, and one press of Enter on Play activated the level select and
-     * then that screen's Back, so the menu appeared to bounce off itself. Nothing in
-     * the title was wrong, and from above this function two presses are
-     * indistinguishable from someone pressing twice.
+     * The handles are merged into one keyboard and the edges are found once. With one
+     * keyboard attached, index 1 opens anyway and mirrors index 0, and the two handles
+     * are sampled independently, so the same press can arrive from each in different
+     * calls. Per-handle histories would deliver every keypress twice; the union of what
+     * every handle reports is what the keyboard holds, and an edge against it is one
+     * keypress. The same key held on two real keyboards is one key held.
      */
     uint16_t merged[OOPS_MAX_HW_KEYS];
     for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
@@ -481,10 +429,8 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
         }
         saw_any = 1;
 
-        /* A disconnected keyboard, or one the system has taken, releases everything it
-         * was holding rather than leaving a key stuck down for as long as the overlay
-         * is up - so it contributes nothing to the union rather than contributing what
-         * it last held. */
+        /* A disconnected keyboard, or one the system has taken, contributes nothing, so
+         * its keys release instead of sticking down while the overlay is up. */
         if (!is_usable_sample(&record)) {
             continue;
         }
@@ -543,10 +489,8 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
         }
     }
 
-    /* **What the title is about to be told**, at OOPS_LOG_DEBUG and above. Off by
-       default: a held key is quiet but a typed sentence is two lines a character, and
-       the reason this exists is that a duplicated press is invisible from above the SDK
-       and indistinguishable, in a log, from someone pressing twice. */
+    /* The events the title receives, at OOPS_LOG_DEBUG: a duplicated press is
+       invisible above the SDK. Off by default, as typing logs two lines a character. */
     for (unsigned int e = 0u; e < n; e++) {
         oops_log_debug(
             "KBD", "event usage=0x%x %s mods=0x%x", (unsigned int)out_events[e].usage,
@@ -558,15 +502,8 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
         s_kbd_event_keys[0][k] = merged[k];
     }
 
-    /*
-     * Said once, on the first key this function ever delivers.
-     *
-     * Establishing that a keystroke reached a title on 2026-09-22 took inferring it
-     * from a demo having presented two frames instead of one, because nothing on the
-     * path says anything. One line removes that inference for every future run and for
-     * every port - and it is the line that distinguishes "the keyboard is not working"
-     * from "the program ignored the key".
-     */
+    /* Logged once, on the first key delivered: it separates "the keyboard is not
+     * working" from "the program ignored the key". */
     static int s_said_first;
     if (n > 0u && !s_said_first) {
         s_said_first = 1;
@@ -582,10 +519,8 @@ uint32_t oops_keyboard_poll_buttons(void) {
         return 0u;
     }
 
-    /*
-     * Periodic reconnect check: only attempt if NO keyboard handles are open.
-     * Capped to once every 180 frames (~3s) to prevent system call flooding.
-     */
+    /* Reconnect only while no handle is open, at most once every 180 frames (about 3s),
+     * so an absent keyboard does not flood the system with open calls. */
     static int s_poll_tick = 0;
     int any_open = 0;
     for (int i = 0; i < OOPS_KEYBOARD_MAX_HANDLES; i++) {
@@ -605,12 +540,9 @@ uint32_t oops_keyboard_poll_buttons(void) {
         if (handle < 0)
             continue;
 
-        /*
-         * Primary Path: sceKeyboardReadState queries the instantaneous physical
-         * driver state. Zero latency, immediate release reporting on the next frame
-         * (allowing rapid double-taps), and continuous held state on every frame
-         * (allowing smooth hold-to-repeat across titles).
-         */
+        /* sceKeyboardReadState gives the instantaneous state: releases show on the next
+         * frame (so double-taps register) and held keys show every frame (so
+         * hold-to-repeat works). */
         if (sceKeyboardReadState &&
             oops_symbol_is_resolved((const void *)sceKeyboardReadState)) {
             oops_kbd_hw_record_t record;
@@ -625,13 +557,9 @@ uint32_t oops_keyboard_poll_buttons(void) {
                 }
                 continue;
             }
-            /* If sceKeyboardReadState fails with an error, fall through to fallback
-             * path */
         }
 
-        /*
-         * Secondary / Fallback Path: sceKeyboardRead event queue
-         */
+        /* Fallback: the sceKeyboardRead event queue. */
         if (sceKeyboardRead && oops_symbol_is_resolved((const void *)sceKeyboardRead)) {
             oops_kbd_hw_record_t samples[16];
             for (size_t s = 0; s < sizeof(samples); s++) {

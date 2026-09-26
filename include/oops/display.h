@@ -1,3 +1,7 @@
+/*
+ * The display: open the primary output on the target's backend (AGC or GNM), draw a
+ * linear framebuffer and flip it, or draw the scanout buffers in place.
+ */
 #ifndef OOPS_DISPLAY_H
 #define OOPS_DISPLAY_H
 
@@ -55,13 +59,12 @@ int oops_display_get_video_handle(const oops_display_t *disp);
  * create or a dispatch that stops retiring all fall back to the CPU path rather than
  * presenting a wrong buffer.
  *
- * **Call it before the first flip.** It writes a test pattern through both scanout
+ * Call it before the first flip. It writes a test pattern through both scanout
  * buffers, so afterwards it refuses (returning 0) rather than disturb a buffer that is
  * on screen or queued.
  *
  * Returns 1 if the compute tiler is now in use, 0 if the CPU tiler stays, -1 for no
- * display. Not calling it is what every caller did before this existed, and leaves the
- * CPU tiler in place.
+ * display. Without the call the CPU tiler stays.
  */
 int oops_display_try_gpu_tiler(oops_display_t *disp);
 
@@ -70,7 +73,7 @@ void oops_display_clear(oops_display_t *disp, uint32_t color);
 int oops_display_flip(oops_display_t *disp);
 
 /*
- * **Another linear image on screen, without it becoming the framebuffer.**
+ * Another linear image on screen, without it becoming the framebuffer.
  * `pixels` is a width x height image of 0xAARRGGBB words, the framebuffer's size
  * and layout. AGC tiles it onto the next scanout buffer and flips, as
  * oops_display_flip does with the framebuffer. GNM's framebuffer is itself a
@@ -86,8 +89,8 @@ int oops_display_present(oops_display_t *disp, const uint32_t *pixels);
 int oops_display_read_shown(oops_display_t *disp, uint32_t *pixels);
 
 /*
- * **For a renderer that draws the scanout buffers itself** - a GPU renderer, as
- * a title on the console is - rather than handing the display a linear image to
+ * For a renderer that draws the scanout buffers itself (a GPU renderer, as a
+ * title on the console is) rather than handing the display a linear image to
  * convert. The buffers are the display's two, in whatever layout VideoOut scans.
  */
 typedef enum oops_display_scanout_layout {
@@ -122,7 +125,7 @@ int oops_display_flip_scanout(oops_display_t *disp);
 oops_display_scanout_layout_t oops_display_use_scanout(oops_display_t *disp);
 
 /*
- * **Open the display scanning out buffers the caller allocated.**
+ * Open the display scanning out buffers the caller allocated.
  *
  * For a renderer that draws into a target of its own, in the layout
  * oops_display_scanout_layout reports, and wants it shown without a copy. The
@@ -134,18 +137,13 @@ oops_display_scanout_layout_t oops_display_use_scanout(oops_display_t *disp);
  * `adopt` may be null with a count of zero, which is exactly
  * oops_display_open.
  *
- * **Why they have to be named here and not later.** VideoOut buffer
- * registration is single-shot and immutable - measured, obSCEne
- * `REQ-20260921T1202Z-9a4c`. Once a handle has buffers, a second registration
- * returns SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED whether it repeats the set,
- * extends it or starts elsewhere; sceVideoOutUnregisterBuffer(s) are not
- * exported at all, so a set cannot be released; and a concurrent handle on the
- * same output is refused. There is exactly one moment to name a buffer, and
- * this is it.
- *
- * The practical consequence for a caller: the buffer must already exist before
- * the display opens. A renderer whose target is allocated lazily - on its first
- * frame, say - has to force that allocation first.
+ * They are named here because VideoOut buffer registration is single-shot and
+ * immutable, as measured by obSCEne: once a handle has buffers, a second
+ * registration returns SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED whether it repeats the
+ * set, extends it or starts elsewhere; sceVideoOutUnregisterBuffer(s) are not
+ * exported, so a set cannot be released; and a concurrent handle on the same
+ * output is refused. So the buffers must exist before the display opens, and a
+ * renderer that allocates its target lazily forces that allocation first.
  */
 oops_display_t *oops_display_open_adopting(oops_display_backend_t backend,
                                            unsigned int width, unsigned int height,
@@ -155,7 +153,7 @@ oops_display_t *oops_display_open_adopting(oops_display_backend_t backend,
  * buffer. `nth` indexes the array passed to oops_display_open_adopting. */
 int oops_display_adopted_index(const oops_display_t *disp, int nth);
 
-/* Flip a buffer by its index, including one from oops_display_adopt_buffer -
+/* Flip a buffer by its index, including an adopted one (oops_display_adopted_index),
  * as it stands, with nothing tiled or copied into it. 0 on success, negative
  * without a display or if the platform refuses the flip. */
 int oops_display_flip_index(oops_display_t *disp, int index);

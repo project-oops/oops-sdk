@@ -1,29 +1,18 @@
 /*
- * Compile a corpus of real shaders with oops-gl's own front end and histogram what it
- * refuses.
+ * Compile a corpus of real shaders with oops-gl's own front end and code generator, and
+ * histogram what each refuses. It calls glCreateShader/glShaderSource/glCompileShader -
+ * the entry points a title calls - so it measures what a port would hit.
  *
- * The point is to decide what to implement next from evidence rather than from guessing
- * which GLSL features ports use. It calls glCreateShader/glShaderSource/glCompileShader
- * - the same entry points a title calls - so what it measures is what a port would hit,
- * not what a separately written parser would.
- *
- * Built and driven by `tools/shader-survey.sh`, which is where the usage and the two
- * harness mistakes this has already made are written down. Takes a list of shader
- * files.
- *
- * A file is classified by extension: .vert/.vs -> vertex, everything else -> fragment.
- * A shader that is actually the other stage still exercises the whole front end; only
- * the stage-specific built-in names differ, and those show up as their own refusal
- * reason.
+ * Built and driven by `tools/shader-survey.sh`, which holds the usage. Takes a list of
+ * shader files; `--per-file` prints one status line per file instead.
  */
 #include <GL/gl.h>
 #include <oops/display.h>
 #include <oops/memory.h>
 
 /* The generator is reached through the same internal entry the unit tests use. A shader
- * that compiles can still be refused for the console - the front end and the code
- * generator are different gates, and only the second one decides whether a port runs on
- * hardware. Surveying just the first says nothing about that. */
+ * that compiles can still be refused for the console, and only the generator decides
+ * whether a port runs on hardware. */
 #include "gl_internal.h"
 
 #include <stdint.h>
@@ -92,26 +81,22 @@ typedef struct {
     char text[REASON_LEN];
     int count;
     char first_file[256];
-    /* **The first message in this bucket, untruncated.** The key above has the shader's
-     * own identifiers stripped so that one finding is one row, and that also removes
-     * the part that says *which* uniform or name - which is the part you need once the
-     * row is the one you are working on. Both, then. */
+    /* The first message in this bucket, untruncated: the key has the shader's own
+     * identifiers stripped, and this keeps the name the message was about. */
     char first_full[REASON_LEN];
 } reason_t;
 
 static reason_t g_reason[MAX_REASONS];
 static int g_reasons;
 
-/* The generator's refusals, histogrammed separately - they are a different question
- * from the front end's. A shader in this column compiles and runs on the software
- * reference and is refused for the console. */
+/* The generator's refusals, histogrammed separately. A shader in this column compiles
+ * and runs on the software reference and is refused for the console. */
 static reason_t g_genreason[MAX_REASONS];
 static int g_genreasons;
 
-/* **The reason, with the shader's own identifiers taken out of it.** A diagnostic
- * naming a variable produces one bucket per variable otherwise, and the histogram then
- * has hundreds of rows of the same finding. Everything from the first ` - ` or `'`
- * onward is dropped, which is where this compiler puts the specifics. */
+/* The reason, with the shader's own identifiers taken out of it, so a diagnostic naming
+ * a variable makes one bucket rather than one per variable. Everything from the first
+ * ` - ` or `'` onward is dropped, which is where this compiler puts the specifics. */
 static void tally_into(const char *log, const char *file, int which);
 
 static void tally(const char *log, const char *file) {
@@ -186,32 +171,11 @@ static int ends_with(const char *s, const char *suf) {
 }
 
 /*
- * **The stage, sniffed from the source rather than taken from the extension.**
- *
- * The first version of this read the extension, and craft's vertex shaders are called
- * `block_vertex.glsl` - so four of its eight shaders were compiled as fragment shaders
- * and reported `gl_Position` as an undeclared name. That is a true statement about a
- * fragment shader and a false finding about craft, and it would have sent me looking
- * for a missing built-in that is not missing. mesa-demos' `vpglsl` directory is the
- * same shape.
- *
- * Writing `gl_Position` or declaring an `attribute` makes it a vertex shader; writing
- * `gl_FragColor` or `gl_FragData` makes it a fragment one. The extension is the
- * tie-break.
- */
-/*
- * **A vertex shader that links against this fragment shader.**
- *
- * The first version of the generation phase paired every fragment shader with a fixed
- * passthrough vertex shader, and three of craft's four would not link - a fragment
- * shader's `varying` has to be declared by the vertex stage too. So it measured how
- * often my stand-in was wrong and reported nothing at all about the generator.
- *
- * This copies the `varying` declarations out of the fragment source and restates them,
- * which is what the vertex half of that program would have done. They are left
- * unwritten: GL leaves a varying the vertex stage never assigns undefined rather than
- * making it a link error, and the question here is whether the *fragment* shader
- * generates.
+ * A vertex shader that links against this fragment shader: a fragment shader's
+ * `varying` has to be declared by the vertex stage too, so the declarations are copied
+ * out of the fragment source. They are left unwritten - GL leaves an unassigned varying
+ * undefined rather than making it a link error - since the question is whether the
+ * fragment shader generates.
  */
 static void make_matching_vs(const char *fs, char *out, size_t cap) {
     size_t w = 0;
@@ -255,18 +219,10 @@ static void make_matching_vs(const char *fs, char *out, size_t cap) {
 }
 
 /*
- * **Is this a standalone GLSL translation unit at all?**
- *
- * A corpus directory holds things that are not: libultraship's shaders are Prism
- * templates that open `@prism(type='fragment', ...)` and are expanded at run time;
- * mesa-demos' `simplex-noise.glsl` is a library of functions meant to be included;
- * retroarch vendors glslang's test suite, which contains deliberately invalid shaders.
- *
- * Counting those as refusals is the harness reporting a property of the corpus as a
- * finding about the compiler - the same mistake as reading the stage off the extension,
- * and the third time this tool has made a version of it. They are skipped and counted
- * separately, so the compile column is about shaders and the skip count says how much
- * of the directory was not one.
+ * Whether this is a standalone GLSL translation unit. A corpus directory holds things
+ * that are not: Prism templates that open `@prism(type='fragment', ...)`, libraries of
+ * functions meant to be included, deliberately invalid test shaders. They are skipped
+ * and counted separately, so the compile column is about shaders.
  */
 static int is_translation_unit(const char *src) {
     const char *p = src;
@@ -279,6 +235,10 @@ static int is_translation_unit(const char *src) {
     return 1;
 }
 
+/* The stage, sniffed from the source because ports name vertex shaders `*_vertex.glsl`
+ * and the like. Writing `gl_Position` or declaring an `attribute` makes it a vertex
+ * shader; writing `gl_FragColor` or `gl_FragData` a fragment one. The extension is the
+ * tie-break. */
 static GLenum sniff_stage(const char *src, const char *path) {
     if (strstr(src, "gl_Position") || strstr(src, "attribute "))
         return GL_VERTEX_SHADER;
@@ -299,17 +259,8 @@ int main(int argc, char **argv) {
     glContextMakeCurrent(ctx);
     glContextSetVersion(2, 0);
 
-    /*
-     * **`--per-file` turns a report into something that can be a gate.**
-     *
-     * The histogram below answers "what is the most common refusal", which is the right
-     * question when pointing this at a corpus of real shaders and deciding what to
-     * implement next. It is the wrong question for a corpus written *against the
-     * specification*, where each file has an expected outcome and the thing worth
-     * knowing is whether any file departed from it. One line per file lets a caller
-     * assert that, so a conformance corpus fails a build rather than printing a number
-     * nobody reads.
-     */
+    /* `--per-file` prints one status line per file, so a corpus with an expected
+     * outcome per file (tools/shader-conformance) can assert each one. */
     int per_file = 0;
     int first_arg = 1;
     if (argc > 1 && strcmp(argv[1], "--per-file") == 0) {
@@ -346,16 +297,9 @@ int main(int argc, char **argv) {
         total++;
         if (status) {
             ok++;
-            /*
-             * **And then ask the generator**, which is the gate that decides console
-             * support. Only a fragment shader: the vertex stage runs on the CPU here,
-             * so there is nothing for the generator to refuse about one.
-             *
-             * The passthrough vertex shader is a stand-in. A fragment shader reading
-             * varyings the stand-in does not write still links - GL leaves those values
-             * undefined rather than making it an error - which is what lets a corpus of
-             * fragment shaders be put through this without their own vertex halves.
-             */
+            /* Then the generator, which decides console support. Only a fragment
+             * shader: the vertex stage runs on the CPU, so the generator has nothing
+             * to refuse about one. */
             if (stage == GL_FRAGMENT_SHADER) {
                 gen_total++;
                 const GLuint vs = glCreateShader(GL_VERTEX_SHADER);
@@ -395,9 +339,8 @@ int main(int argc, char **argv) {
                 glDeleteProgram(prog);
                 glDeleteShader(vs);
             } else if (per_file) {
-                /* A vertex shader has no second gate here - the vertex stage runs on
-                 * the CPU - so compiling is the whole of its answer and it says so in
-                 * its own word. */
+                /* The vertex stage runs on the CPU, so compiling is a vertex shader's
+                 * whole answer. */
                 printf("COMPILES   %s\n", argv[a]);
             }
         } else {
@@ -414,10 +357,7 @@ int main(int argc, char **argv) {
     }
 
     if (per_file) {
-        /* **The histogram is the other question and printing both mixes them.** A
-         * caller reading one line per file has to be able to take the whole of stdout
-         * as those lines; a summary after them is text that parses as a status and a
-         * filename and is neither. */
+        /* No histogram: a per-file caller takes the whole of stdout as status lines. */
         glContextDestroy(ctx);
         return 0;
     }

@@ -70,13 +70,13 @@ _Static_assert(offsetof(ScePadDataInternal, connected) == 76, "connected at 76")
 _Static_assert(offsetof(ScePadDataInternal, timestamp) == 80, "timestamp at 80");
 
 /*
- * The driver record is 120 bytes: obSCEne handed scePadReadState and scePadRead
- * a 4 KB 0xC7 fill on 12.40 and each rewrote exactly 120 (100-input/read-extent
- * and batched-read, sweep 20260909-110725, app context, nothing attached). The
- * batched read returned one record. In that record the sticks read 128,
- * orientation w and acceleration y read 1.0, and the connected byte at 76 read
- * 0 - written, not left as fill. scePadRead() writes `num` consecutive records,
- * so this size is the batch stride, and the asserts hold the struct to it.
+ * The driver record is 120 bytes: obSCEne hands scePadReadState and scePadRead
+ * a 4 KB 0xC7 fill on 12.40 and each rewrites exactly 120 (probes
+ * 100-input/read-extent and batched-read, app context, nothing attached). The
+ * batched read returns one record, in which the sticks read 128, orientation w
+ * and acceleration y read 1.0, and the connected byte at 76 reads 0 - written,
+ * not left as fill. scePadRead() writes `num` consecutive records, so this size
+ * is the batch stride, and the asserts hold the struct to it.
  */
 #define OOPS_PAD_RECORD_BYTES 120
 _Static_assert(sizeof(ScePadDataInternal) == OOPS_PAD_RECORD_BYTES,

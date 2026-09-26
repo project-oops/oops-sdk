@@ -1,6 +1,9 @@
 #ifndef OOPS_HTML_CONTAINER_HPP
 #define OOPS_HTML_CONTAINER_HPP
 
+// The litehtml document container behind oops/html.h: it draws a document onto an
+// oops_surface_t and keeps the scroll position and the anchors for hit testing.
+
 #include "litehtml/document_container.h"
 #include "litehtml/document.h"
 #include "oops/draw.h"
@@ -99,7 +102,7 @@ class oops_container : public litehtml::document_container {
     void get_media_features(litehtml::media_features &media) const override;
     void get_language(std::string &language, std::string &culture) const override;
 
-    // Helper methods
+    // Used by oops_html.cpp. `hit_test` takes view coordinates and adds the scroll.
     void render(oops_surface_t *surf);
     void scroll(int dx, int dy);
     int hit_test(int x, int y, char *href_out, size_t href_len);

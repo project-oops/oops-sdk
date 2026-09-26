@@ -1,3 +1,7 @@
+/*
+ * GPU compute: command queues, compute shaders and synchronous dispatches on AGC.
+ * Every call fails cleanly on the host and on targets without GPU access.
+ */
 #ifndef OOPS_GPU_H
 #define OOPS_GPU_H
 
@@ -57,7 +61,8 @@ oops_gpu_queue_t *oops_gpu_create_compute_queue(void);
 oops_gpu_queue_t *oops_gpu_create_graphics_queue(void);
 
 /*
- * Flush, wait on pending fences, and destroy a GPU compute queue.
+ * Destroy a queue and free its command buffer and fence. Dispatches are synchronous,
+ * so nothing is pending. Safe on NULL.
  */
 void oops_gpu_destroy_queue(oops_gpu_queue_t *queue);
 
@@ -75,13 +80,13 @@ void oops_gpu_destroy_shader(oops_gpu_shader_t *shader);
 
 /*
  * Execute a compute dispatch on the specified hardware queue:
- * - Emits SET_SH_REG packets for shader program VA (COMPUTE_PGM_LO/HI).
+ * - Emits SET_SH_REG packets for the shader header's register table, with the
+ *   program address (COMPUTE_PGM_LO/HI) patched in.
  * - Emits SET_SH_REG packets for user-data SGPRs (COMPUTE_USER_DATA_0..N).
  * - Emits DISPATCH_DIRECT with grid_x, grid_y, grid_z.
- * - Emits RELEASE_MEM with cache writeback and End-of-Pipe (EOP) fence
- * signaling.
- * - Submits DCB to libSceAgcDriver and waits on fence retirement.
- * Returns 0 on success, negative on error.
+ * - Emits RELEASE_MEM with cache writeback and an end-of-pipe fence write.
+ * - Submits the DCB to libSceAgcDriver and waits for the fence.
+ * Returns 0 on success, -2 on a fence timeout, another negative code on error.
  */
 int oops_gpu_dispatch(oops_gpu_queue_t *queue, const oops_gpu_dispatch_t *dispatch);
 

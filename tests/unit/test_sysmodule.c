@@ -1,6 +1,9 @@
 #include "oops/sysmodule.h"
 #include "tests/test_common.h"
 
+/* Unit tests for the system module loader, `oops/sysmodule.h`. */
+
+/* The module identifiers keep the platform's values. */
 static void test_sysmodule_constants(void) {
     ASSERT_EQ(OOPS_SYSMODULE_NET, 0x0001);
     ASSERT_EQ(OOPS_SYSMODULE_HTTP, 0x0002);
@@ -17,9 +20,8 @@ static void test_sysmodule_constants(void) {
     ASSERT_EQ(OOPS_SYSMODULE_ZLIB, 0x00C5);
 }
 
+/* Without the platform runtime, the weak imports are NULL and every call fails. */
 static void test_sysmodule_unsupported_environment(void) {
-    /* On host without platform runtime, weak stubs resolve to NULL and return -1
-     */
     ASSERT_EQ(oops_sysmodule_load(OOPS_SYSMODULE_FONT), -1);
     ASSERT_EQ(oops_sysmodule_unload(OOPS_SYSMODULE_FONT), -1);
     ASSERT_EQ(oops_sysmodule_is_loaded(OOPS_SYSMODULE_FONT), -1);

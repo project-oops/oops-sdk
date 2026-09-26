@@ -2,42 +2,18 @@
  * zs-tiling: where addrlib puts each pixel of oops-gl's depth and stencil surfaces, and
  * whether a handful of basis vectors say it exactly.
  *
- * # The question
+ * oops-gl's depth (Z_32_FLOAT) and stencil (STENCIL_8) surfaces are 64KB_Z_X, SW_MODE
+ * 24, so pixel operations on them need each pixel's byte offset in the tiled surface.
+ * The answer is Mesa's addrlib, under this collection's chip identity and the
+ * GB_ADDR_CONFIG in oops-mesa's `drm_device.c` (OOPS_GB_ADDR_CONFIG). The surfaces are
+ * set up as ac_surface.c sets up a depth-stencil pair (ac_surface.c:1591, :2894-2911);
+ * pipeBankXor 0, since oops-gl's bases are 64 KiB aligned and it programs no XOR.
  *
- * oops-gl's depth surface (Z_32_FLOAT) and stencil surface (STENCIL_8) are 64KB_Z_X -
- * DB_Z_INFO's and DB_STENCIL_INFO's SW_MODE 24 - so the CPU cannot read or write them
- * as rows. glReadPixels of depth, glDrawPixels of stencil, a depth texture copied from
- * the frame: every pixel operation on either was refused on the console for that reason
- * until this tool's vectors went into gl_zs_tiling.h (2026-09-19). Serving them needs
- * each pixel's byte offset in the tiled surface.
- *
- * # Where the answer comes from
- *
- * Mesa's own addrlib, under the chip identity this collection reports and the
- * GB_ADDR_CONFIG oops-mesa derived by inverting addrlib against the display tiler
- * (`drm_device.c`, OOPS_GB_ADDR_CONFIG, worklog 017) - the value `tools/tiling-compare`
- * in oops-mesa shows puts a 64KB_R_X surface exactly where the hardware-verified
- * display tiler does. The surfaces are set up as `ac_surface.c` sets up a depth-stencil
- * pair on this generation (ac_surface.c:1591, :2894-2911): depth with `flags.depth`, 32
- * bits a pixel; stencil with `flags.stencil`, 8 bits, in the depth surface's swizzle
- * mode. pipeBankXor 0: oops-gl's bases are 64 KiB aligned and it programs no surface
- * XOR.
- *
- * # What is checked
- *
- * 1. That addrlib's block is the size oops-gl allocates by (128 x 128 at 32 bits, 256 x
- * 256 at 8).
- * 2. **That each block is a linear map**: every pixel's offset is the block's base plus
- * the XOR of one basis vector per set bit of its in-block x and y - the form the
- * display tiler takes, and the only form cheap enough to use per pixel. Checked over
- * every pixel of a 3 x 2 block surface, so that blocks are known to be laid out row by
- * row, not merely assumed.
- * 3. **A control**: the same under eight pipes instead of sixteen must produce a
- * different layout, or the comparison could not tell a right configuration from a wrong
- * one.
- *
- * The output is tracked (zs_tiling_gfx1013.txt) and the vectors in it are what
- * oops-sdk's src/gl/gl_zs_tiling.h carries.
+ * Checked: the block is the size oops-gl allocates by (128 x 128 at 32 bits, 256 x 256
+ * at 8); each block is a linear map - base plus the XOR of one basis vector per set bit
+ * of in-block x and y - over every pixel of a 3 x 2 block surface; and, as a control,
+ * eight pipes instead of sixteen gives a different layout. The tracked output
+ * (zs_tiling_gfx1013.txt) holds the vectors src/gl/gl_zs_tiling.h carries.
  */
 #include <cstdint>
 #include <cstdio>

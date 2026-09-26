@@ -1,19 +1,14 @@
 .text
-// Sampling a cube map (since 2026-09-20): the texture coordinate taken as a direction, turned
-// into a face and a place on it, and sampled with dim:SQ_RSRC_IMG_CUBE.
+// Sampling a cube map: the texture coordinate taken as a direction, turned into a face and a
+// place on it, and sampled with dim:SQ_RSRC_IMG_CUBE against a descriptor whose TYPE is 0xb.
 //
-// **RDNA2 does the face selection in four instructions**, not in arithmetic written out here:
-// V_CUBEID_F32 gives the face the direction points at, V_CUBESC_F32 and V_CUBETC_F32 the two
-// coordinates on it, and V_CUBEMA_F32 twice the major axis. The shader divides sc and tc by that
-// and biases by a half, which is what puts them in [0, 1], and hands the sampler (u, v, face) as
-// three address registers. That is the sequence ACO emits and the one the ISA documents; it is
-// here because it is the only way to reach those instructions from this library.
+// RDNA2 does the face selection in four instructions: V_CUBEID_F32 gives the face the direction
+// points at, V_CUBESC_F32 and V_CUBETC_F32 the two coordinates on it, and V_CUBEMA_F32 twice the
+// major axis. The shader divides sc and tc by that and biases by a half, which puts them in
+// [0, 1], and hands the sampler (u, v, face) as three address registers. That is the sequence
+// ACO emits and the ISA documents.
 //
-// obSCEne's REQ-20260920T0745Z-6c80 (sweep 20260920-103636, 166-agc/texture-extended) sampled a
-// cube on this part with TYPE 0xb and reported the face its texel came from - face 0, +X - so
-// the descriptor side is measured. This is the shader side of the same draw.
-//
-// **The direction is not divided by q.** The prolog divides s and t before this runs, which is
+// The direction is not divided by q. The prolog divides s and t before this runs, which is
 // right for a 2D sample and wrong for a direction: scaling all three components leaves the
 // direction alone, so this interpolates them again rather than reading the divided pair. The
 // third component is attr2.w, where the vertex carries unit 0's r.

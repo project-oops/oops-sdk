@@ -2,12 +2,10 @@
  * Minimal stub module for /app0/sce_module/libc.prx.
  *
  * Retail rtld requires /app0/sce_module/libc.prx for any Big App (category 0)
- * title before entering the executable entry point (D298, D301).
+ * title before entering the executable entry point (obscene#D298).
  *
- * This stub provides:
- * - PT_SCE_MODULE_PARAM (.data.sce_module_param) required by libSceSysmodule
- * - module_start and module_stop entry points
- * - PLT anchor so procedure linkage tables exist
+ * The stub provides the PT_SCE_MODULE_PARAM (.data.sce_module_param) that
+ * libSceSysmodule requires, module_start and module_stop, and a relocation anchor.
  */
 
 #include <stddef.h>

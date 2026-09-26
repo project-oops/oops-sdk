@@ -1,5 +1,5 @@
 .text
-// The colour sum after texturing (GL 1.4, 3.9; since 2026-09-19): the secondary colour -
+// The colour sum after texturing (GL 1.4, 3.9): the secondary colour -
 // lighting's separate specular term, or glSecondaryColor's under GL_COLOR_SUM - interpolated
 // from the third parameter's x, y and z, added to the combined colour in v4..v6, and the sum
 // clamped to [0, 1]. The textured pixel shader's slot at GL_PS_SUM_SLOT_TEX: after the combine,

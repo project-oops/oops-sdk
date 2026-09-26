@@ -1,15 +1,10 @@
 /*
- * oops-gl: the GLSL front end - tokens
+ * oops-gl: the GLSL compiler's internal interface - lexer, preprocessor, parser,
+ * semantic checks, built-in library, RDNA2 encoder and instruction selection.
  *
- * GL 2.0 is GLSL, and GLSL is a compiler. This is its first stage and the only one that
- * can be finished today: the lexer is pure text handling, so it is testable to the same
- * standard as everything else here, while the code generator behind it needs a shader
- * interface that is still waiting on a hardware measurement (obSCEne REQ-...-3a91).
- *
- * Scoped to **GLSL 1.10**, which is the language GL 2.0 defines. Later versions add
- * keywords and drop others; a token stream that quietly accepted `in`/`out` as 1.10
- * storage qualifiers when the program meant the 1.30 ones would be a compiler that
- * agreed with the wrong specification.
+ * Scoped to GLSL 1.10, the language GL 2.0 defines, with 1.20 where a unit asks for it.
+ * Later versions add keywords and drop others; accepting `in`/`out` as 1.30 storage
+ * qualifiers in a 1.10 shader would agree with the wrong specification.
  */
 
 #ifndef __GLSL_INTERNAL_H__
@@ -21,10 +16,10 @@ typedef enum {
     GLSL_TOK_EOF = 0,
     GLSL_TOK_ERROR,
 
-    /* **The preprocessor's own marker, which never reaches the lexer's consumers.** It
-     * is queued behind a macro's expansion and consumed by `raw_next`, which uses it to
-     * say "that macro's expansion ends here" - see `expand` in glsl_pp.c for why a flag
-     * alone will not do. `value` carries the macro's index. */
+    /* The preprocessor's own marker, which never reaches the lexer's consumers. It is
+     * queued behind a macro's expansion and consumed by `raw_next` to mark where that
+     * expansion ends; see `expand` in glsl_pp.c for why a flag will not do. `value`
+     * carries the macro's index. */
     GLSL_TOK_PP_MACRO_END,
 
     GLSL_TOK_IDENTIFIER,
@@ -51,17 +46,15 @@ typedef enum {
     GLSL_TOK_KW_IN,
     GLSL_TOK_KW_OUT,
     GLSL_TOK_KW_INOUT,
-    /* **GLSL 1.20's qualifiers.** `invariant` asks that a value computed the same way
-     * in two shaders come out bit-identical, and `centroid` moves a varying's sample
-     * point inside the primitive under multisampling. Both are recognised whatever the
-     * shader's version, and the parser refuses them in a 1.10 shader by name. */
+    /* GLSL 1.20's qualifiers. `invariant` asks that a value computed the same way in
+     * two shaders come out bit-identical; `centroid` moves a varying's sample point
+     * inside the primitive under multisampling. Both lex in any version, and the parser
+     * refuses them in a 1.10 shader by name. */
     GLSL_TOK_KW_INVARIANT,
     GLSL_TOK_KW_CENTROID,
-    /* **OpenGL ES 1.00's precision words.** ES makes a shader state the precision it
-     * needs; desktop GL has one precision and the specification says the qualifiers are
-     * accepted and have no effect. They are recognised here so an ES shader parses, and
-     * dropped by the parser rather than carried into the type system, because there is
-     * nothing downstream that could act on them differently. */
+    /* OpenGL ES 1.00's precision words. Desktop GL accepts them with no effect, so they
+     * lex here for an ES shader to parse, and the parser drops them rather than
+     * carrying them into the type system, where nothing could act on them. */
     GLSL_TOK_KW_PRECISION,
     GLSL_TOK_KW_LOWP,
     GLSL_TOK_KW_MEDIUMP,
@@ -98,9 +91,8 @@ typedef enum {
     GLSL_TOK_KW_SAMPLERCUBE,
     GLSL_TOK_KW_SAMPLER1DSHADOW,
     GLSL_TOK_KW_SAMPLER2DSHADOW,
-    /* Reserved by 1.10 for future use. Recognised so they can be **refused with their
-     * own name** rather than parsed as identifiers and failing later as a mysterious
-     * syntax error. */
+    /* Reserved by 1.10 for future use. Recognised so they are refused by name rather
+     * than parsed as identifiers and failing later as an unexplained syntax error. */
     GLSL_TOK_KW_RESERVED,
 
     /* Punctuation and operators */
@@ -143,8 +135,7 @@ typedef enum {
     GLSL_TOK_TILDE,
 
     /* `#`, which starts a preprocessor directive. The preprocessor is a separate stage
-     * and is not written yet; the lexer names the token so that stage has something to
-     * consume, and so a `#version` line is not mistaken for an operator. */
+     * that consumes it, so a `#version` line is never mistaken for an operator. */
     GLSL_TOK_HASH
 } glsl_token_type_t;
 
@@ -171,35 +162,28 @@ typedef struct {
 /* -------------------------------------------------------------------------
  * The AST
  *
- * Nodes live in a caller-supplied arena and refer to each other by **index, not
- * pointer**. Indices survive the arena being copied or moved, they are half the size,
- * and a stale one is a bounds check rather than a wild read - which matters in a
- * freestanding binary where there is nothing to catch the alternative.
+ * Nodes live in a caller-supplied arena and refer to each other by index, not pointer.
+ * Indices survive the arena being copied or moved, are half the size, and a stale one
+ * is a bounds check rather than a wild read in a freestanding binary.
  *
- * The arena is fixed and refuses when full, like every other buffer here. A shader that
- * needs more nodes than this is refused with a diagnostic rather than served by an
- * allocation nobody asked for.
+ * The arena is fixed and refuses when full: a shader needing more nodes is refused with
+ * a diagnostic.
  * ------------------------------------------------------------------------- */
 
 #define GLSL_MAX_NODES 2048
 
-/* **Up here because the parser needs it too.** The type system below is where a struct
- * is given meaning, but the grammar has to know which words are struct names before any
- * of that runs - see `struct_name` on `glsl_parser_t`. */
+/* Struct limits, defined ahead of the parser because the grammar must know which words
+ * are struct names before the type system runs; see `struct_name` on `glsl_parser_t`.
+ */
 #define GLSL_MAX_STRUCTS 16
 #define GLSL_MAX_STRUCT_MEMBERS 16
 
-/* How many arguments an array constructor may have, which is how long an array it can
- * build. The interpreter holds them all before it declares the array, because the
- * declaration is what the name starts existing at - so this bounds a stack array there.
- */
+/* How many arguments an array constructor may have, which is the longest array it can
+ * build. The interpreter holds them all on the stack before declaring the array. */
 #define GLSL_MAX_ARRAY_CTOR_ARGS 32
-/* **How large a struct may be, in components.** A struct is a value - constructed,
- * assigned, passed and returned whole - and the interpreter carries a value in a fixed
- * array on the stack that every expression it evaluates pays for. This is that array's
- * width, enforced here at compile time so an oversized struct is a diagnostic naming
- * itself rather than a copy that silently stops partway. `mat4` is 16 of these, so it
- * is two of the largest built-in type. */
+/* How large a struct may be, in components. The interpreter carries every value in a
+ * fixed stack array of this width, so an oversized struct is refused at compile time
+ * rather than copied partway. Twice a `mat4`, the largest built-in type. */
 #define GLSL_MAX_STRUCT_COMPONENTS 32
 #define GLSL_NO_NODE (-1)
 
@@ -236,7 +220,7 @@ typedef enum {
                       * through `sibling`. */
     GLSL_NODE_PARAM, /* one function parameter */
     GLSL_NODE_FUNCTION, /* name in text, `b` = parameter chain, `c` = body.
-                         * **`c` absent means a prototype**, not an empty body. */
+                         * `c` absent means a prototype, not an empty body. */
     /* `struct Name { members };` - name in text, members chained from `a` as
      * GLSL_NODE_DECL. A declaration may follow the closing brace (`struct S { ... }
      * s;`), in which case the declarators are the siblings of this node, exactly as for
@@ -249,17 +233,15 @@ typedef struct {
     glsl_node_kind_t kind;
     glsl_token_type_t op; /* for UNARY/POSTFIX/BINARY/ASSIGN; GLSL_TOK_EOF otherwise */
     int32_t a, b, c, d;   /* children, GLSL_NO_NODE when absent. `d` exists for `for`,
-                           * which   is the one construct here with four of them. */
+                           * the one construct with four. */
     int32_t sibling;      /* next in a list - call arguments, statements, declarators,
                            * parameters, top-level declarations. GLSL_NO_NODE at the end. */
-    /* Declarations and parameters: the type as written. A type is a token rather than a
-     * resolved type here, because resolving `vec4` to a type - and deciding whether an
-     * identifier names a struct - is the semantic stage's job, not the grammar's. */
+    /* Declarations and parameters: the type as written, as a token. Resolving it, and
+     * deciding whether an identifier names a struct, is the semantic stage's job. */
     glsl_token_type_t type_tok;
-    /* **The type's name, when the type is a struct.** `type_tok` is
-     * `GLSL_TOK_IDENTIFIER` then, which says only "a name was written here"; this says
-     * which. Separate from `text` because that already holds the declarator's own name
-     * - `S s;` has two names and needs both. NULL for every built-in type. */
+    /* The type's name when the type is a struct (`type_tok` is then
+     * `GLSL_TOK_IDENTIFIER`). Separate from `text`, which holds the declarator's own
+     * name: `S s;` has two names. NULL for every built-in type. */
     const char *type_name;
     size_t type_name_len;
     glsl_token_type_t
@@ -268,16 +250,11 @@ typedef struct {
     const char *text;   /* identifier or field name: into the source, never a copy */
     size_t length;
     double value; /* for INTCONST/FLOATCONST/BOOLCONST */
-    /* **Which function a CALL binds to**, as a FUNCTION node index, decided by the
-     * semantic pass. GLSL_NO_NODE on every other kind of node and on a call to a
-     * built-in.
-     *
-     * It exists because a name no longer identifies a function: `permute` may be
-     * declared four times over different parameter types, and only the semantic pass
-     * has the argument types needed to say which one a call means. Recording the answer
-     * here is what keeps the interpreter and the generator from each having to resolve
-     * overloads again - and from disagreeing with this pass, or with each other, when
-     * they do. */
+    /* Which function a CALL binds to, as a FUNCTION node index, decided by the semantic
+     * pass. GLSL_NO_NODE on every other node and on a call to a built-in. Overloads
+     * share a name, and only the semantic pass has the argument types to choose;
+     * recording the choice keeps both back ends from resolving overloads again and
+     * disagreeing. */
     int32_t resolved;
     int line, column;
 } glsl_node_t;
@@ -297,30 +274,19 @@ typedef struct {
     glsl_ast_t *ast;
     const char *error; /* a literal, so there is nothing to free */
     int error_line, error_column;
-    /* **Where tokens come from.** NULL reads the lexer above directly, which is what
-     * the parser's own tests do. Set, the preprocessor is read instead, so directives
-     * are obeyed and macros expanded before the grammar sees anything - see
-     * `glsl_parser_init_pp`. */
+    /* Where tokens come from. NULL reads the lexer above directly, as the parser's own
+     * tests do; set, the preprocessor is read instead, so directives are obeyed and
+     * macros expanded first. See `glsl_parser_init_pp`. */
     struct glsl_pp *pp;
-    /* The shading language the source asked for: 110, 120, or **0 for "not stated"**,
-     * which is what a caller driving the parser without a preprocessor gets. Zero
-     * enforces nothing, so the front end's own tests can parse a fragment of either
-     * dialect; a real compile always has a number, because `glsl_parser_init_pp` reads
-     * it off the `#version` line before the first real token. */
+    /* The shading language the source asked for: 110, 120, or 0 for not stated, which
+     * enforces nothing so the front end's tests can parse either dialect. A real
+     * compile always has a number: `glsl_parser_init_pp` reads `#version` before the
+     * first real token. */
     int version;
-    /*
-     * **The struct names seen so far, which the grammar cannot do without.**
-     *
-     * `Foo bar;` and `foo * bar;` differ only in whether `Foo` names a type, and no
-     * amount of lookahead settles it - C's famous ambiguity, and GLSL inherits it the
-     * moment `struct` exists. `starts_declaration` asks this list.
-     *
-     * It lives on the parser rather than being taken from the semantic pass, because
-     * the decision is needed *while parsing*, before any pass has run. The names point
-     * into the source, like every other token's text, so nothing is copied and nothing
-     * is freed. Sema builds its own table from the AST afterwards and is the authority
-     * on members and layout; this knows only which words are type names.
-     */
+    /* The struct names seen so far. `Foo bar;` and `foo * bar;` differ only in whether
+     * `Foo` names a type, which no lookahead settles; `starts_declaration` asks this
+     * list while parsing, before any semantic pass has run. The names point into the
+     * source. Sema builds its own table afterwards and owns members and layout. */
     const char *struct_name[GLSL_MAX_STRUCTS];
     size_t struct_name_len[GLSL_MAX_STRUCTS];
     int struct_names;
@@ -329,21 +295,17 @@ typedef struct {
 /* -------------------------------------------------------------------------
  * The preprocessor
  *
- * A **token filter**, not a text-to-text pass: the parser pulls tokens through it, so
- * nothing has to allocate a rewritten copy of the source and every token keeps pointing
- * into the original text for diagnostics.
+ * A token filter, not a text-to-text pass: the parser pulls tokens through it, so no
+ * rewritten copy of the source is allocated and every token points into the original
+ * text for diagnostics.
  *
- * GLSL 1.10's preprocessor, whole: `#version`, `#define` and `#undef` both object-like
- * and function-like, `#ifdef`/`#ifndef`/`#if`/`#elif`/`#else`/`#endif` with constant
- * expressions,
- * `#error`, `#extension`, `#pragma` and `#line`.
+ * GLSL 1.10's preprocessor: `#version`, object-like and function-like `#define` and
+ * `#undef`, `#ifdef`/`#ifndef`/`#if`/`#elif`/`#else`/`#endif` with constant
+ * expressions, `#error`, `#extension`, `#pragma` and `#line`.
  *
- * **What is still refused is refused by name, never skipped.** `#extension ... :
- * require` fails because this front end implements no extensions and `require` is the
- * word that says a shader will not work without one - a skipped one compiles a shader
- * that asked for something it did not get. `<<` and `>>` in a `#if` fail because
- * GLSL 1.10 has no shift token, so they would otherwise read as two `<` and evaluate to
- * a number that picks a branch.
+ * What is refused is refused by name, never skipped. `#extension ... : require` fails
+ * because no extensions are implemented. `<<` and `>>` in a `#if` fail because
+ * GLSL 1.10 has no shift token and they would otherwise read as two `<`.
  * ------------------------------------------------------------------------- */
 
 #define GLSL_MAX_MACROS 64
@@ -351,11 +313,8 @@ typedef struct {
 #define GLSL_MAX_COND_DEPTH 32
 #define GLSL_MAX_PENDING 128
 
-/* **A function-like macro's parameters are names, and the body refers to them by
- * position.** Substitution compares each body token against these, so a body token that
- * is a parameter is replaced by the argument at the same index. Eight is past anything
- * a shader's `MAX(a,b)` or `LERP(a,b,t)` uses, and a ninth is refused rather than
- * silently dropped. */
+/* A function-like macro's parameter names; a body token matching one is replaced by the
+ * argument at the same index. A ninth parameter is refused, not dropped. */
 #define GLSL_MAX_MACRO_PARAMS 8
 
 typedef struct {
@@ -364,11 +323,10 @@ typedef struct {
     int32_t first_token; /* into the token pool */
     int32_t token_count;
     GLboolean in_use;    /* defined at all */
-    GLboolean expanding; /* **currently being expanded**: stops `#define A A` looping */
-    /* **Function-like, which is not the same as "takes no arguments".** `#define F() x`
-     * is function-like with zero parameters and must still be written `F()` to expand;
-     * `#define F x` is object-like and expands on sight. One flag cannot be inferred
-     * from `param_count`. */
+    GLboolean expanding; /* currently being expanded: stops `#define A A` looping */
+    /* Function-like, which is not the same as taking no arguments: `#define F() x` has
+     * zero parameters and still expands only as `F()`, while `#define F x` expands on
+     * sight. So this cannot be inferred from `param_count`. */
     GLboolean function_like;
     int param_count;
     const char *param_name[GLSL_MAX_MACRO_PARAMS];
@@ -384,16 +342,14 @@ typedef struct glsl_pp {
     glsl_token_t pool[GLSL_MAX_MACRO_TOKENS];
     int pool_count;
 
-    /* Tokens produced by expansion, served before the lexer is read again. A ring would
-     * be tidier; a straight buffer drained front to back is easier to be sure of. */
+    /* Tokens produced by expansion, served before the lexer is read again. A straight
+     * buffer drained front to back, not a ring. */
     glsl_token_t pending[GLSL_MAX_PENDING];
     int pending_head, pending_tail;
 
-    /* **The token a directive read past its own line.** A directive's end is found by
-     * watching the line number change, which means one token of the *next* line has
-     * already been taken off the lexer by the time the directive is finished. It is
-     * parked here and served before anything else, or it is silently dropped - which
-     * loses the first token after every directive. */
+    /* The token a directive read past its own line. A directive ends when the line
+     * number changes, so the first token of the next line has already been lexed; it is
+     * parked here and served before anything else. */
     glsl_token_t held;
     GLboolean has_held;
 
@@ -425,18 +381,17 @@ GLboolean glsl_lex_next(glsl_lexer_t *lx, glsl_token_t *out);
  * empty. */
 void glsl_parser_init(glsl_parser_t *p, glsl_ast_t *ast, const char *source,
                       size_t length);
-/* The same, reading through a preprocessor the caller has already initialised over the
- * source - so `#version`, `#define` and the conditionals are obeyed rather than
- * reaching the grammar as stray `#` tokens. **It consumes the directives before the
- * first real token**, so `pp->version` is known when it returns and a caller may refuse
- * a language before parsing a line of it. The preprocessor must outlive the parse; the
- * parser does not own it. */
+/* The same, reading through a preprocessor the caller has initialised over the source,
+ * so directives are obeyed rather than reaching the grammar as `#` tokens. It consumes
+ * the directives before the first real token, so `pp->version` is known on return and
+ * a caller may refuse a language before parsing it. The preprocessor must outlive the
+ * parse; the parser does not own it. */
 void glsl_parser_init_pp(glsl_parser_t *p, glsl_ast_t *ast, glsl_pp_t *pp);
-/* Parses one expression, including the comma operator, and returns its root node index
- * - or GLSL_NO_NODE with `p->error` set. It does not require the whole source to be
+/* Parses one expression, including the comma operator, and returns its root node index,
+ * or GLSL_NO_NODE with `p->error` set. It does not require the whole source to be
  * consumed; a caller wanting that checks `p->tok.type == GLSL_TOK_EOF` afterwards. */
 int32_t glsl_parse_expression(glsl_parser_t *p);
-/* One statement - compound, selection, iteration, jump, declaration or expression. */
+/* One statement: compound, selection, iteration, jump, declaration or expression. */
 int32_t glsl_parse_statement(glsl_parser_t *p);
 /* A whole shader: external declarations until the source runs out. Returns a
  * GLSL_NODE_UNIT, or GLSL_NO_NODE with `p->error` set. */
@@ -445,10 +400,8 @@ int32_t glsl_parse_translation_unit(glsl_parser_t *p);
 /* -------------------------------------------------------------------------
  * Types and the semantic stage
  *
- * The grammar accepts `vec3 + mat4` and `v.xyzw` on a `vec2` quite happily - they are
- * both well-formed binary expressions and field selections. Deciding that they are
- * wrong is this stage's job, and it is where a shader compiler earns most of its
- * diagnostics.
+ * The grammar accepts `vec3 + mat4` and `v.xyzw` on a `vec2`, which are well-formed
+ * expressions. Rejecting them is this stage's job, and it produces most diagnostics.
  * ------------------------------------------------------------------------- */
 
 typedef enum {
@@ -466,17 +419,11 @@ typedef enum {
     GLSL_TYPE_BVEC2,
     GLSL_TYPE_BVEC3,
     GLSL_TYPE_BVEC4,
-    /*
-     * **`matCxR` is C columns of R rows**, which is GLSL's order and the opposite of
-     * the one most people say aloud. `mat2x3` is two columns of three, six components,
-     * and a `mat4 * vec4` generalises to `matCxR * vecC -> vecR`.
-     *
-     * The square ones keep their short names because the language does: `mat3` *is*
-     * `mat3x3`. The six below are contiguous with them so `is_matrix` stays a range
-     * check, and their sizes come from a table rather than from arithmetic on the enum
-     * - an ordering that encodes the dimensions is a cleverness that breaks the first
-     * time a type is inserted.
-     */
+    /* `matCxR` is C columns of R rows, GLSL's order: `mat2x3` is two columns of three,
+     * and `matCxR * vecC -> vecR`. The square types keep their short names, as the
+     * language does (`mat3` is `mat3x3`). The six non-square ones are contiguous with
+     * them so `is_matrix` is a range check; sizes come from a table, not enum
+     * arithmetic, so inserting a type cannot break them. */
     GLSL_TYPE_MAT2,
     GLSL_TYPE_MAT3,
     GLSL_TYPE_MAT4,
@@ -493,19 +440,10 @@ typedef enum {
     GLSL_TYPE_SAMPLER1DSHADOW,
     GLSL_TYPE_SAMPLER2DSHADOW,
 
-    /*
-     * **A user-defined struct is a type value in the same enum**,
-     * `GLSL_TYPE_STRUCT_BASE + i` for the `i`th struct this unit declared.
-     *
-     * The alternative was a `{kind, index}` pair, which is tidier and would have meant
-     * touching every place a type is carried - the symbol table, `params[]`, the AST,
-     * both back ends' value structs, every `glsl_type_t` parameter in this header.
-     * Reserving a range instead keeps a type one integer, so all of that code keeps
-     * working unchanged and only the places that must *distinguish* a struct need to
-     * ask.
-     *
-     * The base is well past the built-ins with room to spare, so adding a built-in type
-     * below never renumbers a struct.
+    /* A user-defined struct is a type value in the same enum: `GLSL_TYPE_STRUCT_BASE +
+     * i` for the `i`th struct the unit declared. Reserving a range keeps a type one
+     * integer everywhere it is carried, and only code that must distinguish a struct
+     * asks. The base leaves room, so adding a built-in type never renumbers a struct.
      */
     GLSL_TYPE_STRUCT_BASE = 64
 } glsl_type_t;
@@ -569,29 +507,23 @@ typedef struct {
     glsl_type_t type; /* a variable's type, or a function's return type */
     int scope;        /* the block depth it was declared at */
     GLboolean is_function;
-    /* **The storage qualifier decides assignability.** `uniform`, `attribute` and
-     * `const` are read-only to a shader, and the l-value check is the only place that
-     * matters - so it is kept here rather than re-derived from the declaration node. */
+    /* The storage qualifier, which decides assignability: `uniform`, `attribute` and
+     * `const` are read-only, and the l-value check reads it here. */
     glsl_token_type_t qualifier;
-    /* **How many elements, or 0 for a name that is not an array.** GLSL 1.10 has one
-     * level of array and no array-valued expressions, so a length here and an element
-     * type in `type` is the whole of what the language can say. Indexing is the only
-     * thing that may be done to one, and it is the only place this is read. */
+    /* How many elements, or 0 for a name that is not an array. GLSL 1.10 has one level
+     * of array and no array-valued expressions, so a length and an element type in
+     * `type` say everything; only indexing reads it. */
     int array_size;
-    /* **A `const int`'s value, for the one place the language needs it: an array's
-     * length.** GLSL 4.1.9 calls that an integral constant expression, and the idiom
-     * every shader writes is `const int N = 8; uniform vec2 offs[N];` - so the value
-     * has to survive from the declaration to the use. Only `const`-qualified integer
-     * scalars with a foldable initialiser set it, which is exactly the set the
-     * specification allows to appear there. */
+    /* A `const int`'s value, for an array's length, which GLSL 4.1.9 requires to be an
+     * integral constant expression (`const int N = 8; uniform vec2 offs[N];`). Set only
+     * for `const` integer scalars with a foldable initialiser, the set the
+     * specification allows there. */
     GLboolean has_const_int;
     int const_int;
     glsl_type_t params[GLSL_MAX_PARAMS];
     int param_count;
-    /* **Which FUNCTION node this symbol is**, so a resolved call can name it.
-     * GLSL_NO_NODE for a variable. Overloading is why it is needed: the back ends used
-     * to find a function by name, which stops identifying one as soon as two share a
-     * name. */
+    /* Which FUNCTION node this symbol is, so a resolved call can name it among
+     * overloads. GLSL_NO_NODE for a variable. */
     int32_t decl_node;
 } glsl_symbol_t;
 
@@ -605,26 +537,19 @@ typedef struct {
     /* Set while checking a function body, so `return` can be checked against it. */
     glsl_type_t current_return;
     int loop_depth; /* so `break` and `continue` can be refused outside a loop */
-    /* **Which stage this unit is**, GL_VERTEX_SHADER or GL_FRAGMENT_SHADER - or 0 for a
-     * caller checking a fragment of GLSL without saying. It decides whether `dFdx` and
-     * `texture2DLod` exist: each is a fatal error in the wrong stage rather than a
-     * function that misbehaves, and 0 refuses neither, which is how the front end's own
-     * tests drive it. */
+    /* Which stage this unit is, GL_VERTEX_SHADER or GL_FRAGMENT_SHADER, or 0 for a
+     * caller that does not say. It decides whether `dFdx` and `texture2DLod` exist;
+     * each is an error in the wrong stage, and 0 refuses neither, as the front end's
+     * tests need. */
     GLenum stage;
-    /* **The shading language this unit asked for**: 110 or 120, or 0 for a caller
-     * checking a fragment without saying - which behaves as 1.10, the stricter of the
-     * two.
-     *
-     * The one thing it decides is implicit conversion. GLSL 1.10 converts nothing, so
-     * `1 + 1.0` is an error; 1.20 converts int to float and `ivecN` to `vecN`, and
-     * nothing else - not float to int, and not in the other direction. Accepting 1.20's
-     * rule for a 1.10 shader would pick a type its author did not write, which is the
-     * mistake the existing refusal was put there to prevent. */
+    /* The shading language this unit asked for: 110 or 120, or 0 for a caller that does
+     * not say, which behaves as the stricter 1.10. It decides implicit conversion:
+     * 1.10 converts nothing (`1 + 1.0` is an error); 1.20 converts int to float and
+     * `ivecN` to `vecN`, and nothing else. */
     int version;
-    /* **The structs this unit declared**, in declaration order - a type value of
-     * `GLSL_TYPE_STRUCT_BASE + i` names entry `i`. Kept here rather than in the symbol
-     * table because a struct type is not a name that can be assigned to or called; it
-     * is only ever looked up to find a member's type and offset. */
+    /* The structs this unit declared, in declaration order: type value
+     * `GLSL_TYPE_STRUCT_BASE + i` names entry `i`. Not in the symbol table, because a
+     * struct type is only looked up for a member's type and offset. */
     glsl_struct_t structs[GLSL_MAX_STRUCTS];
     int struct_count;
 } glsl_sema_t;
@@ -634,9 +559,9 @@ const glsl_struct_t *glsl_struct_of(const glsl_sema_t *s, glsl_type_t t);
 /* The member `name` of struct type `t`, or NULL. */
 const glsl_struct_member_t *glsl_struct_member(const glsl_sema_t *s, glsl_type_t t,
                                                const char *name, size_t len);
-/* **The size of anything, including a struct.** `glsl_type_components` takes a type
- * alone and a struct's size lives in the table beside it, so every caller that may see
- * one asks this. */
+/* The size of any type in components, including a struct, whose size lives in the
+ * sema's table. Every caller that may see a struct asks this, not
+ * `glsl_type_components`. */
 int glsl_type_components_of(const glsl_sema_t *s, glsl_type_t t);
 
 void glsl_sema_init(glsl_sema_t *s, glsl_ast_t *ast);
@@ -645,33 +570,26 @@ glsl_type_t glsl_type_from_token(glsl_token_type_t t);
 /* How many components a type has: 1 for a scalar, 2-4 for a vector, 4/9/16 for a
  * matrix. */
 int glsl_type_components(glsl_type_t t);
-/* The type predicates, and the diagnostic sink, shared with the built-in library. One
- * definition of each rule, in glsl_sema.c, rather than a second copy that agrees today.
- */
+/* The diagnostic sink and type predicates, shared with the built-in library so each
+ * rule has one definition, in glsl_sema.c. */
 void glsl_sema_fail(glsl_sema_t *s, const char *why, int32_t node);
 GLboolean glsl_type_is_vector(glsl_type_t t);
 GLboolean glsl_type_is_matrix(glsl_type_t t);
 GLboolean glsl_type_is_sampler(glsl_type_t t);
 /* A vector or matrix's component type; a scalar's own type. */
 glsl_type_t glsl_type_base(glsl_type_t t);
-/* The n-component vector of a base type - `vector_of(FLOAT, 1)` is FLOAT itself. */
+/* The n-component vector of a base type; `vector_of(FLOAT, 1)` is FLOAT itself. */
 glsl_type_t glsl_type_vector_of(glsl_type_t base, int n);
-/* **A matrix has two sizes, and asking for one number is the bug.** There was a
- * `glsl_type_matrix_dim` here returning the side of a square matrix and 0 otherwise,
- * which every site used as both the stride and the bound. That is right only while C ==
- * R, and a caller that kept it would answer 0 for a `mat2x3` and refuse it with no
- * diagnostic - so it is gone rather than deprecated, and the compiler names anything
- * still reaching for it.
- *
- * `matCxR` is C columns of R rows; both are 0 for a type that is not a matrix. */
+/* A matrix's two sizes: `matCxR` is C columns of R rows. Both are 0 for a type that is
+ * not a matrix. Stride and bound are separate questions unless C == R. */
 int glsl_type_matrix_cols(glsl_type_t t);
 int glsl_type_matrix_rows(glsl_type_t t);
 /* The matrix type with these dimensions, or ERROR. */
 glsl_type_t glsl_type_matrix_of(int cols, int rows);
-/* **Whether a value of `got` may be used where `want` is expected**, which is the one
- * place the implicit-conversion rule lives: exact equality always, plus int to float
- * and `ivecN` to `vecN` when the unit is GLSL 1.20. Every assignment, initialiser,
- * argument and return goes through it, so none of them can disagree about the rule. */
+/* Whether a value of `got` may be used where `want` is expected: the one place the
+ * implicit-conversion rule lives. Exact equality always, plus int to float and `ivecN`
+ * to `vecN` in GLSL 1.20. Every assignment, initialiser, argument and return uses it.
+ */
 GLboolean glsl_type_accepts(const glsl_sema_t *s, glsl_type_t want, glsl_type_t got);
 /* The type of an expression node, recording the first error on the way. */
 glsl_type_t glsl_type_of(glsl_sema_t *s, int32_t node);
@@ -683,89 +601,70 @@ GLboolean glsl_declare(glsl_sema_t *s, const char *name, size_t len, glsl_type_t
  * declares a plain variable, so a caller building a table does not need two calls. */
 GLboolean glsl_declare_array(glsl_sema_t *s, const char *name, size_t len,
                              glsl_type_t type, int count, glsl_token_type_t qualifier);
-/* The same, for a `const int` whose value is known - which an array's length and a
+/* The same, for a `const int` whose value is known, which an array's length and a
  * loop's bound may both be. GLSL 7.4's built-in constants come in this way. */
 GLboolean glsl_declare_const_int(glsl_sema_t *s, const char *name, size_t len,
                                  int value);
-/* **Whether this CALL node is a GLSL 1.20 array constructor** `T[N](a, b, ...)`, and if
- * so its element type and length. The parser already produces the shape - a call whose
- * callee is an index into a type name - so both back ends ask this rather than matching
- * the tree themselves. An array constructor has no *type* here, because an expression
- * carries a type and a symbol carries the length, which is why it is only usable as a
+/* Whether this CALL node is a GLSL 1.20 array constructor `T[N](a, b, ...)` (a call
+ * whose callee indexes a type name), and if so its element type and length. It has no
+ * expression type, since a symbol carries an array's length, so it is usable only as a
  * declaration's initialiser. */
 GLboolean glsl_array_ctor_of(glsl_sema_t *s, int32_t node, glsl_type_t *elem,
                              int *count);
-/* The same shape asked of the tree alone, which is what both back ends have - sema
- * folded the length to an `INTCONST` when it typed the call, so there is nothing left
- * to evaluate. */
+/* The same question asked of the tree alone, for the back ends: sema has already folded
+ * the length to an `INTCONST`. */
 GLboolean glsl_array_ctor_shape(const glsl_ast_t *ast, int32_t node, glsl_type_t *elem,
                                 int *count);
-/* **The element type and length of a node naming a whole array**, or false. `a` for a
- * declared array and `s.w` for a struct member with a length. The type system has no
- * array type - an expression carries a type and a symbol carries the length - so any
- * rule needing both halves, in the front end or either back end, asks this. */
+/* The element type and length of a node naming a whole array (`a`, or a struct member
+ * `s.w` with a length), or false. The type system has no array type, so any rule
+ * needing both halves asks this. */
 GLboolean glsl_whole_array_info(glsl_sema_t *s, int32_t node, glsl_type_t *elem,
                                 int *size);
 
 /* -------------------------------------------------------------------------
  * The built-in library
  *
- * GLSL's built-in functions are overloaded over `genType` - `sin` takes a float, a
- * vec2, a vec3 or a vec4 and gives the same back - which the symbol table cannot
- * express: it holds one signature per name. So they are resolved by rule instead, ahead
- * of the table, the way constructors already are.
+ * GLSL's built-in functions are overloaded over `genType` (`sin` takes and returns a
+ * float or any vec), which one signature per name in the symbol table cannot express.
+ * They are resolved by rule ahead of the table, as constructors are.
  *
- * `glsl_builtin_call_type` answers the result type of a call to a built-in. It sets
- * `*found` to false and returns without recording anything when the name is not a
- * built-in at all, so the caller goes on to look in the symbol table; it sets `*found`
- * true and returns GLSL_TYPE_ERROR - with a diagnostic recorded - when the name is a
- * built-in that was called wrongly, which is a better message than "undeclared
- * function".
+ * `glsl_builtin_call_type` answers the result type of a call to a built-in. When the
+ * name is not a built-in it sets `*found` false and records nothing, so the caller
+ * tries the symbol table; when a built-in is called wrongly it sets `*found` true and
+ * returns GLSL_TYPE_ERROR with a diagnostic recorded.
  * ------------------------------------------------------------------------- */
 glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
                                    const glsl_type_t *args, int argc, int32_t node,
                                    GLboolean *found);
-/* Declares GLSL 1.10's built-in variables and uniforms for one stage - `gl_Position`
- * and `gl_FragColor` and the fixed-function state a 1.10 shader may read. Called before
+/* Declares GLSL 1.10's built-in variables and uniforms for one stage: `gl_Position`,
+ * `gl_FragColor` and the fixed-function state a 1.10 shader may read. Called before
  * `glsl_check_unit`, since a shader may use one without declaring it. */
 GLboolean glsl_declare_builtins(glsl_sema_t *s, GLenum stage);
-/* Records one `GLSL_NODE_FUNCTION`'s return type and parameter types, so a call to it
- * can be typed. `glsl_check_unit` does this for every function in a unit; a caller that
- * builds its own symbol table - the pixel-shader back end does - has to do it too, or a
- * call to a function the shader defines cannot be typed at all. */
+/* Records one `GLSL_NODE_FUNCTION`'s return and parameter types, so a call to it can be
+ * typed. `glsl_check_unit` does this for every function; a caller building its own
+ * symbol table, such as the pixel-shader back end, must do it too. */
 GLboolean glsl_declare_function(glsl_sema_t *s, int32_t node);
 
-/* Whether a unit names this identifier anywhere - in a branch it never takes, in a
- * function it never calls, anywhere. A built-in is not declared, so there is no
- * declaration list to walk and the question is about the whole body; the AST is a flat
- * array, so this reads every node once.
- *
- * The over-answer is deliberate. Both callers decide *before* generating: the linker
- * sizes the parameter block, and the back end emits its prologue - and neither can wait
- * to find out which branches exist. A shader charged for a `gl_Color` it mentions and
- * never reaches costs one parameter; one not charged for a `gl_Color` it does reach
+/* Whether a unit names this identifier anywhere, including untaken branches and
+ * uncalled functions; it reads every node of the flat AST once. The over-answer is
+ * deliberate: the linker sizes the parameter block and the back end emits its prologue
+ * before generating, and an unneeded input costs one parameter where a missing one
  * reads a register nothing filled. */
 GLboolean glsl_unit_mentions(const glsl_unit_t *u, const char *name, size_t len);
-/* Whether the unit contains a `discard`. A keyword, so `glsl_unit_mentions` cannot find
- * it - see the definition. */
+/* Whether the unit contains a `discard`, a keyword `glsl_unit_mentions` cannot find. */
 GLboolean glsl_unit_discards(const glsl_unit_t *u);
-/* Why a `gl_` name that is real GLSL is not declared here, or NULL when the name is not
- * one this knows about. What turns "use of an undeclared name" - which reads as a typo
- * - into a sentence naming the feature that is missing. */
+/* Why a real GLSL `gl_` name is not declared here, or NULL for a name this does not
+ * know. It turns "undeclared name" into a message naming the missing feature. */
 const char *glsl_builtin_refusal(const char *name, size_t len);
-/* **The value of a built-in constant** (7.4), or false for any other name. Both back
- * ends ask, so `gl_MaxDrawBuffers` becomes a literal in each rather than a register
- * neither declared - and every value is the constant the matching `glGetIntegerv`
- * answers with, so the shading language and the API cannot be told different numbers.
- */
+/* The value of a built-in constant (7.4), or false for any other name. Both back ends
+ * make it a literal, and each value is what the matching `glGetIntegerv` answers. */
 GLboolean glsl_builtin_const_int(const char *name, size_t len, int *out);
 /* -------------------------------------------------------------------------
  * The back end: RDNA2 instruction encoding
  *
  * Opcodes and field positions are read out of a real assembler, never written from
- * memory - `tools/shader/gl2-transform.s` holds the source and the tests assert the
- * exact words clang produced from it. A wrong encoding assembles into the payload and
- * the hardware does something else, so it cannot fail loudly on its own.
+ * memory: `tools/shader/gl2-transform.s` holds the source and the tests assert the
+ * exact words clang produced from it. A wrong encoding does not fail loudly.
  * ------------------------------------------------------------------------- */
 
 typedef struct {
@@ -777,7 +676,7 @@ typedef struct {
 } glsl_code_t;
 
 /* VOP2 opcodes, from `v_mul_f32` = 0x10080108, `v_add_f32` = 0x06080908,
- * `v_fmac_f32` = 0x56080308 - the opcode is bits [30:25] of each. */
+ * `v_fmac_f32` = 0x56080308; the opcode is bits [30:25] of each. */
 #define GLSL_VOP2_ADD_F32 3u
 /* `v_sub_f32 v4, v8, v9` = 0x08081308. The next opcode, 5, is `v_subrev_f32` with the
  * operands the other way round, so an off-by-one here computes the negation of what was
@@ -787,19 +686,15 @@ typedef struct {
 #define GLSL_VOP2_FMAC_F32 43u
 #define GLSL_VOP2_MIN_F32 15u
 #define GLSL_VOP2_MAX_F32 16u
-/* `d = vcc_lo ? vsrc1 : src0`, which is the **false** value first. `mix(a, b, t)` with
- * a boolean t and GLSL's `?:` both come out of this one instruction, and getting the
- * operands the wrong way round is a shader that runs and chooses the other branch. From
- * `v_cndmask_b32_e32 v4, v5, v6, vcc_lo` = 0x02080d05. */
+/* `d = vcc_lo ? vsrc1 : src0`: the false value comes first. Boolean `mix` and `?:` both
+ * use it. From `v_cndmask_b32_e32 v4, v5, v6, vcc_lo` = 0x02080d05. */
 #define GLSL_VOP2_CNDMASK 1u
 
-/* VOP1 opcode, from `v_mov_b32 v14, v4` = 0x7e1c0304 - bits [16:9]. */
+/* VOP1 opcode, from `v_mov_b32 v14, v4` = 0x7e1c0304, bits [16:9]. */
 #define GLSL_VOP1_MOV_B32 1u
-/* The transcendentals, from `tools/shader/gl2-fragment.s`. **`v_rcp_f32` is a
- * reciprocal, not a divide**: GLSL's `/` is a reciprocal and a multiply, which is what
- * this hardware has. `v_exp_f32` and `v_log_f32` are base **two**, not base e -
- * `exp(x)` is `exp2(x * log2 e)`, and taking them for the natural pair is a shader that
- * runs and computes something plausible. */
+/* The transcendentals, from `tools/shader/gl2-fragment.s`. `v_rcp_f32` is a
+ * reciprocal, not a divide: GLSL's `/` is a reciprocal and a multiply. `v_exp_f32` and
+ * `v_log_f32` are base two, not base e: `exp(x)` is `exp2(x * log2 e)`. */
 #define GLSL_VOP1_FRACT_F32 32u
 #define GLSL_VOP1_TRUNC_F32 33u
 #define GLSL_VOP1_CEIL_F32 34u
@@ -812,8 +707,8 @@ typedef struct {
 #define GLSL_VOP1_SIN_F32 53u
 #define GLSL_VOP1_COS_F32 54u
 
-/* VOPC opcodes, from the same file. `v_cmp_neq_f32` is the **unordered** not-equal,
- * which is what GLSL's `!=` is: a NaN is not equal to anything, including itself. */
+/* VOPC opcodes, from the same file. `v_cmp_neq_f32` is the unordered not-equal, which
+ * is GLSL's `!=`: a NaN is not equal to anything, including itself. */
 #define GLSL_VOPC_LT_F32 1u
 #define GLSL_VOPC_EQ_F32 2u
 #define GLSL_VOPC_LE_F32 3u
@@ -822,11 +717,10 @@ typedef struct {
 #define GLSL_VOPC_NEQ_F32 13u
 
 /* SMEM opcodes: the five load widths, which are consecutive. From
- * `tools/shader/gl2-fragment.s`
- * - `s_load_dword s4, s[0:1], 0x0` = 0xf4000100 0xfa000000, and each wider form is the
- * opcode field (bits 25:18) one higher. **A uniform reaches a compiled pixel shader
- * this way**: the draw puts a block's address in the first user SGPR pair and the
- * shader loads from it. */
+ * `tools/shader/gl2-fragment.s`: `s_load_dword s4, s[0:1], 0x0` = 0xf4000100
+ * 0xfa000000, and each wider form is the opcode field (bits 25:18) one higher. Uniforms
+ * reach a compiled pixel shader this way: the draw puts a block's address in the first
+ * user SGPR pair and the shader loads from it. */
 #define GLSL_SMEM_LOAD_DWORD 0u
 #define GLSL_SMEM_LOAD_DWORDX2 1u
 #define GLSL_SMEM_LOAD_DWORDX4 2u
@@ -835,17 +729,17 @@ typedef struct {
 
 void glsl_code_init(glsl_code_t *c, uint32_t *words, uint32_t capacity);
 uint32_t glsl_vgpr(uint32_t n);
-/* An SGPR as a source operand - the identity, spelled out so a call site says which
- * file it means. See `glsl_emit.c`. */
+/* An SGPR as a source operand: the identity, spelled out so a call site says which file
+ * it means. See `glsl_emit.c`. */
 uint32_t glsl_sgpr(uint32_t n);
-/* `sbase_pair` is an SGPR **pair** index: the address in s[0:1] is 0. `offset` is in
+/* `sbase_pair` is an SGPR pair index: the address in s[0:1] is 0. `offset` is in
  * bytes. */
 void glsl_emit_s_load(glsl_code_t *c, uint32_t op, uint32_t sdata, uint32_t sbase_pair,
                       uint32_t offset);
 void glsl_emit_s_waitcnt_lgkm(glsl_code_t *c);
 
-/* Scalar registers that are not the general file. **Wave32**, so the mask registers are
- * the low halves - `vcc` and `exec` are the 64-bit names and encode differently. */
+/* Scalar registers outside the general file. Wave32, so the mask registers are the low
+ * halves; `vcc` and `exec` are the 64-bit names and encode differently. */
 #define GLSL_SREG_VCC_LO 106u
 #define GLSL_SREG_EXEC_LO 126u
 /* `m0`, which a pixel shader sets once and never reads: see `glsl_emit_s_mov_m0`. */
@@ -856,23 +750,21 @@ void glsl_emit_s_waitcnt_lgkm(glsl_code_t *c);
  * `s_andn2_b32 exec_lo, s4, exec_lo` = 0x8a7e7e04, and `s_and_b32` from the word
  * already in the tree, 0x877e6a7e. */
 #define GLSL_SOP1_MOV_B32 3u
-/* `s_wqm_b32 exec_lo, exec_lo` = 0xbefe097e - whole-quad mode, for a sample's
+/* `s_wqm_b32 exec_lo, exec_lo` = 0xbefe097e: whole-quad mode, for a sample's
  * derivatives. */
 #define GLSL_SOP1_WQM_B32 9u
 #define GLSL_SOP1_AND_SAVEEXEC_B32 60u
 #define GLSL_SOP2_AND_B32 14u
 #define GLSL_SOP2_ANDN2_B32 20u
-/* `s_add_u32 s20, s20, 1` = 0x80148114, from `tools/shader/branch.s` - the trip
+/* `s_add_u32 s20, s20, 1` = 0x80148114, from `tools/shader/branch.s`: the trip
  * counter's step. */
 #define GLSL_SOP2_ADD_U32 0u
 
 void glsl_emit_sop1(glsl_code_t *c, uint32_t op, uint32_t sdst, uint32_t ssrc0);
 void glsl_emit_sop2(glsl_code_t *c, uint32_t op, uint32_t sdst, uint32_t ssrc0,
                     uint32_t ssrc1);
-/* An `if`'s four moments. See `glsl_emit.c` - and note that there is no branch among
- * them: a body run with `exec` zero writes nothing, so skipping it is a saving and not
- * a requirement. A **loop** is where that stops being enough, and the branches below
- * are for that alone. */
+/* An `if` uses no branch (see `glsl_emit.c`): a body run with `exec` zero writes
+ * nothing. Only loops need the branches below. */
 
 /* -------------------------------------------------------------------------
  * Branches
@@ -883,8 +775,8 @@ void glsl_emit_sop2(glsl_code_t *c, uint32_t op, uint32_t sdst, uint32_t ssrc0,
  * ------------------------------------------------------------------------- */
 #define GLSL_SOPP_BRANCH 2u
 #define GLSL_SOPP_CBRANCH_SCC1 5u
-/* Taken when every lane has left - what keeps a narrowed loop from running its body for
- * nobody. */
+/* Taken when every lane has left, so a narrowed loop does not run its body for nobody.
+ */
 #define GLSL_SOPP_CBRANCH_EXECZ 8u
 
 /* SOPC: `101111110 op[22:16] ssrc1[15:8] ssrc0[7:0]`, from `s_cmp_ge_u32 s20, 0x100`
@@ -893,7 +785,7 @@ void glsl_emit_sop2(glsl_code_t *c, uint32_t op, uint32_t sdst, uint32_t ssrc0,
 
 void glsl_emit_sopp(glsl_code_t *c, uint32_t op, uint32_t simm16);
 void glsl_emit_sopc(glsl_code_t *c, uint32_t op, uint32_t ssrc0, uint32_t ssrc1);
-/* The index the next emitted word will take - a label. */
+/* The index the next emitted word will take: a label. */
 uint32_t glsl_code_here(const glsl_code_t *c);
 /* A branch to a word already emitted. `target` comes from an earlier `glsl_code_here`.
  */
@@ -901,49 +793,34 @@ void glsl_emit_branch_back(glsl_code_t *c, uint32_t op, uint32_t target);
 /* A branch to a word not emitted yet: returns the index to pass to
  * `glsl_patch_branch_here`. */
 uint32_t glsl_emit_branch_fwd(glsl_code_t *c, uint32_t op);
-/* Points a forward branch at the next word. **False means the offset could not be
- * trusted** - the buffer overflowed in between - and is a failed compile, never
- * something to ignore. */
+/* Points a forward branch at the next word. False means the buffer overflowed in
+ * between, so the offset cannot be trusted and the compile fails. */
 GLboolean glsl_patch_branch_here(glsl_code_t *c, uint32_t at);
 /* The trip guard: a counter that ends a loop whatever the lanes are doing. */
 void glsl_emit_s_inc_u32(glsl_code_t *c, uint32_t sreg);
 void glsl_emit_s_cmp_ge_u32_imm(glsl_code_t *c, uint32_t sreg, uint32_t imm);
 /* MIMG opcodes, from `tools/shader/gl2-fragment.s`: `image_sample` = 0xf0800f08 and
  * `image_sample_lz` = 0xf09c0f08, the opcode being bits 24:18 of the first word.
- *
- * **`_lz` is the easy one and the wrong one.** It samples level zero, so it needs no
- * derivatives and no whole-quad mode - and leaves the mip chain, the minification
- * filter and GL 1.4's LOD bias unused. The textured fixed-function shader found that on
- * 2026-09-19. */
+ * `_lz` samples level zero only, ignoring the mip chain, the minification filter and
+ * GL 1.4's LOD bias. */
 #define GLSL_MIMG_SAMPLE 32u
-/* **`image_sample_b`, read out of the assembler and not guessed**: clang 21 for gfx1030
- * assembles `image_sample_b v[4:7], v[16:18], s[8:15], s[16:19] dmask:0xf
- * dim:SQ_RSRC_IMG_2D` to `0xF0940F08`, against the plain sample's `0xF0800F08` - the
- * opcode field, bits 24:18, being the whole difference. The same line at
- * `SQ_RSRC_IMG_CUBE` takes `v[16:19]`, one register more than the cube's three
- * coordinates, which is where the bias goes: **first in the address run**, ahead of the
- * coordinate. */
+/* `image_sample_b`: clang 21 for gfx1030 assembles `image_sample_b v[4:7], v[16:18],
+ * s[8:15], s[16:19] dmask:0xf dim:SQ_RSRC_IMG_2D` to 0xF0940F08, against the plain
+ * sample's 0xF0800F08. At `SQ_RSRC_IMG_CUBE` it takes `v[16:19]`, one more than the
+ * cube's three coordinates: the bias goes first in the address run. */
 #define GLSL_MIMG_SAMPLE_B 37u
 #define GLSL_MIMG_SAMPLE_LZ 39u
-/* **The comparing form**, which returns one value rather than a texel: the sampler's
- * own `DEPTH_COMPARE_FUNC` is applied per texel against a reference the shader hands
- * over as the
- * **first** address register, ahead of s and t. From `tools/shader/tex-shadow.s`, where
- * `image_sample_c ... dmask:0x1` is 0xf0a00108 - and the register order is not read off
- * the ISA alone: obSCEne's `-b4e1` reports `VADDR v[2:4] with ref_z in v2 at position
- * 0`. */
+/* The comparing form, which returns one value rather than a texel: the sampler's
+ * `DEPTH_COMPARE_FUNC` is applied per texel against a reference in the first address
+ * register, ahead of s and t. From `tools/shader/tex-shadow.s`, where
+ * `image_sample_c ... dmask:0x1` is 0xf0a00108. */
 #define GLSL_MIMG_SAMPLE_C 40u
 
-/* **The cube face selection, which is four instructions and not arithmetic.** The
- * hardware turns a direction into a face and a place on it: `v_cubeid_f32` names the
- * face, `v_cubesc_f32` and `v_cubetc_f32` give the two coordinates on it, and
- * `v_cubema_f32` gives twice the major axis to divide them by. All four read x, y and z
- * at once, which is why they are VOP3 - there is no two-operand form to reach them
- * through.
- *
+/* Cube face selection: `v_cubeid_f32` names the face, `v_cubesc_f32` and
+ * `v_cubetc_f32` give the two coordinates on it, and `v_cubema_f32` gives twice the
+ * major axis to divide them by. All four read x, y and z, so they are VOP3 only.
  * Opcodes from `tools/shader/tex-cube.s`: 0xd5440013, 0xd5450014, 0xd5460015,
- * 0xd5470016, the opcode being bits 25:16. That is the sequence ACO emits and the one
- * the ISA documents. */
+ * 0xd5470016, the opcode being bits 25:16; the sequence ACO emits. */
 #define GLSL_VOP3_CUBEID_F32 0x144u
 #define GLSL_VOP3_CUBESC_F32 0x145u
 #define GLSL_VOP3_CUBETC_F32 0x146u
@@ -959,7 +836,7 @@ void glsl_emit_vop3(glsl_code_t *c, uint32_t op, uint32_t vdst, uint32_t src0,
 #define GLSL_IMG_DIM_3D 2u
 #define GLSL_IMG_DIM_CUBE 3u
 
-/* `srsrc` and `ssamp` are the **first SGPR** of the descriptor group; the encoder
+/* `srsrc` and `ssamp` are the first SGPR of the descriptor group; the encoder
  * divides by four. `vaddr` is the first of a consecutive run holding the coordinate,
  * `vdata` the first of the four the sample returns. */
 void glsl_emit_image_sample_masked(glsl_code_t *c, uint32_t opcode, uint32_t dim,
@@ -982,7 +859,7 @@ void glsl_emit_vop2(glsl_code_t *c, uint32_t opcode, uint32_t vdst, uint32_t src
 void glsl_emit_vop1(glsl_code_t *c, uint32_t opcode, uint32_t vdst, uint32_t src0);
 void glsl_emit_mul_f32(glsl_code_t *c, uint32_t d, uint32_t s0, uint32_t s1);
 void glsl_emit_add_f32(glsl_code_t *c, uint32_t d, uint32_t s0, uint32_t s1);
-/* `d = s0 - s1`, in that order - see the definition. */
+/* `d = s0 - s1`, in that order; see the definition. */
 void glsl_emit_sub_f32(glsl_code_t *c, uint32_t d, uint32_t s0, uint32_t s1);
 void glsl_emit_neg_f32(glsl_code_t *c, uint32_t d, uint32_t s);
 void glsl_emit_fmac_f32(glsl_code_t *c, uint32_t d, uint32_t s0, uint32_t s1);
@@ -1000,12 +877,11 @@ void glsl_emit_mat_mul_vec(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v,
                            uint32_t n);
 /* `dst[0..3] = m * v`, column-major. `dst` must not overlap `v`. */
 void glsl_emit_mat4_mul_vec4(glsl_code_t *c, uint32_t dst, uint32_t m, uint32_t v);
-/* `dst[0..cols-1] = v * m`, the product with the transpose and **not** `m * v`: `v` has
- * `rows` components and the result has one per column. */
+/* `dst[0..cols-1] = v * m`, the product with the transpose, not `m * v`: `v` has `rows`
+ * components and the result has one per column. */
 void glsl_emit_vec_mul_mat_cr(glsl_code_t *c, uint32_t dst, uint32_t v, uint32_t m,
                               uint32_t cols, uint32_t rows);
-/* `dst[0..n-1] = v * m`, which is the product with the transpose and **not** `m * v`.
- */
+/* `dst[0..n-1] = v * m`, the product with the transpose, not `m * v`. */
 void glsl_emit_vec_mul_mat(glsl_code_t *c, uint32_t dst, uint32_t v, uint32_t m,
                            uint32_t n);
 
@@ -1014,36 +890,27 @@ void glsl_emit_vop1_op(glsl_code_t *c, uint32_t opcode, uint32_t d, uint32_t s);
 /* Two operands: `v_min_f32`, `v_max_f32` and the rest of VOP2. */
 void glsl_emit_vop2_op(glsl_code_t *c, uint32_t opcode, uint32_t d, uint32_t s0,
                        uint32_t s1);
-/* `d = vcc_lo ? s1 : s0`. The **false** value is the first one. */
+/* `d = vcc_lo ? s1 : s0`. The false value is the first one. */
 void glsl_emit_cndmask(glsl_code_t *c, uint32_t d, uint32_t s0, uint32_t s1);
-/* A comparison into `vcc_lo`, and the lane kill that reads it - `discard` is the two
- * together, which is the same pair the alpha test and the polygon stipple already use.
- */
+/* A comparison into `vcc_lo`, and the lane kill that reads it. `discard` is the pair,
+ * as are the alpha test and the polygon stipple. */
 void glsl_emit_cmp(glsl_code_t *c, uint32_t opcode, uint32_t s0, uint32_t s1);
 void glsl_emit_kill_from_vcc(glsl_code_t *c);
 
 /* -------------------------------------------------------------------------
  * The pixel shader's two ends
  *
- * A varying reaches a fragment as a **parameter**, and turning one into a value takes
- * two instructions against the barycentrics the hardware puts in v0 and v1. Exporting
- * the result takes one. Neither depends on the GLSL, and both are the frame the
- * compiled body sits in.
+ * A varying reaches a fragment as a parameter, interpolated by two instructions against
+ * the barycentrics the hardware puts in v0 and v1. Exporting the result takes one.
+ * Neither depends on the GLSL; they frame the compiled body.
  * ------------------------------------------------------------------------- */
 
-/* **`m0` addresses the parameter cache, and every `v_interp` reads it.** The SPI hands
- * the wave its primitive mask in the scalar register just past the user data, and `m0`
- * has to be moved from there before the first interpolation - so `ssrc` is s2 for a
- * shader that takes the block's address in s[0:1] and s0 for one that takes no user
- * data at all.
- *
- * **Leaving it out does not fail loudly.** `m0` is whatever the last wave in that slot
- * left in it, so some waves interpolate the right primitive's parameters and some do
- * not, and the result is a correct-looking surface speckled with fragments built from
- * another primitive's data - per wave, which is why it reads as a fine regular stipple
- * rather than a wrong triangle. Every hand-written pixel shader in the payload sets it
- * (`gl_context.c`, `ps_untex` and `ps_tex`); the generated ones did not until
- * 2026-09-22. */
+/* `m0` addresses the parameter cache, and every `v_interp` reads it. The SPI hands the
+ * wave its primitive mask in the scalar register just past the user data, so `ssrc` is
+ * s2 for a shader taking the block's address in s[0:1] and s0 for one with no user
+ * data. Without it `m0` holds whatever the slot's last wave left, and some waves
+ * interpolate another primitive's parameters: a fine per-wave stipple. The hand-written
+ * pixel shaders in `gl_context.c` (`ps_untex`, `ps_tex`) set it the same way. */
 void glsl_emit_s_mov_m0(glsl_code_t *c, uint32_t ssrc);
 /* One component of one parameter into `vdst`: `p2` false for the first half of the pair
  * and true for the second, which must follow it immediately. `attr` is 0..31 and `chan`
@@ -1052,21 +919,21 @@ void glsl_emit_interp(glsl_code_t *c, uint32_t vdst, uint32_t attr, uint32_t cha
                       GLboolean p2);
 /* Both halves for one component, which is what a caller always wants. */
 void glsl_emit_interp_pair(glsl_code_t *c, uint32_t vdst, uint32_t attr, uint32_t chan);
-/* `exp mrt0 v[base..base+3] done vm` - the colour, and the end of the shader's exports.
+/* `exp mrt0 v[base..base+3] done vm`: the colour, and the end of the shader's exports.
  */
 void glsl_emit_export_mrt0(glsl_code_t *c, uint32_t base);
-/* The depth a shader wrote, exported before the colour - see the definition for why it
+/* The depth a shader wrote, exported before the colour; see the definition for why it
  * carries neither `done` nor `vm`. */
 void glsl_emit_export_mrtz(glsl_code_t *c, uint32_t reg);
 
-/* **The quad permutes a derivative needs**, as `quad_perm` control values. A quad is
- * laid out (0,0) (1,0) / (0,1) (1,1), so the x pair is lanes 0-1 and 2-3 and the y pair
- * is 0-2 and 1-3. Each of these broadcasts one side of that pair across the quad, and
- * the difference of two is the derivative. Verified against the assembler, all four. */
-#define GLSL_DPP_QUAD_X_FAR 0xf5u  /* [1,1,3,3] - the right-hand column */
-#define GLSL_DPP_QUAD_X_NEAR 0xa0u /* [0,0,2,2] - the left-hand column */
-#define GLSL_DPP_QUAD_Y_FAR 0xeeu  /* [2,3,2,3] - the bottom row */
-#define GLSL_DPP_QUAD_Y_NEAR 0x44u /* [0,1,0,1] - the top row */
+/* The quad permutes a derivative needs, as `quad_perm` control values. A quad is laid
+ * out (0,0) (1,0) / (0,1) (1,1), so the x pairs are lanes 0-1 and 2-3 and the y pairs
+ * 0-2 and 1-3. Each broadcasts one side of a pair across the quad; the difference of
+ * two is the derivative. All four are checked against the assembler. */
+#define GLSL_DPP_QUAD_X_FAR 0xf5u  /* [1,1,3,3], the right-hand column */
+#define GLSL_DPP_QUAD_X_NEAR 0xa0u /* [0,0,2,2], the left-hand column */
+#define GLSL_DPP_QUAD_Y_FAR 0xeeu  /* [2,3,2,3], the bottom row */
+#define GLSL_DPP_QUAD_Y_NEAR 0x44u /* [0,1,0,1], the top row */
 
 /* `dst = src`, read through a quad permute. */
 void glsl_emit_dpp_mov(glsl_code_t *c, uint32_t dst, uint32_t src, uint32_t ctrl);
@@ -1078,113 +945,77 @@ void glsl_emit_dpp_sub(glsl_code_t *c, uint32_t dst, uint32_t src0, uint32_t vsr
 /* -------------------------------------------------------------------------
  * Instruction selection: the tree becomes instructions
  *
- * A value occupies consecutive VGPRs, one per component - a `float` is one, a `vec4`
+ * A value occupies consecutive VGPRs, one per component: a `float` is one, a `vec4`
  * four, a `mat4` sixteen laid out column-major. No packing and no component aliasing,
- * so a swizzle is a move rather than a reinterpretation of a register.
+ * so a swizzle is a move.
  *
- * Only the float family is generated, and only the operators whose opcodes have been
- * read out of a real assembler. Anything else sets `error` and emits nothing - see
- * `glsl_gen.c`.
+ * Only the float family is generated, with opcodes read out of a real assembler.
+ * Anything else sets `error` and emits nothing; see `glsl_gen.c`.
  * ------------------------------------------------------------------------- */
 
 #define GLSL_MAX_VGPRS 256u
 #define GLSL_GEN_MAX_VARS 64
 
 /*
- * **The scalar file, as a compiled pixel shader divides it up.**
+ * The scalar file, as a compiled pixel shader divides it:
  *
- *     s0, s1    the block's address, handed over as user data
- *     s2, s3    the primitive mask, which the prologue moves into `m0` for the
- * interpolator. It lands in s2 with two user SGPRs and in s0 with none, so a shader
- * that takes no block reads it from s0 and s[0:1] are not an address at all. s4..s15
- * texture set 0: the image descriptor in s[4:11], the sampler in s[12:15] s16..s27
- * texture set 1 s28       the live-lane mask, kept across a whole-quad section s29..s40
- * an `if`'s saved exec mask, one a nesting level s41..s46  a **branched** loop's three
- * masks, one set a nesting level s48..s79  the uniforms, two `s_load_dwordx16`s
+ *   s0..s1    the uniform block's address, handed over as user data
+ *   s2        the primitive mask, moved into `m0` by the prologue (s0 when the shader
+ *             takes no block, and then s[0:1] is not an address)
+ *   s4..      texture sets, 12 each: image descriptor at +0, sampler at +8
+ *   LIVE      the live-lane mask, kept across a whole-quad section
+ *   EXEC..    an `if`'s saved exec mask, one per nesting level
+ *   LOOP..    a branched loop's three masks, one set per nesting level
+ *   then      the draw constants and the uniforms, placed by `glsl_ps.c`
  *
- * **Every group above starts on a multiple of four, and that is the rule** - not the
- * width. A scalar load of four dwords or more needs a 4-aligned destination whatever
- * its width, so `s_load_dwordx16 s[52:67]` is legal and `s_load_dwordx8 s[6:13]` is
- * not; a pair needs 2 and a single needs nothing. MIMG says the same thing from the
- * other direction: `srsrc` and `ssamp` are five-bit fields holding the register number
- * **divided by four**, so a descriptor group that did not start on a multiple of four
- * could not be named at all.
- *
- * Twelve nesting levels is more than any fragment shader this is meant to compile; a
- * thirteenth is refused rather than written over the uniforms.
+ * A scalar load of four dwords or more needs a 4-aligned destination whatever its
+ * width, and MIMG's `srsrc` and `ssamp` hold the register number divided by four, so
+ * every descriptor and load group starts on a multiple of four.
  */
 #define GLSL_GEN_TEX_SGPR_BASE 4u /* set n: image at +12n, sampler at +12n+8 */
 #define GLSL_GEN_TEX_SGPR_STRIDE 12u
-/*
- * **Four sampler sets, which is what the scalar file has room for and not a round
- * number picked for tidiness.** Sets take s4..s51, the masks s52..s64, the draw
- * constants s68..s71 and the uniforms s72..s103 - against a ceiling of s105, from
- * Mesa's `ac_gpu_info.c:260`
- * (`max_sgpr_alloc = 108`, with VCC at s[106-107]). Two registers spare, and the static
- * assertion in `gl_internal.h` is what keeps a fifth set from silently running past the
- * end.
- *
- * Two was the limit until 2026-09-25, and `tools/shader-survey.sh` is what named the
- * cost: SuperTux's shader samples three textures and was refused for the console while
- * compiling perfectly, so the front end said nothing about it.
+/* Four sampler sets, which is what the scalar file has room for: sets s4..s51, masks
+ * s52..s66, draw constants s68..s71 and uniforms s72..s103, against a ceiling of s105
+ * (Mesa `ac_gpu_info.c:260`, `max_sgpr_alloc = 108` with VCC at s[106-107]). The
+ * static assertions in `gl_internal.h` and below stop a fifth set running past the end.
  */
 #define GLSL_GEN_MAX_TEX_SETS OOPS_GL_GL2_TEX_SETS
 #define GLSL_GEN_LIVE_SGPR 52u
 #define GLSL_GEN_EXEC_SGPR_BASE 53u
-/* **Eight, down from twelve on 2026-09-25**, to make room below the 106-register
- * ceiling for four sampler sets. Eight levels of nested `if` in a fragment shader is
- * past anything written by hand, and a ninth is a diagnostic rather than a corrupted
- * register. */
+/* Eight levels of nested `if`, what fits below the ceiling beside four sampler sets. A
+ * ninth is a diagnostic rather than a corrupted register. */
 #define GLSL_GEN_MAX_EXEC_DEPTH 8
 
 /*
- * **A loop that branches needs three masks, where an `if` needs one.**
+ * A branched loop needs three masks, where an `if` needs one:
  *
  *   `active`  the lanes still going round. The condition narrows it each trip and
- * `break` takes lanes out of it for good. `exec` is reloaded from it at the top of
- * every trip, which is also what undoes a `continue`. `entry`   the mask the loop was
- * entered with, and what `exec` goes back to on the way out. Distinct from `active`
- * because a lane that broke out, or whose condition went false, still runs the
- * statements after the loop - and `active` no longer has it. `trip`    the trip guard's
- * counter. See `gen_for_branched`.
+ *             `break` removes lanes for good; `exec` is reloaded from it at the top of
+ *             every trip, which also undoes a `continue`.
+ *   `entry`   the mask the loop was entered with, restored on the way out: a lane that
+ *             left `active` still runs the statements after the loop.
+ *   `trip`    the trip guard's counter.
  *
- * Two levels, because these are levels of *branched* loop: one the unroller could not
- * finish. An unrolled loop nested inside one costs nothing here, so two is deeper than
- * it reads.
+ * See `gen_for_branched`. The depth counts only loops the unroller could not finish;
+ * unrolled loops nested inside cost nothing here. The masks sit after the exec stack.
  */
-/* **After the exec stack, which is after the sampler sets.** These were s41..s46 while
- * the sets ended at s27; going to four sets on 2026-09-25 moved the sets' end to s51
- * and left these inside it, so a shader with four samplers and a branched loop would
- * have written its loop masks over its own image descriptors. Nothing caught it: the
- * assertion at the end of this block checked the exec stack and the sets and not this
- * range, which is why it now walks the whole map in order rather than checking the
- * pieces it happened to name. */
 #define GLSL_GEN_LOOP_SGPR_BASE 61u
 #define GLSL_GEN_LOOP_SGPR_COUNT 3u
 #define GLSL_GEN_MAX_LOOP_DEPTH 2
-/* A branched loop always ends. The ceiling is the trip count this generator counted
- * statically, so on a shader that does what it says the guard never fires; it is there
- * for the one that does not. Counting stops here, and a loop asking for more trips than
- * this is refused - an unbounded ceiling would be a guard that permits the hang it
- * exists to prevent. */
+/* A branched loop always ends. The guard's ceiling is the statically counted trip
+ * count, so it fires only on a shader that does not do what it says. A loop asking for
+ * more trips than this is refused, since an unbounded ceiling would permit the hang. */
 #define GLSL_GEN_MAX_TRIPS 65536
-/* How deep user-defined calls may nest before the generator refuses. Eight is past
- * anything a fragment shader written by hand does, and short enough that a shader
+/* How deep user-defined calls may nest before the generator refuses, so a shader
  * calling itself is a message rather than a hang. */
 #define GLSL_GEN_MAX_INLINE_DEPTH 8
 
 /*
- * **The scalar map, asserted as the sequence it is.** Mesa puts this part's general
- * SGPRs at s0..s105 - `ac_gpu_info.c:260`, `max_sgpr_alloc = 108` with VCC at
- * s[106-107]. Running off the end, or one range starting inside another, is not a
- * diagnostic at run time: it is another wave's registers or this shader's own
- * descriptors, so a wrong pixel somewhere with no error.
- *
- * **Every range in order, each starting after the last ends.** The first version of
- * this checked the two ranges it happened to name, and that let the loop masks sit
- * inside the sampler descriptors for a commit when the sets grew from two to four. A
- * map is a sequence, so the assertion has to be one. `glsl_ps.c` continues it upward
- * with the draw constants and the uniforms, which are the last things in the file.
+ * The scalar map, asserted as a sequence: every range in order, each starting after the
+ * last ends. The general SGPRs are s0..s105 (Mesa `ac_gpu_info.c:260`,
+ * `max_sgpr_alloc = 108` with VCC at s[106-107]); an overlap or overrun gives no
+ * run-time error, only a wrong pixel. `glsl_ps.c` continues the sequence with the draw
+ * constants and the uniforms.
  */
 typedef char glsl_gen_sgpr_map_fits
     [(GLSL_GEN_TEX_SGPR_BASE +
@@ -1209,21 +1040,14 @@ typedef struct {
     size_t name_len;
     glsl_value_t value;
     glsl_type_t type;
-    /* **How many elements, or 0 for a name that is not an array**, mirroring
-     * `glsl_symbol_t`. An array's registers are its elements end to end - element `k`
-     * of a `vec3 v[4]` is `value.base + 3k` - so the length and the element type are
-     * the whole of what indexing needs. GLSL 1.10 has one level of array and no
-     * array-valued expressions, so there is nothing else a name can be. */
+    /* How many elements, or 0 for a name that is not an array, mirroring
+     * `glsl_symbol_t`. The registers are the elements end to end (element `k` of a
+     * `vec3 v[4]` is `value.base + 3k`), which is all indexing needs. */
     int array_size;
-    /* **Set only for an unrolled loop's counter**, which holds a different known value
-     * in each copy of the body - so `w[i]` is an index this can resolve, and that is
-     * the whole reason an array in a register file is useful rather than merely legal.
-     *
-     * Deliberately not set for locals in general. "This variable holds a constant"
-     * stops being true the moment something assigns to it, and knowing where that
-     * happens is a dataflow question this generator does not ask. The counter is the
-     * one variable it can answer for, because a body that assigns to it is refused
-     * before any of this is emitted. */
+    /* Set only for an unrolled loop's counter, which holds a known value in each copy
+     * of the body, so `w[i]` resolves to a register. Not set for locals in general:
+     * that would need dataflow, and a body assigning to the counter is refused before
+     * emission. */
     GLboolean is_const;
     double const_val;
 } glsl_gen_var_t;
@@ -1241,37 +1065,28 @@ typedef struct {
      * discarded lane has to come out of every one of those saves, or the innermost
      * restore brings it back. */
     int exec_depth;
-    /* How many **branched** loops enclose this point, and for each one the `exec_depth`
-     * it was entered at. `break` and `continue` need both: the masks they act on come
-     * from the depth, and the enclosing `if`s they have to take the lane out of are the
-     * ones from the loop's entry depth up to here - not from zero, because an `if`
-     * *outside* the loop must still restore the lane once the loop is over. */
+    /* How many branched loops enclose this point, and the `exec_depth` each was entered
+     * at. `break` and `continue` take the lane out of the `if`s from the loop's entry
+     * depth up to here, not from zero: an `if` outside the loop must still restore the
+     * lane once the loop is over. */
     int loop_depth;
     int loop_exec_depth[GLSL_GEN_MAX_LOOP_DEPTH];
-    /* **How many user-defined calls are being inlined around this point.** A call has
-     * no call instruction here - the body is generated where the call appears - so this
-     * is the only thing standing between a shader that calls itself and a generator
-     * that never returns. GLSL forbids recursion, but a compiler that loops forever on
-     * invalid input is still a compiler that loops forever. */
+    /* How many user-defined calls are being inlined around this point. Calls are
+     * inlined, so this bounds a shader that calls itself, which GLSL forbids but
+     * invalid input may still do. */
     int inline_depth;
-    /* **What an early `return` needs to know about the function it is leaving**, one
-     * entry per inlined call. `out` is where the value goes - the caller's result
-     * register, the same one the trailing return writes. `exec_depth` and `loop_depth`
-     * are where that function started, so a return takes its lanes out of the `if`s and
-     * loops *inside* the function and leaves the ones enclosing the **call** alone: a
-     * lane that returned early still runs the rest of the caller's statement, and still
-     * goes round the caller's loop.
-     *
-     * `saved` is false when the body has no early return in it, which is the common
-     * case - then no mask is taken and the words are what they always were. */
+    /* What an early `return` needs about the function it leaves, one entry per inlined
+     * call. `out` is the caller's result register. `exec_depth` and `loop_depth` are
+     * where the function started, so a return takes its lanes out of the `if`s and
+     * loops inside the function only: the lane still runs the rest of the caller.
+     * `saved` is false when the body has no early return, and then no mask is taken. */
     glsl_value_t fn_out[GLSL_GEN_MAX_INLINE_DEPTH];
     int fn_exec_depth[GLSL_GEN_MAX_INLINE_DEPTH];
     int fn_loop_depth[GLSL_GEN_MAX_INLINE_DEPTH];
     GLboolean fn_saved[GLSL_GEN_MAX_INLINE_DEPTH];
     /* Whether this shader runs in whole-quad mode, which it does exactly when it
-     * samples. When it is set, `discard` has one more mask to take the lane out of -
-     * the live one at `GLSL_GEN_LIVE_SGPR`, which is what the export is restored from.
-     */
+     * samples. Then `discard` also takes the lane out of the live mask at
+     * `GLSL_GEN_LIVE_SGPR`, which the export is restored from. */
     GLboolean wqm;
     /* The sampler uniforms this shader named, in the order it named them, each with the
      * descriptor set the prologue loaded for it. */
@@ -1279,27 +1094,21 @@ typedef struct {
         const char *name;
         size_t name_len;
         uint32_t set;
-        /* **Which lookup this sampler answers to**, as the `GLSL_IMG_DIM_*` the sample
-         * will carry. The descriptor decides how the hardware reads the memory and the
-         * shader decides what it hands over, and the two have to be the same shape: a
-         * cube and a volume both take three address registers where a 2D takes two, and
-         * all three read a descriptor built a different way. So `texture2D` on a
-         * `samplerCube` is refused rather than sampled with the wrong dim. */
+        /* Which lookup this sampler answers to, as the `GLSL_IMG_DIM_*` the sample
+         * carries. It must match the descriptor's shape (cube and 3D take three address
+         * registers, 2D two), so `texture2D` on a `samplerCube` is refused. */
         uint32_t dim;
-        /* Whether it compares rather than returns - a `sampler2DShadow`. Separate from
-         * `dim` because a shadow sampler's dim is still 2D; what changes is the
-         * instruction, the mask, and that the coordinate carries a reference. */
+        /* Whether it compares rather than returns: a `sampler2DShadow`. Its dim is
+         * still 2D; the instruction, the mask and a reference in the coordinate change.
+         */
         GLboolean shadow;
-        /* **A 1D texture is a 2D image one row high**, which is how `glTexImage1D`
-         * stores it and what `gl_state.c` describes to the hardware - TYPE 9, the 2D
-         * one, because the descriptor builder special-cases only 3D and cube. So its
-         * `dim` is 2D as well, and this is what remembers that the coordinate is one
-         * component with a zero beside it. Sampling it with `dim:SQ_RSRC_IMG_1D` would
-         * tell the hardware something the descriptor does not say. */
+        /* A 1D texture is a 2D image one row high, as `glTexImage1D` stores it and
+         * `gl_state.c` describes it (TYPE 9, the 2D one). Its `dim` is 2D, and this
+         * records that the coordinate is one component with a zero beside it. */
         GLboolean oned;
     } samplers[GLSL_GEN_MAX_TEX_SETS];
     int sampler_count;
-    const char *error; /* the **first** failure, which stops everything after it */
+    const char *error; /* the first failure, which stops everything after it */
     int error_line, error_column;
 } glsl_gen_t;
 
@@ -1309,32 +1118,28 @@ void glsl_gen_init(glsl_gen_t *g, glsl_ast_t *ast, glsl_sema_t *sema,
 GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node);
 /* One expression, leaving its value in the registers the returned value names. */
 glsl_value_t glsl_gen_expression(glsl_gen_t *g, int32_t node);
-/* Give a name a register home without a declaration in the tree - how an attribute, a
- * uniform or a varying arrives once the shader interface is settled. */
+/* Gives a name a register home without a declaration in the tree: how an attribute, a
+ * uniform or a varying arrives. */
 glsl_value_t glsl_gen_declare_input(glsl_gen_t *g, const char *name, size_t len,
                                     glsl_type_t type);
-/* The same, for an input that is an array of `count` of `type` - `gl_TexCoord[]` is the
- * one the language has. The registers are the elements end to end, which is the layout
- * `[]` already indexes, so nothing else has to know it is an array. Returns the whole
- * run. */
+/* The same, for an input that is an array of `count` of `type`, such as
+ * `gl_TexCoord[]`. The registers are the elements end to end, the layout `[]` indexes.
+ * Returns the whole run. */
 glsl_value_t glsl_gen_declare_input_array(glsl_gen_t *g, const char *name, size_t len,
                                           glsl_type_t type, int count);
-/* Puts the allocator's cursor at `first`, so the registers below it are the caller's. A
- * pixel shader's v0 and v1 are the barycentrics the hardware wrote and v4..v7 are what
- * it exports from, and an allocator that handed one of those out would have the shader
- * compute over the values it was given. */
+/* Puts the allocator's cursor at `first`, so the registers below it are the caller's: a
+ * pixel shader's v0 and v1 hold the barycentrics and v4..v7 are what it exports from.
+ */
 void glsl_gen_reserve(glsl_gen_t *g, uint32_t first);
-/* One unnamed register for the prologue's own constants - see the definition. 0 and
- * `g->error` set when the file is full. */
+/* One unnamed register for the prologue's own constants; see the definition. 0, with
+ * `g->error` set, when the file is full. */
 uint32_t glsl_gen_scratch(glsl_gen_t *g);
 /* Where a declared name lives. False when nothing of that name has a register. */
 GLboolean glsl_gen_lookup(glsl_gen_t *g, const char *name, size_t len,
                           glsl_value_t *out);
 /* Tells the generator that `name` is a sampler whose descriptors the prologue loaded
- * into set `set`. A `texture2D` on any other name is refused, which is what stops a
- * shader sampling through something the draw path never filled in. */
-/* `dim` is one of the `GLSL_IMG_DIM_*` above - what this sampler's lookups will carry.
- */
+ * into set `set`; sampling any other name is refused. `dim` is one of the
+ * `GLSL_IMG_DIM_*` above, what this sampler's lookups carry. */
 GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len,
                                    uint32_t set, uint32_t dim, GLboolean shadow,
                                    GLboolean oned);
@@ -1342,14 +1147,11 @@ GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len,
 /* -------------------------------------------------------------------------
  * A compiled unit
  *
- * What `glCompileShader` produces and `glLinkProgram` takes references to. The
- * declaration is in gl_internal.h, where it is opaque; this is its shape, and only the
- * front end and the linker see it.
+ * What `glCompileShader` produces and `glLinkProgram` takes references to. It is opaque
+ * in gl_internal.h; only the front end and the linker see this shape.
  *
- * **The source is owned and kept**, because every `text` pointer in the tree points
- * into it - the lexer copies nothing, by design - so freeing the caller's string would
- * leave a tree whose every name reads freed memory. It is also what `glGetShaderSource`
- * answers from.
+ * The source is owned and kept, because every `text` pointer in the tree points into
+ * it. `glGetShaderSource` also answers from it.
  * ------------------------------------------------------------------------- */
 struct glsl_unit {
     int refs; /* the shader object, plus every program that linked it */
@@ -1359,18 +1161,14 @@ struct glsl_unit {
     int version;  /* what `#version` said, or 0 when there was none */
     int32_t root; /* the GLSL_NODE_UNIT */
     glsl_ast_t ast;
-    /* **The struct table, carried out of the semantic pass.** Sema is transient - it
-     * exists for the length of a compile - but the interpreter needs a struct's size
-     * and its members' positions every time it touches one, and re-deriving them from
-     * the AST at each access would be the same computation done differently, which is
-     * how two layouts start to disagree. The member names point into `source`, which
-     * this unit owns, so they stay valid exactly as long as the tree that refers to
-     * them. */
+    /* The struct table, carried out of the transient semantic pass so the interpreter
+     * uses the same layout rather than re-deriving one. Member names point into
+     * `source`, which this unit owns. */
     glsl_struct_t structs[GLSL_MAX_STRUCTS];
     int struct_count;
 };
 
-/* Preprocesses, parses and checks `src`, returning a unit with one reference - or NULL,
+/* Preprocesses, parses and checks `src`, returning a unit with one reference, or NULL
  * having written a diagnostic into `log`. Nothing is left allocated on failure. */
 glsl_unit_t *glsl_unit_compile(GLenum stage, const char *src, size_t len, char *log,
                                size_t log_size);
