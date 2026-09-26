@@ -1,17 +1,8 @@
 name: check
 
-# Every job begins the same three steps: check out the collection, check this repository
-# out *into* it, and ask `oops bootstrap` for the siblings this project needs. See
-# docs/BUILDING.md.
-#
-# oops-sdk needs no siblings - it is the bottom of the target-side stack and depends on
-# nothing. The bootstrap step is kept anyway: one shape, so that reading any workflow in the
-# collection teaches you all of them, and so the day this grows a dependency is not also the
-# day somebody discovers the preamble was special here.
-#
-# **This repository is linked into what obSCEne ships.** A change here reaches a consumer's
-# binaries without touching a line of the consumer, which is exactly the arrangement that
-# went unchecked in oops-libs until it had a workflow of its own.
+# Checks out the collection, this repository inside it, and bootstraps the siblings this
+# project needs (none; the step keeps every workflow the same shape). See docs/BUILDING.md.
+# oops-sdk is linked into what obSCEne and the apps ship.
 
 on:
   push:
@@ -23,9 +14,19 @@ permissions:
 
 jobs:
   check:
-    name: a clean build at -Werror
+    name: index, build at -Werror, host suite
     runs-on: ubuntu-latest
+    # The clang 21 pin from `toolchain.mk`; Ubuntu's own `clang` package is an older major.
+    container: silkeh/clang:21
     steps:
+      # Before `actions/checkout`, which without git falls back to a download with no history.
+      - name: Tools the container does not ship
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git ca-certificates
+          # The workspace belongs to the runner user, not the container's root.
+          git config --global --add safe.directory '*'
+
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/OOPS
@@ -34,24 +35,20 @@ jobs:
         with:
           path: OOPS/oops-sdk
 
-      # clang is on the runner image already; this fails loudly if that ever stops being
-      # true, rather than at the first compile with a message about a missing program.
-      - name: Toolchain
-        run: clang --version && ar --version | head -1
+      - name: The compiler this build is pinned to
+        run: clang --version | head -1
 
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap oops-sdk
         env:
-          # Empty unless the org secret exists, and empty is the old behaviour.
+          # Empty unless the org secret exists.
           OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
 
-      # One step, because there is one dev command. `oops check oops-sdk` relays to
-      # `./bin/oops-sdk check`, which cleans and then rebuilds every source at
-      # `-Wall -Wextra -Werror`.
-      #
-      # That compile is the whole of the check, and this file says so rather than implying a
-      # suite that does not exist. There is no test verb here: the library cross-compiles to
-      # the target, so nothing it produces can be run on this runner. `./bin/oops-sdk test`
-      # exits 1 with what would have to be built first.
-      - name: oops check oops-sdk
-        run: OOPS/bin/oops check oops-sdk
+      # First, so a stale index fails in seconds; `check` below runs it again.
+      - name: API index
+        run: tools/api-index.sh --check
+        working-directory: OOPS/oops-sdk
+
+      - name: Build and host suite
+        run: ./bin/oops-sdk check
+        working-directory: OOPS/oops-sdk
