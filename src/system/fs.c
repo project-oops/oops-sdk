@@ -294,6 +294,19 @@ int oops_fs_rename(const char *from, const char *to) {
   return rc;
 }
 
+int oops_fs_chmod(const char *path, int mode) {
+  if (path == NULL) {
+    return -1;
+  }
+#ifndef OOPS_HOST_BUILD
+  int rc = (int)sys_call(SYS_chmod, (long)path, mode, 0, 0, 0, 0);
+#else
+  int rc = chmod(path, (mode_t)mode);
+#endif
+  oops_log_debug("FS", "chmod path=%s mode=0%o rc=%d", path, (unsigned)mode, rc);
+  return rc;
+}
+
 /* ---------------------------------------------------------------------------
  * Walking a directory
  *

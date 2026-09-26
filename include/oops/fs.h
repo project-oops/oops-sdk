@@ -52,6 +52,7 @@ int oops_fs_write_all(const char *path, const void *data, size_t size);
 int oops_fs_mkdir(const char *path, int mode);
 int oops_fs_unlink(const char *path);
 int oops_fs_rename(const char *from, const char *to);
+int oops_fs_chmod(const char *path, int mode);
 
 /*
  * Walking a directory, in the POSIX shape over `SYS_getdents`: open, read entries until

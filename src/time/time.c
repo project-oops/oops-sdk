@@ -186,3 +186,18 @@ void oops_time_sleep_ms(uint32_t milliseconds) {
   }
   oops_time_sleep_us(milliseconds * 1000u);
 }
+
+#if !defined(OOPS_HOST_BUILD) && !defined(OOPS_MESA_HOSTED)
+struct timespec;
+
+int clock_gettime(int clk_id, struct timespec *ts);
+
+int clock_gettime(int clk_id, struct timespec *ts) {
+  if (!ts) return -1;
+  if (sys_call(SYS_clock_gettime, (long)clk_id, (long)ts, 0, 0, 0, 0) != 0) {
+    return -1;
+  }
+  return 0;
+}
+#endif
+

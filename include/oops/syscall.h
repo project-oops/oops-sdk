@@ -17,6 +17,7 @@
 #define SYS_close 6
 #define SYS_wait4 7
 #define SYS_unlink 10
+#define SYS_chmod 15
 #define SYS_getpid 20
 #define SYS_ptrace 26
 #define SYS_kill 37

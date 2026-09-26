@@ -102,6 +102,13 @@ oops_js_t *oops_webview_get_js(oops_webview_t *wv);
  */
 oops_html_t *oops_webview_get_html(oops_webview_t *wv);
 
+/*
+ * Scroll vertically the minimum needed so the document range [top, top+height] (in document
+ * pixels) is within the viewport. For a pad/keyboard-driven page that moves a highlight and wants
+ * the highlighted element kept on screen. Clamped to the document bounds.
+ */
+void oops_webview_ensure_visible(oops_webview_t *wv, int top, int height);
+
 #ifdef __cplusplus
 }
 #endif

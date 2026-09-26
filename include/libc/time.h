@@ -69,6 +69,8 @@ struct tm {
   int tm_wday;  /* 0-6, Sunday is 0 */
   int tm_yday;  /* 0-365 */
   int tm_isdst; /* always 0 here: no timezone, so no daylight saving */
+  long tm_gmtoff;
+  char *tm_zone;
 };
 
 struct tm *gmtime(const time_t *t);

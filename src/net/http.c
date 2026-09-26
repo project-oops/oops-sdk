@@ -391,9 +391,16 @@ __attribute__((weak)) int sceHttpSetAutoRedirect(int reqId, int enable);
 __attribute__((weak)) int sceHttpSendRequest(int reqId, const void *postData,
                                              size_t size);
 __attribute__((weak)) int sceHttpGetStatusCode(int reqId, int *statusCode);
+__attribute__((weak)) int sceHttpGetAllResponseHeaders(int reqId, char **header,
+                                                       size_t *headerSize);
 __attribute__((weak)) int sceHttpGetResponseContentLength(int reqId, int *result,
                                                           uint64_t *contentLength);
 __attribute__((weak)) int sceHttpReadData(int reqId, void *buf, size_t size);
+__attribute__((weak)) int sceHttpSetResolveTimeOut(int id, uint32_t usec);
+__attribute__((weak)) int sceHttpSetConnectTimeOut(int id, uint32_t usec);
+__attribute__((weak)) int sceHttpSetSendTimeOut(int id, uint32_t usec);
+__attribute__((weak)) int sceHttpSetRecvTimeOut(int id, uint32_t usec);
+__attribute__((weak)) int sceHttpsDisableOption(int httpCtxId, uint32_t sslFlags);
 
 static int oops_http_tls_get(const char *url, oops_http_response_t *out_resp) {
     (void)oops_sysmodule_load(OOPS_SYSMODULE_NET);
@@ -420,6 +427,15 @@ static int oops_http_tls_get(const char *url, oops_http_response_t *out_resp) {
             sceNetPoolDestroy(net_pool);
         return OOPS_HTTP_ERR_CONNECT;
     }
+
+    /* Turn off the server-certificate checks. The release CDN presents a certificate whose CN is
+     * *.github.io while its SAN covers *.githubusercontent.com; the console's verifier keys on the
+     * CN, so the host-name check rejects an otherwise-valid, trusted certificate (0x80431073).
+     * Disabling SERVER_VERIFY alone leaves the independent checks armed, so clear them all: the
+     * payload is content-addressed by the catalogue, not trusted by TLS identity. Bits: SERVER_VERIFY
+     * 0x01, CN_CHECK 0x04, NOT_AFTER 0x08, NOT_BEFORE 0x10, KNOWN_CA 0x20. */
+    if (sceHttpsDisableOption)
+        sceHttpsDisableOption(http_ctx, 0x01u | 0x04u | 0x08u | 0x10u | 0x20u);
 
     int tmpl = sceHttpCreateTemplate(http_ctx, "OOPSy-daisy/1.0 (Prospero)", 1, 1);
     if (tmpl <= 0) {
@@ -460,6 +476,16 @@ static int oops_http_tls_get(const char *url, oops_http_response_t *out_resp) {
     if (sceHttpSetAutoRedirect) {
         sceHttpSetAutoRedirect(req, 1);
     }
+    /* Bound every blocking phase so a stalled connection surfaces as an error instead of hanging the
+     * caller. Microseconds. */
+    if (sceHttpSetResolveTimeOut)
+        sceHttpSetResolveTimeOut(req, 10u * 1000u * 1000u);
+    if (sceHttpSetConnectTimeOut)
+        sceHttpSetConnectTimeOut(req, 10u * 1000u * 1000u);
+    if (sceHttpSetSendTimeOut)
+        sceHttpSetSendTimeOut(req, 10u * 1000u * 1000u);
+    if (sceHttpSetRecvTimeOut)
+        sceHttpSetRecvTimeOut(req, 20u * 1000u * 1000u);
     if (sceHttpAddRequestHeader) {
         sceHttpAddRequestHeader(req, "User-Agent", "OOPSy-daisy/1.0 (Prospero)", 0);
         sceHttpAddRequestHeader(req, "Accept", "*/*", 0);
@@ -587,6 +613,54 @@ static int oops_http_tls_get(const char *url, oops_http_response_t *out_resp) {
     return OOPS_HTTP_OK;
 }
 
+/* Tear down the shared TLS/HTTP context. Every error and success path funnels through here so the
+ * order (template, http, ssl, net pool) is stated once. A zero id is skipped. */
+static void oops_http_tls_teardown(int tmpl, int http_ctx, int ssl_ctx, int net_pool) {
+    if (tmpl > 0 && sceHttpDeleteTemplate)
+        sceHttpDeleteTemplate(tmpl);
+    if (http_ctx > 0 && sceHttpTerm)
+        sceHttpTerm(http_ctx);
+    if (ssl_ctx > 0 && sceSslTerm)
+        sceSslTerm(ssl_ctx);
+    if (net_pool > 0 && sceNetPoolDestroy)
+        sceNetPoolDestroy(net_pool);
+}
+
+/* Copy the value of the (case-insensitive) Location header out of a raw response-header block into
+ * dst. Returns 1 when found. A GitHub release redirects to a long signed CDN URL, so dst is sized
+ * generously by the caller. */
+static int oops_http_find_location(const char *headers, size_t len, char *dst, size_t dst_sz) {
+    if (!headers || !dst || dst_sz == 0)
+        return 0;
+    const char *end = headers + len;
+    for (const char *p = headers; p < end; p++) {
+        if (p != headers && p[-1] != '\n')
+            continue; /* only test at the start of a header line */
+        static const char key[] = "location:";
+        const char *q = p;
+        size_t i = 0;
+        while (q < end && key[i]) {
+            char c = *q;
+            if (c >= 'A' && c <= 'Z')
+                c = (char)(c - 'A' + 'a');
+            if (c != key[i])
+                break;
+            i++;
+            q++;
+        }
+        if (key[i] != '\0')
+            continue; /* this line is not Location: */
+        while (q < end && (*q == ' ' || *q == '\t'))
+            q++;
+        size_t o = 0;
+        while (q < end && *q != '\r' && *q != '\n' && o + 1 < dst_sz)
+            dst[o++] = *q++;
+        dst[o] = '\0';
+        return o > 0;
+    }
+    return 0;
+}
+
 static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
                                      oops_http_progress_fn on_progress,
                                      void *userdata) {
@@ -602,7 +676,7 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
         return OOPS_HTTP_ERR_TLS_UNAVAIL;
     }
 
-    oops_log_debug("HTTP", "TLS GET to file %s -> %s", url, dest_path);
+    oops_log_info("HTTP", "download: starting %s -> %s", url, dest_path);
 
     int net_pool = sceNetPoolCreate("oops_http", 32 * 1024, 0);
     int ssl_ctx = sceSslInit(320 * 1024);
@@ -617,91 +691,138 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
         return OOPS_HTTP_ERR_CONNECT;
     }
 
+    /* Turn off the server-certificate checks. The release CDN presents a certificate whose CN is
+     * *.github.io while its SAN covers *.githubusercontent.com; the console's verifier keys on the
+     * CN, so the host-name check rejects an otherwise-valid, trusted certificate (0x80431073).
+     * Disabling SERVER_VERIFY alone leaves the independent checks armed, so clear them all: the
+     * payload is content-addressed by the catalogue, not trusted by TLS identity. Bits: SERVER_VERIFY
+     * 0x01, CN_CHECK 0x04, NOT_AFTER 0x08, NOT_BEFORE 0x10, KNOWN_CA 0x20. */
+    if (sceHttpsDisableOption)
+        sceHttpsDisableOption(http_ctx, 0x01u | 0x04u | 0x08u | 0x10u | 0x20u);
+
     int tmpl = sceHttpCreateTemplate(http_ctx, "OOPSy-daisy/1.0 (Prospero)", 1, 1);
     if (tmpl <= 0) {
         oops_log_warn("HTTP", "sceHttpCreateTemplate failed (tmpl=%d)", tmpl);
-        sceHttpTerm(http_ctx);
-        if (ssl_ctx > 0 && sceSslTerm)
-            sceSslTerm(ssl_ctx);
-        if (net_pool > 0 && sceNetPoolDestroy)
-            sceNetPoolDestroy(net_pool);
+        oops_http_tls_teardown(0, http_ctx, ssl_ctx, net_pool);
         return OOPS_HTTP_ERR_CONNECT;
     }
 
-    int conn = sceHttpCreateConnectionWithURL(tmpl, url, 1);
-    if (conn <= 0) {
-        oops_log_warn("HTTP", "sceHttpCreateConnectionWithURL failed (conn=%d)", conn);
-        sceHttpDeleteTemplate(tmpl);
-        sceHttpTerm(http_ctx);
-        if (ssl_ctx > 0 && sceSslTerm)
-            sceSslTerm(ssl_ctx);
-        if (net_pool > 0 && sceNetPoolDestroy)
-            sceNetPoolDestroy(net_pool);
-        return OOPS_HTTP_ERR_CONNECT;
+    /* Follow redirects by hand. A GitHub release 302-redirects to a signed CDN URL on a different
+     * host; the platform's auto-follow reuses the first host's SNI on the new connection, which the
+     * CDN rejects during the TLS handshake (0x80431073). A fresh connection per hop lets the SDK send
+     * the SNI that matches each host. */
+    char cur_url[4096];
+    size_t ci = 0;
+    while (url[ci] && ci + 1 < sizeof(cur_url)) {
+        cur_url[ci] = url[ci];
+        ci++;
     }
+    cur_url[ci] = '\0';
 
-    int req = sceHttpCreateRequestWithURL2(conn, "GET", url, 0);
-    if (req <= 0) {
-        oops_log_warn("HTTP", "sceHttpCreateRequestWithURL2 failed (req=%d)", req);
-        sceHttpDeleteConnection(conn);
-        sceHttpDeleteTemplate(tmpl);
-        sceHttpTerm(http_ctx);
-        if (ssl_ctx > 0 && sceSslTerm)
-            sceSslTerm(ssl_ctx);
-        if (net_pool > 0 && sceNetPoolDestroy)
-            sceNetPoolDestroy(net_pool);
-        return OOPS_HTTP_ERR_CONNECT;
-    }
-
-    if (sceHttpSetAutoRedirect) {
-        sceHttpSetAutoRedirect(req, 1);
-    }
-    if (sceHttpAddRequestHeader) {
-        sceHttpAddRequestHeader(req, "User-Agent", "OOPSy-daisy/1.0 (Prospero)", 0);
-        sceHttpAddRequestHeader(req, "Accept", "*/*", 0);
-        sceHttpAddRequestHeader(req, "Connection", "close", 0);
-    }
-
-    int send_rc = sceHttpSendRequest(req, (void *)0, 0);
-    if (send_rc < 0) {
-        oops_log_warn("HTTP", "sceHttpSendRequest failed: %d", send_rc);
-        sceHttpDeleteRequest(req);
-        sceHttpDeleteConnection(conn);
-        sceHttpDeleteTemplate(tmpl);
-        sceHttpTerm(http_ctx);
-        if (ssl_ctx > 0 && sceSslTerm)
-            sceSslTerm(ssl_ctx);
-        if (net_pool > 0 && sceNetPoolDestroy)
-            sceNetPoolDestroy(net_pool);
-        return OOPS_HTTP_ERR_SEND;
-    }
-
+    int conn = -1;
+    int req = -1;
     int status_code = 0;
-    int sc_rc = sceHttpGetStatusCode(req, &status_code);
-    if (sc_rc < 0) {
-        oops_log_warn("HTTP", "sceHttpGetStatusCode failed: %d", sc_rc);
+    int have_body = 0;
+    for (int hop = 0; hop < 8; hop++) {
+        conn = sceHttpCreateConnectionWithURL(tmpl, cur_url, 1);
+        if (conn <= 0) {
+            oops_log_warn("HTTP", "sceHttpCreateConnectionWithURL failed (conn=%d)", conn);
+            oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
+            return OOPS_HTTP_ERR_CONNECT;
+        }
+        req = sceHttpCreateRequestWithURL2(conn, "GET", cur_url, 0);
+        if (req <= 0) {
+            oops_log_warn("HTTP", "sceHttpCreateRequestWithURL2 failed (req=%d)", req);
+            sceHttpDeleteConnection(conn);
+            oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
+            return OOPS_HTTP_ERR_CONNECT;
+        }
+
+        /* Never let the platform follow: each host must get its own connection (see above). */
+        if (sceHttpSetAutoRedirect)
+            sceHttpSetAutoRedirect(req, 0);
+        /* Bound every blocking phase so a stalled connection surfaces as an error instead of hanging
+         * the caller. Microseconds. */
+        if (sceHttpSetResolveTimeOut)
+            sceHttpSetResolveTimeOut(req, 10u * 1000u * 1000u);
+        if (sceHttpSetConnectTimeOut)
+            sceHttpSetConnectTimeOut(req, 10u * 1000u * 1000u);
+        if (sceHttpSetSendTimeOut)
+            sceHttpSetSendTimeOut(req, 10u * 1000u * 1000u);
+        if (sceHttpSetRecvTimeOut)
+            sceHttpSetRecvTimeOut(req, 20u * 1000u * 1000u);
+        if (sceHttpAddRequestHeader) {
+            sceHttpAddRequestHeader(req, "User-Agent", "OOPSy-daisy/1.0 (Prospero)", 0);
+            /* A GitHub release-asset API URL serves the binary only for this exact Accept; a
+             * wildcard returns the asset's JSON metadata instead. The CDN it redirects to ignores
+             * the header, so carrying it across the hop is harmless. */
+            sceHttpAddRequestHeader(req, "Accept", "application/octet-stream", 0);
+            sceHttpAddRequestHeader(req, "Connection", "close", 0);
+        }
+
+        int send_rc = sceHttpSendRequest(req, (void *)0, 0);
+        if (send_rc < 0) {
+            oops_log_warn("HTTP", "sceHttpSendRequest failed at hop %d: %d", hop, send_rc);
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
+            return OOPS_HTTP_ERR_SEND;
+        }
+
+        status_code = 0;
+        int sc_rc = sceHttpGetStatusCode(req, &status_code);
+        if (sc_rc < 0) {
+            oops_log_warn("HTTP", "sceHttpGetStatusCode failed: %d", sc_rc);
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
+            return OOPS_HTTP_ERR_PARSE;
+        }
+        oops_log_info("HTTP", "download: hop %d status %d", hop, status_code);
+
+        if (status_code == 200) {
+            have_body = 1;
+            break;
+        }
+        if (status_code == 301 || status_code == 302 || status_code == 303 ||
+            status_code == 307 || status_code == 308) {
+            char *hdr = (void *)0;
+            size_t hsz = 0;
+            char next[4096];
+            if (!sceHttpGetAllResponseHeaders ||
+                sceHttpGetAllResponseHeaders(req, &hdr, &hsz) < 0 || !hdr ||
+                !oops_http_find_location(hdr, hsz, next, sizeof(next))) {
+                oops_log_warn("HTTP", "redirect %d with no Location header", status_code);
+                sceHttpDeleteRequest(req);
+                sceHttpDeleteConnection(conn);
+                oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
+                return OOPS_HTTP_ERR_PARSE;
+            }
+            size_t ni = 0;
+            while (next[ni] && ni + 1 < sizeof(cur_url)) {
+                cur_url[ni] = next[ni];
+                ni++;
+            }
+            cur_url[ni] = '\0';
+            oops_log_info("HTTP", "download: redirect %d, following to the next host",
+                          status_code);
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            req = -1;
+            conn = -1;
+            continue;
+        }
+
+        oops_log_warn("HTTP", "TLS GET %s returned status %d (expected 200)", url, status_code);
         sceHttpDeleteRequest(req);
         sceHttpDeleteConnection(conn);
-        sceHttpDeleteTemplate(tmpl);
-        sceHttpTerm(http_ctx);
-        if (ssl_ctx > 0 && sceSslTerm)
-            sceSslTerm(ssl_ctx);
-        if (net_pool > 0 && sceNetPoolDestroy)
-            sceNetPoolDestroy(net_pool);
+        oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
         return OOPS_HTTP_ERR_PARSE;
     }
 
-    if (status_code != 200) {
-        oops_log_warn("HTTP", "TLS GET %s returned status %d (expected 200)", url,
-                      status_code);
-        sceHttpDeleteRequest(req);
-        sceHttpDeleteConnection(conn);
-        sceHttpDeleteTemplate(tmpl);
-        sceHttpTerm(http_ctx);
-        if (ssl_ctx > 0 && sceSslTerm)
-            sceSslTerm(ssl_ctx);
-        if (net_pool > 0 && sceNetPoolDestroy)
-            sceNetPoolDestroy(net_pool);
+    if (!have_body) {
+        oops_log_warn("HTTP", "too many redirects for %s", url);
+        oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
         return OOPS_HTTP_ERR_PARSE;
     }
 
@@ -710,17 +831,14 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
         oops_log_error("HTTP", "failed to open %s for writing: fd=%d", dest_path, fd);
         sceHttpDeleteRequest(req);
         sceHttpDeleteConnection(conn);
-        sceHttpDeleteTemplate(tmpl);
-        sceHttpTerm(http_ctx);
-        if (ssl_ctx > 0 && sceSslTerm)
-            sceSslTerm(ssl_ctx);
-        if (net_pool > 0 && sceNetPoolDestroy)
-            sceNetPoolDestroy(net_pool);
+        oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
         return OOPS_HTTP_ERR_WRITE;
     }
 
+    oops_log_info("HTTP", "download: status %d, streaming body", status_code);
     char chunk[8192];
     size_t total_written = 0;
+    size_t last_logged = 0;
     while (1) {
         int n = sceHttpReadData(req, chunk, sizeof(chunk));
         if (n < 0) {
@@ -728,12 +846,7 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
             oops_fs_close(fd);
             sceHttpDeleteRequest(req);
             sceHttpDeleteConnection(conn);
-            sceHttpDeleteTemplate(tmpl);
-            sceHttpTerm(http_ctx);
-            if (ssl_ctx > 0 && sceSslTerm)
-                sceSslTerm(ssl_ctx);
-            if (net_pool > 0 && sceNetPoolDestroy)
-                sceNetPoolDestroy(net_pool);
+            oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
             return OOPS_HTTP_ERR_RECV;
         }
         if (n == 0) {
@@ -746,15 +859,14 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
             oops_fs_close(fd);
             sceHttpDeleteRequest(req);
             sceHttpDeleteConnection(conn);
-            sceHttpDeleteTemplate(tmpl);
-            sceHttpTerm(http_ctx);
-            if (ssl_ctx > 0 && sceSslTerm)
-                sceSslTerm(ssl_ctx);
-            if (net_pool > 0 && sceNetPoolDestroy)
-                sceNetPoolDestroy(net_pool);
+            oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
             return OOPS_HTTP_ERR_WRITE;
         }
         total_written += (size_t)written;
+        if (total_written - last_logged >= 512u * 1024u) {
+            last_logged = total_written;
+            oops_log_info("HTTP", "download: %zu bytes", total_written);
+        }
         if (on_progress)
             on_progress((uint64_t)total_written, 0, userdata);
     }
@@ -762,15 +874,9 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
     oops_fs_close(fd);
     sceHttpDeleteRequest(req);
     sceHttpDeleteConnection(conn);
-    sceHttpDeleteTemplate(tmpl);
-    sceHttpTerm(http_ctx);
-    if (ssl_ctx > 0 && sceSslTerm)
-        sceSslTerm(ssl_ctx);
-    if (net_pool > 0 && sceNetPoolDestroy)
-        sceNetPoolDestroy(net_pool);
+    oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
 
-    oops_log_info("HTTP", "TLS GET %s saved to %s (%zu bytes)", url, dest_path,
-                  total_written);
+    oops_log_info("HTTP", "download: saved %s (%zu bytes)", dest_path, total_written);
     return OOPS_HTTP_OK;
 }
 

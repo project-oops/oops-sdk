@@ -391,4 +391,12 @@ oops_html_t *oops_webview_get_html(oops_webview_t *wv) {
     return wv ? wv->html : nullptr;
 }
 
+void oops_webview_ensure_visible(oops_webview_t *wv, int top, int height) {
+    if (!wv || !wv->html)
+        return;
+    auto *c = static_cast<oops_container *>(oops_html_get_container(wv->html));
+    if (c)
+        c->ensure_visible(top, height);
+}
+
 } // extern "C"

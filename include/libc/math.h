@@ -88,6 +88,25 @@ double hypot(double x, double y);
 double round(double x);
 double trunc(double x);
 
+double sinh(double x);
+float sinhf(float x);
+double cosh(double x);
+float coshf(float x);
+double tanh(double x);
+float tanhf(float x);
+double asinh(double x);
+float asinhf(float x);
+double acosh(double x);
+float acoshf(float x);
+double atanh(double x);
+float atanhf(float x);
+double cbrt(double x);
+float cbrtf(float x);
+double log1p(double x);
+float log1pf(float x);
+double expm1(double x);
+float expm1f(float x);
+
 /*
  * **The round-to-nearest-integer family C99 requires beside `round`** (2026-09-21). `round` was
  * already here and rounds halves away from zero; these round to *even* on a tie, which is the

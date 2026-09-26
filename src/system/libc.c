@@ -16,11 +16,15 @@
 
 #include "libc/assert.h"
 #include "libc/errno.h"
+#include "libc/locale.h"
+#include "libc/malloc_np.h"
 #include "libc/math.h"
 #include "libc/stdio.h"
 #include "libc/stdlib.h"
 #include "libc/string.h"
+#include "libc/strings.h"
 #include "libc/time.h"
+#include "libc/sys/time.h"
 #include "oops/time.h"
 #include "oops/freestd.h"
 #include "oops/fs.h"
@@ -33,20 +37,26 @@
  * math
  * --------------------------------------------------------------------------- */
 
-float sqrtf(float x) { return oops_sqrtf(x); }
-float fabsf(float x) { return oops_fabsf(x); }
-float floorf(float x) { return oops_floorf(x); }
-float ceilf(float x) { return oops_ceilf(x); }
-float fmodf(float x, float y) { return oops_fmodf(x, y); }
-float sinf(float x) { return oops_sinf(x); }
-float cosf(float x) { return oops_cosf(x); }
-float tanf(float x) { return oops_tanf(x); }
-float atan2f(float y, float x) { return oops_atan2f(y, x); }
-float expf(float x) { return oops_expf(x); }
-float logf(float x) { return oops_logf(x); }
-float powf(float base, float exp_) { return oops_powf(base, exp_); }
+/* Weak, because a port may bring its own and two strong definitions fail the link. An N64
+ * decompilation computes atan2f from the lookup table the original used, and its callers want that
+ * one; a hosted libc is weak here for the same reason. A title with no definition of its own still
+ * resolves to these. */
+#define OOPS_LIBM_WEAK __attribute__((weak))
 
-float atanf(float x) { return oops_atan2f(x, 1.0f); }
+OOPS_LIBM_WEAK float sqrtf(float x) { return oops_sqrtf(x); }
+OOPS_LIBM_WEAK float fabsf(float x) { return oops_fabsf(x); }
+OOPS_LIBM_WEAK float floorf(float x) { return oops_floorf(x); }
+OOPS_LIBM_WEAK float ceilf(float x) { return oops_ceilf(x); }
+OOPS_LIBM_WEAK float fmodf(float x, float y) { return oops_fmodf(x, y); }
+OOPS_LIBM_WEAK float sinf(float x) { return oops_sinf(x); }
+OOPS_LIBM_WEAK float cosf(float x) { return oops_cosf(x); }
+OOPS_LIBM_WEAK float tanf(float x) { return oops_tanf(x); }
+OOPS_LIBM_WEAK float atan2f(float y, float x) { return oops_atan2f(y, x); }
+OOPS_LIBM_WEAK float expf(float x) { return oops_expf(x); }
+OOPS_LIBM_WEAK float logf(float x) { return oops_logf(x); }
+OOPS_LIBM_WEAK float powf(float base, float exp_) { return oops_powf(base, exp_); }
+
+OOPS_LIBM_WEAK float atanf(float x) { return oops_atan2f(x, 1.0f); }
 
 /* asin and acos from atan2, which is the identity that needs no new series: asin(x) is the angle
  * whose sine is x, and sqrt(1 - x^2) is its cosine. Both clamp, because a caller that arrives
@@ -103,11 +113,11 @@ double asin(double x) { return oops_asin(x); }
 double acos(double x) { return oops_acos(x); }
 double atan(double x) { return oops_atan(x); }
 double atan2(double y, double x) { return oops_atan2(y, x); }
+long double atan2l(long double y, long double x) { return oops_atan2((double)y, (double)x); }
 double exp(double x) { return oops_exp(x); }
 double log(double x) { return oops_ln(x); }
 double log10(double x) { return oops_ln(x) * 0.43429448190325182765; }
 double pow(double base, double exp_) { return oops_pow(base, exp_); }
-long double atan2l(long double y, long double x) { return oops_atan2((double)y, (double)x); }
 double hypot(double x, double y) { return (double)hypotf((float)x, (float)y); }
 double round(double x) { return (double)roundf((float)x); }
 double trunc(double x) { return (double)truncf((float)x); }
@@ -306,6 +316,31 @@ char *strstr(const char *haystack, const char *needle) {
  * for why that is the specified behaviour here rather than a shortcut. */
 int strcoll(const char *a, const char *b) { return strcmp(a, b); }
 
+static int libc_tolower(int c) {
+    return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+}
+
+int strcasecmp(const char *s1, const char *s2) {
+    if (!s1 || !s2) return (s1 == s2) ? 0 : (s1 ? 1 : -1);
+    while (*s1 && *s2) {
+        int d = libc_tolower((unsigned char)*s1) - libc_tolower((unsigned char)*s2);
+        if (d) return d;
+        s1++;
+        s2++;
+    }
+    return libc_tolower((unsigned char)*s1) - libc_tolower((unsigned char)*s2);
+}
+
+int strncasecmp(const char *s1, const char *s2, size_t n) {
+    if (!s1 || !s2) return (s1 == s2) ? 0 : (s1 ? 1 : -1);
+    for (size_t i = 0; i < n; i++) {
+        int d = libc_tolower((unsigned char)s1[i]) - libc_tolower((unsigned char)s2[i]);
+        if (d) return d;
+        if (!s1[i]) return 0;
+    }
+    return 0;
+}
+
 /* `strxfrm` transforms `src` so that `strcmp` on the results orders the same way `strcoll`
  * orders the originals. With `strcoll` being `strcmp`, the transform is the identity and this is
  * a bounded copy.
@@ -381,21 +416,9 @@ char *strerror(int errnum) {
     return (char *)(size_t) "unknown error";
 }
 
-/*
- * **The reentrant one, which libc++ needs to compile at all.**
- *
- * `libcxx/src/system_error.cpp` calls `::strerror_r` unconditionally on anything that is not
- * Windows, so its absence is not a link error a port discovers late - it is a *compile* error in
- * the C++ standard library, and it stopped Extreme Tux Racer building on 2026-09-25.
- *
- * **The XSI signature, returning int**, not the GNU one returning `char *`. libc++ handles both
- * through `handle_strerror_r_return` overloads, so either links; this is the POSIX one and the
- * one FreeBSD provides, which is the platform this target names.
- *
- * It copies the same single string `strerror` returns, for the same reason: there is no errno
- * here. ERANGE is returned when the caller's buffer cannot hold it, which is what a caller
- * checking the return expects, rather than a silent truncation.
- */
+/* The XSI form, returning int, as FreeBSD provides: libc++'s system_error.cpp calls
+ * `::strerror_r` unconditionally off Windows, so its absence is a compile error there.
+ * ERANGE rather than a silent truncation, which a caller checking the return expects. */
 int strerror_r(int errnum, char *buf, size_t buflen) {
     const char *msg = strerror(errnum);
     size_t n = 0;
@@ -613,6 +636,18 @@ ldiv_t ldiv(long num, long den) {
     return r;
 }
 
+lldiv_t lldiv(long long num, long long den) {
+    lldiv_t r;
+    r.quot = den ? num / den : 0;
+    r.rem = den ? num % den : 0;
+    return r;
+}
+
+size_t malloc_usable_size(const void *p) {
+    (void)p;
+    return 0;
+}
+
 /* Sorting and searching. The algorithms are `obs_qsort` and `obs_bsearch` in
  * `src/system/freestd.c`, which builds on the host too, so `test_freestd.c` can run them - this
  * file cannot be tested at all. See `<libc/stdlib.h>` for why a GL 1.x port needs a sort. */
@@ -677,6 +712,18 @@ void abort(void) {
     exit(1);
 }
 
+/* See `<stdlib.h>`: nothing ever runs these, so nothing is kept. */
+int atexit(void (*fn)(void)) {
+    (void)fn;
+    return 0;
+}
+
+int system(const char *command) {
+    if (command == NULL) return 0;
+    errno = ENOSYS;
+    return -1;
+}
+
 /* ---------------------------------------------------------------------------
  * errno
  *
@@ -718,18 +765,6 @@ int *oops_errno_location(void) {
 static FILE s_stdout = {-1, 0, 0, 1, -1, 0, 0u, 0u, 1};
 static FILE s_stderr = {-1, 0, 0, 2, -1, 0, 0u, 0u, 1};
 static FILE s_stdin = {-1, 1, 0, 0, -1, 0, 0u, 0u, 1}; /* nothing to read; at EOF from the start */
-/* See `<stdlib.h>`: nothing ever runs these, so nothing is kept. */
-int atexit(void (*fn)(void)) {
-    (void)fn;
-    return 0;
-}
-
-int system(const char *command) {
-    if (command == NULL) return 0;
-    errno = ENOSYS;
-    return -1;
-}
-
 FILE *stdout = &s_stdout;
 FILE *stderr = &s_stderr;
 FILE *stdin = &s_stdin;
@@ -1361,6 +1396,9 @@ struct tm *gmtime_r(const time_t *t, struct tm *out) {
     out->tm_mon = (int)m - 1;
     out->tm_mday = (int)d;
     out->tm_isdst = 0;
+    out->tm_gmtoff = 0;
+    static char s_utc[] = "UTC";
+    out->tm_zone = s_utc;
 
     /* Day of the year, counted from January the first of this year. */
     {
@@ -1538,6 +1576,40 @@ char *ctime(const time_t *t) {
 
 double difftime(time_t end, time_t start) {
     return (double)end - (double)start;
+}
+
+/* ---------------------------------------------------------------------------
+ * locale
+ * --------------------------------------------------------------------------- */
+
+struct lconv *localeconv(void) {
+    static struct lconv lc;
+    static char dot[] = ".";
+    static char empty[] = "";
+    lc.decimal_point = dot;
+    lc.thousands_sep = empty;
+    lc.grouping = empty;
+    return &lc;
+}
+
+char *setlocale(int category, const char *locale) {
+    (void)category;
+    (void)locale;
+    static char c[] = "C";
+    return c;
+}
+
+/* ---------------------------------------------------------------------------
+ * sys/time
+ * --------------------------------------------------------------------------- */
+
+int gettimeofday(struct timeval *tv, void *tz) {
+    (void)tz;
+    if (tv) {
+        tv->tv_sec = (time_t)oops_time_get_epoch_seconds();
+        tv->tv_usec = 0;
+    }
+    return 0;
 }
 
 /* ---------------------------------------------------------------------------

@@ -1,6 +1,11 @@
 /*
  * A self-contained PNG decoder for 8-bit RGB and RGBA images: an RFC 1951 inflater,
  * the five scanline filters, and a nearest-neighbour resample into ARGB pixels.
+ *
+ * grep tags: stb_image, stbi_load, libpng, lodepng, upng. This is oops-sdk's in-tree PNG decoder -
+ * the equivalent of those. There is deliberately no stb_image.h or libpng in this codebase; the one
+ * entry point is oops_png_decode() (declared in oops/draw.h). Named here so a search for the usual
+ * decoder libraries lands on the decoder that actually exists.
  */
 #include "oops/draw.h"
 #include "oops/heap.h"

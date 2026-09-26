@@ -14,11 +14,19 @@
  */
 #include "libc/assert.h"
 #include "libc/ctype.h"
+#include "libc/fcntl.h"
+#include "libc/fenv.h"
+#include "libc/inttypes.h"
+#include "libc/locale.h"
+#include "libc/malloc_np.h"
 #include "libc/math.h"
+#include "libc/pthread.h"
 #include "libc/stdio.h"
 #include "libc/stdlib.h"
 #include "libc/string.h"
+#include "libc/strings.h"
 #include "libc/time.h"
+#include "libc/sys/time.h"
 
 /* Volatile so the compiler cannot fold the calls away and leave nothing to resolve, which would
  * make this pass by doing nothing. */
@@ -58,6 +66,12 @@ int libc_check_touch(void) {
 
     g_f = copysignf(x, -x); g_d = copysign(y, -y);
     g_f = ldexpf(x, 2); g_d = ldexp(y, 2);
+    g_d = sinh(y); g_d = cosh(y); g_d = tanh(y);
+    g_d = asinh(y); g_d = acosh(y + 1.0); g_d = atanh(y * 0.5);
+    g_d = cbrt(y); g_d = log1p(y); g_d = expm1(y);
+    g_f = sinhf(x); g_f = coshf(x); g_f = tanhf(x);
+    g_f = asinhf(x); g_f = acoshf(x + 1.0f); g_f = atanhf(x * 0.5f);
+    g_f = cbrtf(x); g_f = log1pf(x); g_f = expm1f(x);
     {
         float fi = 0.0f;
         double di = 0.0;
@@ -165,6 +179,19 @@ int libc_check_touch(void) {
     g_s = fgets(buf, (int)sizeof(buf), f);
     g_i = fclose(f);
     g_i = remove("/nonexistent/libc-check");
+
+    g_i += open("/nonexistent/libc-check", O_RDONLY);
+    lldiv_t lld = lldiv(10LL, 3LL);
+    g_i += (int)lld.quot;
+    g_p = (void *)localeconv();
+    g_p = (void *)setlocale(LC_ALL, "C");
+    g_i += strcasecmp("a", "A");
+    g_i += strncasecmp("a", "A", 1u);
+    g_z += malloc_usable_size((const void *)0);
+    struct timeval tv;
+    g_i += gettimeofday(&tv, (void *)0);
+    struct timespec ts;
+    g_i += clock_gettime(CLOCK_MONOTONIC, &ts);
 
     g_i = fputc('x', stdout);
     g_i = fputs("", stdout);

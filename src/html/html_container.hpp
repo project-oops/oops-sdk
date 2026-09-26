@@ -98,6 +98,7 @@ class oops_container : public litehtml::document_container {
     // Used by oops_html.cpp. `hit_test` takes view coordinates and adds the scroll.
     void render(oops_surface_t *surf);
     void scroll(int dx, int dy);
+    void ensure_visible(int top, int h);
     int hit_test(int x, int y, char *href_out, size_t href_len);
     int get_content_height() const;
 };

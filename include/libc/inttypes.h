@@ -118,4 +118,11 @@
 #define SCNuPTR SCNu64
 #define SCNxPTR SCNx64
 
+typedef struct { intmax_t quot; intmax_t rem; } imaxdiv_t;
+
+#ifndef _SSIZE_T_DECLARED
+#define _SSIZE_T_DECLARED
+typedef long ssize_t;
+#endif
+
 #endif /* OOPS_LIBC_INTTYPES_H */

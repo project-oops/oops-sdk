@@ -5,6 +5,9 @@
 
 #include "oops/math.h"
 #include "oops/freestd.h"
+#ifndef OOPS_HOST_BUILD
+#include "libc/math.h"
+#endif
 
 float oops_floorf(float x) {
   int i = (int)x;
@@ -566,3 +569,56 @@ double oops_pow(double base, double exp_) {
   }
   return oops_exp(exp_ * oops_ln(base));
 }
+
+#ifndef OOPS_HOST_BUILD
+/* Hyperbolic functions and extensions */
+double sinh(double x) {
+  double e = oops_exp(x);
+  return 0.5 * (e - 1.0 / e);
+}
+float sinhf(float x) { return (float)sinh((double)x); }
+
+double cosh(double x) {
+  double e = oops_exp(x);
+  return 0.5 * (e + 1.0 / e);
+}
+float coshf(float x) { return (float)cosh((double)x); }
+
+double tanh(double x) {
+  double e = oops_exp(2.0 * x);
+  return (e - 1.0) / (e + 1.0);
+}
+float tanhf(float x) { return (float)tanh((double)x); }
+
+double asinh(double x) {
+  return oops_ln(x + oops_sqrt(x * x + 1.0));
+}
+float asinhf(float x) { return (float)asinh((double)x); }
+
+double acosh(double x) {
+  if (x < 1.0) return (x - x) / (x - x);
+  return oops_ln(x + oops_sqrt(x * x - 1.0));
+}
+float acoshf(float x) { return (float)acosh((double)x); }
+
+double atanh(double x) {
+  return 0.5 * oops_ln((1.0 + x) / (1.0 - x));
+}
+float atanhf(float x) { return (float)atanh((double)x); }
+
+double cbrt(double x) {
+  return x < 0.0 ? -oops_pow(-x, 1.0 / 3.0) : oops_pow(x, 1.0 / 3.0);
+}
+float cbrtf(float x) { return (float)cbrt((double)x); }
+
+double log1p(double x) {
+  return oops_ln(1.0 + x);
+}
+float log1pf(float x) { return (float)log1p((double)x); }
+
+double expm1(double x) {
+  return oops_exp(x) - 1.0;
+}
+float expm1f(float x) { return (float)expm1((double)x); }
+#endif
+
