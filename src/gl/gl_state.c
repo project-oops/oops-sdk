@@ -5633,9 +5633,9 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size,
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
-    /* Bounds are an error, not a clamp. Both are checked non-negative before the sum.
-     */
-    if (offset < 0 || size < 0 || offset + size > buf->size) {
+    /* Bounds are an error, not a clamp. Compared as a difference, since the sum of two
+     * valid-looking values can overflow. */
+    if (offset < 0 || size < 0 || offset > buf->size || size > buf->size - offset) {
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }
@@ -5665,7 +5665,7 @@ void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, GLvoid 
         gl_record_error(ctx, GL_INVALID_OPERATION);
         return;
     }
-    if (offset < 0 || size < 0 || offset + size > buf->size) {
+    if (offset < 0 || size < 0 || offset > buf->size || size > buf->size - offset) {
         gl_record_error(ctx, GL_INVALID_VALUE);
         return;
     }

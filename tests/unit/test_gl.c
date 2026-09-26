@@ -8508,6 +8508,12 @@ static void test_gl_buffer_mapping_and_occlusion_queries(void) {
     ASSERT_EQ(glGetError(), GL_INVALID_ENUM);
     glGetBufferSubData(GL_ARRAY_BUFFER, 4, (GLsizeiptr)sizeof(back), back);
     ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+    /* A range whose end overflows is out of bounds, not wrapped back inside. */
+    const GLintptr huge = (GLintptr)(~(unsigned long)0 >> 1);
+    glBufferSubData(GL_ARRAY_BUFFER, huge, 16, quad);
+    ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
+    glGetBufferSubData(GL_ARRAY_BUFFER, 16, huge, back);
+    ASSERT_EQ(glGetError(), GL_INVALID_VALUE);
     /* A new store unmaps. */
     (void)glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(quad), quad, GL_DYNAMIC_COPY);
