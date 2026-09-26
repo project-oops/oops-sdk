@@ -2598,8 +2598,6 @@ static void gl_ps_env_write(gl_context_t *ctx, size_t slot, const uint32_t *word
 GLboolean gl_ps_patch_tex_env(gl_context_t *ctx) {
     if (!ctx || !ctx->gpu_payload)
         return GL_TRUE;
-    if (!ctx || !ctx->gpu_payload)
-        return GL_TRUE;
 
     /* Unit 0's stage: its texel is the sample in v4..v7, and GL_PREVIOUS at unit 0 is
      * the primary colour (GL 1.3, 3.8.13), so both fall on v8..v11. */
