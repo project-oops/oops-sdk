@@ -1242,11 +1242,7 @@ static GLboolean gen_place_of(glsl_gen_t *g, int32_t node, gen_place_t *out) {
         }
         return GL_TRUE;
     }
-    (void)gen_fail(
-        g,
-        "this is not something with a register to write into; an array element "
-        "has no instruction selection yet",
-        node);
+    (void)gen_fail(g, "this is not something with a register to write into", node);
     return GL_FALSE;
 }
 
@@ -1429,11 +1425,9 @@ static glsl_value_t gen_builtin_texture(glsl_gen_t *g, const char *nm, size_t le
         if (nm_prefix(nm, len, "texture") || nm_prefix(nm, len, "shadow")) {
             return gen_fail(
                 g,
-                "texture2D, texture2DProj, textureCube, texture3D and texture3DProj "
-                "are generated; a shadow lookup is not. It is different in kind - it "
-                "compares against a reference rather than returning a texel, through "
-                "`image_sample_c` and a compare function in the sampler - and that "
-                "is not written here yet",
+                "this texture lookup is not generated; texture1D, texture2D, "
+                "texture3D and textureCube, the Proj forms of the first "
+                "three, and shadow1D and shadow2D with their Proj forms are",
                 node);
         }
         return GEN_NOT_MINE;
@@ -4344,8 +4338,8 @@ GLboolean glsl_gen_stmt(glsl_gen_t *g, int32_t node) {
         (void)gen_fail(
             g,
             "this statement has no instruction selection yet: declarations, "
-            "expressions, blocks, `if`, `for`, `break`, `continue`, `return` "
-            "and `discard` are",
+            "expressions, blocks, `if`, `for`, `while`, `do`, `break`, `continue`, "
+            "`return` and `discard` are",
             node);
         return GL_FALSE;
     }

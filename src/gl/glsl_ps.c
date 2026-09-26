@@ -468,12 +468,17 @@ static GLboolean ps_declare_samplers(const gl_program_object_t *p,
         }
         if (has_set)
             continue;
-        if (u->type != GL_SAMPLER_2D) {
-            oops_snprintf(
-                log, log_size,
-                "uniform '%s' is a sampler this path does not carry; only sampler2D "
-                "is generated",
-                u->name);
+        /* The six types the link gives a set (glsl_link.c); any of them left without
+         * one means the sets ran out. */
+        const GLboolean carried =
+            (GLboolean)(u->type == GL_SAMPLER_1D || u->type == GL_SAMPLER_2D ||
+                        u->type == GL_SAMPLER_3D || u->type == GL_SAMPLER_CUBE ||
+                        u->type == GL_SAMPLER_1D_SHADOW ||
+                        u->type == GL_SAMPLER_2D_SHADOW);
+        if (!carried) {
+            oops_snprintf(log, log_size,
+                          "uniform '%s' is a sampler type this path does not carry",
+                          u->name);
         } else {
             oops_snprintf(
                 log, log_size,

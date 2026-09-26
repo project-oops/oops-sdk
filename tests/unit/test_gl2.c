@@ -2985,8 +2985,34 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
                                           &count, &vgprs, NULL, NULL, log, sizeof(log)),
               GL_FALSE);
     /* The set count, as the message spells it. */
-    char want[16];
-    (void)oops_snprintf(want, sizeof(want), "%d", OOPS_GL_GL2_TEX_SETS);
+    char want[32];
+    (void)oops_snprintf(want, sizeof(want), "more than %d", OOPS_GL_GL2_TEX_SETS);
+    ASSERT_TRUE(strstr(log, want) != NULL);
+
+    /* The same count of cube samplers is refused for the count too: a cube takes a set
+     * like a 2D sampler does, so its type is not the reason. */
+    memset(log, 0, sizeof(log));
+    at = 0;
+    for (int s = 0; s <= OOPS_GL_GL2_TEX_SETS; s++) {
+        at += oops_snprintf(too_many_fs + at, sizeof(too_many_fs) - (size_t)at,
+                            "uniform samplerCube s%d;\n", s);
+    }
+    at += oops_snprintf(too_many_fs + at, sizeof(too_many_fs) - (size_t)at,
+                        "varying vec2 uv;\nvoid main() {\n  gl_FragColor = vec4(0.0)");
+    for (int s = 0; s <= OOPS_GL_GL2_TEX_SETS; s++) {
+        at += oops_snprintf(too_many_fs + at, sizeof(too_many_fs) - (size_t)at,
+                            " + textureCube(s%d, vec3(uv, 1.0))", s);
+    }
+    (void)oops_snprintf(too_many_fs + at, sizeof(too_many_fs) - (size_t)at, ";\n}\n");
+    const GLuint too_many_cubes =
+        linked_program("attribute vec3 pos;\n"
+                       "varying vec2 uv;\n"
+                       "void main() { uv = pos.xy; gl_Position = vec4(pos, 1.0); }\n",
+                       too_many_fs);
+    ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, too_many_cubes), words,
+                                          256u, &count, &vgprs, NULL, NULL, log,
+                                          sizeof(log)),
+              GL_FALSE);
     ASSERT_TRUE(strstr(log, want) != NULL);
 
     /* The varying limit, named with its number: four parameters, sixteen floats. A
