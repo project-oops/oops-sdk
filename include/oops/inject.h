@@ -99,6 +99,7 @@ uintptr_t loader_load_into_proc(pid_t pid, const uint8_t *elf_data, size_t elf_s
 pid_t target_find_by_name(const char *name);
 pid_t target_find_foreground_app(void);
 pid_t target_resolve(const char *target_spec);
+int target_get_title_id(pid_t pid, char *out_title, size_t out_len);
 
 /* High-level Process Injection Orchestrator */
 int oops_inject_elf(pid_t target_pid, const uint8_t *elf_data, size_t elf_size,

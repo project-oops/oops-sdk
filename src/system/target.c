@@ -461,3 +461,14 @@ pid_t target_resolve(const char *target_spec) {
 
     return target_find_foreground_app();
 }
+
+int target_get_title_id(pid_t pid, char *out_title, size_t out_len) {
+    if (pid <= 0 || out_title == NULL || out_len < 16) {
+        return 0;
+    }
+    uintptr_t proc = krw_get_proc(pid);
+    if (proc == 0) {
+        return 0;
+    }
+    return get_proc_title_id(proc, out_title, out_len);
+}
