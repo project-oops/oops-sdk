@@ -4,6 +4,7 @@
  * maps CPU- and GPU-visible memory in 64 KB pages and tracks it for free and physical
  * lookup.
  */
+#include "oops/freestd.h"
 #include "oops/memory.h"
 #include "oops/system.h"
 
@@ -197,7 +198,7 @@ struct oops_alloc_slot {
 
 static struct oops_alloc_slot s_alloc_slots[OOPS_MAX_ALLOCS];
 
-void *oops_mem_alloc(size_t size, size_t alignment, oops_mem_type_t type) {
+static void *mem_alloc_pages(size_t size, size_t alignment, oops_mem_type_t type) {
     if (size == 0)
         return NULL;
 
@@ -254,10 +255,112 @@ void *oops_mem_alloc(size_t size, size_t alignment, oops_mem_type_t type) {
     return vaddr;
 }
 
+/* Small allocations are carved from shared blocks so that a 4 KB texture does not cost
+ * a 64 KB page and a tracking slot of its own. A block is an ordinary page allocation,
+ * so oops_mem_get_phys covers carves unchanged; it is released when its last carve is
+ * freed. Carves are zeroed, as a fresh mapping is. */
+#define OOPS_MEM_SMALL_MAX 0x8000u
+#define OOPS_MEM_SMALL_ALIGN_MAX 0x1000u
+#define OOPS_MEM_SMALL_ALIGN_MIN 0x100u
+#define OOPS_MEM_BLOCK_BYTES 0x200000u
+#define OOPS_MAX_BLOCKS 1024
+
+struct oops_mem_block {
+    uint8_t *base;
+    size_t used;
+    uint32_t live;
+    oops_mem_type_t type;
+    int in_use;
+    int open; /* the block new carves of this type come from */
+};
+
+static struct oops_mem_block s_blocks[OOPS_MAX_BLOCKS];
+
+static void mem_free_pages(void *ptr);
+
+static struct oops_mem_block *mem_open_block(oops_mem_type_t type, size_t size,
+                                             size_t align) {
+    int spare = -1;
+    for (int i = 0; i < OOPS_MAX_BLOCKS; i++) {
+        struct oops_mem_block *b = &s_blocks[i];
+        if (!b->in_use) {
+            if (spare < 0)
+                spare = i;
+            continue;
+        }
+        if (!b->open || b->type != type)
+            continue;
+        size_t off = (b->used + align - 1u) & ~(align - 1u);
+        if (off + size <= OOPS_MEM_BLOCK_BYTES)
+            return b;
+        b->open = 0; /* full: carves already in it stay until freed */
+        if (b->live == 0u) {
+            mem_free_pages(b->base);
+            b->in_use = 0;
+            if (spare < 0)
+                spare = i;
+        }
+    }
+    if (spare < 0) {
+        oops_log_warn("MEM", "oops_mem_alloc: out of carve blocks (max %d)", OOPS_MAX_BLOCKS);
+        return NULL;
+    }
+    uint8_t *base = (uint8_t *)mem_alloc_pages(OOPS_MEM_BLOCK_BYTES, 0x10000, type);
+    if (!base)
+        return NULL;
+    struct oops_mem_block *b = &s_blocks[spare];
+    b->base = base;
+    b->used = 0;
+    b->live = 0;
+    b->type = type;
+    b->in_use = 1;
+    b->open = 1;
+    return b;
+}
+
+void *oops_mem_alloc(size_t size, size_t alignment, oops_mem_type_t type) {
+    if (size == 0 || size > OOPS_MEM_SMALL_MAX || alignment > OOPS_MEM_SMALL_ALIGN_MAX ||
+        (alignment & (alignment - 1u)) != 0u)
+        return mem_alloc_pages(size, alignment, type);
+
+    size_t align = alignment < OOPS_MEM_SMALL_ALIGN_MIN ? OOPS_MEM_SMALL_ALIGN_MIN : alignment;
+    struct oops_mem_block *b = mem_open_block(type, size, align);
+    if (!b)
+        return NULL;
+    size_t off = (b->used + align - 1u) & ~(align - 1u);
+    uint8_t *p = b->base + off;
+    b->used = off + size;
+    b->live++;
+    memset(p, 0, size);
+    oops_log_trace("MEM", "oops_mem_alloc carve: %p size=%zu block=%p", (void *)p, size,
+                   (void *)b->base);
+    return p;
+}
+
 void oops_mem_free(void *ptr) {
     if (!ptr)
         return;
+    const uint8_t *p = (const uint8_t *)ptr;
+    for (int i = 0; i < OOPS_MAX_BLOCKS; i++) {
+        struct oops_mem_block *b = &s_blocks[i];
+        if (!b->in_use || p < b->base || p >= b->base + OOPS_MEM_BLOCK_BYTES)
+            continue;
+        if (b->live > 0u)
+            b->live--;
+        if (b->live == 0u) {
+            if (b->open) {
+                b->used = 0; /* empty and still current: reuse it from the start */
+            } else {
+                mem_free_pages(b->base);
+                b->in_use = 0;
+            }
+        }
+        return;
+    }
+    mem_free_pages(ptr);
+}
 
+static void mem_free_pages(void *ptr) {
     oops_log_trace("MEM", "oops_mem_free: ptr=%p", ptr);
 
     for (int i = 0; i < OOPS_MAX_ALLOCS; i++) {

@@ -51,8 +51,9 @@ int oops_mem_reserve_va(void **addr_inout, size_t len, int flags, size_t alignme
 int oops_mem_release_va(void *vaddr, size_t len);
 
 /* High-level managed GPU/CPU allocations: direct memory, mapped CPU+GPU
- * read-write, tracked so that free and the physical lookup need only the
- * pointer. Sizes round up to 64 KB. Not thread-safe. */
+ * read-write, zeroed, tracked so that free and the physical lookup need only the
+ * pointer. Up to 32 KB at up to 4 KB alignment is carved from a shared 2 MB block;
+ * larger sizes round up to 64 KB pages. Not thread-safe. */
 void *oops_mem_alloc(size_t size, size_t alignment, oops_mem_type_t type);
 void oops_mem_free(void *ptr);
 

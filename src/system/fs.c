@@ -557,12 +557,22 @@ int oops_fs_get_storage_dir(oops_storage_location_t loc, char *out_path, size_t 
 
   if (resolved[0] == '\0') {
     /* Refuses rather than silently unmounting the package. See
-     * `oops_system_allow_sandbox_escape`. */
+     * `oops_system_allow_sandbox_escape`.
+     *
+     * Loud for OOPS_STORAGE_APP_DATA, which asked for /data and is being told no. Quiet for
+     * OOPS_STORAGE_PREFER_USB, which asked for a USB stick and said what to fall back to: no stick
+     * and no escape is that caller's ordinary answer, not a fault. `oops_log_enable_disk_sink` is
+     * the one that matters - every title calls it at entry, and six of them opened with this as an
+     * ERROR while nothing was wrong. */
     if (!oops_system_sandbox_escape_allowed()) {
-      oops_log_error("FS",
-                     "refusing to leave the sandbox for /data: it unmounts /app0 and every asset "
-                     "in it. Write to /app0, which is writable, or call "
-                     "oops_system_allow_sandbox_escape() if this title accepts losing them.");
+      if (loc == OOPS_STORAGE_PREFER_USB) {
+        oops_log_debug("FS", "no USB mounted, and /data is outside the sandbox: no storage dir");
+      } else {
+        oops_log_error("FS",
+                       "refusing to leave the sandbox for /data: it unmounts /app0 and every asset "
+                       "in it. Write to /app0, which is writable, or call "
+                       "oops_system_allow_sandbox_escape() if this title accepts losing them.");
+      }
       return -1;
     }
     (void)oops_system_escape_sandbox();
