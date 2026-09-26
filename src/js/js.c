@@ -69,7 +69,9 @@ static oops_js_value_t js_val_to_oops(JSContext *ctx, JSValueConst v) {
         } else {
             out.type = OOPS_JS_TYPE_OBJECT;
         }
-        out.u.ptr = JS_VALUE_GET_PTR(v);
+        /* The kind only: every caller releases `v` once converted, so its address
+         * would dangle. */
+        out.u.ptr = NULL;
     } else {
         out.type = OOPS_JS_TYPE_UNDEFINED;
     }
@@ -103,19 +105,16 @@ static JSValue native_thunk(JSContext *ctx, JSValueConst this_val, int argc,
      * its oops_webview_t there). Each oops_js_t owns its runtime, so that slot is
      * private to it. */
     oops_js_t *js = (oops_js_t *)JS_GetRuntimeOpaque(JS_GetRuntime(ctx));
-    oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG thunk entered magic=%d js=%lx",
-                       magic, (unsigned long)(uintptr_t)js);
     if (!js || magic < 0 || magic >= js->binding_count) {
         return JS_UNDEFINED;
     }
 
     oops_js_fn_binding_t *b = &js->bindings[magic];
-    oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG thunk count=%d fn=%lx ud=%lx",
-                       js->binding_count, (unsigned long)(uintptr_t)b->fn,
-                       (unsigned long)(uintptr_t)b->userdata);
     oops_js_value_t *arg_vals = NULL;
     if (argc > 0) {
         arg_vals = (oops_js_value_t *)malloc(sizeof(oops_js_value_t) * (size_t)argc);
+        if (!arg_vals)
+            return JS_ThrowOutOfMemory(ctx);
         for (int i = 0; i < argc; i++) {
             arg_vals[i] = js_val_to_oops(ctx, argv[i]);
         }
@@ -240,9 +239,6 @@ int oops_js_register_fn(oops_js_t *js, const char *name, oops_js_native_fn fn,
     JSValue global_obj = JS_GetGlobalObject(js->ctx);
     JSValue func_obj = JS_NewCFunctionMagic(js->ctx, (JSCFunctionMagic *)native_thunk,
                                             name, 0, JS_CFUNC_generic_magic, id);
-    oops_kprintf_level(OOPS_LOG_INFO, "JS", "OOPSYDBG reg '%s' id=%d thunk=%lx obj=%lx",
-                       name, id, (unsigned long)(uintptr_t)&native_thunk,
-                       (unsigned long)(uintptr_t)JS_VALUE_GET_PTR(func_obj));
     JS_SetPropertyStr(js->ctx, global_obj, name, func_obj);
     JS_FreeValue(js->ctx, global_obj);
 

@@ -142,6 +142,26 @@ void test_js_syntax_error(void) {
     printf("PASS: test_js_syntax_error\n");
 }
 
+/* An object result reports its kind and no address: the engine releases the value as
+ * the call returns, so an address would dangle. */
+void test_js_object_result_carries_no_address(void) {
+    oops_js_t *js = oops_js_create();
+    assert(js != NULL);
+
+    oops_js_value_t v;
+    int rc = oops_js_eval(js, "({ a: 1 })", "obj.js", &v);
+    assert(rc == 0);
+    assert(v.type == OOPS_JS_TYPE_OBJECT);
+    if (v.u.ptr != NULL) {
+        printf("FAIL: test_js_object_result_carries_no_address (ptr set)\n");
+        exit(1);
+    }
+    oops_js_free_value(js, &v);
+
+    oops_js_destroy(js);
+    printf("PASS: test_js_object_result_carries_no_address\n");
+}
+
 int main(void) {
     printf("=== RUNNING JS UNIT TESTS ===\n");
     test_js_lifecycle();
@@ -149,6 +169,7 @@ int main(void) {
     test_js_native_binding();
     test_js_globals_and_microtasks();
     test_js_syntax_error();
+    test_js_object_result_carries_no_address();
     printf("ALL JS UNIT TESTS PASSED!\n");
     return 0;
 }

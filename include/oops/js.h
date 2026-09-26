@@ -34,7 +34,7 @@ typedef struct oops_js_value {
         int integer;
         double number;
         char *string; /* Dynamically allocated, freed by oops_js_free_value */
-        void *ptr;
+        void *ptr;    /* NULL: an object, array or function reports its kind only */
     } u;
     uint64_t _raw; /* Internal JSValue tag & payload */
 } oops_js_value_t;
