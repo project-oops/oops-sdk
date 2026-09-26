@@ -2765,6 +2765,30 @@ static void test_gl2_pixel_shader_encodings_match_the_assembler(void) {
     ASSERT_EQ(words[1], 0xbf810000u); /* s_endpgm */
 }
 
+/* The link refuses a missing context before it compiles the fragment stage, whose
+ * serial lives in the context. */
+static void test_gl2_link_refuses_a_null_context(void) {
+    void *ctx = gl2_context();
+    const GLuint prog = linked_program(
+        "attribute vec3 pos;\nvoid main() { gl_Position = vec4(pos, 1.0); }\n",
+        "void main() { gl_FragColor = vec4(1.0); }\n");
+    gl_context_t *c = (gl_context_t *)ctx;
+    gl_program_object_t *p = gl_find_program(c, prog);
+    ASSERT_TRUE(p != NULL);
+    glsl_unit_t *vs = NULL, *fs = NULL;
+    for (int i = 0; i < p->attached_count; i++) {
+        const gl_shader_object_t *s = gl_find_shader(c, p->attached[i]);
+        if (s && s->type == GL_VERTEX_SHADER)
+            vs = s->unit;
+        if (s && s->type == GL_FRAGMENT_SHADER)
+            fs = s->unit;
+    }
+    ASSERT_TRUE(vs != NULL && fs != NULL);
+    ASSERT_EQ(gl_program_link(NULL, p, vs, fs), GL_FALSE);
+    glDeleteProgram(prog);
+    glContextDestroy(ctx);
+}
+
 /* gl2-cube's fragment shader compiles to the expected console pixel shader. */
 static void test_gl2_compiles_a_whole_pixel_shader(void) {
     void *ctx = gl2_context();
@@ -8385,6 +8409,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_an_early_return_ends_the_function_and_nothing_else);
     RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
+    RUN_TEST(test_gl2_link_refuses_a_null_context);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);
     RUN_TEST(test_gl2_compiled_while_loops);
     RUN_TEST(test_gl2_compiled_unbounded_for_loops);

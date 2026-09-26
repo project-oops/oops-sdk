@@ -562,8 +562,7 @@ static GLint lowest_free_slot(const gl_program_object_t *p, int need) {
  * relink leaves a program that is not linked (GL 2.0, 2.15.3). */
 GLboolean gl_program_link(gl_context_t *ctx, gl_program_object_t *p, glsl_unit_t *vs,
                           glsl_unit_t *fs) {
-    (void)ctx;
-    if (!p)
+    if (!ctx || !p)
         return GL_FALSE;
 
     gl_glsl_unit_release(p->vs);
