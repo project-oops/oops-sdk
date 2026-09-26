@@ -5804,6 +5804,15 @@ static void test_pm4_gl_resident_draw_arrays_dispatches_batched_triangles(void) 
     };
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
 
+    /* The vertex stage fetches the attributes from the buffer object's own store, so
+     * `gl_hw_can_resident_draw` takes the resident path only for a store the GPU can
+     * read. The host build has no GPU allocator and every store comes from the heap, so
+     * the fixture states this one is GPU-visible, as it states the payload, the command
+     * buffer and the hardware above. */
+    gl_buffer_object_t *const bo = gl_find_buffer(ctx, vbo);
+    ASSERT_TRUE(bo != NULL);
+    bo->gpu_visible = GL_TRUE;
+
     GLint pos_loc = glGetAttribLocation(prog, "pos");
     GLint col_loc = glGetAttribLocation(prog, "col");
     ASSERT_TRUE(pos_loc >= 0);
@@ -5825,6 +5834,12 @@ static void test_pm4_gl_resident_draw_arrays_dispatches_batched_triangles(void) 
     oops_pm4_report_t report;
     ASSERT_EQ(oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report), 0);
     ASSERT_EQ(report.error_count, 0u);
+
+    /* One batch, not one draw per triangle: the CPU assembly path draws each triangle
+     * with its own DRAW_INDEX_AUTO, and every register below is that path's rather than
+     * the resident path's. */
+    ASSERT_EQ(report.draw_index_auto_count, 1u);
+    ASSERT_EQ(report.last_draw_index_count, 6u);
 
     /* Verify NGG VS/GS program counter was set to OOPS_GL_VS_GL2_OFFSET */
     const uint64_t vs_va = (uint64_t)(uintptr_t)payload + OOPS_GL_VS_GL2_OFFSET;
