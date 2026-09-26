@@ -2,9 +2,10 @@
  * The DOM subset a page's scripts see: `document`, `window` and an `Element` class
  * over litehtml elements.
  *
- * Each wrap of a litehtml element creates a new JS object that owns its own listener
- * list; the wrapper holds a shared pointer to the element, so the element stays alive
- * while a script still references it. A mutation marks the webview's layout dirty.
+ * Each wrap of a litehtml element creates a new JS object holding a shared pointer to
+ * the element, so the element stays alive while a script still references it. Its
+ * listeners are the webview's, keyed by element, so every wrapper sees them. A mutation
+ * marks the webview's layout dirty.
  */
 
 #include "dom_bridge.hpp"
@@ -17,15 +18,8 @@
 
 static JSClassID js_element_class_id = 0;
 
-static void js_element_finalizer(JSRuntime *rt, JSValue val) {
-    auto *data =
-        static_cast<dom_element_data *>(JS_GetOpaque(val, js_element_class_id));
-    if (data) {
-        for (auto &l : data->listeners) {
-            JS_FreeValueRT(rt, l.callback);
-        }
-        delete data;
-    }
+static void js_element_finalizer(JSRuntime * /*rt*/, JSValue val) {
+    delete static_cast<dom_element_data *>(JS_GetOpaque(val, js_element_class_id));
 }
 
 static JSClassDef js_element_class = {"Element", js_element_finalizer, nullptr, nullptr,
@@ -135,12 +129,14 @@ static JSValue js_element_add_event_listener(JSContext *ctx, JSValueConst this_v
         return JS_UNDEFINED;
     auto *data =
         static_cast<dom_element_data *>(JS_GetOpaque(this_val, js_element_class_id));
-    if (!data || !JS_IsFunction(ctx, argv[1]))
+    if (!data || !data->wv || !data->el || !JS_IsFunction(ctx, argv[1]))
         return JS_UNDEFINED;
 
     const char *event_type = JS_ToCString(ctx, argv[0]);
     if (event_type) {
-        data->listeners.push_back({JS_DupValue(ctx, argv[1]), std::string(event_type)});
+        dom_element_listeners &entry = data->wv->element_listeners[data->el.get()];
+        entry.el = data->el;
+        entry.list.push_back({JS_DupValue(ctx, argv[1]), std::string(event_type)});
         JS_FreeCString(ctx, event_type);
     }
     return JS_UNDEFINED;
@@ -580,23 +576,43 @@ void dom_bridge_dispatch_event(JSContext *ctx, JSValue elem_obj, const char *eve
         return;
     auto *data =
         static_cast<dom_element_data *>(JS_GetOpaque(elem_obj, js_element_class_id));
-    if (!data)
+    if (!data || !data->wv || !data->el)
         return;
+    const auto it = data->wv->element_listeners.find(data->el.get());
+    if (it == data->wv->element_listeners.end())
+        return;
+    dom_bridge_call_listeners(ctx, it->second.list, event_type, elem_obj, event_obj);
+}
 
-    for (const auto &l : data->listeners) {
-        if (l.event_type == event_type) {
-            JSValue argv[1] = {event_obj};
-            JSValue ret = JS_Call(ctx, l.callback, elem_obj, 1, argv);
-            if (JS_IsException(ret)) {
-                JSValue ex = JS_GetException(ctx);
-                const char *err = JS_ToCString(ctx, ex);
-                oops_log_error("WEBVIEW", "Event listener error: %s",
-                               err ? err : "unknown");
-                if (err)
-                    JS_FreeCString(ctx, err);
-                JS_FreeValue(ctx, ex);
-            }
-            JS_FreeValue(ctx, ret);
+void dom_bridge_call_listeners(JSContext *ctx,
+                               const std::vector<dom_event_listener> &list,
+                               const char *type, JSValueConst this_val,
+                               JSValueConst event_obj) {
+    // By index up to the count at entry: a listener that adds one grows, and may
+    // reallocate, the vector being walked. The callback is held for the call.
+    const size_t count = list.size();
+    for (size_t i = 0; i < count; i++) {
+        if (list[i].event_type != type)
+            continue;
+        JSValue fn = JS_DupValue(ctx, list[i].callback);
+        JSValue argv[1] = {event_obj};
+        JSValue ret = JS_Call(ctx, fn, this_val, 1, argv);
+        JS_FreeValue(ctx, fn);
+        if (JS_IsException(ret)) {
+            JSValue ex = JS_GetException(ctx);
+            const char *err = JS_ToCString(ctx, ex);
+            oops_log_error("WEBVIEW", "Exception in %s listener: %s", type,
+                           err ? err : "unknown");
+            if (err)
+                JS_FreeCString(ctx, err);
+            JS_FreeValue(ctx, ex);
         }
+        JS_FreeValue(ctx, ret);
     }
+}
+
+void dom_bridge_free_listeners(JSContext *ctx, std::vector<dom_event_listener> &list) {
+    for (auto &l : list)
+        JS_FreeValue(ctx, l.callback);
+    list.clear();
 }

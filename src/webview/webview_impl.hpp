@@ -8,8 +8,9 @@
 #include "host_env.hpp"
 #include "html_container.hpp"
 
-#include <vector>
+#include <map>
 #include <memory>
+#include <vector>
 
 // The webview's state, shared by webview.cpp, dom_bridge.cpp and host_env.cpp. The JS
 // context's opaque points at it.
@@ -24,6 +25,7 @@ struct oops_webview {
     std::vector<webview_timer> timers;
     std::vector<webview_fetch_task> pending_fetches;
     std::vector<dom_event_listener> window_listeners;
+    std::map<const litehtml::element *, dom_element_listeners> element_listeners;
 
     void mark_dirty() { dirty_layout = true; }
 };

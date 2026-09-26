@@ -81,24 +81,22 @@ static void dispatch_window_event(oops_webview_t *wv, const char *type) {
     if (!ctx)
         return;
 
-    for (const auto &l : wv->window_listeners) {
-        if (l.event_type == type) {
-            JSValue ev = JS_NewObject(ctx);
-            JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, type));
-            JSValue args[1] = {ev};
-            JSValue ret = JS_Call(ctx, l.callback, JS_UNDEFINED, 1, args);
-            if (JS_IsException(ret)) {
-                JSValue ex = JS_GetException(ctx);
-                const char *err = JS_ToCString(ctx, ex);
-                oops_log_error("WEBVIEW", "Exception in %s listener: %s", type,
-                               err ? err : "unknown");
-                if (err)
-                    JS_FreeCString(ctx, err);
-                JS_FreeValue(ctx, ex);
-            }
-            JS_FreeValue(ctx, ret);
-            JS_FreeValue(ctx, ev);
-        }
+    JSValue ev = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, type));
+    dom_bridge_call_listeners(ctx, wv->window_listeners, type, JS_UNDEFINED, ev);
+    JS_FreeValue(ctx, ev);
+}
+
+// A view coordinate as a document one: the view shows the document from its scroll
+// offset, and litehtml hit-tests in document coordinates.
+static void view_to_document(oops_webview_t *wv, int *x, int *y) {
+    const auto *c =
+        wv->html
+            ? static_cast<const oops_container *>(oops_html_get_container(wv->html))
+            : nullptr;
+    if (c) {
+        *x += c->m_scroll_x;
+        *y += c->m_scroll_y;
     }
 }
 
@@ -113,7 +111,9 @@ static void dispatch_mouse_event(oops_webview_t *wv, const char *type, int32_t x
     auto *doc = static_cast<litehtml::document *>(oops_html_get_document(wv->html));
     litehtml::element::ptr hit_el = nullptr;
     if (doc && doc->root_render()) {
-        hit_el = doc->root_render()->get_element_by_point(x, y, x, y, nullptr);
+        int doc_x = x, doc_y = y;
+        view_to_document(wv, &doc_x, &doc_y);
+        hit_el = doc->root_render()->get_element_by_point(doc_x, doc_y, x, y, nullptr);
     }
 
     JSValue ev = JS_NewObject(ctx);
@@ -128,23 +128,7 @@ static void dispatch_mouse_event(oops_webview_t *wv, const char *type, int32_t x
         JS_FreeValue(ctx, el_val);
     }
 
-    for (const auto &l : wv->window_listeners) {
-        if (l.event_type == type) {
-            JSValue args[1] = {ev};
-            JSValue ret = JS_Call(ctx, l.callback, JS_UNDEFINED, 1, args);
-            if (JS_IsException(ret)) {
-                JSValue ex = JS_GetException(ctx);
-                const char *err = JS_ToCString(ctx, ex);
-                oops_log_error("WEBVIEW", "Exception in %s listener: %s", type,
-                               err ? err : "unknown");
-                if (err)
-                    JS_FreeCString(ctx, err);
-                JS_FreeValue(ctx, ex);
-            }
-            JS_FreeValue(ctx, ret);
-        }
-    }
-
+    dom_bridge_call_listeners(ctx, wv->window_listeners, type, JS_UNDEFINED, ev);
     JS_FreeValue(ctx, ev);
 }
 
@@ -162,23 +146,7 @@ static void dispatch_key_event(oops_webview_t *wv, const char *type, uint32_t ke
     JS_SetPropertyStr(ctx, ev, "which", JS_NewInt32(ctx, keycode));
     JS_SetPropertyStr(ctx, ev, "modifiers", JS_NewInt32(ctx, modifiers));
 
-    for (const auto &l : wv->window_listeners) {
-        if (l.event_type == type) {
-            JSValue args[1] = {ev};
-            JSValue ret = JS_Call(ctx, l.callback, JS_UNDEFINED, 1, args);
-            if (JS_IsException(ret)) {
-                JSValue ex = JS_GetException(ctx);
-                const char *err = JS_ToCString(ctx, ex);
-                oops_log_error("WEBVIEW", "Exception in %s listener: %s", type,
-                               err ? err : "unknown");
-                if (err)
-                    JS_FreeCString(ctx, err);
-                JS_FreeValue(ctx, ex);
-            }
-            JS_FreeValue(ctx, ret);
-        }
-    }
-
+    dom_bridge_call_listeners(ctx, wv->window_listeners, type, JS_UNDEFINED, ev);
     JS_FreeValue(ctx, ev);
 }
 
@@ -235,10 +203,10 @@ void oops_webview_destroy(oops_webview_t *wv) {
         auto *ctx = static_cast<JSContext *>(oops_js_get_context(wv->js));
         if (ctx) {
             host_env_cleanup(ctx, wv);
-            for (auto &l : wv->window_listeners) {
-                JS_FreeValue(ctx, l.callback);
-            }
-            wv->window_listeners.clear();
+            dom_bridge_free_listeners(ctx, wv->window_listeners);
+            for (auto &entry : wv->element_listeners)
+                dom_bridge_free_listeners(ctx, entry.second.list);
+            wv->element_listeners.clear();
         }
     }
 
@@ -281,6 +249,14 @@ int oops_webview_load_html(oops_webview_t *wv, const char *html, const char *bas
         oops_log_error("WEBVIEW", "oops_webview_load_html called with NULL arguments");
         return -1;
     }
+
+    // The old document's elements go with it, and so do their listeners.
+    auto *ctx = static_cast<JSContext *>(oops_js_get_context(wv->js));
+    if (ctx) {
+        for (auto &entry : wv->element_listeners)
+            dom_bridge_free_listeners(ctx, entry.second.list);
+    }
+    wv->element_listeners.clear();
 
     int ret = oops_html_load(wv->html, html, base_url);
     if (ret != 0) {
@@ -356,28 +332,30 @@ void oops_webview_send_input(oops_webview_t *wv, const oops_webview_event_t *ev)
     auto *doc =
         wv->html ? static_cast<litehtml::document *>(oops_html_get_document(wv->html))
                  : nullptr;
+    int doc_x = ev->u.mouse.x, doc_y = ev->u.mouse.y;
+    view_to_document(wv, &doc_x, &doc_y);
 
     switch (ev->type) {
     case OOPS_WEBVIEW_EVENT_MOUSE_MOVE:
         if (doc) {
-            doc->on_mouse_over(ev->u.mouse.x, ev->u.mouse.y, ev->u.mouse.x,
-                               ev->u.mouse.y, [](const litehtml::position &) {});
+            doc->on_mouse_over(doc_x, doc_y, ev->u.mouse.x, ev->u.mouse.y,
+                               [](const litehtml::position &) {});
         }
         dispatch_mouse_event(wv, "mousemove", ev->u.mouse.x, ev->u.mouse.y,
                              ev->u.mouse.button);
         break;
     case OOPS_WEBVIEW_EVENT_MOUSE_BUTTON_DOWN:
         if (doc) {
-            doc->on_lbutton_down(ev->u.mouse.x, ev->u.mouse.y, ev->u.mouse.x,
-                                 ev->u.mouse.y, [](const litehtml::position &) {});
+            doc->on_lbutton_down(doc_x, doc_y, ev->u.mouse.x, ev->u.mouse.y,
+                                 [](const litehtml::position &) {});
         }
         dispatch_mouse_event(wv, "mousedown", ev->u.mouse.x, ev->u.mouse.y,
                              ev->u.mouse.button);
         break;
     case OOPS_WEBVIEW_EVENT_MOUSE_BUTTON_UP:
         if (doc) {
-            doc->on_lbutton_up(ev->u.mouse.x, ev->u.mouse.y, ev->u.mouse.x,
-                               ev->u.mouse.y, [](const litehtml::position &) {});
+            doc->on_lbutton_up(doc_x, doc_y, ev->u.mouse.x, ev->u.mouse.y,
+                               [](const litehtml::position &) {});
         }
         dispatch_mouse_event(wv, "mouseup", ev->u.mouse.x, ev->u.mouse.y,
                              ev->u.mouse.button);

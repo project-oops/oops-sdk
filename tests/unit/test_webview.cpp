@@ -118,6 +118,109 @@ void test_webview_events_and_input() {
     printf("PASS: test_webview_events_and_input\n");
 }
 
+// Reads a page variable that holds an integer.
+static int page_int(oops_js_t *js, const char *name) {
+    oops_js_value_t v;
+    int rc = oops_js_eval(js, name, "<test>", &v);
+    assert(rc == 0);
+    assert(v.type == OOPS_JS_TYPE_INT);
+    const int n = v.u.integer;
+    oops_js_free_value(js, &v);
+    return n;
+}
+
+// A click on an element reaches a listener added through getElementById, whose wrapper
+// is not the one the click dispatches through.
+void test_webview_element_listener_fires() {
+    oops_webview_t *wv = oops_webview_create(800, 600);
+    assert(wv != nullptr);
+    const char *html = "<html><head><style>body { margin: 0; }"
+                       "#box { width: 200px; height: 100px; }</style></head><body>"
+                       "<div id=\"box\"></div>"
+                       "<script>"
+                       "  var boxClicks = 0;"
+                       "  document.getElementById('box').addEventListener('click',"
+                       "      () => { boxClicks++; });"
+                       "</script>"
+                       "</body></html>";
+    assert(oops_webview_load_html(wv, html, "https://example.com/") == 0);
+
+    oops_webview_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = OOPS_WEBVIEW_EVENT_MOUSE_BUTTON_UP;
+    ev.u.mouse.x = 50;
+    ev.u.mouse.y = 50;
+    ev.u.mouse.button = 1;
+    oops_webview_send_input(wv, &ev);
+    assert(page_int(oops_webview_get_js(wv), "boxClicks") == 1);
+
+    oops_webview_destroy(wv);
+    printf("PASS: test_webview_element_listener_fires\n");
+}
+
+// A listener added during a dispatch does not run in that dispatch, and adding many
+// does not disturb the one after it in the dispatch in progress.
+void test_webview_listener_added_during_dispatch() {
+    oops_webview_t *wv = oops_webview_create(800, 600);
+    assert(wv != nullptr);
+    const char *html =
+        "<html><body><script>"
+        "  var calls = 0;"
+        "  window.addEventListener('keydown', () => {"
+        "    calls++;"
+        "    for (let i = 0; i < 64; i++)"
+        "      window.addEventListener('keydown', () => { calls += 100; });"
+        "  });"
+        "  window.addEventListener('keydown', () => { calls++; });"
+        "</script></body></html>";
+    assert(oops_webview_load_html(wv, html, "https://example.com/") == 0);
+
+    oops_webview_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = OOPS_WEBVIEW_EVENT_KEY_DOWN;
+    ev.u.key.keycode = 65;
+    oops_webview_send_input(wv, &ev);
+    assert(page_int(oops_webview_get_js(wv), "calls") == 2);
+
+    oops_webview_destroy(wv);
+    printf("PASS: test_webview_listener_added_during_dispatch\n");
+}
+
+// A click is hit-tested in document coordinates, so it finds the element under the
+// pointer after the page has scrolled.
+void test_webview_click_hit_test_follows_scroll() {
+    oops_webview_t *wv = oops_webview_create(800, 600);
+    assert(wv != nullptr);
+    const char *html = "<html><head><style>body { margin: 0; }"
+                       "div { width: 200px; height: 1000px; }</style></head><body>"
+                       "<div id=\"top\"></div><div id=\"low\"></div>"
+                       "<script>"
+                       "  var topClicks = 0, lowClicks = 0;"
+                       "  document.getElementById('top').addEventListener('click',"
+                       "      () => { topClicks++; });"
+                       "  document.getElementById('low').addEventListener('click',"
+                       "      () => { lowClicks++; });"
+                       "</script>"
+                       "</body></html>";
+    assert(oops_webview_load_html(wv, html, "https://example.com/") == 0);
+    oops_html_scroll(oops_webview_get_html(wv), 0, 900);
+    assert(oops_html_get_scroll_y(oops_webview_get_html(wv)) == 900);
+
+    oops_webview_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = OOPS_WEBVIEW_EVENT_MOUSE_BUTTON_UP;
+    ev.u.mouse.x = 50;
+    ev.u.mouse.y = 150; // document y 1050: the second div
+    ev.u.mouse.button = 1;
+    oops_webview_send_input(wv, &ev);
+    oops_js_t *js = oops_webview_get_js(wv);
+    assert(page_int(js, "lowClicks") == 1);
+    assert(page_int(js, "topClicks") == 0);
+
+    oops_webview_destroy(wv);
+    printf("PASS: test_webview_click_hit_test_follows_scroll\n");
+}
+
 // A `setTimeout` callback fires from a pump after its delay has passed, and not from
 // one before it.
 void test_webview_timers_and_pump() {
@@ -207,6 +310,9 @@ int main() {
     test_webview_lifecycle();
     test_webview_dom_mutation();
     test_webview_events_and_input();
+    test_webview_element_listener_fires();
+    test_webview_listener_added_during_dispatch();
+    test_webview_click_hit_test_follows_scroll();
     test_webview_timers_and_pump();
     test_webview_render();
     printf("ALL WEBVIEW UNIT TESTS PASSED!\n");
