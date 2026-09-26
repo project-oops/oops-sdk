@@ -4340,6 +4340,81 @@ void gl_draw_primitive_triangle(gl_context_t *ctx, const gl_vertex_t *v0,
 static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                                      const gl_vertex_t *v1, const gl_vertex_t *v2,
                                      const gl_vertex_t *pv);
+/* One triangle between the stages of gl_draw_triangle_pv_body: the input vertices, the
+ * program, and per vertex what each stage computes - the object-space and clip
+ * positions, the clip distances, the fog factor, the divided position, and the colours.
+ * The arrays are gl_draw_triangle_pv_body's locals; each stage names the fields it uses
+ * at its top. */
+typedef struct {
+    const gl_vertex_t *v0, *v1, *v2, *pv;
+    gl_program_object_t *prog;
+    GLboolean prog_vs;
+    gl_shader_vertex_out_t *vso;
+    const float *in0, *in1, *in2;
+    float *c0, *c1, *c2;
+    float *cd0, *cd1, *cd2;
+    float fog0, fog1, fog2;
+    float inv_w0, inv_w1, inv_w2;
+    const float *ndc0, *ndc1, *ndc2;
+    float *col0, *col1, *col2;
+    float *sec0, *sec1, *sec2;
+} gl_tri_t;
+static GLboolean gl_tri_clip_fog(gl_context_t *ctx, gl_tri_t *tri);
+static void gl_tri_colours(gl_context_t *ctx, const gl_tri_t *tri);
+static void gl_tri_screen(gl_context_t *ctx, const gl_tri_t *tri,
+                          gl_screen_vertex_t *out0, gl_screen_vertex_t *out1,
+                          gl_screen_vertex_t *out2);
+static void gl_draw_triangle_hw(gl_context_t *ctx, const gl_tri_t *tri);
+
+/* The hardware path's state between its stages. Each stage copies the fields it reads
+ * into locals of the same names, and stores what it decides for the stages after it. */
+typedef struct {
+    GLuint base_unit;
+    GLuint eff_tex;
+    gl_texture_object_t *eff_obj;
+    /* The block a compiled pixel shader is handed: two texture units' descriptors and
+     * the program's uniforms, built once and copied into the ring slot the same pass
+     * chooses. */
+    uint32_t gl2_block[OOPS_GL_GL2_SLOT_STRIDE / 4u];
+    GLboolean gl2_block_used;
+    GLboolean unit1_applied, volume, cube, depth_tex, shadow;
+    gl_texture_object_t *unit1_obj;
+    float poly_att[3][4];
+    GLboolean poly_smooth;
+    GLboolean p3, p3_needed, unit1;
+    uint32_t params;
+    size_t vsz;
+    uint32_t tri_bytes;
+    size_t vbo_offset;
+    uint64_t desc_table_va, ps_va;
+    uint32_t ps_rsrc2;
+    uint32_t *dw;
+    uint64_t vbo_t0, dcb_t0;
+} gl_hw_draw_t;
+static GLboolean gl_hw_tri_begin(gl_context_t *ctx, const gl_tri_t *tri,
+                                 gl_hw_draw_t *hw);
+static void gl_hw_tri_census(gl_context_t *ctx, GLuint base_unit, GLuint eff_tex,
+                             gl_texture_object_t *eff_obj);
+static void gl_hw_tri_sampling(gl_context_t *ctx, gl_hw_draw_t *hw);
+static void gl_hw_tri_patch(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_t *hw);
+static void gl_hw_tri_sample_slots(gl_context_t *ctx, gl_hw_draw_t *hw);
+static void gl_hw_tri_desc_slot(gl_context_t *ctx, GLuint eff_tex,
+                                gl_texture_object_t *eff_obj,
+                                gl_texture_object_t *unit1_obj);
+static void gl_hw_note_slot(gl_context_t *ctx, GLuint eff_tex,
+                            const gl_texture_object_t *unit1_obj);
+#ifndef OOPS_HOST_BUILD
+static void gl_hw_trace_draw(gl_context_t *ctx, gl_texture_object_t *eff_obj);
+#endif
+static void gl_hw_tri_ring(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_t *hw);
+static void gl_hw_tri_payload(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_t *hw);
+static void gl_hw_tri_vertices(gl_context_t *ctx, const gl_tri_t *tri,
+                               gl_hw_draw_t *hw);
+static void gl_hw_tri_shader(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_t *hw);
+static void gl_hw_tri_emit_state(gl_context_t *ctx, gl_hw_draw_t *hw);
+static void gl_hw_tri_emit_dynamic(gl_context_t *ctx, gl_hw_draw_t *hw);
+static void gl_hw_tri_emit_draw(gl_context_t *ctx, const gl_tri_t *tri,
+                                gl_hw_draw_t *hw);
 
 /* **Timed, so a slow frame can be blamed on the right code.** Subtracting the submit
  * time from the frame time leaves the CPU's share - but that share is the *whole* CPU,
@@ -4389,41 +4464,6 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
     const uint64_t tnl_t0 = oops_time_get_ns();
 #endif
 
-#ifdef OOPS_HOST_BUILD
-    /* **The geometry, which is the one property of the port's sky no probe has
-     * reproduced.**
-     *
-     * Every check written against that surface draws a single full-screen quad with
-     * coordinates running 0 to 1. The port draws a tessellated dome - thousands of
-     * triangles carrying their own coordinates - and the fault appears at column
-     * granularity, which is a property of how triangles land on pixels rather than of
-     * any state. This prints the triangles so the shape of them can be compared against
-     * the shape of the artifact.
-     *
-     * Host only, and behind an environment variable, because it belongs to the desktop
-     * harness where the same draws can be watched with a filesystem and a debugger.
-     * `OOPS_GL_DUMP_TRIS` is how many to print. */
-    {
-        static long tris = -1;
-        if (tris < 0) {
-            const char *e = getenv("OOPS_GL_DUMP_TRIS");
-            tris = (e && *e) ? strtol(e, (char **)0, 10) : 0;
-        }
-        if (tris > 0) {
-            tris--;
-            fprintf(stderr,
-                    "tri v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f) "
-                    "v2=(%.3f,%.3f,%.3f,%.3f) tc0=(%.4f,%.4f) tc1=(%.4f,%.4f) "
-                    "tc2=(%.4f,%.4f)\n",
-                    (double)v0->x, (double)v0->y, (double)v0->z, (double)v0->w,
-                    (double)v1->x, (double)v1->y, (double)v1->z, (double)v1->w,
-                    (double)v2->x, (double)v2->y, (double)v2->z, (double)v2->w,
-                    (double)v0->tc[1][0], (double)v0->tc[1][1], (double)v1->tc[1][0],
-                    (double)v1->tc[1][1], (double)v2->tc[1][0], (double)v2->tc[1][1]);
-        }
-    }
-#endif
-
     gl_update_mvp(ctx);
 
     /* **A GL 2.0 program replaces this stage entirely** (since 2026-09-21).
@@ -4471,6 +4511,24 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
         mat4_transform_vec4(c2, &ctx->mvp, in2);
     }
 
+    /* Simple near-plane guard: cull if completely behind camera */
+    if (c0[3] <= 0.001f && c1[3] <= 0.001f && c2[3] <= 0.001f) {
+        return;
+    }
+    /* If partially behind near plane, clamp w to prevent division by zero */
+    float w0 = (c0[3] > 0.001f) ? c0[3] : 0.001f;
+    float w1 = (c1[3] > 0.001f) ? c1[3] : 0.001f;
+    float w2 = (c2[3] > 0.001f) ? c2[3] : 0.001f;
+
+    /* 2. Perspective divide to NDC */
+    float inv_w0 = 1.0f / w0;
+    float inv_w1 = 1.0f / w1;
+    float inv_w2 = 1.0f / w2;
+
+    float ndc0[3] = {c0[0] * inv_w0, c0[1] * inv_w0, c0[2] * inv_w0};
+    float ndc1[3] = {c1[0] * inv_w1, c1[1] * inv_w1, c1[2] * inv_w1};
+    float ndc2[3] = {c2[0] * inv_w2, c2[1] * inv_w2, c2[2] * inv_w2};
+
     /* User clip distances, in eye space, one per plane per vertex.
      *
      * Computed here and interpolated per fragment rather than the triangle being
@@ -4481,6 +4539,159 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
     float cd0[OOPS_GL_CLIP_PLANE_COUNT] = {0};
     float cd1[OOPS_GL_CLIP_PLANE_COUNT] = {0};
     float cd2[OOPS_GL_CLIP_PLANE_COUNT] = {0};
+    float col0[4], col1[4], col2[4], sec0[4], sec1[4], sec2[4];
+    gl_tri_t tri = {.v0 = v0,
+                    .v1 = v1,
+                    .v2 = v2,
+                    .pv = pv,
+                    .prog = prog,
+                    .prog_vs = prog_vs,
+                    .vso = vso,
+                    .in0 = in0,
+                    .in1 = in1,
+                    .in2 = in2,
+                    .c0 = c0,
+                    .c1 = c1,
+                    .c2 = c2,
+                    .cd0 = cd0,
+                    .cd1 = cd1,
+                    .cd2 = cd2,
+                    .inv_w0 = inv_w0,
+                    .inv_w1 = inv_w1,
+                    .inv_w2 = inv_w2,
+                    .ndc0 = ndc0,
+                    .ndc1 = ndc1,
+                    .ndc2 = ndc2,
+                    .col0 = col0,
+                    .col1 = col1,
+                    .col2 = col2,
+                    .sec0 = sec0,
+                    .sec1 = sec1,
+                    .sec2 = sec2};
+    if (!gl_tri_clip_fog(ctx, &tri))
+        return;
+    gl_tri_colours(ctx, &tri);
+    gl_screen_vertex_t sv0, sv1, sv2;
+    gl_tri_screen(ctx, &tri, &sv0, &sv1, &sv2);
+
+    /* 4. Backface culling via 2D signed area (screen coordinates) */
+    float area =
+        (sv1.sx - sv0.sx) * (sv2.sy - sv0.sy) - (sv1.sy - sv0.sy) * (sv2.sx - sv0.sx);
+
+    /* **glPolygonOffset, the third piece of state that existed only on the hardware
+     * path.**
+     *
+     * `PA_SU_POLY_OFFSET_*` carried the factor and units while this rasteriser knew
+     * nothing of them, so coplanar geometry drawn over a surface - the whole point of
+     * the call - separated on the console and z-fought on the host.
+     *
+     * The specification's offset is `factor * m + units * r`, where `m` is the largest
+     * depth slope of the triangle and `r` is the smallest resolvable depth difference.
+     * Computed here rather than per fragment because **both terms are constant across a
+     * triangle**, which is what makes the offset a plane shift rather than a warp.
+     *
+     * `m` is `max(|dz/dx|, |dz/dy|)` from the plane through the three screen vertices;
+     * the signed area is its denominator, which is why this sits after it. */
+    float depth_bias = 0.0f;
+    if (gl_prim_offsets(ctx) && area != 0.0f) {
+        const float inv_area = 1.0f / area;
+        const float dzdx = ((sv1.sz - sv0.sz) * (sv2.sy - sv0.sy) -
+                            (sv2.sz - sv0.sz) * (sv1.sy - sv0.sy)) *
+                           inv_area;
+        const float dzdy = ((sv2.sz - sv0.sz) * (sv1.sx - sv0.sx) -
+                            (sv1.sz - sv0.sz) * (sv2.sx - sv0.sx)) *
+                           inv_area;
+        float adx = dzdx < 0.0f ? -dzdx : dzdx;
+        float ady = dzdy < 0.0f ? -dzdy : dzdy;
+        const float slope = adx > ady ? adx : ady;
+        /* `r` for a float depth buffer holding 0..1. The hardware derives its own from
+         * the depth format; this is the software path's equivalent and is deliberately
+         * small enough that `units` behaves like a nudge rather than a jump. */
+        const float resolvable = 1.0f / 16777216.0f;
+        depth_bias =
+            ctx->polygon_offset_factor * slope + ctx->polygon_offset_units * resolvable;
+    }
+    sv0.sz += depth_bias;
+    sv1.sz += depth_bias;
+    sv2.sz += depth_bias;
+
+    /* Taken here rather than past the two returns below, so that every triangle the
+     * wrapper counted has contributed to the phase it spent its time in. A culled or
+     * degenerate one does the transform and then stops, which is exactly what this
+     * should show. */
+#ifndef OOPS_HOST_BUILD
+    ctx->hw_tnl_ns += oops_time_get_ns() - tnl_t0;
+#endif
+
+    if (!ctx->use_hardware && gl_prim_culls(ctx)) {
+        /* Note: with Y-flip, CCW in 3D becomes negative in screen space */
+        GLboolean is_ccw = (area < 0.0f) ? GL_TRUE : GL_FALSE;
+        if (ctx->front_face == GL_CW)
+            is_ccw = !is_ccw;
+
+        if (ctx->cull_mode == GL_BACK && !is_ccw)
+            return;
+        if (ctx->cull_mode == GL_FRONT && is_ccw)
+            return;
+        if (ctx->cull_mode == GL_FRONT_AND_BACK)
+            return;
+    }
+
+    if (area > -1e-4f && area < 1e-4f)
+        return; /* Degenerate */
+
+    if (ctx->use_hardware) {
+        gl_draw_triangle_hw(ctx, &tri);
+        return;
+    }
+
+#ifdef OOPS_HOST_BUILD
+    /* 6. Host builds have no GPU: the software rasterizer stands in for it there, and
+     * only there. */
+    gl_rasterize_triangle(ctx, &sv0, &sv1, &sv2);
+    ctx->triangles_drawn++;
+#else
+    gl_hw_fail(ctx, "no hardware pipeline: nothing is drawn");
+#endif
+}
+
+/* The clip distances from each vertex's `gl_ClipVertex`; GL_FALSE when all three are
+ * outside one enabled plane. */
+static GLboolean gl_tri_shader_clip(gl_context_t *ctx,
+                                    const gl_shader_vertex_out_t *vso, float *cd0,
+                                    float *cd1, float *cd2) {
+    for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
+        if (!ctx->clip_plane_enabled[i])
+            continue;
+        const float *p = ctx->clip_plane[i];
+        const gl_shader_vertex_out_t *s[3] = {&vso[0], &vso[1], &vso[2]};
+        float *dst[3] = {&cd0[i], &cd1[i], &cd2[i]};
+        for (int k = 0; k < 3; k++) {
+            if (!s[k]->wrote_clip_vertex) {
+                *dst[k] = 0.0f;
+                continue;
+            }
+            const float *cv = s[k]->clip_vertex;
+            *dst[k] = p[0] * cv[0] + p[1] * cv[1] + p[2] * cv[2] + p[3] * cv[3];
+        }
+    }
+    for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
+        if (!ctx->clip_plane_enabled[i])
+            continue;
+        if (cd0[i] < 0.0f && cd1[i] < 0.0f && cd2[i] < 0.0f)
+            return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* The user clip distances and the fog factor of each vertex; GL_FALSE when all three
+ * are outside one enabled plane. */
+static GLboolean gl_tri_clip_fog(gl_context_t *ctx, gl_tri_t *tri) {
+    const gl_vertex_t *const v0 = tri->v0, *const v1 = tri->v1, *const v2 = tri->v2;
+    const GLboolean prog_vs = tri->prog_vs;
+    const gl_shader_vertex_out_t *const vso = tri->vso;
+    const float *const in0 = tri->in0, *const in1 = tri->in1, *const in2 = tri->in2;
+    float *const cd0 = tri->cd0, *const cd1 = tri->cd1, *const cd2 = tri->cd2;
     /* Unfogged unless fog is on, so the blend below is a no-op without a branch per
      * fragment. */
     float fog0 = 1.0f, fog1 = 1.0f, fog2 = 1.0f;
@@ -4507,29 +4718,8 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
             fog1 = gl_fog_factor(ctx, vso[1].vary[GL_SHADER_VARY_FOG]);
             fog2 = gl_fog_factor(ctx, vso[2].vary[GL_SHADER_VARY_FOG]);
         }
-        if (any_clip) {
-            for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
-                if (!ctx->clip_plane_enabled[i])
-                    continue;
-                const float *p = ctx->clip_plane[i];
-                const gl_shader_vertex_out_t *s[3] = {&vso[0], &vso[1], &vso[2]};
-                float *dst[3] = {&cd0[i], &cd1[i], &cd2[i]};
-                for (int k = 0; k < 3; k++) {
-                    if (!s[k]->wrote_clip_vertex) {
-                        *dst[k] = 0.0f;
-                        continue;
-                    }
-                    const float *cv = s[k]->clip_vertex;
-                    *dst[k] = p[0] * cv[0] + p[1] * cv[1] + p[2] * cv[2] + p[3] * cv[3];
-                }
-            }
-            for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
-                if (!ctx->clip_plane_enabled[i])
-                    continue;
-                if (cd0[i] < 0.0f && cd1[i] < 0.0f && cd2[i] < 0.0f)
-                    return;
-            }
-        }
+        if (any_clip && !gl_tri_shader_clip(ctx, vso, cd0, cd1, cd2))
+            return GL_FALSE;
     } else if (ctx->cap_fog && ctx->fog_coord_src == GL_FOG_COORD) {
         /* GL 1.4's fog coordinate in place of the distance: the vertex's own value,
          * used as given
@@ -4576,34 +4766,24 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
             if (!ctx->clip_plane_enabled[i])
                 continue;
             if (cd0[i] < 0.0f && cd1[i] < 0.0f && cd2[i] < 0.0f)
-                return;
+                return GL_FALSE;
         }
     }
+    tri->fog0 = fog0;
+    tri->fog1 = fog1;
+    tri->fog2 = fog2;
+    return GL_TRUE;
+}
 
-    /* Simple near-plane guard: cull if completely behind camera */
-    if (c0[3] <= 0.001f && c1[3] <= 0.001f && c2[3] <= 0.001f) {
-        return;
-    }
-    /* If partially behind near plane, clamp w to prevent division by zero */
-    float w0 = (c0[3] > 0.001f) ? c0[3] : 0.001f;
-    float w1 = (c1[3] > 0.001f) ? c1[3] : 0.001f;
-    float w2 = (c2[3] > 0.001f) ? c2[3] : 0.001f;
-
-    /* 2. Perspective divide to NDC */
-    float inv_w0 = 1.0f / w0;
-    float inv_w1 = 1.0f / w1;
-    float inv_w2 = 1.0f / w2;
-
-    float ndc0[3] = {c0[0] * inv_w0, c0[1] * inv_w0, c0[2] * inv_w0};
-    float ndc1[3] = {c1[0] * inv_w1, c1[1] * inv_w1, c1[2] * inv_w1};
-    float ndc2[3] = {c2[0] * inv_w2, c2[1] * inv_w2, c2[2] * inv_w2};
-
-    /* 3. Viewport mapping */
-    float vp_w_half = (float)ctx->vp_w * 0.5f;
-    float vp_h_half = (float)ctx->vp_h * 0.5f;
-    float vp_ox = (float)ctx->vp_x + vp_w_half;
-    float vp_oy = (float)ctx->vp_y + vp_h_half;
-
+/* The colours of the three vertices: the vertex shader's, or clamped, lit and
+ * flat-shaded. */
+static void gl_tri_colours(gl_context_t *ctx, const gl_tri_t *tri) {
+    const gl_vertex_t *const v0 = tri->v0, *const v1 = tri->v1, *const v2 = tri->v2;
+    const gl_vertex_t *const pv = tri->pv;
+    const GLboolean prog_vs = tri->prog_vs;
+    const gl_shader_vertex_out_t *const vso = tri->vso;
+    const float *const ndc0 = tri->ndc0, *const ndc1 = tri->ndc1,
+                       *const ndc2 = tri->ndc2;
     /* Compute vertex colors (lighting or direct color) */
     float col0[4] = {v0->r, v0->g, v0->b, v0->a};
     float col1[4] = {v1->r, v1->g, v1->b, v1->a};
@@ -4714,6 +4894,38 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
         memcpy(sec1, flat_sec, sizeof(flat_sec));
         memcpy(sec2, flat_sec, sizeof(flat_sec));
     }
+    memcpy(tri->col0, col0, sizeof(col0));
+    memcpy(tri->col1, col1, sizeof(col1));
+    memcpy(tri->col2, col2, sizeof(col2));
+    memcpy(tri->sec0, sec0, sizeof(sec0));
+    memcpy(tri->sec1, sec1, sizeof(sec1));
+    memcpy(tri->sec2, sec2, sizeof(sec2));
+}
+
+/* The three screen vertices: the viewport and depth-range mapping of the divided
+ * positions, with each vertex's colours, texture coordinates, clip distances, fog and,
+ * under a vertex shader, what it interpolates. */
+static void gl_tri_screen(gl_context_t *ctx, const gl_tri_t *tri,
+                          gl_screen_vertex_t *out0, gl_screen_vertex_t *out1,
+                          gl_screen_vertex_t *out2) {
+    const gl_vertex_t *const v0 = tri->v0, *const v1 = tri->v1, *const v2 = tri->v2;
+    const GLboolean prog_vs = tri->prog_vs;
+    const gl_shader_vertex_out_t *const vso = tri->vso;
+    const float *const cd0 = tri->cd0, *const cd1 = tri->cd1, *const cd2 = tri->cd2;
+    const float fog0 = tri->fog0, fog1 = tri->fog1, fog2 = tri->fog2;
+    const float inv_w0 = tri->inv_w0, inv_w1 = tri->inv_w1, inv_w2 = tri->inv_w2;
+    const float *const ndc0 = tri->ndc0, *const ndc1 = tri->ndc1,
+                       *const ndc2 = tri->ndc2;
+    const float *const col0 = tri->col0, *const col1 = tri->col1,
+                       *const col2 = tri->col2;
+    const float *const sec0 = tri->sec0, *const sec1 = tri->sec1,
+                       *const sec2 = tri->sec2;
+
+    /* 3. Viewport mapping */
+    float vp_w_half = (float)ctx->vp_w * 0.5f;
+    float vp_h_half = (float)ctx->vp_h * 0.5f;
+    float vp_ox = (float)ctx->vp_x + vp_w_half;
+    float vp_oy = (float)ctx->vp_y + vp_h_half;
 
     /* **glDepthRange, which lived only in the hardware path until now.**
      *
@@ -4797,1723 +5009,1807 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
             }
         }
     }
+    *out0 = sv0;
+    *out1 = sv1;
+    *out2 = sv2;
+}
 
-    /* 4. Backface culling via 2D signed area (screen coordinates) */
-    float area =
-        (sv1.sx - sv0.sx) * (sv2.sy - sv0.sy) - (sv1.sy - sv0.sy) * (sv2.sx - sv0.sx);
+/* One triangle through the hardware path (AMD RDNA2 GFX10.3): the pixel shader's slots
+ * and the descriptors brought up to date, the vertices written into the ring, then the
+ * command words. */
+static void gl_draw_triangle_hw(gl_context_t *ctx, const gl_tri_t *tri) {
+    gl_hw_draw_t hw_state;
+    gl_hw_draw_t *const hw = &hw_state;
+    if (!gl_hw_tri_begin(ctx, tri, hw))
+        return;
+    gl_hw_tri_census(ctx, hw->base_unit, hw->eff_tex, hw->eff_obj);
+    gl_hw_tri_sampling(ctx, hw);
+    gl_hw_tri_patch(ctx, tri, hw);
+    gl_hw_tri_sample_slots(ctx, hw);
+    if (hw->eff_obj && ctx->hw_frame_tex != 0u)
+        gl_hw_tri_desc_slot(ctx, hw->eff_tex, hw->eff_obj, hw->unit1_obj);
+    gl_hw_tri_ring(ctx, tri, hw);
+    gl_hw_tri_payload(ctx, tri, hw);
+    gl_hw_tri_vertices(ctx, tri, hw);
+    gl_hw_tri_shader(ctx, tri, hw);
+    gl_hw_tri_emit_state(ctx, hw);
+    gl_hw_tri_emit_dynamic(ctx, hw);
+    gl_hw_tri_emit_draw(ctx, tri, hw);
+}
 
-    /* **glPolygonOffset, the third piece of state that existed only on the hardware
-     * path.**
+/* A program the back end generated for, a working pipeline, an open frame with room
+ * in the stream, and the texture the sampling stage uses. GL_FALSE draws nothing. */
+static GLboolean gl_hw_tri_begin(gl_context_t *ctx, const gl_tri_t *tri,
+                                 gl_hw_draw_t *hw) {
+    gl_program_object_t *const prog = tri->prog;
+    /* **A GL 2.0 program draws with its own compiled pixel shader, or not at all.**
      *
-     * `PA_SU_POLY_OFFSET_*` carried the factor and units while this rasteriser knew
-     * nothing of them, so coplanar geometry drawn over a surface - the whole point of
-     * the call - separated on the console and z-fought on the host.
+     * The back end compiles the fragment stage at link time (`glsl_ps.c`); a
+     * program it would not generate for has `hw_ps_words` zero, and this refuses
+     * rather than running the fixed-function instruments in its place - which would
+     * put a picture on screen that no part of the program asked for, from a call
+     * that reported success.
      *
-     * The specification's offset is `factor * m + units * r`, where `m` is the largest
-     * depth slope of the triangle and `r` is the smallest resolvable depth difference.
-     * Computed here rather than per fragment because **both terms are constant across a
-     * triangle**, which is what makes the offset a plane shift rather than a warp.
-     *
-     * `m` is `max(|dz/dx|, |dz/dy|)` from the plane through the three screen vertices;
-     * the signed area is its denominator, which is why this sits after it. */
-    float depth_bias = 0.0f;
-    if (gl_prim_offsets(ctx) && area != 0.0f) {
-        const float inv_area = 1.0f / area;
-        const float dzdx = ((sv1.sz - sv0.sz) * (sv2.sy - sv0.sy) -
-                            (sv2.sz - sv0.sz) * (sv1.sy - sv0.sy)) *
-                           inv_area;
-        const float dzdy = ((sv2.sz - sv0.sz) * (sv1.sx - sv0.sx) -
-                            (sv1.sz - sv0.sz) * (sv2.sx - sv0.sx)) *
-                           inv_area;
-        float adx = dzdx < 0.0f ? -dzdx : dzdx;
-        float ady = dzdy < 0.0f ? -dzdy : dzdy;
-        const float slope = adx > ady ? adx : ady;
-        /* `r` for a float depth buffer holding 0..1. The hardware derives its own from
-         * the depth format; this is the software path's equivalent and is deliberately
-         * small enough that `units` behaves like a nudge rather than a jump. */
-        const float resolvable = 1.0f / 16777216.0f;
-        depth_bias =
-            ctx->polygon_offset_factor * slope + ctx->polygon_offset_units * resolvable;
+     * A program with **no** fragment stage is the one case that needs no compiled
+     * shader: the fixed-function pixel shader is what runs for it, exactly as the
+     * specification says, and its vertex shader's `gl_FrontColor` and
+     * `gl_TexCoord[]` are what reach it. */
+    if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words == 0u) {
+        /* **Once per program, not once per context.** A draw loop that keeps
+         * binding the same refused program still prints one line; a suite that
+         * binds a different one per check gets a reason for each, which is the
+         * difference between "something was refused" and a list of what the back
+         * end does not generate yet. */
+        if (!prog->hw_ps_logged) {
+            prog->hw_ps_logged = GL_TRUE;
+            oops_log_info("GL", "%s",
+                          prog->hw_ps_log[0]
+                              ? prog->hw_ps_log
+                              : "this program's fragment shader has no console code");
+        }
+        gl_record_error(ctx, GL_INVALID_OPERATION);
+        return GL_FALSE;
     }
-    sv0.sz += depth_bias;
-    sv1.sz += depth_bias;
-    sv2.sz += depth_bias;
-
-    /* Taken here rather than past the two returns below, so that every triangle the
-     * wrapper counted has contributed to the phase it spent its time in. A culled or
-     * degenerate one does the transform and then stops, which is exactly what this
-     * should show. */
-#ifndef OOPS_HOST_BUILD
-    ctx->hw_tnl_ns += oops_time_get_ns() - tnl_t0;
-#endif
-
-    if (!ctx->use_hardware && gl_prim_culls(ctx)) {
-        /* Note: with Y-flip, CCW in 3D becomes negative in screen space */
-        GLboolean is_ccw = (area < 0.0f) ? GL_TRUE : GL_FALSE;
-        if (ctx->front_face == GL_CW)
-            is_ccw = !is_ccw;
-
-        if (ctx->cull_mode == GL_BACK && !is_ccw)
-            return;
-        if (ctx->cull_mode == GL_FRONT && is_ccw)
-            return;
-        if (ctx->cull_mode == GL_FRONT_AND_BACK)
-            return;
+    /* **The compiled shader says whether it wants one**, rather than this
+     * recomputing the condition the compiler used. `hw_ps_user_sgprs` is two
+     * exactly when the shader was built to be handed the block's address - and the
+     * same count decides where the SPI puts the primitive mask, which the shader
+     * has already moved into `m0`. One answer, read in both places. */
+    const GLboolean gl2_block_used =
+        (GLboolean)(prog != (gl_program_object_t *)0 && prog->fs &&
+                    prog->hw_ps_words > 0u && prog->hw_ps_user_sgprs > 0u);
+    if (ctx->hw_failed)
+        return GL_FALSE; /* the failure is on the log and the status query */
+    if (!ctx->hw_frame_active) {
+        gl_hw_begin_frame(ctx);
     }
 
-    if (area > -1e-4f && area < 1e-4f)
-        return; /* Degenerate */
+    /* Room for the most one draw can emit below, counted rather than guessed: the
+     * depth block 72 (24 registers, first depth-tested draw only), the four
+     * per-draw state registers 13 (blending covers both targets in one packet, so
+     * five dwords there, not four), viewport 6, depth range 4, scissor 4, clip
+     * planes and their enables 29, CB_COLOR_CONTROL 3, the blend constant 6, shader
+     * and user data 21, the draw itself 5, and the stencil surface's binding 15
+     * (first stencil-tested draw only) and registers 5 - 183 dwords, held as
+     * OOPS_GL_DCB_DRAW_MAX_DW with some slack. **Plus the flush trailer.** This was
+     * a bare 160 until 2026-09-19, which reserved nothing for the 46 dwords
+     * gl_hw_flush appends: a draw that just fitted left a stream that could not be
+     * closed inside the buffer. */
+    if (ctx->dcb_words + OOPS_GL_DCB_DRAW_MAX_DW + OOPS_GL_DCB_TRAILER_DW >=
+        ctx->dcb_capacity_dw) {
+        gl_hw_flush(ctx);
+        gl_hw_begin_frame(ctx);
+    }
 
-    /* 5. Hardware AGC Path (AMD RDNA2 GFX10.3) */
-    if (ctx->use_hardware) {
-        /* **A GL 2.0 program draws with its own compiled pixel shader, or not at all.**
-         *
-         * The back end compiles the fragment stage at link time (`glsl_ps.c`); a
-         * program it would not generate for has `hw_ps_words` zero, and this refuses
-         * rather than running the fixed-function instruments in its place - which would
-         * put a picture on screen that no part of the program asked for, from a call
-         * that reported success.
-         *
-         * A program with **no** fragment stage is the one case that needs no compiled
-         * shader: the fixed-function pixel shader is what runs for it, exactly as the
-         * specification says, and its vertex shader's `gl_FrontColor` and
-         * `gl_TexCoord[]` are what reach it. */
-        if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words == 0u) {
-            /* **Once per program, not once per context.** A draw loop that keeps
-             * binding the same refused program still prints one line; a suite that
-             * binds a different one per check gets a reason for each, which is the
-             * difference between "something was refused" and a list of what the back
-             * end does not generate yet. */
-            if (!prog->hw_ps_logged) {
-                prog->hw_ps_logged = GL_TRUE;
-                oops_log_info(
-                    "GL", "%s",
-                    prog->hw_ps_log[0]
-                        ? prog->hw_ps_log
-                        : "this program's fragment shader has no console code");
+    /* **There is a ring of descriptor slots, and each draw points at its own**
+     * (since 2026-09-21).
+     *
+     * There was one slot. Every textured draw handed the shader the same address,
+     * so a second texture bound later in the frame overwrote the first and every
+     * built draw would have sampled whichever was bound last - the draws are built,
+     * not executed, so nothing noticed until the submit. Submitting the frame on
+     * any descriptor change was what kept that correct, and the note here said a
+     * ring "would avoid it and is the change to make if a frame ever switches
+     * textures often enough to matter". A scene with twenty materials matters: it
+     * submitted twenty times a frame and waited on a fence each time.
+     *
+     * So a texture change now takes the next slot and the stream carries on. The
+     * wrap submits, and so does a border colour, which lives in a table a frame
+     * register names. See `OOPS_GL_DESC_RING_OFFSET`. Only a *different* texture
+     * takes a slot: rebinding the same one, which a display list does constantly,
+     * changes nothing. */
+    /* The unit the sampling stage draws from - the first with a texture, not
+     * necessarily unit 0. Its coordinate set is the one the vertex carries below.
+     */
+    const GLuint base_unit = gl_hw_base_unit(ctx);
+    GLuint eff_tex = gl_unit_texture_id(ctx, base_unit);
+    gl_texture_object_t *eff_obj =
+        (gl_texture_object_t *)gl_lookup_texture(ctx, eff_tex);
+    hw->base_unit = base_unit;
+    hw->eff_tex = eff_tex;
+    hw->eff_obj = eff_obj;
+    hw->gl2_block_used = gl2_block_used;
+    return GL_TRUE;
+}
+
+/* The per-draw texture census, and one log line for a unit whose texture cannot be
+ * sampled. */
+static void gl_hw_tri_census(gl_context_t *ctx, GLuint base_unit, GLuint eff_tex,
+                             gl_texture_object_t *eff_obj) {
+    /*
+     * **Texturing is on, a texture is bound, and GL says it cannot be sampled.**
+     *
+     * `gl_effective_texture_id` answers zero for that and for texturing being off
+     * alike, so the two are told apart here: a name bound on unit 0 with nothing
+     * effective is the first case. GL requires it to draw untextured (3.8.10)
+     * rather than to raise an error, which is why it is silent - and on screen it
+     * is indistinguishable from a port whose textures never loaded. Neverball's
+     * title screen looked exactly like that while gl1-probe's texture checks passed
+     * on hardware and the pinned libpng decoded all 292 of its PNGs: neither suite
+     * covers this join.
+     *
+     * The name and the base level's size are what separate the three explanations -
+     * the default texture standing in for an unbound unit, an upload that stored
+     * nothing (zero by zero), and a stored image the completeness rule rejects
+     * anyway. Said once.
+     */
+    static GLboolean told_incomplete = GL_FALSE;
+    /*
+     * **Read the unit's own enable and binding, not `gl_unit_texture_id`.**
+     *
+     * The first version of this asked whether `gl_effective_texture_id` was
+     * zero while `gl_unit_texture_id(ctx, 0)` was not - and those are the same
+     * call: the effective id *is* unit 0's. The condition could not hold, the
+     * branch was dead, and a run that printed nothing looked like evidence that
+     * textures were fine. It was not evidence of anything.
+     *
+     * Both of those answer zero for "texturing off" and for "on but unusable"
+     * alike, so the only way to tell them apart is the state they are computed
+     * from.
+     */
+    const gl_tex_unit_t *u0 = &ctx->tex_unit[0];
+    const GLboolean tex_on =
+        (GLboolean)(u0->cap_texture_2d || u0->cap_texture_3d ||
+                    u0->cap_texture_cube_map || u0->cap_texture_1d);
+    const GLuint bound0 = u0->bound_texture_2d;
+    /* The census this draw contributes to - see the counters' note in
+     * gl_internal.h.
+     *
+     * **Asked of every unit, not of unit 0.** The first version reused `tex_on`
+     * above, which reads unit 0's enables - and `gl_hw_base_unit` exists
+     * precisely because unit 0 is often not the textured one. Neverball's
+     * shadow arrangement disables unit 0 and puts the surface texture on unit
+     * 1, so on the draws this census was written to measure the condition was
+     * false and **neither counter moved**. A run reported `draws-textured: 0`
+     * and `draws-untextured: 0` for a screen full of geometry, which reads as
+     * "nothing was drawn" and meant "nothing was asked".
+     *
+     * A draw that wanted a texture and got none is the interesting half, so the
+     * split is by `eff_tex`: a draw with texturing off on every unit is
+     * neither. */
+    GLboolean any_tex_on = GL_FALSE;
+    for (GLuint u = 0u; u < OOPS_GL_MAX_TEXTURE_UNITS && !any_tex_on; u++) {
+        const gl_tex_unit_t *tu = &ctx->tex_unit[u];
+        if (tu->cap_texture_2d || tu->cap_texture_3d || tu->cap_texture_cube_map ||
+            tu->cap_texture_1d) {
+            any_tex_on = GL_TRUE;
+        }
+    }
+    if (any_tex_on) {
+        if (eff_tex != 0u)
+            ctx->hw_draws_textured++;
+        else
+            ctx->hw_draws_untextured++;
+    }
+    /* **And which texture, which is the question the pair above cannot
+     * answer.** A scan and an increment per draw, printed once a flip - see
+     * `hw_tex_census`. Unconditional because it costs no syscall: a counter
+     * nobody switched on is a counter that is not there when the run that
+     * needed it happens. */
+    {
+        /* **Keyed on the pair of units, not on the base unit alone.** See
+         * `id1`: a pass that holds unit 0 steady and varies unit 1 per surface
+         * is one row and thirty materials otherwise, which is a census that
+         * reports the one thing already known. */
+        /* The same condition `unit1_applied` states further down, written out
+         * because that one is not in scope yet: a second unit only exists for
+         * this draw when unit 0 is the base and has something bound. */
+        const uint32_t census_id1 =
+            (ctx->hw_multitex && base_unit == 0u && eff_tex != 0u)
+                ? gl_unit_texture_id(ctx, 1u)
+                : 0u;
+        uint32_t ci = 0u;
+        for (; ci < ctx->hw_tex_census_n; ci++) {
+            if (ctx->hw_tex_census[ci].id == eff_tex &&
+                ctx->hw_tex_census[ci].id1 == census_id1)
+                break;
+        }
+        if (ci == ctx->hw_tex_census_n && ci < OOPS_GL_TEX_CENSUS) {
+            ctx->hw_tex_census_n++;
+            ctx->hw_tex_census[ci].id = eff_tex;
+            ctx->hw_tex_census[ci].id1 = census_id1;
+            ctx->hw_tex_census[ci].draws = 0u;
+        }
+        if (ci < OOPS_GL_TEX_CENSUS) {
+            ctx->hw_tex_census[ci].draws++;
+            ctx->hw_tex_census[ci].w = (uint16_t)(eff_obj ? eff_obj->width : 0);
+            ctx->hw_tex_census[ci].h = (uint16_t)(eff_obj ? eff_obj->height : 0);
+            ctx->hw_tex_census[ci].slot = (uint8_t)ctx->hw_desc_slot;
+            ctx->hw_tex_census[ci].unit = (uint8_t)base_unit;
+            ctx->hw_tex_census[ci].env =
+                (uint8_t)(uint32_t)ctx->tex_unit[base_unit].tex_env_mode;
+            ctx->hw_tex_census[ci].blend = (uint8_t)(ctx->cap_blend ? 1u : 0u);
+            ctx->hw_tex_census[ci].base = eff_obj ? eff_obj->base_format : 0u;
+            ctx->hw_tex_census[ci].pitch = eff_obj ? eff_obj->pitch : 0u;
+            /* The base level's own storage, to compare against the address the
+             * descriptor carries: equal means the sampler reads the texels a
+             * capture holds, different means it reads the mip chain, which
+             * nothing has ever replayed. */
+            ctx->hw_tex_census[ci].garlic =
+                eff_obj ? (uint32_t)(eff_obj->garlic_va >> 8) : 0u;
+            for (int dw_i = 0; dw_i < 8; dw_i++) {
+                ctx->hw_tex_census[ci].desc[dw_i] =
+                    eff_obj ? eff_obj->img_desc[dw_i] : 0u;
             }
-            gl_record_error(ctx, GL_INVALID_OPERATION);
-            return;
+            /* The sampler half - `s[12:15]` in `tex-prolog.s`, where the image
+             * half is `s[4:11]`. Wrap, filter and the LOD clamps live here, and
+             * this is the only part of what the hardware is handed that has
+             * never been read back. */
+            for (int sw_i = 0; sw_i < 4; sw_i++) {
+                ctx->hw_tex_census[ci].samp[sw_i] =
+                    eff_obj ? eff_obj->samp_desc[sw_i] : 0u;
+            }
+        } else {
+            ctx->hw_tex_census_over++;
         }
-        /* **The block a compiled pixel shader is handed**: two texture units'
-         * descriptors and this program's uniforms, built once below and copied into the
-         * ring slot the same pass chooses. A program with neither is handed nothing and
-         * takes no user SGPRs. */
-        uint32_t gl2_block[OOPS_GL_GL2_SLOT_STRIDE / 4u];
-        /* **The compiled shader says whether it wants one**, rather than this
-         * recomputing the condition the compiler used. `hw_ps_user_sgprs` is two
-         * exactly when the shader was built to be handed the block's address - and the
-         * same count decides where the SPI puts the primitive mask, which the shader
-         * has already moved into `m0`. One answer, read in both places. */
-        const GLboolean gl2_block_used =
-            (GLboolean)(prog != (gl_program_object_t *)0 && prog->fs &&
-                        prog->hw_ps_words > 0u && prog->hw_ps_user_sgprs > 0u);
-        if (ctx->hw_failed)
-            return; /* the failure is on the log and the status query; nothing is drawn
-                     */
-        if (!ctx->hw_frame_active) {
-            gl_hw_begin_frame(ctx);
+    }
+    if (!told_incomplete && tex_on && eff_tex == 0u) {
+        told_incomplete = GL_TRUE;
+        const gl_texture_object_t *t0 =
+            bound0 ? gl_lookup_texture(ctx, bound0)
+                   : gl_lookup_texture(ctx, OOPS_GL_DEFAULT_TEXTURE_2D);
+        gl_tex_view_t v;
+        char msg[160];
+        size_t n = 0;
+        const char *head = "unusable texture on unit 0, drawn untextured: name ";
+        while (head[n] && n < sizeof(msg) - 48) {
+            msg[n] = head[n];
+            n++;
         }
+        n += obs_format_u64(msg + n, (uint64_t)bound0);
+        if (t0 && gl_tex_level_view(t0, t0->base_level, &v)) {
+            const char *mid = " base level ";
+            for (size_t k = 0; mid[k]; k++)
+                msg[n++] = mid[k];
+            n += obs_format_u64(msg + n, (uint64_t)(uint32_t)v.width);
+            msg[n++] = 'x';
+            n += obs_format_u64(msg + n, (uint64_t)(uint32_t)v.height);
+            const char *tail = " fmt ";
+            for (size_t k = 0; tail[k]; k++)
+                msg[n++] = tail[k];
+            n += obs_format_u64(msg + n, (uint64_t)(uint32_t)v.internal_format);
+        } else {
+            const char *none = " has no base level image";
+            for (size_t k = 0; none[k]; k++)
+                msg[n++] = none[k];
+        }
+        msg[n] = '\0';
+        oops_log_info("GL", "%s", msg);
+    }
+}
 
-        /* Room for the most one draw can emit below, counted rather than guessed: the
-         * depth block 72 (24 registers, first depth-tested draw only), the four
-         * per-draw state registers 13 (blending covers both targets in one packet, so
-         * five dwords there, not four), viewport 6, depth range 4, scissor 4, clip
-         * planes and their enables 29, CB_COLOR_CONTROL 3, the blend constant 6, shader
-         * and user data 21, the draw itself 5, and the stencil surface's binding 15
-         * (first stencil-tested draw only) and registers 5 - 183 dwords, held as
-         * OOPS_GL_DCB_DRAW_MAX_DW with some slack. **Plus the flush trailer.** This was
-         * a bare 160 until 2026-09-19, which reserved nothing for the 46 dwords
-         * gl_hw_flush appends: a draw that just fitted left a stream that could not be
-         * closed inside the buffer. */
-        if (ctx->dcb_words + OOPS_GL_DCB_DRAW_MAX_DW + OOPS_GL_DCB_TRAILER_DW >=
-            ctx->dcb_capacity_dw) {
-            gl_hw_flush(ctx);
-            gl_hw_begin_frame(ctx);
+/* Which texture units and which sampling form this draw uses: a unit it cannot apply
+ * is logged once, and an incomplete cube map draws untextured. */
+static void gl_hw_tri_sampling(gl_context_t *ctx, gl_hw_draw_t *hw) {
+    const GLuint base_unit = hw->base_unit;
+    GLuint eff_tex = hw->eff_tex;
+    gl_texture_object_t *eff_obj = hw->eff_obj;
+    /*
+     * **Which units this path applies**, and one log line for a texture it leaves
+     * out.
+     *
+     * Unit 0 when it is textured, and unit 1 with it since 2026-09-20
+     * (gl_multitex.h). The one unit this can leave out is **unit 1 when unit 0 has
+     * no texture**, because this path's second stage combines against the first's
+     * result and there is no first; that is what the line below reports.
+     *
+     * **It is not about units above the second, and this comment said it was until
+     * 2026-09-21.** There are none, anywhere: `OOPS_GL_MAX_TEXTURE_UNITS` is 2,
+     * every per-unit array in the library is that size, `GL_MAX_TEXTURE_UNITS`
+     * reports 2, and `glActiveTexture(GL_TEXTURE2)` is refused with
+     * `GL_INVALID_ENUM` by `gl_mt_unit` - in the software rasteriser exactly as
+     * here. The loop below can only ever take `tu` to 1. A third unit is a
+     * whole-library feature, not a gap in this path, and the docs that listed it as
+     * a console difference were wrong.
+     */
+    /* **A second stage only when unit 0 is the base.** When unit 1 *is* the base -
+     * unit 0 disabled, which is Neverball's shadow arrangement - it is applied as
+     * the single stage above and there is nothing left over to report. */
+    const GLboolean unit1_applied =
+        (GLboolean)(ctx->hw_multitex && base_unit == 0u && eff_tex != 0u &&
+                    gl_unit_texture_id(ctx, 1u) != 0u);
+    for (GLuint tu = 1u; tu < OOPS_GL_MAX_TEXTURE_UNITS && !ctx->hw_unit_logged; tu++) {
+        if (gl_unit_texture_id(ctx, tu) == 0u)
+            continue;
+        if (tu == base_unit)
+            continue;
+        if (tu == 1u && unit1_applied)
+            continue;
+        oops_log_info("GL", "a texture unit this path does not apply is bound: it is "
+                            "applied by the "
+                            "software rasteriser only and is left out of the draw");
+        ctx->hw_unit_logged = GL_TRUE;
+    }
+    /* **Two colour targets** (since 2026-09-20). A draw under GL_FRONT_AND_BACK or
+     * GL_LEFT reaches both buffers here: CB_COLOR1 is bound to `fb_also`, both
+     * masks carry MRT1, and the pixel shader exports to it (gl_ps_patch_export). It
+     * reached the back only until then, which left the front holding whatever the
+     * CPU's clears and pixel rectangles had put there. */
+    /* **A volume is sampled here since 2026-09-20.** Its slices are already laid
+     * out one after another by the upload, the descriptor carries TYPE 0xa and the
+     * last slice in WORD4, and the sample slot interpolates r, divides it by q and
+     * samples with `dim:SQ_RSRC_IMG_3D` (gl_ps_patch_sample). Like a cube map's
+     * direction, r rides in the third parameter, so such a draw runs at least the
+     * three-parameter vertex shader - `volume` forces it below.
+     *
+     * A volume with no storage yet has nothing to sample and is still drawn
+     * untextured, said once in the log - the same shape as an incomplete cube map
+     * below. */
+    GLboolean volume = GL_FALSE;
+    if (eff_obj && eff_obj->target == GL_TEXTURE_3D) {
+        volume = GL_TRUE;
+        /* **What is still missing is the mip chain, not the sample**, and the
+         * reason moved on 2026-09-21 from structural to measured. The chain layout
+         * was two-dimensional, which was reason enough; `gl_tex_chain_layout_3d`
+         * fixed that, and the console read the base level anyway - `volume-mipmap`
+         * answered `saw 0xffff0000`, red, level 0, with `LAST_LEVEL` 1 in the
+         * descriptor. Where a level sits inside a 3D image is not the 2D rule with
+         * a depth term, and `REQ-20260921T1300Z-9b73` asks what it is. See
+         * `gl_tex_chain_levels`. Said once, and only by a draw whose filter would
+         * have used the chain. */
+        if (!ctx->hw_3d_logged && gl_filter_uses_mipmaps(eff_obj->min_filter)) {
+            oops_log_info(
+                "GL",
+                "a 3D texture's mip chain is not built on this path: minification "
+                "samples the base level");
+            ctx->hw_3d_logged = GL_TRUE;
         }
+    }
+    /* **A cube map is sampled here since 2026-09-20.** Its six faces are uploaded
+     * as one array (gl_tex_cube_upload), the descriptor carries TYPE 0xb, and the
+     * pixel shader's sample slot finds the face from the direction
+     * (gl_ps_patch_sample). What remains is the direction's third component: the
+     * vertex carries r in the third parameter, so such a draw runs at least the
+     * three-parameter vertex shader - `cube` forces it below.
+     *
+     * A cube map whose faces have not all arrived has no array to sample, and GL
+     * does not sample an incomplete one either (2.1, 3.8.10); that one is still
+     * drawn untextured. */
+    GLboolean cube = GL_FALSE;
+    if (eff_obj && eff_obj->target == GL_TEXTURE_CUBE_MAP) {
+        if (eff_obj->cube_hw_dim > 0 || eff_obj->cube) {
+            cube = GL_TRUE;
+        } else {
+            if (!ctx->hw_cube_logged) {
+                oops_log_info("GL", "a cube map with no complete set of faces is not "
+                                    "sampled on this "
+                                    "path: the draw is untextured");
+                ctx->hw_cube_logged = GL_TRUE;
+            }
+            eff_tex = 0u;
+            eff_obj = (gl_texture_object_t *)0;
+        }
+    }
+    /* **A depth texture is sampled here since 2026-09-20**, with GL 1.4's
+     * comparison and without it. The descriptor's image format is `32_FLOAT` rather
+     * than `8_8_8_8_UNORM`, because a depth texel is one float; the sampler's
+     * DEPTH_COMPARE_FUNC has carried GL_TEXTURE_COMPARE_FUNC since `-6c80` measured
+     * it; and the sample slot asks for one channel and spreads it as
+     * GL_DEPTH_TEXTURE_MODE says (gl_ps_patch_sample).
+     *
+     * Under GL_COMPARE_R_TO_TEXTURE the reference is r, which rides in the third
+     * parameter like a volume's and a cube map's - so `shadow` forces one below.
+     * Without the comparison the texel is the stored depth and no r is read.
+     *
+     * **The hardware compares per texel and then filters**, which is the
+     * percentage-closer filter; the software rasteriser does the same
+     * (gl_depth_texel), so GL_LINEAR agrees on both paths rather than one of them
+     * comparing a filtered depth. */
+    GLboolean depth_tex = GL_FALSE, shadow = GL_FALSE;
+    if (eff_obj) {
+        gl_tex_view_t dv;
+        if (gl_tex_level_view(eff_obj, eff_obj->base_level, &dv) &&
+            dv.base_format == GL_DEPTH_COMPONENT) {
+            depth_tex = GL_TRUE;
+            shadow = (GLboolean)(eff_obj->compare_mode == GL_COMPARE_R_TO_TEXTURE);
+        }
+    }
+    hw->eff_tex = eff_tex;
+    hw->eff_obj = eff_obj;
+    hw->unit1_applied = unit1_applied;
+    hw->volume = volume;
+    hw->cube = cube;
+    hw->depth_tex = depth_tex;
+    hw->shadow = shadow;
+}
 
-        /* **There is a ring of descriptor slots, and each draw points at its own**
-         * (since 2026-09-21).
-         *
-         * There was one slot. Every textured draw handed the shader the same address,
-         * so a second texture bound later in the frame overwrote the first and every
-         * built draw would have sampled whichever was bound last - the draws are built,
-         * not executed, so nothing noticed until the submit. Submitting the frame on
-         * any descriptor change was what kept that correct, and the note here said a
-         * ring "would avoid it and is the change to make if a frame ever switches
-         * textures often enough to matter". A scene with twenty materials matters: it
-         * submitted twenty times a frame and waited on a fence each time.
-         *
-         * So a texture change now takes the next slot and the stream carries on. The
-         * wrap submits, and so does a border colour, which lives in a table a frame
-         * register names. See `OOPS_GL_DESC_RING_OFFSET`. Only a *different* texture
-         * takes a slot: rebinding the same one, which a display list does constantly,
-         * changes nothing. */
-        /* The unit the sampling stage draws from - the first with a texture, not
-         * necessarily unit 0. Its coordinate set is the one the vertex carries below.
-         */
-        const GLuint base_unit = gl_hw_base_unit(ctx);
-        GLuint eff_tex = gl_unit_texture_id(ctx, base_unit);
-        gl_texture_object_t *eff_obj =
-            (gl_texture_object_t *)gl_lookup_texture(ctx, eff_tex);
+/* The pixel shaders' slots this draw decides - the texture environment, fog, the
+ * export, the stipple and the coverage - with the textures they sample made current. */
+static void gl_hw_tri_patch(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_t *hw) {
+    float *const c0 = tri->c0, *const c1 = tri->c1, *const c2 = tri->c2;
+    const GLuint eff_tex = hw->eff_tex;
+    gl_texture_object_t *const eff_obj = hw->eff_obj;
+    const GLboolean unit1_applied = hw->unit1_applied;
+    float (*const poly_att)[4] = hw->poly_att;
+    /* **The shader-patch block is timed separately**, because the draw path
+     * measured 5.9us per triangle on hardware while the same front half -
+     * transform, clip, light - takes 0.17us on a build machine. Over ninety per
+     * cent of a triangle is therefore spent after the vertex maths, and these calls
+     * are the part of "after" that does real work on every draw: each rebuilds its
+     * words and compares them against the payload before deciding it had nothing to
+     * do. Knowing whether that is the cost decides whether the fix is to make them
+     * cheaper or to batch the draws. */
+#ifndef OOPS_HOST_BUILD
+    const uint64_t patch_t0 = oops_time_get_ns();
+#endif
+    /* **The second unit's texture, resolved here and not where its descriptor is
+     * copied.**
+     *
+     * The slot decision below asks whether anything this draw would write differs
+     * from what the slot already holds, and a slot holds *both* units. Answering
+     * that needs unit 1's descriptors already repacked, so its prepare moves up
+     * here beside unit 0's - which is where a prepare belongs anyway, since
+     * preparing can submit the frame and that is a thing to do before a slot has
+     * been chosen rather than after. */
+    gl_texture_object_t *unit1_obj =
+        unit1_applied ? gl_texture_slot(ctx, gl_unit_texture_id(ctx, 1u))
+                      : (gl_texture_object_t *)0;
+    if (eff_obj) {
+        /* The texture's hardware image brought up to date - its mip chain built or
+         * rebuilt, its descriptors repacked. Building may have submitted the frame
+         * to free an old chain, in which case the frame is reopened here before
+         * anything is written. */
+        gl_tex_hw_prepare(ctx, eff_obj);
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+        if (unit1_obj) {
+            gl_tex_hw_prepare(ctx, unit1_obj);
+            if (!ctx->hw_frame_active)
+                gl_hw_begin_frame(ctx);
+        }
+        /* **The combine follows the texture as well as glTexEnv**: its base format
+         * decides which channels the environment touches, so a draw with a texture
+         * of another base format rewrites the shader's four words - submitting the
+         * draws built with the old ones first, and reopening the frame. */
+        /* GL_BLEND, GL_DECAL of RGBA and GL_COMBINE included since 2026-09-19, as a
+         * program in the longer slot; the log line is for a program that did not
+         * fit, which GL's argument counts rule out. */
+        if (!gl_ps_patch_tex_env(ctx) && !ctx->hw_env_logged) {
+            oops_log_info("GL", "a texture combine outgrew the pixel shader's slot: "
+                                "this draw modulates on this path");
+            ctx->hw_env_logged = GL_TRUE;
+        }
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+    }
+    /* Fog, in both pixel shaders: the colour in the fog slot's literals, the factor
+     * in the vertex (below). A change submits the draws built with the old words
+     * first. */
+    gl_ps_patch_fog(ctx);
+    if (!ctx->hw_frame_active)
+        gl_hw_begin_frame(ctx);
+    /* **Both colour buffers** (since 2026-09-20). Every draw sets the export,
+     * whether it exports to one target or two, for the reason the colour sum's slot
+     * is set every time: a draw after glDrawBuffer(GL_BACK) must stop writing the
+     * buffer GL no longer names. */
+    gl_ps_patch_export(ctx, (GLboolean)(ctx->fb_also != (uint32_t *)0));
+    if (!ctx->hw_frame_active)
+        gl_hw_begin_frame(ctx);
+    /* **The polygon stipple** (on this path since 2026-09-20): the discard slot and
+     * the mask it reads. Set on every draw, like the two above - the stipple can be
+     * switched off, or glPolygonMode taken off GL_FILL, between two draws of a
+     * frame. */
+    gl_ps_patch_stipple(ctx, gl_polygon_stipple_on(ctx));
+    if (!ctx->hw_frame_active)
+        gl_hw_begin_frame(ctx);
+    /* **Antialiasing's coverage** (since 2026-09-20; the textured shader's slot too
+     * since 2026-09-21). Set on every draw, like the two above: a triangle after a
+     * smooth point must stop weighing its alpha by an interpolant meant for
+     * something else, and a textured smooth point after an untextured one must move
+     * the slot to the other shader. `gl_smoothing` has already decided whether this
+     * draw smooths at all. */
+    /* **The polygon's widening is decided here, before the slot is patched**,
+     * because the two have to agree: a triangle the widening refuses - no area, no
+     * inradius, a vertex with no window position - exports no fourth parameter, and
+     * a slot left reading `attr3` would take its coverage from a routing that does
+     * not exist. */
+    const GLboolean poly_smooth =
+        (GLboolean)(ctx->aa_edges != 0u &&
+                    gl_hw_polygon_smooth_setup(ctx, ctx->aa_edges, c0, c1, c2,
+                                               poly_att));
+    gl_ps_patch_coverage_where(ctx, poly_smooth
+                                        ? ((eff_tex != 0u) ? GL_COVERAGE_POLYGON_TEX
+                                                           : GL_COVERAGE_POLYGON_UNTEX)
+                                    : !ctx->aa_hw_on  ? GL_COVERAGE_OFF
+                                    : (eff_tex != 0u) ? GL_COVERAGE_TEXTURED
+                                                      : GL_COVERAGE_UNTEXTURED);
+#ifndef OOPS_HOST_BUILD
+    ctx->hw_patch_ns += oops_time_get_ns() - patch_t0;
+    /* Everything from here to the command words is the descriptor slot decision and
+     * the vertex ring - see `hw_vbo_ns`. */
+    const uint64_t vbo_t0 = oops_time_get_ns();
+    hw->vbo_t0 = vbo_t0;
+#endif
+    if (!ctx->hw_frame_active)
+        gl_hw_begin_frame(ctx);
+    hw->unit1_obj = unit1_obj;
+    hw->poly_smooth = poly_smooth;
+}
+
+/* The sampling slots of a textured draw - the colour sum, the sample form and the
+ * second unit - and whether its vertex needs a third parameter. */
+static void gl_hw_tri_sample_slots(gl_context_t *ctx, gl_hw_draw_t *hw) {
+    const GLuint eff_tex = hw->eff_tex;
+    gl_texture_object_t *const eff_obj = hw->eff_obj;
+    const GLboolean unit1_applied = hw->unit1_applied;
+    const GLboolean volume = hw->volume, cube = hw->cube;
+    const GLboolean depth_tex = hw->depth_tex, shadow = hw->shadow;
+    /* **The colour sum after texturing** (GL 1.4, 3.9; on this path since
+     * 2026-09-19). A textured draw whose secondary colour is not zero somewhere
+     * carries it in the third parameter, and the textured shader's sum slot adds it
+     * after the combine and before fog. Such a draw runs the three-parameter vertex
+     * shader. Everything else keeps two parameters and the sum slot's state, so
+     * gl-cube's stream is untouched. A change of the slot submits the draws built
+     * with the old words first. **Every textured draw sets the slot**, the sum on
+     * or not: a slot left holding the sum would add whatever attr2 reads on a draw
+     * that exports two parameters. */
+    GLboolean p3 = GL_FALSE;
+    /* The third parameter a cube map's direction and a volume's r need, separate
+     * from the colour sum's use of the same export - see where it is set. */
+    GLboolean p3_needed = GL_FALSE;
+    /* **The second texture unit** (since 2026-09-20, and off until gl_multitex.h's
+     * gate or a test opens it). A draw uses it when unit 1 has an enabled texture
+     * of its own and unit 0 is textured too - a second unit with nothing under it
+     * is no second unit. It implies the third parameter as well, the fourth shader
+     * exporting both. */
+    const GLboolean unit1 = unit1_applied;
+    if (eff_tex != 0u) {
         /*
-         * **Texturing is on, a texture is bound, and GL says it cannot be sampled.**
+         * **Whether the sum runs is context state, not this triangle's vertex
+         * data** (2026-09-24).
          *
-         * `gl_effective_texture_id` answers zero for that and for texturing being off
-         * alike, so the two are told apart here: a name bound on unit 0 with nothing
-         * effective is the first case. GL requires it to draw untextured (3.8.10)
-         * rather than to raise an error, which is why it is silent - and on screen it
-         * is indistinguishable from a port whose textures never loaded. Neverball's
-         * title screen looked exactly like that while gl1-probe's texture checks passed
-         * on hardware and the pinned libpng decoded all 292 of its PNGs: neither suite
-         * covers this join.
+         * This used to scan the three vertices and turn the slot on only when one
+         * of them had a non-zero secondary colour. That is per *triangle*, and
+         * under specular lighting it alternates across a lit surface as highlights
+         * come and go - so the slot was rewritten 686 times in a Neverball frame,
+         * and a slot write calls `gl_ps_flush_shaders`, which evicts all three
+         * shader ranges: sixty cache lines a time, forty-one thousand a frame, and
+         * essentially the whole of `patch-us`. `patch-writes sum` was 686 where
+         * every other slot was in single figures.
          *
-         * The name and the base level's size are what separate the three explanations -
-         * the default texture standing in for an unbound unit, an upload that stored
-         * nothing (zero by zero), and a stored image the completeness rule rejects
-         * anyway. Said once.
+         * Following `gl_color_sum_on` instead costs nothing in correctness: with
+         * the sum enabled, a triangle whose secondary colour is zero adds zero. It
+         * costs the three-parameter vertex - 64 bytes instead of 48 - on every
+         * textured draw while colour sum is on, which is the trade the measurement
+         * says to take.
+         *
+         * The slot must still be *set* on every textured draw, on or off: a slot
+         * left holding the sum would add whatever attr2 reads on a draw that
+         * exports two parameters. What changed is only what decides it.
          */
+        p3 = gl_color_sum_on(ctx);
+        /* A cube map's direction needs its third component, which the vertex
+         * carries in the third parameter - so such a draw exports one whether or
+         * not a colour sum wants it. gl_ps_patch_sum is still told `p3` and not
+         * this: the sum's slot is about the secondary colour, and turning it on
+         * here would add one nothing asked for. */
+        if (cube || volume || shadow)
+            p3_needed = GL_TRUE;
+        gl_ps_patch_sum(ctx, p3);
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+        /* One of the five forms, on every textured draw, for the reason every other
+         * slot is set on every draw: a draw that stops using a cube map must stop
+         * looking for a face, and one that stops comparing must stop asking for one
+         * channel. */
         {
-            static GLboolean told_incomplete = GL_FALSE;
-            /*
-             * **Read the unit's own enable and binding, not `gl_unit_texture_id`.**
-             *
-             * The first version of this asked whether `gl_effective_texture_id` was
-             * zero while `gl_unit_texture_id(ctx, 0)` was not - and those are the same
-             * call: the effective id *is* unit 0's. The condition could not hold, the
-             * branch was dead, and a run that printed nothing looked like evidence that
-             * textures were fine. It was not evidence of anything.
-             *
-             * Both of those answer zero for "texturing off" and for "on but unusable"
-             * alike, so the only way to tell them apart is the state they are computed
-             * from.
-             */
-            const gl_tex_unit_t *u0 = &ctx->tex_unit[0];
-            const GLboolean tex_on =
-                (GLboolean)(u0->cap_texture_2d || u0->cap_texture_3d ||
-                            u0->cap_texture_cube_map || u0->cap_texture_1d);
-            const GLuint bound0 = u0->bound_texture_2d;
-            /* The census this draw contributes to - see the counters' note in
-             * gl_internal.h.
-             *
-             * **Asked of every unit, not of unit 0.** The first version reused `tex_on`
-             * above, which reads unit 0's enables - and `gl_hw_base_unit` exists
-             * precisely because unit 0 is often not the textured one. Neverball's
-             * shadow arrangement disables unit 0 and puts the surface texture on unit
-             * 1, so on the draws this census was written to measure the condition was
-             * false and **neither counter moved**. A run reported `draws-textured: 0`
-             * and `draws-untextured: 0` for a screen full of geometry, which reads as
-             * "nothing was drawn" and meant "nothing was asked".
-             *
-             * A draw that wanted a texture and got none is the interesting half, so the
-             * split is by `eff_tex`: a draw with texturing off on every unit is
-             * neither. */
-            GLboolean any_tex_on = GL_FALSE;
-            for (GLuint u = 0u; u < OOPS_GL_MAX_TEXTURE_UNITS && !any_tex_on; u++) {
-                const gl_tex_unit_t *tu = &ctx->tex_unit[u];
-                if (tu->cap_texture_2d || tu->cap_texture_3d ||
-                    tu->cap_texture_cube_map || tu->cap_texture_1d) {
-                    any_tex_on = GL_TRUE;
-                }
-            }
-            if (any_tex_on) {
-                if (eff_tex != 0u)
-                    ctx->hw_draws_textured++;
-                else
-                    ctx->hw_draws_untextured++;
-            }
-            /* **And which texture, which is the question the pair above cannot
-             * answer.** A scan and an increment per draw, printed once a flip - see
-             * `hw_tex_census`. Unconditional because it costs no syscall: a counter
-             * nobody switched on is a counter that is not there when the run that
-             * needed it happens. */
-            {
-                /* **Keyed on the pair of units, not on the base unit alone.** See
-                 * `id1`: a pass that holds unit 0 steady and varies unit 1 per surface
-                 * is one row and thirty materials otherwise, which is a census that
-                 * reports the one thing already known. */
-                /* The same condition `unit1_applied` states further down, written out
-                 * because that one is not in scope yet: a second unit only exists for
-                 * this draw when unit 0 is the base and has something bound. */
-                const uint32_t census_id1 =
-                    (ctx->hw_multitex && base_unit == 0u && eff_tex != 0u)
-                        ? gl_unit_texture_id(ctx, 1u)
-                        : 0u;
-                uint32_t ci = 0u;
-                for (; ci < ctx->hw_tex_census_n; ci++) {
-                    if (ctx->hw_tex_census[ci].id == eff_tex &&
-                        ctx->hw_tex_census[ci].id1 == census_id1)
-                        break;
-                }
-                if (ci == ctx->hw_tex_census_n && ci < OOPS_GL_TEX_CENSUS) {
-                    ctx->hw_tex_census_n++;
-                    ctx->hw_tex_census[ci].id = eff_tex;
-                    ctx->hw_tex_census[ci].id1 = census_id1;
-                    ctx->hw_tex_census[ci].draws = 0u;
-                }
-                if (ci < OOPS_GL_TEX_CENSUS) {
-                    ctx->hw_tex_census[ci].draws++;
-                    ctx->hw_tex_census[ci].w = (uint16_t)(eff_obj ? eff_obj->width : 0);
-                    ctx->hw_tex_census[ci].h =
-                        (uint16_t)(eff_obj ? eff_obj->height : 0);
-                    ctx->hw_tex_census[ci].slot = (uint8_t)ctx->hw_desc_slot;
-                    ctx->hw_tex_census[ci].unit = (uint8_t)base_unit;
-                    ctx->hw_tex_census[ci].env =
-                        (uint8_t)(uint32_t)ctx->tex_unit[base_unit].tex_env_mode;
-                    ctx->hw_tex_census[ci].blend = (uint8_t)(ctx->cap_blend ? 1u : 0u);
-                    ctx->hw_tex_census[ci].base = eff_obj ? eff_obj->base_format : 0u;
-                    ctx->hw_tex_census[ci].pitch = eff_obj ? eff_obj->pitch : 0u;
-                    /* The base level's own storage, to compare against the address the
-                     * descriptor carries: equal means the sampler reads the texels a
-                     * capture holds, different means it reads the mip chain, which
-                     * nothing has ever replayed. */
-                    ctx->hw_tex_census[ci].garlic =
-                        eff_obj ? (uint32_t)(eff_obj->garlic_va >> 8) : 0u;
-                    for (int dw_i = 0; dw_i < 8; dw_i++) {
-                        ctx->hw_tex_census[ci].desc[dw_i] =
-                            eff_obj ? eff_obj->img_desc[dw_i] : 0u;
-                    }
-                    /* The sampler half - `s[12:15]` in `tex-prolog.s`, where the image
-                     * half is `s[4:11]`. Wrap, filter and the LOD clamps live here, and
-                     * this is the only part of what the hardware is handed that has
-                     * never been read back. */
-                    for (int sw_i = 0; sw_i < 4; sw_i++) {
-                        ctx->hw_tex_census[ci].samp[sw_i] =
-                            eff_obj ? eff_obj->samp_desc[sw_i] : 0u;
-                    }
-                } else {
-                    ctx->hw_tex_census_over++;
-                }
-            }
-            if (!told_incomplete && tex_on && eff_tex == 0u) {
-                told_incomplete = GL_TRUE;
-                const gl_texture_object_t *t0 =
-                    bound0 ? gl_lookup_texture(ctx, bound0)
-                           : gl_lookup_texture(ctx, OOPS_GL_DEFAULT_TEXTURE_2D);
-                gl_tex_view_t v;
-                char msg[160];
-                size_t n = 0;
-                const char *head =
-                    "unusable texture on unit 0, drawn untextured: name ";
-                while (head[n] && n < sizeof(msg) - 48) {
-                    msg[n] = head[n];
-                    n++;
-                }
-                n += obs_format_u64(msg + n, (uint64_t)bound0);
-                if (t0 && gl_tex_level_view(t0, t0->base_level, &v)) {
-                    const char *mid = " base level ";
-                    for (size_t k = 0; mid[k]; k++)
-                        msg[n++] = mid[k];
-                    n += obs_format_u64(msg + n, (uint64_t)(uint32_t)v.width);
-                    msg[n++] = 'x';
-                    n += obs_format_u64(msg + n, (uint64_t)(uint32_t)v.height);
-                    const char *tail = " fmt ";
-                    for (size_t k = 0; tail[k]; k++)
-                        msg[n++] = tail[k];
-                    n += obs_format_u64(msg + n, (uint64_t)(uint32_t)v.internal_format);
-                } else {
-                    const char *none = " has no base level image";
-                    for (size_t k = 0; none[k]; k++)
-                        msg[n++] = none[k];
-                }
-                msg[n] = '\0';
-                oops_log_info("GL", "%s", msg);
-            }
+            const gl_ps_sample_kind_t kind =
+                shadow ? GL_PS_SAMPLE_SHADOW
+                       : (depth_tex
+                              ? GL_PS_SAMPLE_DEPTH
+                              : (cube ? GL_PS_SAMPLE_CUBE
+                                      : (volume ? GL_PS_SAMPLE_3D : GL_PS_SAMPLE_2D)));
+            gl_ps_patch_sample(ctx, kind,
+                               eff_obj ? eff_obj->depth_mode : (GLenum)GL_LUMINANCE);
         }
-        /*
-         * **Which units this path applies**, and one log line for a texture it leaves
-         * out.
-         *
-         * Unit 0 when it is textured, and unit 1 with it since 2026-09-20
-         * (gl_multitex.h). The one unit this can leave out is **unit 1 when unit 0 has
-         * no texture**, because this path's second stage combines against the first's
-         * result and there is no first; that is what the line below reports.
-         *
-         * **It is not about units above the second, and this comment said it was until
-         * 2026-09-21.** There are none, anywhere: `OOPS_GL_MAX_TEXTURE_UNITS` is 2,
-         * every per-unit array in the library is that size, `GL_MAX_TEXTURE_UNITS`
-         * reports 2, and `glActiveTexture(GL_TEXTURE2)` is refused with
-         * `GL_INVALID_ENUM` by `gl_mt_unit` - in the software rasteriser exactly as
-         * here. The loop below can only ever take `tu` to 1. A third unit is a
-         * whole-library feature, not a gap in this path, and the docs that listed it as
-         * a console difference were wrong.
-         */
-        /* **A second stage only when unit 0 is the base.** When unit 1 *is* the base -
-         * unit 0 disabled, which is Neverball's shadow arrangement - it is applied as
-         * the single stage above and there is nothing left over to report. */
-        const GLboolean unit1_applied =
-            (GLboolean)(ctx->hw_multitex && base_unit == 0u && eff_tex != 0u &&
-                        gl_unit_texture_id(ctx, 1u) != 0u);
-        for (GLuint tu = 1u; tu < OOPS_GL_MAX_TEXTURE_UNITS && !ctx->hw_unit_logged;
-             tu++) {
-            if (gl_unit_texture_id(ctx, tu) == 0u)
-                continue;
-            if (tu == base_unit)
-                continue;
-            if (tu == 1u && unit1_applied)
-                continue;
-            oops_log_info("GL",
-                          "a texture unit this path does not apply is bound: it is "
-                          "applied by the "
-                          "software rasteriser only and is left out of the draw");
-            ctx->hw_unit_logged = GL_TRUE;
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+        /* Both of the second unit's slots, on every textured draw and for the
+         * reason the sum and the export are: a draw that drops back to one unit
+         * must stop sampling and stop combining a texel it no longer fetches. */
+        gl_ps_patch_unit1(ctx, unit1);
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+        gl_ps_patch_tex_env_unit1(ctx, unit1);
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+    }
+    hw->p3 = p3;
+    hw->p3_needed = p3_needed;
+    hw->unit1 = unit1;
+}
+
+/* **Compared by content, not by texture.** The slot was reloaded only for a
+ * *different* texture until 2026-09-19, so changing one texture's wrap mode or
+ * filter mid-frame and drawing again rewrote the descriptors every earlier draw
+ * of the frame would read at the flush: they all sampled with the new
+ * parameters. Any change to what the slot holds now submits the draws that read
+ * the old contents first. */
+static void gl_hw_tri_desc_slot(gl_context_t *ctx, GLuint eff_tex,
+                                gl_texture_object_t *eff_obj,
+                                gl_texture_object_t *unit1_obj) {
+    /* **Compared against the shadow, not against the slot.**
+     *
+     * This read the slot back out of `gpu_payload` until 2026-09-24. That
+     * memory is ONION and every write to a slot is followed by a `clflush`, so
+     * the comparison on the next triangle missed to the far side of the bus
+     * every single time - 10.5ms of a 22.3ms frame over ten thousand triangles,
+     * the largest phase in the draw path and four times what the frame's entire
+     * command stream costs to write. The CPU wrote those bytes and already
+     * knows them; see `hw_desc_shadow`. */
+    const uint32_t *slot = ctx->hw_desc_shadow;
+    const void *border = (const char *)ctx->gpu_payload + OOPS_GL_BORDER_TABLE_OFFSET;
+    uint32_t samp[4];
+    memcpy(samp, eff_obj->samp_desc, 16);
+    samp[2] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[0], eff_obj));
+    GLboolean moved = (GLboolean)((ctx->hw_desc_shadow_valid & 1u) == 0u ||
+                                  memcmp(slot, eff_obj->img_desc, 32) != 0 ||
+                                  memcmp(slot + 8, samp, 16) != 0);
+    /*
+     * **The second unit's half of the slot decides too** (2026-09-24).
+     *
+     * A slot is two descriptors, `OOPS_GL_DESC_UNIT_STRIDE` apart, and this
+     * test read only the first. Where unit 0's texture is constant across a
+     * pass and unit 1's changes per surface, `moved` was false for every draw:
+     * the slot never advanced, every draw in the submit pointed at it, and each
+     * one overwrote the previous draw's unit-1 descriptor. At the submit they
+     * all sampled whichever material was written last.
+     *
+     * That is Neverball's shadowed pass exactly. `tex_env_shadow` binds one
+     * shadow texture to unit 0 for the whole frame and the material to unit 1,
+     * and `GL_MAX_TEXTURE_UNITS` of 2 is what makes `tex_env_select` choose it.
+     * So the floor, which is the shadow receiver, wore a single texture -
+     * whichever mesh was drawn last before the submit - while the level's
+     * unshadowed geometry, which runs with unit 1 as the *base* unit and
+     * therefore through the test above, was right.
+     *
+     * It also explains why the fault tracked the vertex ring's size and nothing
+     * else: the ring bound sets how many draws share a submit, and the number
+     * of draws sharing one stale descriptor is the number of surfaces that come
+     * out wrong. At 64 KiB a frame submitted forty-six times and each submit
+     * spanned few enough draws to look nearly right; at 4 MiB it submitted once
+     * and the whole level wore one texture. Every direct read-back said the
+     * descriptors were correct, and they were - at the moment they were
+     * written, and not at the moment they were read.
+     */
+    if (unit1_obj) {
+        const uint32_t *slot1 = slot + OOPS_GL_DESC_UNIT_STRIDE / 4u;
+        uint32_t samp1[4];
+        memcpy(samp1, unit1_obj->samp_desc, 16);
+        samp1[2] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[1], unit1_obj));
+        if ((ctx->hw_desc_shadow_valid & 2u) == 0u ||
+            memcmp(slot1, unit1_obj->img_desc, 32) != 0 ||
+            memcmp(slot1 + 8, samp1, 16) != 0) {
+            moved = GL_TRUE;
         }
-        /* **Two colour targets** (since 2026-09-20). A draw under GL_FRONT_AND_BACK or
-         * GL_LEFT reaches both buffers here: CB_COLOR1 is bound to `fb_also`, both
-         * masks carry MRT1, and the pixel shader exports to it (gl_ps_patch_export). It
-         * reached the back only until then, which left the front holding whatever the
-         * CPU's clears and pixel rectangles had put there. */
-        /* **A volume is sampled here since 2026-09-20.** Its slices are already laid
-         * out one after another by the upload, the descriptor carries TYPE 0xa and the
-         * last slice in WORD4, and the sample slot interpolates r, divides it by q and
-         * samples with `dim:SQ_RSRC_IMG_3D` (gl_ps_patch_sample). Like a cube map's
-         * direction, r rides in the third parameter, so such a draw runs at least the
-         * three-parameter vertex shader - `volume` forces it below.
-         *
-         * A volume with no storage yet has nothing to sample and is still drawn
-         * untextured, said once in the log - the same shape as an incomplete cube map
-         * below. */
-        GLboolean volume = GL_FALSE;
-        if (eff_obj && eff_obj->target == GL_TEXTURE_3D) {
-            volume = GL_TRUE;
-            /* **What is still missing is the mip chain, not the sample**, and the
-             * reason moved on 2026-09-21 from structural to measured. The chain layout
-             * was two-dimensional, which was reason enough; `gl_tex_chain_layout_3d`
-             * fixed that, and the console read the base level anyway - `volume-mipmap`
-             * answered `saw 0xffff0000`, red, level 0, with `LAST_LEVEL` 1 in the
-             * descriptor. Where a level sits inside a 3D image is not the 2D rule with
-             * a depth term, and `REQ-20260921T1300Z-9b73` asks what it is. See
-             * `gl_tex_chain_levels`. Said once, and only by a draw whose filter would
-             * have used the chain. */
-            if (!ctx->hw_3d_logged && gl_filter_uses_mipmaps(eff_obj->min_filter)) {
-                oops_log_info(
-                    "GL",
-                    "a 3D texture's mip chain is not built on this path: minification "
-                    "samples the base level");
-                ctx->hw_3d_logged = GL_TRUE;
-            }
-        }
-        /* **A cube map is sampled here since 2026-09-20.** Its six faces are uploaded
-         * as one array (gl_tex_cube_upload), the descriptor carries TYPE 0xb, and the
-         * pixel shader's sample slot finds the face from the direction
-         * (gl_ps_patch_sample). What remains is the direction's third component: the
-         * vertex carries r in the third parameter, so such a draw runs at least the
-         * three-parameter vertex shader - `cube` forces it below.
-         *
-         * A cube map whose faces have not all arrived has no array to sample, and GL
-         * does not sample an incomplete one either (2.1, 3.8.10); that one is still
-         * drawn untextured. */
-        GLboolean cube = GL_FALSE;
-        if (eff_obj && eff_obj->target == GL_TEXTURE_CUBE_MAP) {
-            if (eff_obj->cube_hw_dim > 0 || eff_obj->cube) {
-                cube = GL_TRUE;
+    }
+    /* **A border colour still submits**, whatever the ring has room for: the
+     * table it lives in is named by `TA_BC_BASE_ADDR`, a register the frame
+     * sets once, so a second border in one frame is not something a slot can
+     * carry. Rare enough that a ring of its own would be weight for nothing. */
+    const GLboolean border_moved =
+        (GLboolean)(eff_obj->border_in_table &&
+                    memcmp(border, eff_obj->border_hw, 16) != 0);
+    if (moved && ctx->hw_desc_slot >= OOPS_GL_DESC_RING_SLOTS)
+        ctx->hw_desc_ring_full++;
+    if (border_moved || (moved && ctx->hw_desc_slot >= OOPS_GL_DESC_RING_SLOTS) ||
+        gl_ps_ring_needs_submit(ctx)) {
+        /* The ring is full, or the border changed, or the shader variant this
+         * draw needs has nowhere to go: the frame runs, and the draws it holds
+         * sample the descriptors - and bind the shader variants - they were
+         * built with. */
+        gl_hw_flush(ctx);
+        gl_hw_begin_frame(ctx);
+    } else if (moved) {
+        /* **The next slot, not a submission.** The draws already built keep
+         * pointing at the slot they were given; this one gets its own. */
+        ctx->hw_desc_slot++;
+        /* A different slot holds whatever an earlier frame put there, which
+         * this shadow does not describe. Both halves go invalid and are set
+         * again as they are written below - a draw that uses one unit leaves
+         * the other's bit clear, so the next two-unit draw cannot match bytes
+         * nobody wrote this frame. */
+        ctx->hw_desc_shadow_valid = 0u;
+    }
+    gl_hw_note_slot(ctx, eff_tex, unit1_obj);
+#ifndef OOPS_HOST_BUILD
+    gl_hw_trace_draw(ctx, eff_obj);
+#endif
+}
+
+/* Records which textures hold this draw's descriptor slot, and counts a slot that
+ * changes texture within one submit. */
+static void gl_hw_note_slot(gl_context_t *ctx, GLuint eff_tex,
+                            const gl_texture_object_t *unit1_obj) {
+    /* **Did this slot already belong to another texture in this submit?** See
+     * `hw_slot_tex`. Recorded here rather than where the descriptor is copied,
+     * because this is the point at which the slot for *this draw* is finally
+     * decided - and it is the slot the draw will point at whether or not the
+     * descriptor is rewritten. */
+    const uint32_t s = ctx->hw_desc_slot;
+    const uint32_t tex1 = unit1_obj ? unit1_obj->id : 0u;
+    if (s > ctx->hw_desc_slot_high)
+        ctx->hw_desc_slot_high = s;
+    if (s > (uint32_t)OOPS_GL_DESC_RING_SLOTS)
+        return;
+    const uint32_t had = ctx->hw_slot_tex[s];
+    const uint32_t had1 = ctx->hw_slot_tex1[s];
+    /* **Either half re-pointing is a collision.** Watching the first
+     * half alone is what let this report zero through the whole of the
+     * unit-1 fault above: `had` was one shadow texture all frame and
+     * matched every time. */
+    const GLboolean hit = (GLboolean)((had != 0u && had != eff_tex) ||
+                                      (had1 != 0u && tex1 != 0u && had1 != tex1));
+    if (hit) {
+        if (ctx->hw_slot_collisions == 0u) {
+            ctx->hw_slot_first_slot = s;
+            /* The half that actually moved, so the line names the two
+             * textures that shared the slot rather than the pair that
+             * did not. */
+            if (had != 0u && had != eff_tex) {
+                ctx->hw_slot_first_had = had;
+                ctx->hw_slot_first_got = eff_tex;
             } else {
-                if (!ctx->hw_cube_logged) {
-                    oops_log_info("GL",
-                                  "a cube map with no complete set of faces is not "
-                                  "sampled on this "
-                                  "path: the draw is untextured");
-                    ctx->hw_cube_logged = GL_TRUE;
-                }
-                eff_tex = 0u;
-                eff_obj = (gl_texture_object_t *)0;
+                ctx->hw_slot_first_had = had1;
+                ctx->hw_slot_first_got = tex1;
             }
         }
-        /* **A depth texture is sampled here since 2026-09-20**, with GL 1.4's
-         * comparison and without it. The descriptor's image format is `32_FLOAT` rather
-         * than `8_8_8_8_UNORM`, because a depth texel is one float; the sampler's
-         * DEPTH_COMPARE_FUNC has carried GL_TEXTURE_COMPARE_FUNC since `-6c80` measured
-         * it; and the sample slot asks for one channel and spreads it as
-         * GL_DEPTH_TEXTURE_MODE says (gl_ps_patch_sample).
-         *
-         * Under GL_COMPARE_R_TO_TEXTURE the reference is r, which rides in the third
-         * parameter like a volume's and a cube map's - so `shadow` forces one below.
-         * Without the comparison the texel is the stored depth and no r is read.
-         *
-         * **The hardware compares per texel and then filters**, which is the
-         * percentage-closer filter; the software rasteriser does the same
-         * (gl_depth_texel), so GL_LINEAR agrees on both paths rather than one of them
-         * comparing a filtered depth. */
-        GLboolean depth_tex = GL_FALSE, shadow = GL_FALSE;
-        if (eff_obj) {
-            gl_tex_view_t dv;
-            if (gl_tex_level_view(eff_obj, eff_obj->base_level, &dv) &&
-                dv.base_format == GL_DEPTH_COMPONENT) {
-                depth_tex = GL_TRUE;
-                shadow = (GLboolean)(eff_obj->compare_mode == GL_COMPARE_R_TO_TEXTURE);
-            }
-        }
-        /* **The shader-patch block is timed separately**, because the draw path
-         * measured 5.9us per triangle on hardware while the same front half -
-         * transform, clip, light - takes 0.17us on a build machine. Over ninety per
-         * cent of a triangle is therefore spent after the vertex maths, and these calls
-         * are the part of "after" that does real work on every draw: each rebuilds its
-         * words and compares them against the payload before deciding it had nothing to
-         * do. Knowing whether that is the cost decides whether the fix is to make them
-         * cheaper or to batch the draws. */
+        ctx->hw_slot_collisions++;
+    }
+    ctx->hw_slot_tex[s] = eff_tex;
+    if (tex1 != 0u)
+        ctx->hw_slot_tex1[s] = tex1;
+}
+
 #ifndef OOPS_HOST_BUILD
-        const uint64_t patch_t0 = oops_time_get_ns();
-#endif
-        /* **The second unit's texture, resolved here and not where its descriptor is
-         * copied.**
+/* One trace line per draw of which texture it bound and into which slot. */
+static void gl_hw_trace_draw(gl_context_t *ctx, gl_texture_object_t *eff_obj) {
+    /* **Which texture each draw actually bound, and into which slot.**
+     *
+     * The port being chased renders one surface as a fine mosaic of two images
+     * while its texels and descriptors are provably correct in memory - so the
+     * question left is not what a texture contains but which one a given draw
+     * reached for. Nothing has ever reported that: the census counts draws and
+     * the dumps describe textures, and the mapping between them has been
+     * invisible.
+     *
+     * Sixty-four draws from the fourth frame, which is after loading has
+     * settled and inside a frame that is drawing the scene rather than building
+     * it. */
+    {
+        static uint32_t drew;
+        /* **A whole frame, not a prefix of one.** Two hundred and fifty-six
+           draws were all the same texture and all correct, and the frame has
+           four hundred and fifty-one - so the prefix answered for the surface
+           that is fine and said nothing about the rest. */
+        /* **At OOPS_LOG_TRACE, because this is a syscall per draw call.**
          *
-         * The slot decision below asks whether anything this draw would write differs
-         * from what the slot already holds, and a slot holds *both* units. Answering
-         * that needs unit 1's descriptors already repacked, so its prepare moves up
-         * here beside unit 0's - which is where a prepare belongs anyway, since
-         * preparing can submit the frame and that is a thing to do before a slot has
-         * been chosen rather than after. */
-        gl_texture_object_t *unit1_obj =
-            unit1_applied ? gl_texture_slot(ctx, gl_unit_texture_id(ctx, 1u))
-                          : (gl_texture_object_t *)0;
-        if (eff_obj) {
-            /* The texture's hardware image brought up to date - its mip chain built or
-             * rebuilt, its descriptors repacked. Building may have submitted the frame
-             * to free an old chain, in which case the frame is reopened here before
-             * anything is written. */
-            gl_tex_hw_prepare(ctx, eff_obj);
-            if (!ctx->hw_frame_active)
-                gl_hw_begin_frame(ctx);
-            if (unit1_obj) {
-                gl_tex_hw_prepare(ctx, unit1_obj);
-                if (!ctx->hw_frame_active)
-                    gl_hw_begin_frame(ctx);
+         * The cap of 512 bounds how many lines a frame writes and was taken for
+         * a bound on the cost. It is not one: Neverball issues around twenty
+         * thousand draws a frame, so five hundred kernel-log syscalls land in
+         * every one of them, and the game advanced about a fifth of a second
+         * while several seconds of wall clock went past. From the sofa that is
+         * a frozen game, and it was reported as one - there was no fault, no GL
+         * error and no stalled fence, because nothing was wrong except that the
+         * library was writing a log nobody had asked for. */
+        if (gl_log_level >= (int)OOPS_LOG_TRACE && ctx->frame_count >= 3u &&
+            drew < 512u) {
+            drew++;
+            char m[200];
+            size_t n = 0;
+            /* **The environment and the colour as well as the texture.** The
+               first run of this reported sixty-four draws that all bound the
+               right texture into the right slot, which ruled out the binding
+               and left the question of what is then done with the texel: a
+               texture holding (0,0,25) cannot be modulated into anything
+               bright, so an environment that adds or replaces is a different
+               story from one that multiplies. */
+            /* **The unit that is sampled, not unit zero.** Reading unit 0
+               unconditionally reported GL_COMBINE with a shadow formula for
+               every draw, which looked like a fault and is not one: a port
+               using two stages leaves unit 0 disabled with a staged environment
+               on it and puts the real texture on unit 1, so unit 0's mode
+               describes a unit nothing samples. `gl_hw_base_unit` is what the
+               shader patch itself asks, so it is what this has to ask. */
+            const GLuint bu = gl_hw_base_unit(ctx);
+            const char *lead = "draw tex/w/h/slot/unit/env/col/blend";
+            while (lead[n] && n < 48u) {
+                m[n] = lead[n];
+                n++;
             }
-            /* **The combine follows the texture as well as glTexEnv**: its base format
-             * decides which channels the environment touches, so a draw with a texture
-             * of another base format rewrites the shader's four words - submitting the
-             * draws built with the old ones first, and reopening the frame. */
-            /* GL_BLEND, GL_DECAL of RGBA and GL_COMBINE included since 2026-09-19, as a
-             * program in the longer slot; the log line is for a program that did not
-             * fit, which GL's argument counts rule out. */
-            if (!gl_ps_patch_tex_env(ctx) && !ctx->hw_env_logged) {
-                oops_log_info("GL",
-                              "a texture combine outgrew the pixel shader's slot: "
-                              "this draw modulates on this path");
-                ctx->hw_env_logged = GL_TRUE;
-            }
-            if (!ctx->hw_frame_active)
-                gl_hw_begin_frame(ctx);
-        }
-        /* Fog, in both pixel shaders: the colour in the fog slot's literals, the factor
-         * in the vertex (below). A change submits the draws built with the old words
-         * first. */
-        gl_ps_patch_fog(ctx);
-        if (!ctx->hw_frame_active)
-            gl_hw_begin_frame(ctx);
-        /* **Both colour buffers** (since 2026-09-20). Every draw sets the export,
-         * whether it exports to one target or two, for the reason the colour sum's slot
-         * is set every time: a draw after glDrawBuffer(GL_BACK) must stop writing the
-         * buffer GL no longer names. */
-        gl_ps_patch_export(ctx, (GLboolean)(ctx->fb_also != (uint32_t *)0));
-        if (!ctx->hw_frame_active)
-            gl_hw_begin_frame(ctx);
-        /* **The polygon stipple** (on this path since 2026-09-20): the discard slot and
-         * the mask it reads. Set on every draw, like the two above - the stipple can be
-         * switched off, or glPolygonMode taken off GL_FILL, between two draws of a
-         * frame. */
-        gl_ps_patch_stipple(ctx, gl_polygon_stipple_on(ctx));
-        if (!ctx->hw_frame_active)
-            gl_hw_begin_frame(ctx);
-        /* **Antialiasing's coverage** (since 2026-09-20; the textured shader's slot too
-         * since 2026-09-21). Set on every draw, like the two above: a triangle after a
-         * smooth point must stop weighing its alpha by an interpolant meant for
-         * something else, and a textured smooth point after an untextured one must move
-         * the slot to the other shader. `gl_smoothing` has already decided whether this
-         * draw smooths at all. */
-        /* **The polygon's widening is decided here, before the slot is patched**,
-         * because the two have to agree: a triangle the widening refuses - no area, no
-         * inradius, a vertex with no window position - exports no fourth parameter, and
-         * a slot left reading `attr3` would take its coverage from a routing that does
-         * not exist. */
-        float poly_att[3][4];
-        const GLboolean poly_smooth =
-            (GLboolean)(ctx->aa_edges != 0u &&
-                        gl_hw_polygon_smooth_setup(ctx, ctx->aa_edges, c0, c1, c2,
-                                                   poly_att));
-        gl_ps_patch_coverage_where(ctx, poly_smooth       ? ((eff_tex != 0u)
-                                                                 ? GL_COVERAGE_POLYGON_TEX
-                                                                 : GL_COVERAGE_POLYGON_UNTEX)
-                                        : !ctx->aa_hw_on  ? GL_COVERAGE_OFF
-                                        : (eff_tex != 0u) ? GL_COVERAGE_TEXTURED
-                                                          : GL_COVERAGE_UNTEXTURED);
-#ifndef OOPS_HOST_BUILD
-        ctx->hw_patch_ns += oops_time_get_ns() - patch_t0;
-        /* Everything from here to the command words is the descriptor slot decision and
-         * the vertex ring - see `hw_vbo_ns`. */
-        const uint64_t vbo_t0 = oops_time_get_ns();
-#endif
-        if (!ctx->hw_frame_active)
-            gl_hw_begin_frame(ctx);
-        /* **The colour sum after texturing** (GL 1.4, 3.9; on this path since
-         * 2026-09-19). A textured draw whose secondary colour is not zero somewhere
-         * carries it in the third parameter, and the textured shader's sum slot adds it
-         * after the combine and before fog. Such a draw runs the three-parameter vertex
-         * shader. Everything else keeps two parameters and the sum slot's state, so
-         * gl-cube's stream is untouched. A change of the slot submits the draws built
-         * with the old words first. **Every textured draw sets the slot**, the sum on
-         * or not: a slot left holding the sum would add whatever attr2 reads on a draw
-         * that exports two parameters. */
-        GLboolean p3 = GL_FALSE;
-        /* The third parameter a cube map's direction and a volume's r need, separate
-         * from the colour sum's use of the same export - see where it is set. */
-        GLboolean p3_needed = GL_FALSE;
-        /* **The second texture unit** (since 2026-09-20, and off until gl_multitex.h's
-         * gate or a test opens it). A draw uses it when unit 1 has an enabled texture
-         * of its own and unit 0 is textured too - a second unit with nothing under it
-         * is no second unit. It implies the third parameter as well, the fourth shader
-         * exporting both. */
-        const GLboolean unit1 = unit1_applied;
-        if (eff_tex != 0u) {
-            /*
-             * **Whether the sum runs is context state, not this triangle's vertex
-             * data** (2026-09-24).
-             *
-             * This used to scan the three vertices and turn the slot on only when one
-             * of them had a non-zero secondary colour. That is per *triangle*, and
-             * under specular lighting it alternates across a lit surface as highlights
-             * come and go - so the slot was rewritten 686 times in a Neverball frame,
-             * and a slot write calls `gl_ps_flush_shaders`, which evicts all three
-             * shader ranges: sixty cache lines a time, forty-one thousand a frame, and
-             * essentially the whole of `patch-us`. `patch-writes sum` was 686 where
-             * every other slot was in single figures.
-             *
-             * Following `gl_color_sum_on` instead costs nothing in correctness: with
-             * the sum enabled, a triangle whose secondary colour is zero adds zero. It
-             * costs the three-parameter vertex - 64 bytes instead of 48 - on every
-             * textured draw while colour sum is on, which is the trade the measurement
-             * says to take.
-             *
-             * The slot must still be *set* on every textured draw, on or off: a slot
-             * left holding the sum would add whatever attr2 reads on a draw that
-             * exports two parameters. What changed is only what decides it.
-             */
-            p3 = gl_color_sum_on(ctx);
-            /* A cube map's direction needs its third component, which the vertex
-             * carries in the third parameter - so such a draw exports one whether or
-             * not a colour sum wants it. gl_ps_patch_sum is still told `p3` and not
-             * this: the sum's slot is about the secondary colour, and turning it on
-             * here would add one nothing asked for. */
-            if (cube || volume || shadow)
-                p3_needed = GL_TRUE;
-            gl_ps_patch_sum(ctx, p3);
-            if (!ctx->hw_frame_active)
-                gl_hw_begin_frame(ctx);
-            /* One of the five forms, on every textured draw, for the reason every other
-             * slot is set on every draw: a draw that stops using a cube map must stop
-             * looking for a face, and one that stops comparing must stop asking for one
-             * channel. */
+            n = gl_msg_hex(m, sizeof(m), n, eff_obj->id);
+            n = gl_msg_hex(m, sizeof(m), n, (uint32_t)eff_obj->width);
+            n = gl_msg_hex(m, sizeof(m), n, (uint32_t)eff_obj->height);
+            n = gl_msg_hex(m, sizeof(m), n, ctx->hw_desc_slot);
+            n = gl_msg_hex(m, sizeof(m), n, bu);
+            n = gl_msg_hex(m, sizeof(m), n, (uint32_t)ctx->tex_unit[bu].tex_env_mode);
             {
-                const gl_ps_sample_kind_t kind =
-                    shadow
-                        ? GL_PS_SAMPLE_SHADOW
-                        : (depth_tex
-                               ? GL_PS_SAMPLE_DEPTH
-                               : (cube ? GL_PS_SAMPLE_CUBE
-                                       : (volume ? GL_PS_SAMPLE_3D : GL_PS_SAMPLE_2D)));
-                gl_ps_patch_sample(
-                    ctx, kind, eff_obj ? eff_obj->depth_mode : (GLenum)GL_LUMINANCE);
+                /* The primary colour the combine will use, packed as eight bits
+                   a channel so one word carries it. */
+                uint32_t c = 0u;
+                for (int k = 0; k < 4; k++) {
+                    float v = ctx->cur_color[k];
+                    if (v < 0.0f)
+                        v = 0.0f;
+                    if (v > 1.0f)
+                        v = 1.0f;
+                    c = (c << 8) | (uint32_t)(v * 255.0f);
+                }
+                n = gl_msg_hex(m, sizeof(m), n, c);
             }
-            if (!ctx->hw_frame_active)
-                gl_hw_begin_frame(ctx);
-            /* Both of the second unit's slots, on every textured draw and for the
-             * reason the sum and the export are: a draw that drops back to one unit
-             * must stop sampling and stop combining a texel it no longer fetches. */
-            gl_ps_patch_unit1(ctx, unit1);
-            if (!ctx->hw_frame_active)
-                gl_hw_begin_frame(ctx);
-            gl_ps_patch_tex_env_unit1(ctx, unit1);
+            /* Blending, because the fault was described as something
+               translucent laid over what is behind it, and a blended draw is
+               the only kind that can be. */
+            n = gl_msg_hex(m, sizeof(m), n, ctx->cap_blend ? 1u : 0u);
+            m[n] = 0;
+            oops_log_info("GL", "%s", m);
+
+            /* **And what GL_COMBINE was actually asked for**, which is the
+               whole of what happens to the texel once it has been correctly
+               fetched. The surface being chased draws every one of its
+               triangles through this path, and no check anywhere has verified a
+               combine on hardware - they all use GL_REPLACE or GL_MODULATE. A
+               texel of (0,0,25) cannot be modulated into anything bright, but a
+               combine that adds, interpolates or scales by four can take it
+               anywhere, so these are the numbers that decide whether the colour
+               on the panel is explicable at all. */
+            if (ctx->tex_unit[bu].tex_env_mode == GL_COMBINE) {
+                const gl_combine_t *cb = &ctx->tex_unit[bu].combine;
+                size_t k = 0;
+                const char *cl = "draw comb rgb/src0-2/op0-2/scale";
+                while (cl[k] && k < 40u) {
+                    m[k] = cl[k];
+                    k++;
+                }
+                k = gl_msg_hex(m, sizeof(m), k, (uint32_t)cb->mode_rgb);
+                for (int s = 0; s < 3; s++) {
+                    k = gl_msg_hex(m, sizeof(m), k, (uint32_t)cb->source_rgb[s]);
+                }
+                for (int s = 0; s < 3; s++) {
+                    k = gl_msg_hex(m, sizeof(m), k, (uint32_t)cb->operand_rgb[s]);
+                }
+                k = gl_msg_hex(m, sizeof(m), k, (uint32_t)(cb->scale_rgb * 16.0f));
+                m[k] = 0;
+                oops_log_info("GL", "%s", m);
+            }
+        }
+    }
+}
+#endif
+
+/* The GL 2.0 uniform block's ring slot, and the vertex ring's room for this triangle.
+ */
+static void gl_hw_tri_ring(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_t *hw) {
+    gl_program_object_t *const prog = tri->prog;
+    const GLboolean prog_vs = tri->prog_vs;
+    const GLuint eff_tex = hw->eff_tex;
+    const GLboolean gl2_block_used = hw->gl2_block_used;
+    uint32_t *const gl2_block = hw->gl2_block;
+    const GLboolean poly_smooth = hw->poly_smooth;
+    const GLboolean p3 = hw->p3, p3_needed = hw->p3_needed, unit1 = hw->unit1;
+    /* **The GL 2.0 uniform ring, on the descriptors' own rule.** A uniform block is
+     * per draw in exactly the way a texture's descriptors are: the draws already
+     * built read the slot they were handed at the flush, so a draw whose uniforms
+     * differ from what the current slot holds must take the next one rather than
+     * overwrite it. Without this, a frame that draws two objects in one program
+     * with different colours draws both in the second colour - and the software
+     * path, which has no slot at all, draws it correctly, so nothing on the host
+     * would ever show it.
+     *
+     * The block is **built here and copied where the shader's address is chosen**,
+     * because deciding which slot to use means knowing what would go in it - and
+     * building it twice would be two chances to build it differently. */
+    if (gl2_block_used) {
+        /* Any texture this program samples has to be uploaded and have its
+         * descriptors built before they can be copied, and that can submit the
+         * frame. */
+        for (int s = 0; s < prog->hw_tex_sets; s++) {
+            gl_texture_object_t *obj = gl_gl2_sampler_texture(ctx, prog, s);
+            if (!obj)
+                continue;
+            gl_tex_hw_prepare(ctx, obj);
             if (!ctx->hw_frame_active)
                 gl_hw_begin_frame(ctx);
         }
-        /* **Compared by content, not by texture.** The slot was reloaded only for a
-         * *different* texture until 2026-09-19, so changing one texture's wrap mode or
-         * filter mid-frame and drawing again rewrote the descriptors every earlier draw
-         * of the frame would read at the flush: they all sampled with the new
-         * parameters. Any change to what the slot holds now submits the draws that read
-         * the old contents first. */
-        if (eff_obj && ctx->hw_frame_tex != 0u) {
-            /* **Compared against the shadow, not against the slot.**
-             *
-             * This read the slot back out of `gpu_payload` until 2026-09-24. That
-             * memory is ONION and every write to a slot is followed by a `clflush`, so
-             * the comparison on the next triangle missed to the far side of the bus
-             * every single time - 10.5ms of a 22.3ms frame over ten thousand triangles,
-             * the largest phase in the draw path and four times what the frame's entire
-             * command stream costs to write. The CPU wrote those bytes and already
-             * knows them; see `hw_desc_shadow`. */
-            const uint32_t *slot = ctx->hw_desc_shadow;
-            const void *border =
-                (const char *)ctx->gpu_payload + OOPS_GL_BORDER_TABLE_OFFSET;
-            uint32_t samp[4];
-            memcpy(samp, eff_obj->samp_desc, 16);
-            samp[2] |= gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[0], eff_obj));
-            GLboolean moved = (GLboolean)((ctx->hw_desc_shadow_valid & 1u) == 0u ||
-                                          memcmp(slot, eff_obj->img_desc, 32) != 0 ||
-                                          memcmp(slot + 8, samp, 16) != 0);
-            /*
-             * **The second unit's half of the slot decides too** (2026-09-24).
-             *
-             * A slot is two descriptors, `OOPS_GL_DESC_UNIT_STRIDE` apart, and this
-             * test read only the first. Where unit 0's texture is constant across a
-             * pass and unit 1's changes per surface, `moved` was false for every draw:
-             * the slot never advanced, every draw in the submit pointed at it, and each
-             * one overwrote the previous draw's unit-1 descriptor. At the submit they
-             * all sampled whichever material was written last.
-             *
-             * That is Neverball's shadowed pass exactly. `tex_env_shadow` binds one
-             * shadow texture to unit 0 for the whole frame and the material to unit 1,
-             * and `GL_MAX_TEXTURE_UNITS` of 2 is what makes `tex_env_select` choose it.
-             * So the floor, which is the shadow receiver, wore a single texture -
-             * whichever mesh was drawn last before the submit - while the level's
-             * unshadowed geometry, which runs with unit 1 as the *base* unit and
-             * therefore through the test above, was right.
-             *
-             * It also explains why the fault tracked the vertex ring's size and nothing
-             * else: the ring bound sets how many draws share a submit, and the number
-             * of draws sharing one stale descriptor is the number of surfaces that come
-             * out wrong. At 64 KiB a frame submitted forty-six times and each submit
-             * spanned few enough draws to look nearly right; at 4 MiB it submitted once
-             * and the whole level wore one texture. Every direct read-back said the
-             * descriptors were correct, and they were - at the moment they were
-             * written, and not at the moment they were read.
-             */
-            if (unit1_obj) {
-                const uint32_t *slot1 = slot + OOPS_GL_DESC_UNIT_STRIDE / 4u;
-                uint32_t samp1[4];
-                memcpy(samp1, unit1_obj->samp_desc, 16);
-                samp1[2] |=
-                    gl_hw_lod_bias_bits(gl_tex_lod_bias(&ctx->tex_unit[1], unit1_obj));
-                if ((ctx->hw_desc_shadow_valid & 2u) == 0u ||
-                    memcmp(slot1, unit1_obj->img_desc, 32) != 0 ||
-                    memcmp(slot1 + 8, samp1, 16) != 0) {
-                    moved = GL_TRUE;
-                }
-            }
-            /* **A border colour still submits**, whatever the ring has room for: the
-             * table it lives in is named by `TA_BC_BASE_ADDR`, a register the frame
-             * sets once, so a second border in one frame is not something a slot can
-             * carry. Rare enough that a ring of its own would be weight for nothing. */
-            const GLboolean border_moved =
-                (GLboolean)(eff_obj->border_in_table &&
-                            memcmp(border, eff_obj->border_hw, 16) != 0);
-            if (moved && ctx->hw_desc_slot >= OOPS_GL_DESC_RING_SLOTS)
-                ctx->hw_desc_ring_full++;
-            if (border_moved ||
-                (moved && ctx->hw_desc_slot >= OOPS_GL_DESC_RING_SLOTS) ||
-                gl_ps_ring_needs_submit(ctx)) {
-                /* The ring is full, or the border changed, or the shader variant this
-                 * draw needs has nowhere to go: the frame runs, and the draws it holds
-                 * sample the descriptors - and bind the shader variants - they were
-                 * built with. */
+        if (!ctx->hw_frame_active)
+            gl_hw_begin_frame(ctx);
+        gl_gl2_build_block(ctx, prog, gl2_block);
+
+        const void *slot =
+            (const char *)ctx->gpu_payload + gl_hw_gl2_slot_offset(ctx->hw_gl2_slot);
+        const GLboolean moved_block =
+            (GLboolean)(ctx->hw_gl2_slot_program != 0u &&
+                        (ctx->hw_gl2_slot_program != prog->name ||
+                         memcmp(slot, gl2_block, OOPS_GL_GL2_SLOT_STRIDE) != 0));
+        if (moved_block) {
+            if (ctx->hw_gl2_slot + 1u >= OOPS_GL_GL2_SLOTS) {
+                /* The ring is full: the frame runs, and the draws it holds read the
+                 * values they were built with. `gl_hw_begin_frame` puts the slot
+                 * back to 0. */
                 gl_hw_flush(ctx);
                 gl_hw_begin_frame(ctx);
-            } else if (moved) {
-                /* **The next slot, not a submission.** The draws already built keep
-                 * pointing at the slot they were given; this one gets its own. */
-                ctx->hw_desc_slot++;
-                /* A different slot holds whatever an earlier frame put there, which
-                 * this shadow does not describe. Both halves go invalid and are set
-                 * again as they are written below - a draw that uses one unit leaves
-                 * the other's bit clear, so the next two-unit draw cannot match bytes
-                 * nobody wrote this frame. */
-                ctx->hw_desc_shadow_valid = 0u;
-            }
-            /* **Did this slot already belong to another texture in this submit?** See
-             * `hw_slot_tex`. Recorded here rather than where the descriptor is copied,
-             * because this is the point at which the slot for *this draw* is finally
-             * decided - and it is the slot the draw will point at whether or not the
-             * descriptor is rewritten. */
-            {
-                const uint32_t s = ctx->hw_desc_slot;
-                const uint32_t tex1 = unit1_obj ? unit1_obj->id : 0u;
-                if (s > ctx->hw_desc_slot_high)
-                    ctx->hw_desc_slot_high = s;
-                if (s <= (uint32_t)OOPS_GL_DESC_RING_SLOTS) {
-                    const uint32_t had = ctx->hw_slot_tex[s];
-                    const uint32_t had1 = ctx->hw_slot_tex1[s];
-                    /* **Either half re-pointing is a collision.** Watching the first
-                     * half alone is what let this report zero through the whole of the
-                     * unit-1 fault above: `had` was one shadow texture all frame and
-                     * matched every time. */
-                    const GLboolean hit =
-                        (GLboolean)((had != 0u && had != eff_tex) ||
-                                    (had1 != 0u && tex1 != 0u && had1 != tex1));
-                    if (hit) {
-                        if (ctx->hw_slot_collisions == 0u) {
-                            ctx->hw_slot_first_slot = s;
-                            /* The half that actually moved, so the line names the two
-                             * textures that shared the slot rather than the pair that
-                             * did not. */
-                            if (had != 0u && had != eff_tex) {
-                                ctx->hw_slot_first_had = had;
-                                ctx->hw_slot_first_got = eff_tex;
-                            } else {
-                                ctx->hw_slot_first_had = had1;
-                                ctx->hw_slot_first_got = tex1;
-                            }
-                        }
-                        ctx->hw_slot_collisions++;
-                    }
-                    ctx->hw_slot_tex[s] = eff_tex;
-                    if (tex1 != 0u)
-                        ctx->hw_slot_tex1[s] = tex1;
-                }
-            }
-#ifndef OOPS_HOST_BUILD
-            /* **Which texture each draw actually bound, and into which slot.**
-             *
-             * The port being chased renders one surface as a fine mosaic of two images
-             * while its texels and descriptors are provably correct in memory - so the
-             * question left is not what a texture contains but which one a given draw
-             * reached for. Nothing has ever reported that: the census counts draws and
-             * the dumps describe textures, and the mapping between them has been
-             * invisible.
-             *
-             * Sixty-four draws from the fourth frame, which is after loading has
-             * settled and inside a frame that is drawing the scene rather than building
-             * it. */
-            {
-                static uint32_t drew;
-                /* **A whole frame, not a prefix of one.** Two hundred and fifty-six
-                   draws were all the same texture and all correct, and the frame has
-                   four hundred and fifty-one - so the prefix answered for the surface
-                   that is fine and said nothing about the rest. */
-                /* **At OOPS_LOG_TRACE, because this is a syscall per draw call.**
-                 *
-                 * The cap of 512 bounds how many lines a frame writes and was taken for
-                 * a bound on the cost. It is not one: Neverball issues around twenty
-                 * thousand draws a frame, so five hundred kernel-log syscalls land in
-                 * every one of them, and the game advanced about a fifth of a second
-                 * while several seconds of wall clock went past. From the sofa that is
-                 * a frozen game, and it was reported as one - there was no fault, no GL
-                 * error and no stalled fence, because nothing was wrong except that the
-                 * library was writing a log nobody had asked for. */
-                if (gl_log_level >= (int)OOPS_LOG_TRACE && ctx->frame_count >= 3u &&
-                    drew < 512u) {
-                    drew++;
-                    char m[200];
-                    size_t n = 0;
-                    /* **The environment and the colour as well as the texture.** The
-                       first run of this reported sixty-four draws that all bound the
-                       right texture into the right slot, which ruled out the binding
-                       and left the question of what is then done with the texel: a
-                       texture holding (0,0,25) cannot be modulated into anything
-                       bright, so an environment that adds or replaces is a different
-                       story from one that multiplies. */
-                    /* **The unit that is sampled, not unit zero.** Reading unit 0
-                       unconditionally reported GL_COMBINE with a shadow formula for
-                       every draw, which looked like a fault and is not one: a port
-                       using two stages leaves unit 0 disabled with a staged environment
-                       on it and puts the real texture on unit 1, so unit 0's mode
-                       describes a unit nothing samples. `gl_hw_base_unit` is what the
-                       shader patch itself asks, so it is what this has to ask. */
-                    const GLuint bu = gl_hw_base_unit(ctx);
-                    const char *lead = "draw tex/w/h/slot/unit/env/col/blend";
-                    while (lead[n] && n < 48u) {
-                        m[n] = lead[n];
-                        n++;
-                    }
-                    n = gl_msg_hex(m, sizeof(m), n, eff_obj->id);
-                    n = gl_msg_hex(m, sizeof(m), n, (uint32_t)eff_obj->width);
-                    n = gl_msg_hex(m, sizeof(m), n, (uint32_t)eff_obj->height);
-                    n = gl_msg_hex(m, sizeof(m), n, ctx->hw_desc_slot);
-                    n = gl_msg_hex(m, sizeof(m), n, bu);
-                    n = gl_msg_hex(m, sizeof(m), n,
-                                   (uint32_t)ctx->tex_unit[bu].tex_env_mode);
-                    {
-                        /* The primary colour the combine will use, packed as eight bits
-                           a channel so one word carries it. */
-                        uint32_t c = 0u;
-                        for (int k = 0; k < 4; k++) {
-                            float v = ctx->cur_color[k];
-                            if (v < 0.0f)
-                                v = 0.0f;
-                            if (v > 1.0f)
-                                v = 1.0f;
-                            c = (c << 8) | (uint32_t)(v * 255.0f);
-                        }
-                        n = gl_msg_hex(m, sizeof(m), n, c);
-                    }
-                    /* Blending, because the fault was described as something
-                       translucent laid over what is behind it, and a blended draw is
-                       the only kind that can be. */
-                    n = gl_msg_hex(m, sizeof(m), n, ctx->cap_blend ? 1u : 0u);
-                    m[n] = 0;
-                    oops_log_info("GL", "%s", m);
-
-                    /* **And what GL_COMBINE was actually asked for**, which is the
-                       whole of what happens to the texel once it has been correctly
-                       fetched. The surface being chased draws every one of its
-                       triangles through this path, and no check anywhere has verified a
-                       combine on hardware - they all use GL_REPLACE or GL_MODULATE. A
-                       texel of (0,0,25) cannot be modulated into anything bright, but a
-                       combine that adds, interpolates or scales by four can take it
-                       anywhere, so these are the numbers that decide whether the colour
-                       on the panel is explicable at all. */
-                    if (ctx->tex_unit[bu].tex_env_mode == GL_COMBINE) {
-                        const gl_combine_t *cb = &ctx->tex_unit[bu].combine;
-                        size_t k = 0;
-                        const char *cl = "draw comb rgb/src0-2/op0-2/scale";
-                        while (cl[k] && k < 40u) {
-                            m[k] = cl[k];
-                            k++;
-                        }
-                        k = gl_msg_hex(m, sizeof(m), k, (uint32_t)cb->mode_rgb);
-                        for (int s = 0; s < 3; s++) {
-                            k = gl_msg_hex(m, sizeof(m), k,
-                                           (uint32_t)cb->source_rgb[s]);
-                        }
-                        for (int s = 0; s < 3; s++) {
-                            k = gl_msg_hex(m, sizeof(m), k,
-                                           (uint32_t)cb->operand_rgb[s]);
-                        }
-                        k = gl_msg_hex(m, sizeof(m), k,
-                                       (uint32_t)(cb->scale_rgb * 16.0f));
-                        m[k] = 0;
-                        oops_log_info("GL", "%s", m);
-                    }
-                }
-            }
-#endif
-        }
-
-        /* **The GL 2.0 uniform ring, on the descriptors' own rule.** A uniform block is
-         * per draw in exactly the way a texture's descriptors are: the draws already
-         * built read the slot they were handed at the flush, so a draw whose uniforms
-         * differ from what the current slot holds must take the next one rather than
-         * overwrite it. Without this, a frame that draws two objects in one program
-         * with different colours draws both in the second colour - and the software
-         * path, which has no slot at all, draws it correctly, so nothing on the host
-         * would ever show it.
-         *
-         * The block is **built here and copied where the shader's address is chosen**,
-         * because deciding which slot to use means knowing what would go in it - and
-         * building it twice would be two chances to build it differently. */
-        if (gl2_block_used) {
-            /* Any texture this program samples has to be uploaded and have its
-             * descriptors built before they can be copied, and that can submit the
-             * frame. */
-            for (int s = 0; s < prog->hw_tex_sets; s++) {
-                gl_texture_object_t *obj = gl_gl2_sampler_texture(ctx, prog, s);
-                if (!obj)
-                    continue;
-                gl_tex_hw_prepare(ctx, obj);
-                if (!ctx->hw_frame_active)
-                    gl_hw_begin_frame(ctx);
-            }
-            if (!ctx->hw_frame_active)
-                gl_hw_begin_frame(ctx);
-            gl_gl2_build_block(ctx, prog, gl2_block);
-
-            const void *slot = (const char *)ctx->gpu_payload +
-                               gl_hw_gl2_slot_offset(ctx->hw_gl2_slot);
-            const GLboolean moved_block =
-                (GLboolean)(ctx->hw_gl2_slot_program != 0u &&
-                            (ctx->hw_gl2_slot_program != prog->name ||
-                             memcmp(slot, gl2_block, OOPS_GL_GL2_SLOT_STRIDE) != 0));
-            if (moved_block) {
-                if (ctx->hw_gl2_slot + 1u >= OOPS_GL_GL2_SLOTS) {
-                    /* The ring is full: the frame runs, and the draws it holds read the
-                     * values they were built with. `gl_hw_begin_frame` puts the slot
-                     * back to 0. */
-                    gl_hw_flush(ctx);
-                    gl_hw_begin_frame(ctx);
-                } else {
-                    ctx->hw_gl2_slot++;
-                }
-            }
-            ctx->hw_gl2_slot_program = prog->name;
-        }
-
-        /* **A full vertex ring is submitted before it is reused.** Each triangle's
-         * vertices go into its own slot and the draw that reads them only runs at the
-         * flush, so the ring holds exactly one stream's worth. This took
-         * `triangles_drawn % 450` until 2026-09-19 with nothing at the wrap: the 451st
-         * triangle of a frame overwrote the first one's vertices before the GPU had
-         * read them, and the frame drew triangle 451 twice and triangle 1 never.
-         * gl-cube's twelve and gl1-probe's handful never got near it; any real scene
-         * does. Submitting here is the same step a texture change already takes - the
-         * render target persists across submissions, so the frame simply continues.
-         *
-         * The fill is per stream (gl_hw_flush resets it), which is what makes this the
-         * ring's fill level. A larger buffer would submit less often; this makes it
-         * correct. It is counted in bytes since 2026-09-19, when a triangle became 144
-         * bytes or 192 - three 64-byte vertices with the third parameter. The capacity
-         * is the 450 144-byte triangles it always was, so a stream of two-parameter
-         * draws submits exactly where it did. */
-        /* 2, 3 or 4 parameters, and so 48, 64 or 80 bytes a vertex. The fourth shader
-         * loads the third parameter too, so a two-unit vertex carries both. */
-        /* **A textured smooth primitive escalates to four**, because that is where its
-         * coverage offset rides - the second unit's parameter, which such a draw has
-         * spare by definition
-         * (`gl_smoothing` refuses to smooth when unit 1 is applied). It costs eighty
-         * bytes a vertex and the four-parameter vertex shader, both of which a two-unit
-         * draw already uses. */
-        const GLboolean aa_p4 =
-            (GLboolean)(ctx->aa_hw_on && ctx->aa_hw_tex && eff_tex != 0u);
-        /* **A smooth polygon escalates too**, and for the same reason: its three edge
-         * distances and their w need the whole of the fourth parameter. `poly_smooth`
-         * was decided above, with the slot, so the two cannot disagree. */
-        /* **A GL 2.0 program's parameter count is its varyings'**, not the
-         * fixed-function pipeline's: nothing in a compiled pixel shader reads the
-         * colour or the texture coordinate, so the questions above - a second texture
-         * unit, a smooth primitive - are about a stage this draw does not use.
-         * `hw_params` was worked out at link time and is two at minimum, which is the
-         * pipeline's smallest configuration. */
-        const uint32_t params =
-            (prog_vs && prog && prog->fs)
-                ? prog->hw_params
-                : ((unit1 || aa_p4 || poly_smooth) ? 4u
-                                                   : ((p3 || p3_needed) ? 3u : 2u));
-        const size_t vsz = (params >= 4u) ? 80u : (params == 3u) ? 64u : 48u;
-        const uint32_t tri_bytes = (uint32_t)(vsz * 3u);
-        if (ctx->hw_vbo_cursor + tri_bytes > gl_vbo_ring_bytes) {
-            gl_hw_flush(ctx);
-            gl_hw_begin_frame(ctx);
-        }
-
-        /* **A GL 2.0 program's shader is copied into the payload here, before this
-         * triangle takes a place in the vertex ring, because the copy can submit the
-         * frame.**
-         *
-         * `gl_ps_sync_payload_edit` flushes when the words differ - the GPU may not yet
-         * have read what is being overwritten - and `gl_hw_flush` puts `hw_vbo_cursor`
-         * back to zero along with the command stream. Done after the vertices were
-         * written, that hands the *next* triangle the offset this one is already using:
-         * it overwrites these vertices, and the two draws then read one triangle. Half
-         * of every quad, with the surviving half carrying the right colour, which is
-         * what gl2-probe measured eleven times over - `drawn 3876` against a 7752-pixel
-         * rect, the left flank drawn and the right the clear.
-         *
-         * Moving the command cursor below the copy was necessary and was not
-         * sufficient: the stream and the vertex ring are both reset by a flush, and
-         * only one of them had been accounted for. */
-        if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u) {
-            uint32_t *const ps_slot =
-                (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_GL2_OFFSET);
-            /*
-             * **The compiled shader's export tail is swapped here, not by
-             * `gl_ps_patch_export`.**
-             *
-             * That one runs earlier in the draw and patches the payload's two
-             * fixed-function shaders at their fixed offsets; a compiled shader's export
-             * sits at whatever offset its own length puts it, and the upload below
-             * would overwrite anything patched in before it. So the target count joins
-             * the serial in deciding whether the slot is stale: the same program drawn
-             * into one buffer and then into two needs the words rewritten even though
-             * it is the same program.
-             */
-            const GLboolean both = (GLboolean)(ctx->fb_also != (uint32_t *)0);
-            if (ctx->hw_ps_resident != prog->hw_ps_serial ||
-                ctx->hw_ps_resident_both != both) {
-                gl_ps_sync_payload_edit(ctx, ps_slot, prog->hw_ps, prog->hw_ps_words);
-                memcpy(ps_slot, prog->hw_ps, prog->hw_ps_words * sizeof(uint32_t));
-                /* `glsl_ps.c` ends every compiled shader with the one-target export
-                 * tail and two `s_nop`s of room, so the two-target form is the same
-                 * length and goes in over it. */
-                memcpy(ps_slot + prog->hw_ps_words - GL_PS_EXPORT_WORDS,
-                       gl_ps_export_words(both), GL_PS_EXPORT_WORDS * sizeof(uint32_t));
-                /* Everything after the shader is left as it was; `s_endpgm` is the last
-                 * word it wrote, so nothing beyond it is reachable. */
-                gl_ps_flush_shaders(ctx);
-                ctx->hw_ps_resident = prog->hw_ps_serial;
-                ctx->hw_ps_resident_both = both;
-                if (!ctx->hw_frame_active)
-                    gl_hw_begin_frame(ctx);
+            } else {
+                ctx->hw_gl2_slot++;
             }
         }
-
-        /* This triangle's place in the vertex buffer: three vertices of 48 bytes,
-         * or 64. */
-        size_t vbo_offset = ctx->hw_vbo_cursor;
-        ctx->hw_vbo_cursor += tri_bytes;
-
-        /* **Untextured, the secondary colour joins the primary per vertex.** With no
-         * texture between them, that is GL's per-fragment sum, except where it
-         * saturates between the vertices. A textured draw that sums carries the
-         * secondary colour in the third parameter instead, for the pixel shader to add
-         * after the combine (`p3`, above). Until 2026-09-19 it was summed here too, and
-         * the texture modulated the colour it should have left alone. */
-        if (gl_color_sum_on(ctx) && !p3) {
-            for (int k = 0; k < 3; k++) {
-                col0[k] = (col0[k] + sec0[k] > 1.0f) ? 1.0f : col0[k] + sec0[k];
-                col1[k] = (col1[k] + sec1[k] > 1.0f) ? 1.0f : col1[k] + sec1[k];
-                col2[k] = (col2[k] + sec2[k] > 1.0f) ? 1.0f : col2[k] + sec2[k];
-            }
-        }
-
-        if (ctx->vbo_mem) {
-            char *vbo_ptr = (char *)ctx->vbo_mem + vbo_offset;
-            /* **Divided per vertex on this path**: the pixel shader samples the
-             * interpolated s and t as they come, so q is applied at the corners - exact
-             * where q is the same at all three, as it is for everything but a projected
-             * texture. A per-fragment divide wants q in the vertex's spare fourth
-             * texture component and a v_rcp and two v_mul in the pixel shader - the
-             * software rasteriser's rule, a shader change away. */
-            /* Unit 0's coordinate: the console samples one texture (see the unit 1 note
-             * above).
-             * **s and t undivided and q in w**: the textured pixel shader interpolates
-             * all three and divides per fragment (since 2026-09-19 - the vertex divided
-             * before, which is exact only while q is the same at every corner). A q of
-             * 0 goes as 1, the rule the software rasteriser's gl_q_inv applies, rather
-             * than as an infinity waiting in the shader's reciprocal. **z is the fog
-             * factor**, which the pixel shaders' fog slot interpolates
-             * (gl_ps_patch_fog) - 1, no fog, when fog is off. */
-            /* **The base unit's coordinate set, not always set 0.** A vertex carries
-             * one per unit; the stage samples the unit `base_unit` names, so it must
-             * interpolate that unit's coordinates. Reading `tc[0]` here while sampling
-             * unit 1's texture would draw it with the wrong coordinates, which is a
-             * subtler wrong than drawing it not at all. */
-            const float *t0 = v0->tc[base_unit], *t1 = v1->tc[base_unit],
-                        *t2 = v2->tc[base_unit];
-            float uv0[4] = {t0[0], t0[1], fog0, (t0[3] != 0.0f) ? t0[3] : 1.0f};
-            float uv1[4] = {t1[0], t1[1], fog1, (t1[3] != 0.0f) ? t1[3] : 1.0f};
-            float uv2[4] = {t2[0], t2[1], fog2, (t2[3] != 0.0f) ? t2[3] : 1.0f};
-
-            /* Each vertex: position, colour, the texture parameter - and with the third
-             * parameter, {secondary r, g, b, unit 0's r}, the secondary colour for the
-             * sum and r for what samples in three dimensions. */
-            const float *pos[3] = {c0, c1, c2};
-            const float *col[3] = {col0, col1, col2};
-            const float *uvs[3] = {uv0, uv1, uv2};
-            const float *sec[3] = {sec0, sec1, sec2};
-            const float *tcs[3] = {t0, t1, t2};
-            const float *u1[3] = {v0->tc[1], v1->tc[1], v2->tc[1]};
-            /* **A GL 2.0 program's vertex carries its varyings and nothing else.**
-             *
-             * The position is the same field it always was - `c0` is `gl_Position`,
-             * which the vertex shader computed on the CPU - and the parameters after it
-             * are the interpolated block, four floats at a time. The fixed-function
-             * colour and texture coordinate are not written: nothing in a compiled
-             * pixel shader reads them, and writing them would only mean the parameter
-             * slots carried two things.
-             *
-             * A program with a vertex shader and **no** fragment shader is the
-             * exception and takes the arm below, because the fixed-function pixel
-             * shader is what runs for it - and `gl_FrontColor` and `gl_TexCoord[]`
-             * already reached `col` and `uvs` through the screen vertices. */
-            if (prog_vs && prog && prog->fs) {
-                for (size_t k = 0; k < 3; k++) {
-                    char *v = vbo_ptr + k * vsz;
-                    memcpy(v + 0, pos[k], 16);
-                    for (uint32_t pi = 0; pi < params; pi++) {
-                        float slot[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                        /* **The fixed-function colour, when the fragment shader reads
-                         * it.** `gl_FrontColor` is not a user varying and has a slot of
-                         * its own in the vertex stage's output, so it is copied from
-                         * there into the parameter the linker set aside - which is the
-                         * first one past the user's, and exists only for a shader that
-                         * names `gl_Color`. */
-                        if (prog->hw_color_param >= 0 &&
-                            pi == (uint32_t)prog->hw_color_param) {
-                            for (int c = 0; c < 4; c++) {
-                                slot[c] = vso[k].vary[GL_SHADER_VARY_COLOR + c];
-                            }
-                        } else if (prog->hw_texcoord_param >= 0 &&
-                                   pi >= (uint32_t)prog->hw_texcoord_param &&
-                                   pi < (uint32_t)prog->hw_texcoord_param +
-                                            (uint32_t)OOPS_GL_MAX_TEXTURE_UNITS) {
-                            /* **`gl_TexCoord[u]`, from the slot the vertex stage left
-                             * it in.** Not a user varying and so not in the flat block
-                             * below - the fixed-function outputs have named places in
-                             * the vertex's own output and this is one of them. */
-                            const uint32_t u = pi - (uint32_t)prog->hw_texcoord_param;
-                            for (int c = 0; c < 4; c++) {
-                                slot[c] = vso[k].vary[GL_SHADER_VARY_TEXCOORD +
-                                                      (int)(u * 4u) + c];
-                            }
-                        } else {
-                            for (int c = 0; c < 4; c++) {
-                                const int at = (int)(pi * 4u) + c;
-                                if (at < prog->varying_floats)
-                                    slot[c] = vso[k].vary[at];
-                            }
-                        }
-                        memcpy(v + 16 + pi * 16u, slot, 16);
-                    }
-                }
-                goto vertices_written;
-            }
-            for (size_t k = 0; k < 3; k++) {
-                char *v = vbo_ptr + k * vsz;
-                memcpy(v + 0, pos[k], 16);
-                memcpy(v + 16, col[k], 16);
-                memcpy(v + 32, uvs[k], 16);
-                if (params >= 3u) {
-                    const float p2[4] = {sec[k][0], sec[k][1], sec[k][2], tcs[k][2]};
-                    memcpy(v + 48, p2, 16);
-                }
-                if (params >= 4u) {
-                    /* The second unit's coordinate, divided per fragment as the first
-                     * is, with a q of 0 going as 1 - gl_q_inv's rule. z is unused: the
-                     * fog factor is the first unit's to carry, and only one is
-                     * interpolated. */
-                    /* **A smooth polygon owns this parameter outright** - `{d0*w, d1*w,
-                     * d2*w, w}` from the widening above - which is why it is refused
-                     * when the second unit wants the same four floats. */
-                    const float p3v[4] = {poly_smooth ? poly_att[k][0] : u1[k][0],
-                                          poly_smooth ? poly_att[k][1] : u1[k][1],
-                                          poly_smooth ? poly_att[k][2] : 0.0f,
-                                          poly_smooth
-                                              ? poly_att[k][3]
-                                              : ((u1[k][3] != 0.0f) ? u1[k][3] : 1.0f)};
-                    memcpy(v + 64, p3v, 16);
-                }
-            }
-            /* Both arms land here. The `(void)0` is what makes the label legal at the
-             * end of a block on a target where the flush below is compiled out. */
-        vertices_written:
-            (void)0;
-#if defined(__x86_64__)
-            /* Every cache line the triangle touches: it starts 16-byte aligned, so its
-             * last bytes can sit in a line of their own. */
-            for (size_t p = 0; p < tri_bytes; p += 64u) {
-                __builtin_ia32_clflush((const void *)(vbo_ptr + p));
-            }
-            __builtin_ia32_clflush((const void *)(vbo_ptr + tri_bytes - 1u));
-#endif
-        }
-
-        uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
-        /* This draw's own descriptor slot - slot 0 is the original table, so a frame
-         * that never changes texture hands over the address it always did. */
-        uint64_t desc_table_va = payload_va + gl_hw_desc_slot_offset(ctx->hw_desc_slot);
-        uint64_t ps_va =
-            payload_va + OOPS_GL_PS_UNTEX_OFFSET; /* Default: untextured Gouraud */
-        uint32_t ps_rsrc2 = 0u;
-
-        /* **A GL 2.0 program's own pixel shader, copied into the payload's one slot.**
-         *
-         * Copied rather than compiled here: the words were generated at link time and
-         * the copy is what a draw can afford. The upload goes through the same
-         * synchronisation a patched shader slot uses - the payload is GPU-visible
-         * memory and an edit the GPU has not seen flushed would be the previous shader
-         * running against this draw's parameters.
-         *
-         * `ps_rsrc2` gains its user-SGPR pair only when the program has uniforms: they
-         * are what the pair's address points at, and a shader with none loads nothing
-         * and is handed nothing. A shader that **sampled** a texture would want the
-         * descriptors at that same address, one block with the descriptors at one
-         * offset and the uniforms at another - which is the shape this will take when
-         * `image_sample` is generated, and is why the uniform ring is its own region
-         * rather than a widened descriptor slot.
-         *
-         * **RSRC1 is not touched.** The frame's stage table already reserves 136 VGPRs
-         * for the pixel stage, and `glsl_ps.c` refuses a shader that would need more -
-         * so the register that says how much of the file to allocate stays at the
-         * measured value rather than becoming a second thing to get right. */
-        if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u) {
-            /* The copy itself happened above, before this triangle took its place in
-             * the vertex ring - it can submit the frame, and a submit resets that ring.
-             * What is left here is choosing the address and the block, neither of which
-             * touches the GPU. */
-            ps_va = payload_va + OOPS_GL_PS_GL2_OFFSET;
-            ps_rsrc2 = 0u;
-
-            /* **The uniforms, into the slot the ring above chose.**
-             *
-             * `prog->values` is the pool every `glUniform*` writes and `glGetUniformfv`
-             * reads, copied verbatim - so what the shader loads and what the API
-             * reports back are the same bytes rather than two layouts to keep in step.
-             * The shader's two `s_load_dwordx16`s read from the address handed over
-             * below, which is why `ps_rsrc2` gains its user-SGPR pair here: a compiled
-             * shader with no uniforms still takes none.
-             *
-             * Flushed from the CPU's cache like every other payload edit: this is
-             * GPU-visible memory and an unflushed write is the previous draw's uniforms
-             * running against this draw's geometry. */
-            if (gl2_block_used) {
-                const uint32_t boff = gl_hw_gl2_slot_offset(ctx->hw_gl2_slot);
-                char *dst = (char *)ctx->gpu_payload + boff;
-                memcpy(dst, gl2_block, OOPS_GL_GL2_SLOT_STRIDE);
-#if defined(__x86_64__)
-                for (uint32_t b = 0; b < OOPS_GL_GL2_SLOT_STRIDE; b += 64u) {
-                    __builtin_ia32_clflush((const void *)(dst + b));
-                }
-#endif
-                desc_table_va = payload_va + boff;
-                /* USER_SGPR is bits 5:1, and the count is the shader's own: s[0:1] is
-                 * the block's address and the primitive mask lands in s2, which is
-                 * where the prologue's `s_mov_b32 m0, s2` reads it from. */
-                ps_rsrc2 = (prog->hw_ps_user_sgprs & 0x1fu) << 1u;
-            }
-        } else if (eff_tex > 0u) {
-            /* Stage 5: Textured + Gouraud - the ring's copy holding this draw's patched
-               words, not the master, which the GPU never reads. See
-               OOPS_GL_PS_RING_OFFSET. */
-            ps_va = payload_va + gl_ps_ring_offset(ctx);
-            ps_rsrc2 = 0x00000004u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor
-                                       table. 0x2 loads one SGPR and the primitive mask
-                                       lands in s1 (measured 2026-09-14) */
-            /* **By slot, not by sweep.** This searched the whole table for a matching
-               id on every draw - the same cost `gl_lookup_texture` was carrying, and
-               missed here when that one was fixed. `break` kept it to the matching
-               index rather than all 256, but `gl_texture_object_t` is large enough that
-               striding even part of the table evicts what the rest of the draw wants.
-             */
-            {
-                gl_texture_object_t *const hit = gl_texture_slot(ctx, eff_tex);
-                const int ti = hit ? (int)(hit - ctx->textures) : -1;
-                if (hit) {
-                    uint32_t *dt =
-                        (uint32_t *)((char *)ctx->gpu_payload +
-                                     gl_hw_desc_slot_offset(ctx->hw_desc_slot));
-                    memcpy(dt, ctx->textures[ti].img_desc, 32);
-                    memcpy(dt + 8, ctx->textures[ti].samp_desc, 16);
-                    /* GL 1.4's bias, the texture's and the unit's, joins the sampler
-                     * here rather than in the texture's own descriptor, since half of
-                     * it is context state. */
-                    dt[10] |= gl_hw_lod_bias_bits(
-                        gl_tex_lod_bias(&ctx->tex_unit[0], &ctx->textures[ti]));
-                    /* And into the shadow, so the next draw's comparison does not have
-                     * to read these bytes back through a cache line this function is
-                     * about to flush - see `hw_desc_shadow`. Copied from `dt` rather
-                     * than rebuilt, so the two can only ever hold the same thing. */
-                    memcpy(ctx->hw_desc_shadow, dt, 48);
-                    ctx->hw_desc_shadow_valid |= 1u;
-                    ctx->hw_frame_tex = eff_tex;
-                    /* The border colour table's one entry, for a sampler whose WORD3
-                     * names it. */
-                    float *bt = (float *)((char *)ctx->gpu_payload +
-                                          OOPS_GL_BORDER_TABLE_OFFSET);
-                    if (ctx->textures[ti].border_in_table) {
-                        memcpy(bt, ctx->textures[ti].border_hw, 16);
-                    }
-#if defined(__x86_64__)
-                    __builtin_ia32_clflush((const void *)dt);
-                    __builtin_ia32_clflush((const void *)bt);
-#endif
-                    /* the lookup above already found the one entry; nothing to break
-                     * out of */
-                }
-            }
-            /* **The second unit's pair**, one stride along the table, where
-             * tex-prolog2.s loads it from. Its own texture, its own unit's LOD bias.
-             * Nothing writes it unless the draw uses the unit; a stale pair is never
-             * read, because the sample that would read it is a branch over itself then.
-             */
-            if (unit1) {
-                const GLuint id1 = gl_unit_texture_id(ctx, 1u);
-                gl_texture_object_t *const hit1 = gl_texture_slot(ctx, id1);
-                const int ti = hit1 ? (int)(hit1 - ctx->textures) : -1;
-                if (hit1) {
-                    gl_tex_hw_prepare(ctx, &ctx->textures[ti]);
-                    if (!ctx->hw_frame_active)
-                        gl_hw_begin_frame(ctx);
-                    uint32_t *dt1 =
-                        (uint32_t *)((char *)ctx->gpu_payload +
-                                     gl_hw_desc_slot_offset(ctx->hw_desc_slot) +
-                                     OOPS_GL_DESC_UNIT_STRIDE);
-                    memcpy(dt1, ctx->textures[ti].img_desc, 32);
-                    memcpy(dt1 + 8, ctx->textures[ti].samp_desc, 16);
-                    dt1[10] |= gl_hw_lod_bias_bits(
-                        gl_tex_lod_bias(&ctx->tex_unit[1], &ctx->textures[ti]));
-                    memcpy(ctx->hw_desc_shadow + OOPS_GL_DESC_UNIT_STRIDE / 4u, dt1,
-                           48);
-                    ctx->hw_desc_shadow_valid |= 2u;
-#if defined(__x86_64__)
-                    __builtin_ia32_clflush((const void *)dt1);
-#endif
-                    /* the lookup above already found the one entry; nothing to break
-                     * out of */
-                }
-            }
-        }
-
-        /* Emit dynamic Depth Control, Blending, Cull Mode, and Color Target Mask state
-         */
-        /* **The command stream's cursor, taken after every payload edit above and not
-         * before.**
-         *
-         * Copying a compiled pixel shader into the payload can submit the frame first,
-         * because the GPU may not yet have read the words being overwritten
-         * (`gl_ps_sync_payload_edit`) - and a submit resets `dcb_words`. A cursor read
-         * before that points past the end of a stream that has already gone, so the
-         * draw written through it sits beyond whatever the new stream contains, with
-         * the gap between filled by the previous frame's words.
-         *
-         * **A submit resets two counters, and this is only one of them.**
-         * `hw_vbo_cursor` goes back to zero as well, which is why the shader copy also
-         * has to happen before this triangle takes its place in the vertex ring - see
-         * the copy, up by the ring check. Moving this cursor alone changed nothing
-         * measurable: gl2-probe reported the same `drawn 3876` against a 7752-pixel
-         * rect before and after, because the lost triangle was the vertex ring's and
-         * not this. Both are needed and neither is sufficient.
-         *
-         * Nothing between the old position and here touches `dw`, which is what makes
-         * moving it a move rather than a rewrite. */
-        /* **The command words themselves, timed apart from the setup before them.** Of
-         * a triangle's 5.9us on hardware, 1.6 is the shader patching and 4.3 is
-         * everything after it - and 43 dwords of command buffer cannot be 4.3us, so the
-         * cost is either in preparing the texture and its descriptors above, or in
-         * these writes. One timer separates the two and decides whether the answer is
-         * batching draws or something in the texture path. */
-#ifndef OOPS_HOST_BUILD
-        const uint64_t dcb_t0 = oops_time_get_ns();
-        ctx->hw_vbo_ns += dcb_t0 - vbo_t0;
-#endif
-        uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
-
-        uint32_t cur_depth_ctrl = gl_compute_db_depth_control(ctx);
-        uint32_t cur_blend_ctrl = gl_compute_cb_blend_control(ctx);
-        uint32_t cur_cull_ctrl = gl_compute_pa_su_sc_mode_cntl(ctx);
-        uint32_t cur_target_mask = gl_compute_cb_target_mask(ctx);
-        /* The same mask for the second target, when GL names both buffers - as the
-         * frame's own CB_TARGET_MASK carries it. A mid-frame glColorMask must not drop
-         * MRT1's half. */
-        if (ctx->fb_also)
-            cur_target_mask |= cur_target_mask << 4;
-
-        /* The first depth-tested draw of a frame binds the depth surface. */
-        if (cur_depth_ctrl != 0u && !ctx->hw_z_bound) {
-            gl_hw_emit_depth_block(ctx, &dw);
-            ctx->hw_z_bound = GL_TRUE;
-        }
-        /* **An active occlusion query starts counting here** and nowhere earlier - the
-         * depth surface is bound by the line above, which is the condition e3a7 hung
-         * without. The precision bits go on once a frame, because a flush mid-query
-         * re-emits the depth block with the plain recipe; the begin snapshot is taken
-         * once a query. */
-        if (ctx->query_active != 0u && ctx->hw_z_bound && !ctx->hw_query_reg) {
-            *dw++ = 0xc0016900u; /* SET_CONTEXT_REG DB_COUNT_CONTROL (0x001) */
-            *dw++ = 0x001u;
-            *dw++ = 0x11000106u; /* + PERFECT_ZPASS_COUNTS,
-                                    DISABLE_CONSERVATIVE_ZPASS_COUNTS */
-            ctx->hw_query_reg = GL_TRUE;
-            if (!ctx->hw_query_counting) {
-                gl_hw_emit_zpass_done(&dw, gl_hw_zpass_base(ctx));
-                ctx->hw_query_counting = GL_TRUE;
-            }
-        }
-        /* **The stencil test** (since 2026-09-19; **seen on hardware 2026-09-20**,
-         * gl1-probe's `stencil` passing - this said "written, not yet seen" until
-         * 2026-09-21. obSCEne's own fixture could not bind a non-passthrough stage,
-         * `REQ-20260917T1845Z-3d5b`, so the probe is what measured it.) The first
-         * stencil-tested draw of a frame makes the stencil surface live - which a frame
-         * that never tests stencil, gl-cube's included, never emits - and every
-         * stencil-tested draw sets the operations and the reference. */
-        if (gl_hw_stencil_on(ctx)) {
-            if (!ctx->hw_stencil_bound) {
-                gl_hw_emit_stencil_bind(ctx, &dw);
-                ctx->hw_stencil_bound = GL_TRUE;
-            }
-            /* DB_STENCIL_CONTROL (0x10B), DB_STENCILREFMASK (0x10C),
-             * DB_STENCILREFMASK_BF (0x10D)
-             * - context registers 0x2842C, 0x28430, 0x28434 in gfx103.json -
-             * consecutive, so one packet. The fields are gfx103.json's; STENCILOPVAL 1
-             * is radeonsi's, the step the increment and decrement operations take
-             * (si_state.c:1325-1333).
-             *
-             * **The back face carries its own operations and its own reference** (since
-             * 2026-09-22). These were copies of the front while GL 1.x was the only
-             * caller, which is what 1.x has - but `glStencilOpSeparate` is GL 2.0's and
-             * the context has carried the back state all along. The shadow-volume idiom
-             * is the case that shows it: one front face incrementing and one back
-             * decrementing over the same rectangle should leave the stencil where it
-             * started, and two copies of the front state leave 2.
-             *
-             * `_BF` sits at 12, 16 and 20 in `R_02842C`, which is the front's layout
-             * shifted by twelve - so the shift is still right and only the values were
-             * wrong. */
-            const uint32_t ops = gl_hw_stencil_op(ctx->stencil_fail) |
-                                 (gl_hw_stencil_op(ctx->stencil_zpass) << 4) |
-                                 (gl_hw_stencil_op(ctx->stencil_zfail) << 8);
-            const uint32_t ops_bf = gl_hw_stencil_op(ctx->stencil_back_fail) |
-                                    (gl_hw_stencil_op(ctx->stencil_back_zpass) << 4) |
-                                    (gl_hw_stencil_op(ctx->stencil_back_zfail) << 8);
-            const uint32_t refmask = ((uint32_t)ctx->stencil_ref & 0xffu) |
-                                     ((ctx->stencil_value_mask & 0xffu) << 8) |
-                                     ((ctx->stencil_writemask & 0xffu) << 16) |
-                                     (1u << 24);
-            const uint32_t refmask_bf = ((uint32_t)ctx->stencil_back_ref & 0xffu) |
-                                        ((ctx->stencil_back_value_mask & 0xffu) << 8) |
-                                        ((ctx->stencil_back_writemask & 0xffu) << 16) |
-                                        (1u << 24);
-            *dw++ = 0xc0036900u; /* PACKET3_SET_CONTEXT_REG, three data dwords */
-            *dw++ = 0x10bu;
-            *dw++ = ops | (ops_bf << 12);
-            *dw++ = refmask;
-            *dw++ = refmask_bf;
-        }
-
-        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmDB_DEPTH_CONTROL (0x200) */
-        *dw++ = 0x200u;
-        *dw++ = cur_depth_ctrl;
-
-        /* **Both targets' blend controls, in one packet**, because 0x1e0 and 0x1e1 are
-         * adjacent - the colour block keeps one per MRT and radeonsi writes them as
-         * `R_028780_CB_BLEND0_CONTROL + i * 4` (`si_state.c:420`). MRT1's copy is the
-         * same state, or zero when nothing is bound there; a mid-frame glBlendFunc must
-         * not leave the second target on the frame's opening value. */
-        *dw++ = 0xc0026900u; /* PACKET3_SET_CONTEXT_REG mmCB_BLEND0_CONTROL (0x1e0), two
-                                dwords */
-        *dw++ = 0x1e0u;
-        *dw++ = cur_blend_ctrl;
-        *dw++ = ctx->fb_also ? cur_blend_ctrl : 0u;
-
-        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmPA_SU_SC_MODE_CNTL (0x205) */
-        *dw++ = 0x205u;
-        *dw++ = cur_cull_ctrl;
-
-        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmCB_TARGET_MASK (0x08e) */
-        *dw++ = 0x08eu;
-        *dw++ = cur_target_mask;
-
-        /* A viewport set after the frame's registers were written. Four consecutive
-         * registers, so one packet. Nothing is emitted for a frame whose viewport was
-         * already current when it began, which keeps the stream gl-cube's oracle
-         * recorded byte for byte. */
-        if (ctx->hw_vport_dirty) {
-            uint32_t vport[4];
-            gl_compute_vport(ctx, ctx->height ? ctx->height : 1080u, vport);
-            *dw++ = 0xc0046900u; /* PACKET3_SET_CONTEXT_REG, four data dwords */
-            *dw++ = 0x10fu;      /* mmPA_CL_VPORT_XSCALE .. YOFFSET */
-            *dw++ = vport[0];
-            *dw++ = vport[1];
-            *dw++ = vport[2];
-            *dw++ = vport[3];
-            ctx->hw_vport_dirty = GL_FALSE;
-        }
-
-        /* A depth range set after the frame's registers were written:
-         * PA_CL_VPORT_ZSCALE and ZOFFSET, the two registers after the four above
-         * (gfx103.json 0x2844c, 0x28450), with the same arithmetic as the frame table's
-         * arms for 0x113 and 0x114. */
-        if (ctx->hw_depth_range_dirty) {
-            *dw++ = 0xc0026900u; /* PACKET3_SET_CONTEXT_REG, two data dwords */
-            *dw++ = 0x113u;      /* mmPA_CL_VPORT_ZSCALE .. ZOFFSET */
-            *dw++ = gl_f32_bits((ctx->depth_far - ctx->depth_near) * 0.5f);
-            *dw++ = gl_f32_bits((ctx->depth_far + ctx->depth_near) * 0.5f);
-            ctx->hw_depth_range_dirty = GL_FALSE;
-        }
-
-        /* A scissor box, or the test being switched, after the frame's registers were
-         * written. Two consecutive registers, so one packet - and like the viewport,
-         * nothing is emitted for a frame whose scissor was already current when it
-         * began. */
-        if (ctx->hw_scissor_dirty) {
-            uint32_t sc[2];
-            gl_compute_scissor(ctx, ctx->width ? ctx->width : 1920u,
-                               ctx->height ? ctx->height : 1080u, sc);
-            *dw++ = 0xc0026900u; /* PACKET3_SET_CONTEXT_REG, two data dwords */
-            *dw++ = 0x094u;      /* mmPA_SC_VPORT_SCISSOR_0_TL .. _BR */
-            *dw++ = sc[0];
-            *dw++ = sc[1];
-            ctx->hw_scissor_dirty = GL_FALSE;
-        }
-
-        /* A clip plane set, or enabled, after the frame's registers were written. Both
-         * the equations and the enable bits move together - a plane written without its
-         * enable does nothing, and an enable without its plane clips against whatever
-         * was there before. */
-        if (ctx->hw_clip_dirty) {
-            gl_hw_emit_clip_planes(ctx, &dw);
-            *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmPA_CL_CLIP_CNTL */
-            *dw++ = 0x204u;
-            *dw++ = gl_compute_clip_cntl(ctx);
-            ctx->hw_clip_dirty = GL_FALSE;
-        }
-
-        /* A logic op switched, or its opcode changed, after the frame's registers were
-         * written. */
-        if (ctx->hw_color_control_dirty) {
-            *dw++ =
-                0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmCB_COLOR_CONTROL (0x202) */
-            *dw++ = 0x202u;
-            *dw++ = gl_compute_cb_color_control(ctx);
-            ctx->hw_color_control_dirty = GL_FALSE;
-        }
-
-        /* The blend constant, only for a draw that reads it. CB_BLEND_RED, _GREEN,
-         * _BLUE and _ALPHA are consecutive from context offset 0x105 (gfx103.json,
-         * 0x28414..0x28420), and radeonsi writes them the same way - one sequence of
-         * the four floats' bits (gallium/drivers/radeonsi/si_state.c:730-738). */
-        if (ctx->hw_blend_color_dirty && gl_blend_reads_constant(ctx)) {
-            /*
-             * **Green goes in the alpha slot when the colour constant is read**,
-             * because on this part it is read from there.
-             *
-             * obSCEne measured it (`-2e9f`, sweep 20260921-run17, firmware 12.40; the
-             * arms are in `docs/hardware/agc-blend-and-export-fw1240.md`): the green
-             * channel of a `BLEND_CONSTANT_COLOR` blend takes `CB_BLEND_ALPHA` at
-             * `0x108` and ignores `CB_BLEND_GREEN` at `0x106`, whatever the packet
-             * shape or write order. Red and blue take their own registers. Writing
-             * green twice is the only way to make `glBlendColor` mean what GL says it
-             * means.
-             *
-             * **And a draw that reads both families is refused rather than
-             * half-served.** Both want `0x108`: the colour constant needs green there
-             * and the alpha constant needs alpha. Nothing can satisfy both, and a
-             * silently wrong channel is exactly what `D009` exists to prevent -
-             * `glBlendFuncSeparate(GL_CONSTANT_COLOR, ..., GL_CONSTANT_ALPHA, ...)` is
-             * legal GL and is rare, so it fails loudly here.
-             */
-            const GLboolean wants_color = gl_blend_reads_constant_color(ctx);
-            const GLboolean wants_alpha = gl_blend_reads_constant_alpha(ctx);
-
-            if (wants_color && wants_alpha) {
-                gl_record_error(ctx, GL_INVALID_OPERATION);
-            }
-
-            *dw++ = 0xc0046900u; /* PACKET3_SET_CONTEXT_REG, four data dwords */
-            *dw++ = 0x105u;      /* mmCB_BLEND_RED .. ALPHA */
-            *dw++ = gl_f32_bits(ctx->blend_color[0]);
-            *dw++ = gl_f32_bits(ctx->blend_color[1]);
-            *dw++ = gl_f32_bits(ctx->blend_color[2]);
-            /* The alpha slot carries green for a colour-constant draw, and the real
-               alpha otherwise. When both were asked for, the error above has already
-               been recorded and the colour constant is the one served. */
-            *dw++ =
-                gl_f32_bits(wants_color ? ctx->blend_color[1] : ctx->blend_color[3]);
-            ctx->hw_blend_color_dirty = GL_FALSE;
-        }
-
-        /* The vertex stage with two parameters or three, switched only on a change. */
-        gl_hw_emit_param_count(ctx, &dw, params);
-
-        /* Emit Shader & User Data */
-        *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_LO_PS */
-        *dw++ = 0x08u;
-        *dw++ = (uint32_t)(ps_va >> 8);
-        *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_HI_PS */
-        *dw++ = 0x09u;
-        *dw++ = (uint32_t)(ps_va >> 40);
-        *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_RSRC2_PS */
-        *dw++ = 0x0bu;
-        *dw++ = ps_rsrc2;
-
-        /* **What the SPI hands the pixel stage**, which a compiled shader decides and
-         * the frame table cannot: `SPI_PS_INPUT_ENA` and `_ADDR` (context 0x1b3 and
-         * 0x1b4). The barycentrics always; a shader reading `gl_FragCoord` also asks
-         * for the window position, which the SPI then puts in v2..v5. A shader that
-         * read those without this would read whatever the registers held.
-         *
-         * Emitted only when it changes, because the frame table already set the value
-         * every fixed-function draw wants and most frames never leave it.
-         * `hw_input_ena` is put back to that value by `gl_hw_begin_frame`, alongside
-         * `hw_params`. */
-        {
-            const uint32_t want =
-                (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u)
-                    ? prog->hw_ps_input_ena
-                    : (gl_polygon_stipple_on(ctx) ? 0x00000302u : 0x00000002u);
-            if (want != ctx->hw_input_ena) {
-                *dw++ = 0xc0016900u;
-                *dw++ = 0x1b3u;
-                *dw++ = want;
-                *dw++ = 0xc0016900u;
-                *dw++ = 0x1b4u;
-                *dw++ = want;
-                ctx->hw_input_ena = want;
-            }
-        }
-
-        /* **A shader that writes its own depth changes the depth block, in two
-         * registers.**
-         *
-         * `SPI_SHADER_Z_FORMAT` (0x1c4) has to say a Z is coming - `SPI_SHADER_32_R`,
-         * one value - or the export is made and nothing reads it. And
-         * `DB_SHADER_CONTROL` (0x203) has to stop testing early: the frame's value is
-         * `EARLY_Z_THEN_LATE_Z`, and a depth the shader computes is not known until the
-         * shader has run, so an early test would have used the interpolated depth and
-         * rejected fragments the shader was going to move. `LATE_Z` with
-         * `Z_EXPORT_ENABLE` is the pair that goes together - bits from `R_02880C` and
-         * `R_028710` for gfx103.
-         *
-         * Emitted only on a change, and put back by `gl_hw_begin_frame` to what the
-         * frame's own table wrote, exactly as the input-enable above. */
-        {
-            const GLboolean compiled_ps =
-                (GLboolean)(prog != (gl_program_object_t *)0 && prog->fs &&
-                            prog->hw_ps_words > 0u);
-            const GLboolean depth_ps =
-                (GLboolean)(compiled_ps && prog->hw_ps_exports_depth);
-            /* **`KILL_ENABLE`, which `discard` does not survive without.** Clearing
-             * `exec` stops the shader writing; it does not stop the depth block, which
-             * with early Z has already tested, written and retired the pixel on the
-             * understanding that the shader cannot change the answer. The discarded
-             * fragment then keeps its colour and its depth, and the draw behind it is
-             * rejected by a depth that should not be there - which is `gl2-probe`'s
-             * `discard` exactly, and why `discard-in-loop` passed beside it: that one
-             * runs with no depth test, so there is no early Z to retire the pixel and
-             * the export's mask is the only thing deciding.
-             *
-             * From `uses_discard` in radeonsi (`si_state_shaders.cpp:1711`). `Z_ORDER`
-             * stays `EARLY_Z_THEN_LATE_Z` - case 1 of the table at `:1730` - so this is
-             * one bit and not a move to late Z. */
-            /* **The fixed-function path kills too**, and has the same bug for the same
-             * reason: the alpha test and the polygon stipple both clear `exec`, and
-             * neither has ever told the depth block. GL 1.x has no check that combines
-             * one with a depth test, so nothing has measured it - the register is wrong
-             * either way, and `GL_ALWAYS` is excluded because a test that keeps
-             * everything is not a kill. */
-            const GLboolean kill_ff =
-                (GLboolean)((ctx->cap_alpha_test && ctx->alpha_func != GL_ALWAYS) ||
-                            gl_polygon_stipple_on(ctx));
-            const GLboolean kill_ps =
-                (GLboolean)(compiled_ps ? prog->hw_ps_kills : kill_ff);
-            const uint32_t want_zfmt = depth_ps ? 1u : 0u;
-            const uint32_t want_dbsc =
-                (depth_ps ? 0x00000001u : 0x00000010u) | (kill_ps ? 0x00000040u : 0u);
-            if (want_zfmt != ctx->hw_z_format) {
-                *dw++ = 0xc0016900u;
-                *dw++ = 0x1c4u;
-                *dw++ = want_zfmt;
-                ctx->hw_z_format = want_zfmt;
-            }
-            /* **Its own comparison, not the format's.** A program that discards and
-             * does not write depth moves this register while the format stands still.
-             */
-            if (want_dbsc != ctx->hw_db_shader_control) {
-                *dw++ = 0xc0016900u;
-                *dw++ = 0x203u;
-                *dw++ = want_dbsc;
-                ctx->hw_db_shader_control = want_dbsc;
-            }
-        }
-
-        /* Pass Descriptor Table VA to PS User SGPRs 0 and 1
-         * (mmSPI_SHADER_USER_DATA_PS_0 = 0x0c, 0x0d) */
-        *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_PS_0 */
-        *dw++ = 0x0cu;
-        *dw++ = (uint32_t)desc_table_va;
-        *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_PS_1 */
-        *dw++ = 0x0du;
-        *dw++ = (uint32_t)(desc_table_va >> 32);
-
-        /* Pass VBO byte offset into GS User SGPR 0 (mmSPI_SHADER_USER_DATA_GS_0 = 0x8c)
-         */
-        *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_GS_0 */
-        *dw++ = 0x8cu;
-        *dw++ = (uint32_t)vbo_offset;
-        *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_VS_0 (legacy
-                                VS stage) */
-        *dw++ = 0x4cu;
-        *dw++ = (uint32_t)vbo_offset;
-
-        /* Dispatch Hardware Draw */
-        *dw++ = 0xc0002f00u; /* PACKET3_NUM_INSTANCES */
-        *dw++ = 1u;
-        *dw++ = 0xc0012d00u; /* DRAW_INDEX_AUTO */
-        *dw++ = 3u;
-        *dw++ = 2u;
-
-        ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
-        ctx->triangles_drawn++;
-#ifndef OOPS_HOST_BUILD
-        ctx->hw_dcb_ns += oops_time_get_ns() - dcb_t0;
-#endif
-        return;
+        ctx->hw_gl2_slot_program = prog->name;
     }
 
-#ifdef OOPS_HOST_BUILD
-    /* 6. Host builds have no GPU: the software rasterizer stands in for it there, and
-     * only there. */
-    gl_rasterize_triangle(ctx, &sv0, &sv1, &sv2);
+    /* **A full vertex ring is submitted before it is reused.** Each triangle's
+     * vertices go into its own slot and the draw that reads them only runs at the
+     * flush, so the ring holds exactly one stream's worth. This took
+     * `triangles_drawn % 450` until 2026-09-19 with nothing at the wrap: the 451st
+     * triangle of a frame overwrote the first one's vertices before the GPU had
+     * read them, and the frame drew triangle 451 twice and triangle 1 never.
+     * gl-cube's twelve and gl1-probe's handful never got near it; any real scene
+     * does. Submitting here is the same step a texture change already takes - the
+     * render target persists across submissions, so the frame simply continues.
+     *
+     * The fill is per stream (gl_hw_flush resets it), which is what makes this the
+     * ring's fill level. A larger buffer would submit less often; this makes it
+     * correct. It is counted in bytes since 2026-09-19, when a triangle became 144
+     * bytes or 192 - three 64-byte vertices with the third parameter. The capacity
+     * is the 450 144-byte triangles it always was, so a stream of two-parameter
+     * draws submits exactly where it did. */
+    /* 2, 3 or 4 parameters, and so 48, 64 or 80 bytes a vertex. The fourth shader
+     * loads the third parameter too, so a two-unit vertex carries both. */
+    /* **A textured smooth primitive escalates to four**, because that is where its
+     * coverage offset rides - the second unit's parameter, which such a draw has
+     * spare by definition
+     * (`gl_smoothing` refuses to smooth when unit 1 is applied). It costs eighty
+     * bytes a vertex and the four-parameter vertex shader, both of which a two-unit
+     * draw already uses. */
+    const GLboolean aa_p4 =
+        (GLboolean)(ctx->aa_hw_on && ctx->aa_hw_tex && eff_tex != 0u);
+    /* **A smooth polygon escalates too**, and for the same reason: its three edge
+     * distances and their w need the whole of the fourth parameter. `poly_smooth`
+     * was decided above, with the slot, so the two cannot disagree. */
+    /* **A GL 2.0 program's parameter count is its varyings'**, not the
+     * fixed-function pipeline's: nothing in a compiled pixel shader reads the
+     * colour or the texture coordinate, so the questions above - a second texture
+     * unit, a smooth primitive - are about a stage this draw does not use.
+     * `hw_params` was worked out at link time and is two at minimum, which is the
+     * pipeline's smallest configuration. */
+    const uint32_t params =
+        (prog_vs && prog && prog->fs)
+            ? prog->hw_params
+            : ((unit1 || aa_p4 || poly_smooth) ? 4u : ((p3 || p3_needed) ? 3u : 2u));
+    const size_t vsz = (params >= 4u) ? 80u : (params == 3u) ? 64u : 48u;
+    const uint32_t tri_bytes = (uint32_t)(vsz * 3u);
+    if (ctx->hw_vbo_cursor + tri_bytes > gl_vbo_ring_bytes) {
+        gl_hw_flush(ctx);
+        gl_hw_begin_frame(ctx);
+    }
+    hw->params = params;
+    hw->vsz = vsz;
+    hw->tri_bytes = tri_bytes;
+}
+
+/* A compiled pixel shader into the payload, this triangle's place in the vertex
+ * ring, and an untextured draw's colour sum. */
+static void gl_hw_tri_payload(gl_context_t *ctx, const gl_tri_t *tri,
+                              gl_hw_draw_t *hw) {
+    gl_program_object_t *const prog = tri->prog;
+    float *const col0 = tri->col0, *const col1 = tri->col1, *const col2 = tri->col2;
+    const float *const sec0 = tri->sec0, *const sec1 = tri->sec1,
+                       *const sec2 = tri->sec2;
+    const GLboolean p3 = hw->p3;
+    const uint32_t tri_bytes = hw->tri_bytes;
+    /* **A GL 2.0 program's shader is copied into the payload here, before this
+     * triangle takes a place in the vertex ring, because the copy can submit the
+     * frame.**
+     *
+     * `gl_ps_sync_payload_edit` flushes when the words differ - the GPU may not yet
+     * have read what is being overwritten - and `gl_hw_flush` puts `hw_vbo_cursor`
+     * back to zero along with the command stream. Done after the vertices were
+     * written, that hands the *next* triangle the offset this one is already using:
+     * it overwrites these vertices, and the two draws then read one triangle. Half
+     * of every quad, with the surviving half carrying the right colour, which is
+     * what gl2-probe measured eleven times over - `drawn 3876` against a 7752-pixel
+     * rect, the left flank drawn and the right the clear.
+     *
+     * Moving the command cursor below the copy was necessary and was not
+     * sufficient: the stream and the vertex ring are both reset by a flush, and
+     * only one of them had been accounted for. */
+    if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u) {
+        uint32_t *const ps_slot =
+            (uint32_t *)((char *)ctx->gpu_payload + OOPS_GL_PS_GL2_OFFSET);
+        /*
+         * **The compiled shader's export tail is swapped here, not by
+         * `gl_ps_patch_export`.**
+         *
+         * That one runs earlier in the draw and patches the payload's two
+         * fixed-function shaders at their fixed offsets; a compiled shader's export
+         * sits at whatever offset its own length puts it, and the upload below
+         * would overwrite anything patched in before it. So the target count joins
+         * the serial in deciding whether the slot is stale: the same program drawn
+         * into one buffer and then into two needs the words rewritten even though
+         * it is the same program.
+         */
+        const GLboolean both = (GLboolean)(ctx->fb_also != (uint32_t *)0);
+        if (ctx->hw_ps_resident != prog->hw_ps_serial ||
+            ctx->hw_ps_resident_both != both) {
+            gl_ps_sync_payload_edit(ctx, ps_slot, prog->hw_ps, prog->hw_ps_words);
+            memcpy(ps_slot, prog->hw_ps, prog->hw_ps_words * sizeof(uint32_t));
+            /* `glsl_ps.c` ends every compiled shader with the one-target export
+             * tail and two `s_nop`s of room, so the two-target form is the same
+             * length and goes in over it. */
+            memcpy(ps_slot + prog->hw_ps_words - GL_PS_EXPORT_WORDS,
+                   gl_ps_export_words(both), GL_PS_EXPORT_WORDS * sizeof(uint32_t));
+            /* Everything after the shader is left as it was; `s_endpgm` is the last
+             * word it wrote, so nothing beyond it is reachable. */
+            gl_ps_flush_shaders(ctx);
+            ctx->hw_ps_resident = prog->hw_ps_serial;
+            ctx->hw_ps_resident_both = both;
+            if (!ctx->hw_frame_active)
+                gl_hw_begin_frame(ctx);
+        }
+    }
+
+    /* This triangle's place in the vertex buffer: three vertices of 48 bytes,
+     * or 64. */
+    size_t vbo_offset = ctx->hw_vbo_cursor;
+    ctx->hw_vbo_cursor += tri_bytes;
+
+    /* **Untextured, the secondary colour joins the primary per vertex.** With no
+     * texture between them, that is GL's per-fragment sum, except where it
+     * saturates between the vertices. A textured draw that sums carries the
+     * secondary colour in the third parameter instead, for the pixel shader to add
+     * after the combine (`p3`, above). Until 2026-09-19 it was summed here too, and
+     * the texture modulated the colour it should have left alone. */
+    if (gl_color_sum_on(ctx) && !p3) {
+        for (int k = 0; k < 3; k++) {
+            col0[k] = (col0[k] + sec0[k] > 1.0f) ? 1.0f : col0[k] + sec0[k];
+            col1[k] = (col1[k] + sec1[k] > 1.0f) ? 1.0f : col1[k] + sec1[k];
+            col2[k] = (col2[k] + sec2[k] > 1.0f) ? 1.0f : col2[k] + sec2[k];
+        }
+    }
+    hw->vbo_offset = vbo_offset;
+}
+
+/* A compiled program's three vertices: the position, then the interpolated block four
+ * floats a parameter, with `gl_FrontColor` and `gl_TexCoord[]` in the parameters the
+ * linker set aside for them. */
+static void gl_hw_write_program_vertices(char *vbo_ptr, size_t vsz, uint32_t params,
+                                         const gl_program_object_t *prog,
+                                         const gl_shader_vertex_out_t *vso,
+                                         const float *const pos[3]) {
+    for (size_t k = 0; k < 3; k++) {
+        char *v = vbo_ptr + k * vsz;
+        memcpy(v + 0, pos[k], 16);
+        for (uint32_t pi = 0; pi < params; pi++) {
+            float slot[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            /* **The fixed-function colour, when the fragment shader reads
+             * it.** `gl_FrontColor` is not a user varying and has a slot of
+             * its own in the vertex stage's output, so it is copied from
+             * there into the parameter the linker set aside - which is the
+             * first one past the user's, and exists only for a shader that
+             * names `gl_Color`. */
+            if (prog->hw_color_param >= 0 && pi == (uint32_t)prog->hw_color_param) {
+                for (int c = 0; c < 4; c++) {
+                    slot[c] = vso[k].vary[GL_SHADER_VARY_COLOR + c];
+                }
+            } else if (prog->hw_texcoord_param >= 0 &&
+                       pi >= (uint32_t)prog->hw_texcoord_param &&
+                       pi < (uint32_t)prog->hw_texcoord_param +
+                                (uint32_t)OOPS_GL_MAX_TEXTURE_UNITS) {
+                /* **`gl_TexCoord[u]`, from the slot the vertex stage left
+                 * it in.** Not a user varying and so not in the flat block
+                 * below - the fixed-function outputs have named places in
+                 * the vertex's own output and this is one of them. */
+                const uint32_t u = pi - (uint32_t)prog->hw_texcoord_param;
+                for (int c = 0; c < 4; c++) {
+                    slot[c] = vso[k].vary[GL_SHADER_VARY_TEXCOORD + (int)(u * 4u) + c];
+                }
+            } else {
+                for (int c = 0; c < 4; c++) {
+                    const int at = (int)(pi * 4u) + c;
+                    if (at < prog->varying_floats)
+                        slot[c] = vso[k].vary[at];
+                }
+            }
+            memcpy(v + 16 + pi * 16u, slot, 16);
+        }
+    }
+}
+
+/* The triangle's three vertices into its place in the vertex ring. */
+static void gl_hw_tri_vertices(gl_context_t *ctx, const gl_tri_t *tri,
+                               gl_hw_draw_t *hw) {
+    const gl_vertex_t *const v0 = tri->v0, *const v1 = tri->v1, *const v2 = tri->v2;
+    gl_program_object_t *const prog = tri->prog;
+    const GLboolean prog_vs = tri->prog_vs;
+    const gl_shader_vertex_out_t *const vso = tri->vso;
+    const float *const c0 = tri->c0, *const c1 = tri->c1, *const c2 = tri->c2;
+    const float *const col0 = tri->col0, *const col1 = tri->col1,
+                       *const col2 = tri->col2;
+    const float *const sec0 = tri->sec0, *const sec1 = tri->sec1,
+                       *const sec2 = tri->sec2;
+    const float fog0 = tri->fog0, fog1 = tri->fog1, fog2 = tri->fog2;
+    const GLuint base_unit = hw->base_unit;
+    const float (*const poly_att)[4] = hw->poly_att;
+    const GLboolean poly_smooth = hw->poly_smooth;
+    const uint32_t params = hw->params;
+    const size_t vsz = hw->vsz;
+    const uint32_t tri_bytes = hw->tri_bytes;
+    const size_t vbo_offset = hw->vbo_offset;
+    if (ctx->vbo_mem) {
+        char *vbo_ptr = (char *)ctx->vbo_mem + vbo_offset;
+        /* **Divided per vertex on this path**: the pixel shader samples the
+         * interpolated s and t as they come, so q is applied at the corners - exact
+         * where q is the same at all three, as it is for everything but a projected
+         * texture. A per-fragment divide wants q in the vertex's spare fourth
+         * texture component and a v_rcp and two v_mul in the pixel shader - the
+         * software rasteriser's rule, a shader change away. */
+        /* Unit 0's coordinate: the console samples one texture (see the unit 1 note
+         * above).
+         * **s and t undivided and q in w**: the textured pixel shader interpolates
+         * all three and divides per fragment (since 2026-09-19 - the vertex divided
+         * before, which is exact only while q is the same at every corner). A q of
+         * 0 goes as 1, the rule the software rasteriser's gl_q_inv applies, rather
+         * than as an infinity waiting in the shader's reciprocal. **z is the fog
+         * factor**, which the pixel shaders' fog slot interpolates
+         * (gl_ps_patch_fog) - 1, no fog, when fog is off. */
+        /* **The base unit's coordinate set, not always set 0.** A vertex carries
+         * one per unit; the stage samples the unit `base_unit` names, so it must
+         * interpolate that unit's coordinates. Reading `tc[0]` here while sampling
+         * unit 1's texture would draw it with the wrong coordinates, which is a
+         * subtler wrong than drawing it not at all. */
+        const float *t0 = v0->tc[base_unit], *t1 = v1->tc[base_unit],
+                    *t2 = v2->tc[base_unit];
+        float uv0[4] = {t0[0], t0[1], fog0, (t0[3] != 0.0f) ? t0[3] : 1.0f};
+        float uv1[4] = {t1[0], t1[1], fog1, (t1[3] != 0.0f) ? t1[3] : 1.0f};
+        float uv2[4] = {t2[0], t2[1], fog2, (t2[3] != 0.0f) ? t2[3] : 1.0f};
+
+        /* Each vertex: position, colour, the texture parameter - and with the third
+         * parameter, {secondary r, g, b, unit 0's r}, the secondary colour for the
+         * sum and r for what samples in three dimensions. */
+        const float *pos[3] = {c0, c1, c2};
+        const float *col[3] = {col0, col1, col2};
+        const float *uvs[3] = {uv0, uv1, uv2};
+        const float *sec[3] = {sec0, sec1, sec2};
+        const float *tcs[3] = {t0, t1, t2};
+        const float *u1[3] = {v0->tc[1], v1->tc[1], v2->tc[1]};
+        /* **A GL 2.0 program's vertex carries its varyings and nothing else.**
+         *
+         * The position is the same field it always was - `c0` is `gl_Position`,
+         * which the vertex shader computed on the CPU - and the parameters after it
+         * are the interpolated block, four floats at a time. The fixed-function
+         * colour and texture coordinate are not written: nothing in a compiled
+         * pixel shader reads them, and writing them would only mean the parameter
+         * slots carried two things.
+         *
+         * A program with a vertex shader and **no** fragment shader is the
+         * exception and takes the arm below, because the fixed-function pixel
+         * shader is what runs for it - and `gl_FrontColor` and `gl_TexCoord[]`
+         * already reached `col` and `uvs` through the screen vertices. */
+        if (prog_vs && prog && prog->fs) {
+            gl_hw_write_program_vertices(vbo_ptr, vsz, params, prog, vso, pos);
+            goto vertices_written;
+        }
+        for (size_t k = 0; k < 3; k++) {
+            char *v = vbo_ptr + k * vsz;
+            memcpy(v + 0, pos[k], 16);
+            memcpy(v + 16, col[k], 16);
+            memcpy(v + 32, uvs[k], 16);
+            if (params >= 3u) {
+                const float p2[4] = {sec[k][0], sec[k][1], sec[k][2], tcs[k][2]};
+                memcpy(v + 48, p2, 16);
+            }
+            if (params >= 4u) {
+                /* The second unit's coordinate, divided per fragment as the first
+                 * is, with a q of 0 going as 1 - gl_q_inv's rule. z is unused: the
+                 * fog factor is the first unit's to carry, and only one is
+                 * interpolated. */
+                /* **A smooth polygon owns this parameter outright** - `{d0*w, d1*w,
+                 * d2*w, w}` from the widening above - which is why it is refused
+                 * when the second unit wants the same four floats. */
+                const float p3v[4] = {poly_smooth ? poly_att[k][0] : u1[k][0],
+                                      poly_smooth ? poly_att[k][1] : u1[k][1],
+                                      poly_smooth ? poly_att[k][2] : 0.0f,
+                                      poly_smooth
+                                          ? poly_att[k][3]
+                                          : ((u1[k][3] != 0.0f) ? u1[k][3] : 1.0f)};
+                memcpy(v + 64, p3v, 16);
+            }
+        }
+        /* Both arms land here. The `(void)0` is what makes the label legal at the
+         * end of a block on a target where the flush below is compiled out. */
+    vertices_written:
+        (void)0;
+#if defined(__x86_64__)
+        /* Every cache line the triangle touches: it starts 16-byte aligned, so its
+         * last bytes can sit in a line of their own. */
+        for (size_t p = 0; p < tri_bytes; p += 64u) {
+            __builtin_ia32_clflush((const void *)(vbo_ptr + p));
+        }
+        __builtin_ia32_clflush((const void *)(vbo_ptr + tri_bytes - 1u));
+#endif
+    }
+}
+
+/* The pixel shader the draw binds and the table its user SGPRs point at: a compiled
+ * program's with its uniform block, or the textured shader with this draw's
+ * descriptors copied into its slot. */
+static void gl_hw_tri_shader(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_t *hw) {
+    gl_program_object_t *const prog = tri->prog;
+    const GLuint eff_tex = hw->eff_tex;
+    const GLboolean gl2_block_used = hw->gl2_block_used;
+    const uint32_t *const gl2_block = hw->gl2_block;
+    const GLboolean unit1 = hw->unit1;
+    uint64_t payload_va = (uint64_t)(uintptr_t)ctx->gpu_payload;
+    /* This draw's own descriptor slot - slot 0 is the original table, so a frame
+     * that never changes texture hands over the address it always did. */
+    uint64_t desc_table_va = payload_va + gl_hw_desc_slot_offset(ctx->hw_desc_slot);
+    uint64_t ps_va =
+        payload_va + OOPS_GL_PS_UNTEX_OFFSET; /* Default: untextured Gouraud */
+    uint32_t ps_rsrc2 = 0u;
+
+    /* **A GL 2.0 program's own pixel shader, copied into the payload's one slot.**
+     *
+     * Copied rather than compiled here: the words were generated at link time and
+     * the copy is what a draw can afford. The upload goes through the same
+     * synchronisation a patched shader slot uses - the payload is GPU-visible
+     * memory and an edit the GPU has not seen flushed would be the previous shader
+     * running against this draw's parameters.
+     *
+     * `ps_rsrc2` gains its user-SGPR pair only when the program has uniforms: they
+     * are what the pair's address points at, and a shader with none loads nothing
+     * and is handed nothing. A shader that **sampled** a texture would want the
+     * descriptors at that same address, one block with the descriptors at one
+     * offset and the uniforms at another - which is the shape this will take when
+     * `image_sample` is generated, and is why the uniform ring is its own region
+     * rather than a widened descriptor slot.
+     *
+     * **RSRC1 is not touched.** The frame's stage table already reserves 136 VGPRs
+     * for the pixel stage, and `glsl_ps.c` refuses a shader that would need more -
+     * so the register that says how much of the file to allocate stays at the
+     * measured value rather than becoming a second thing to get right. */
+    if (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u) {
+        /* The copy itself happened above, before this triangle took its place in
+         * the vertex ring - it can submit the frame, and a submit resets that ring.
+         * What is left here is choosing the address and the block, neither of which
+         * touches the GPU. */
+        ps_va = payload_va + OOPS_GL_PS_GL2_OFFSET;
+        ps_rsrc2 = 0u;
+
+        /* **The uniforms, into the slot the ring above chose.**
+         *
+         * `prog->values` is the pool every `glUniform*` writes and `glGetUniformfv`
+         * reads, copied verbatim - so what the shader loads and what the API
+         * reports back are the same bytes rather than two layouts to keep in step.
+         * The shader's two `s_load_dwordx16`s read from the address handed over
+         * below, which is why `ps_rsrc2` gains its user-SGPR pair here: a compiled
+         * shader with no uniforms still takes none.
+         *
+         * Flushed from the CPU's cache like every other payload edit: this is
+         * GPU-visible memory and an unflushed write is the previous draw's uniforms
+         * running against this draw's geometry. */
+        if (gl2_block_used) {
+            const uint32_t boff = gl_hw_gl2_slot_offset(ctx->hw_gl2_slot);
+            char *dst = (char *)ctx->gpu_payload + boff;
+            memcpy(dst, gl2_block, OOPS_GL_GL2_SLOT_STRIDE);
+#if defined(__x86_64__)
+            for (uint32_t b = 0; b < OOPS_GL_GL2_SLOT_STRIDE; b += 64u) {
+                __builtin_ia32_clflush((const void *)(dst + b));
+            }
+#endif
+            desc_table_va = payload_va + boff;
+            /* USER_SGPR is bits 5:1, and the count is the shader's own: s[0:1] is
+             * the block's address and the primitive mask lands in s2, which is
+             * where the prologue's `s_mov_b32 m0, s2` reads it from. */
+            ps_rsrc2 = (prog->hw_ps_user_sgprs & 0x1fu) << 1u;
+        }
+    } else if (eff_tex > 0u) {
+        /* Stage 5: Textured + Gouraud - the ring's copy holding this draw's patched
+           words, not the master, which the GPU never reads. See
+           OOPS_GL_PS_RING_OFFSET. */
+        ps_va = payload_va + gl_ps_ring_offset(ctx);
+        ps_rsrc2 = 0x00000004u; /* USER_SGPR=2 (bits 5:1): s[0:1] = descriptor
+                                   table. 0x2 loads one SGPR and the primitive mask
+                                   lands in s1 (measured 2026-09-14) */
+        /* **By slot, not by sweep.** This searched the whole table for a matching
+           id on every draw - the same cost `gl_lookup_texture` was carrying, and
+           missed here when that one was fixed. `break` kept it to the matching
+           index rather than all 256, but `gl_texture_object_t` is large enough that
+           striding even part of the table evicts what the rest of the draw wants.
+         */
+        {
+            gl_texture_object_t *const hit = gl_texture_slot(ctx, eff_tex);
+            const int ti = hit ? (int)(hit - ctx->textures) : -1;
+            if (hit) {
+                uint32_t *dt = (uint32_t *)((char *)ctx->gpu_payload +
+                                            gl_hw_desc_slot_offset(ctx->hw_desc_slot));
+                memcpy(dt, ctx->textures[ti].img_desc, 32);
+                memcpy(dt + 8, ctx->textures[ti].samp_desc, 16);
+                /* GL 1.4's bias, the texture's and the unit's, joins the sampler
+                 * here rather than in the texture's own descriptor, since half of
+                 * it is context state. */
+                dt[10] |= gl_hw_lod_bias_bits(
+                    gl_tex_lod_bias(&ctx->tex_unit[0], &ctx->textures[ti]));
+                /* And into the shadow, so the next draw's comparison does not have
+                 * to read these bytes back through a cache line this function is
+                 * about to flush - see `hw_desc_shadow`. Copied from `dt` rather
+                 * than rebuilt, so the two can only ever hold the same thing. */
+                memcpy(ctx->hw_desc_shadow, dt, 48);
+                ctx->hw_desc_shadow_valid |= 1u;
+                ctx->hw_frame_tex = eff_tex;
+                /* The border colour table's one entry, for a sampler whose WORD3
+                 * names it. */
+                float *bt =
+                    (float *)((char *)ctx->gpu_payload + OOPS_GL_BORDER_TABLE_OFFSET);
+                if (ctx->textures[ti].border_in_table) {
+                    memcpy(bt, ctx->textures[ti].border_hw, 16);
+                }
+#if defined(__x86_64__)
+                __builtin_ia32_clflush((const void *)dt);
+                __builtin_ia32_clflush((const void *)bt);
+#endif
+                /* the lookup above already found the one entry; nothing to break
+                 * out of */
+            }
+        }
+        /* **The second unit's pair**, one stride along the table, where
+         * tex-prolog2.s loads it from. Its own texture, its own unit's LOD bias.
+         * Nothing writes it unless the draw uses the unit; a stale pair is never
+         * read, because the sample that would read it is a branch over itself then.
+         */
+        if (unit1) {
+            const GLuint id1 = gl_unit_texture_id(ctx, 1u);
+            gl_texture_object_t *const hit1 = gl_texture_slot(ctx, id1);
+            const int ti = hit1 ? (int)(hit1 - ctx->textures) : -1;
+            if (hit1) {
+                gl_tex_hw_prepare(ctx, &ctx->textures[ti]);
+                if (!ctx->hw_frame_active)
+                    gl_hw_begin_frame(ctx);
+                uint32_t *dt1 = (uint32_t *)((char *)ctx->gpu_payload +
+                                             gl_hw_desc_slot_offset(ctx->hw_desc_slot) +
+                                             OOPS_GL_DESC_UNIT_STRIDE);
+                memcpy(dt1, ctx->textures[ti].img_desc, 32);
+                memcpy(dt1 + 8, ctx->textures[ti].samp_desc, 16);
+                dt1[10] |= gl_hw_lod_bias_bits(
+                    gl_tex_lod_bias(&ctx->tex_unit[1], &ctx->textures[ti]));
+                memcpy(ctx->hw_desc_shadow + OOPS_GL_DESC_UNIT_STRIDE / 4u, dt1, 48);
+                ctx->hw_desc_shadow_valid |= 2u;
+#if defined(__x86_64__)
+                __builtin_ia32_clflush((const void *)dt1);
+#endif
+                /* the lookup above already found the one entry; nothing to break
+                 * out of */
+            }
+        }
+    }
+    hw->desc_table_va = desc_table_va;
+    hw->ps_va = ps_va;
+    hw->ps_rsrc2 = ps_rsrc2;
+}
+
+/* The command stream's cursor, the depth and stencil surfaces a draw first needs, and
+ * the four registers every draw sets. */
+static void gl_hw_tri_emit_state(gl_context_t *ctx, gl_hw_draw_t *hw) {
+#ifndef OOPS_HOST_BUILD
+    const uint64_t vbo_t0 = hw->vbo_t0;
+#endif
+    /* Emit dynamic Depth Control, Blending, Cull Mode, and Color Target Mask state
+     */
+    /* **The command stream's cursor, taken after every payload edit above and not
+     * before.**
+     *
+     * Copying a compiled pixel shader into the payload can submit the frame first,
+     * because the GPU may not yet have read the words being overwritten
+     * (`gl_ps_sync_payload_edit`) - and a submit resets `dcb_words`. A cursor read
+     * before that points past the end of a stream that has already gone, so the
+     * draw written through it sits beyond whatever the new stream contains, with
+     * the gap between filled by the previous frame's words.
+     *
+     * **A submit resets two counters, and this is only one of them.**
+     * `hw_vbo_cursor` goes back to zero as well, which is why the shader copy also
+     * has to happen before this triangle takes its place in the vertex ring - see
+     * the copy, up by the ring check. Moving this cursor alone changed nothing
+     * measurable: gl2-probe reported the same `drawn 3876` against a 7752-pixel
+     * rect before and after, because the lost triangle was the vertex ring's and
+     * not this. Both are needed and neither is sufficient.
+     *
+     * Nothing between the old position and here touches `dw`, which is what makes
+     * moving it a move rather than a rewrite. */
+    /* **The command words themselves, timed apart from the setup before them.** Of
+     * a triangle's 5.9us on hardware, 1.6 is the shader patching and 4.3 is
+     * everything after it - and 43 dwords of command buffer cannot be 4.3us, so the
+     * cost is either in preparing the texture and its descriptors above, or in
+     * these writes. One timer separates the two and decides whether the answer is
+     * batching draws or something in the texture path. */
+#ifndef OOPS_HOST_BUILD
+    const uint64_t dcb_t0 = oops_time_get_ns();
+    ctx->hw_vbo_ns += dcb_t0 - vbo_t0;
+    hw->dcb_t0 = dcb_t0;
+#endif
+    uint32_t *dw = ctx->dcb_mem + ctx->dcb_words;
+
+    uint32_t cur_depth_ctrl = gl_compute_db_depth_control(ctx);
+    uint32_t cur_blend_ctrl = gl_compute_cb_blend_control(ctx);
+    uint32_t cur_cull_ctrl = gl_compute_pa_su_sc_mode_cntl(ctx);
+    uint32_t cur_target_mask = gl_compute_cb_target_mask(ctx);
+    /* The same mask for the second target, when GL names both buffers - as the
+     * frame's own CB_TARGET_MASK carries it. A mid-frame glColorMask must not drop
+     * MRT1's half. */
+    if (ctx->fb_also)
+        cur_target_mask |= cur_target_mask << 4;
+
+    /* The first depth-tested draw of a frame binds the depth surface. */
+    if (cur_depth_ctrl != 0u && !ctx->hw_z_bound) {
+        gl_hw_emit_depth_block(ctx, &dw);
+        ctx->hw_z_bound = GL_TRUE;
+    }
+    /* **An active occlusion query starts counting here** and nowhere earlier - the
+     * depth surface is bound by the line above, which is the condition e3a7 hung
+     * without. The precision bits go on once a frame, because a flush mid-query
+     * re-emits the depth block with the plain recipe; the begin snapshot is taken
+     * once a query. */
+    if (ctx->query_active != 0u && ctx->hw_z_bound && !ctx->hw_query_reg) {
+        *dw++ = 0xc0016900u; /* SET_CONTEXT_REG DB_COUNT_CONTROL (0x001) */
+        *dw++ = 0x001u;
+        *dw++ = 0x11000106u; /* + PERFECT_ZPASS_COUNTS,
+                                DISABLE_CONSERVATIVE_ZPASS_COUNTS */
+        ctx->hw_query_reg = GL_TRUE;
+        if (!ctx->hw_query_counting) {
+            gl_hw_emit_zpass_done(&dw, gl_hw_zpass_base(ctx));
+            ctx->hw_query_counting = GL_TRUE;
+        }
+    }
+    /* **The stencil test** (since 2026-09-19; **seen on hardware 2026-09-20**,
+     * gl1-probe's `stencil` passing - this said "written, not yet seen" until
+     * 2026-09-21. obSCEne's own fixture could not bind a non-passthrough stage,
+     * `REQ-20260917T1845Z-3d5b`, so the probe is what measured it.) The first
+     * stencil-tested draw of a frame makes the stencil surface live - which a frame
+     * that never tests stencil, gl-cube's included, never emits - and every
+     * stencil-tested draw sets the operations and the reference. */
+    if (gl_hw_stencil_on(ctx)) {
+        if (!ctx->hw_stencil_bound) {
+            gl_hw_emit_stencil_bind(ctx, &dw);
+            ctx->hw_stencil_bound = GL_TRUE;
+        }
+        /* DB_STENCIL_CONTROL (0x10B), DB_STENCILREFMASK (0x10C),
+         * DB_STENCILREFMASK_BF (0x10D)
+         * - context registers 0x2842C, 0x28430, 0x28434 in gfx103.json -
+         * consecutive, so one packet. The fields are gfx103.json's; STENCILOPVAL 1
+         * is radeonsi's, the step the increment and decrement operations take
+         * (si_state.c:1325-1333).
+         *
+         * **The back face carries its own operations and its own reference** (since
+         * 2026-09-22). These were copies of the front while GL 1.x was the only
+         * caller, which is what 1.x has - but `glStencilOpSeparate` is GL 2.0's and
+         * the context has carried the back state all along. The shadow-volume idiom
+         * is the case that shows it: one front face incrementing and one back
+         * decrementing over the same rectangle should leave the stencil where it
+         * started, and two copies of the front state leave 2.
+         *
+         * `_BF` sits at 12, 16 and 20 in `R_02842C`, which is the front's layout
+         * shifted by twelve - so the shift is still right and only the values were
+         * wrong. */
+        const uint32_t ops = gl_hw_stencil_op(ctx->stencil_fail) |
+                             (gl_hw_stencil_op(ctx->stencil_zpass) << 4) |
+                             (gl_hw_stencil_op(ctx->stencil_zfail) << 8);
+        const uint32_t ops_bf = gl_hw_stencil_op(ctx->stencil_back_fail) |
+                                (gl_hw_stencil_op(ctx->stencil_back_zpass) << 4) |
+                                (gl_hw_stencil_op(ctx->stencil_back_zfail) << 8);
+        const uint32_t refmask = ((uint32_t)ctx->stencil_ref & 0xffu) |
+                                 ((ctx->stencil_value_mask & 0xffu) << 8) |
+                                 ((ctx->stencil_writemask & 0xffu) << 16) | (1u << 24);
+        const uint32_t refmask_bf = ((uint32_t)ctx->stencil_back_ref & 0xffu) |
+                                    ((ctx->stencil_back_value_mask & 0xffu) << 8) |
+                                    ((ctx->stencil_back_writemask & 0xffu) << 16) |
+                                    (1u << 24);
+        *dw++ = 0xc0036900u; /* PACKET3_SET_CONTEXT_REG, three data dwords */
+        *dw++ = 0x10bu;
+        *dw++ = ops | (ops_bf << 12);
+        *dw++ = refmask;
+        *dw++ = refmask_bf;
+    }
+
+    *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmDB_DEPTH_CONTROL (0x200) */
+    *dw++ = 0x200u;
+    *dw++ = cur_depth_ctrl;
+
+    /* **Both targets' blend controls, in one packet**, because 0x1e0 and 0x1e1 are
+     * adjacent - the colour block keeps one per MRT and radeonsi writes them as
+     * `R_028780_CB_BLEND0_CONTROL + i * 4` (`si_state.c:420`). MRT1's copy is the
+     * same state, or zero when nothing is bound there; a mid-frame glBlendFunc must
+     * not leave the second target on the frame's opening value. */
+    *dw++ = 0xc0026900u; /* PACKET3_SET_CONTEXT_REG mmCB_BLEND0_CONTROL (0x1e0), two
+                            dwords */
+    *dw++ = 0x1e0u;
+    *dw++ = cur_blend_ctrl;
+    *dw++ = ctx->fb_also ? cur_blend_ctrl : 0u;
+
+    *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmPA_SU_SC_MODE_CNTL (0x205) */
+    *dw++ = 0x205u;
+    *dw++ = cur_cull_ctrl;
+
+    *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmCB_TARGET_MASK (0x08e) */
+    *dw++ = 0x08eu;
+    *dw++ = cur_target_mask;
+    hw->dw = dw;
+}
+
+/* The registers a draw sets only when the state behind them changed since the frame
+ * began: viewport, depth range, scissor, clip planes, logic op and blend constant. */
+static void gl_hw_tri_emit_dynamic(gl_context_t *ctx, gl_hw_draw_t *hw) {
+    uint32_t *dw = hw->dw;
+    /* A viewport set after the frame's registers were written. Four consecutive
+     * registers, so one packet. Nothing is emitted for a frame whose viewport was
+     * already current when it began, which keeps the stream gl-cube's oracle
+     * recorded byte for byte. */
+    if (ctx->hw_vport_dirty) {
+        uint32_t vport[4];
+        gl_compute_vport(ctx, ctx->height ? ctx->height : 1080u, vport);
+        *dw++ = 0xc0046900u; /* PACKET3_SET_CONTEXT_REG, four data dwords */
+        *dw++ = 0x10fu;      /* mmPA_CL_VPORT_XSCALE .. YOFFSET */
+        *dw++ = vport[0];
+        *dw++ = vport[1];
+        *dw++ = vport[2];
+        *dw++ = vport[3];
+        ctx->hw_vport_dirty = GL_FALSE;
+    }
+
+    /* A depth range set after the frame's registers were written:
+     * PA_CL_VPORT_ZSCALE and ZOFFSET, the two registers after the four above
+     * (gfx103.json 0x2844c, 0x28450), with the same arithmetic as the frame table's
+     * arms for 0x113 and 0x114. */
+    if (ctx->hw_depth_range_dirty) {
+        *dw++ = 0xc0026900u; /* PACKET3_SET_CONTEXT_REG, two data dwords */
+        *dw++ = 0x113u;      /* mmPA_CL_VPORT_ZSCALE .. ZOFFSET */
+        *dw++ = gl_f32_bits((ctx->depth_far - ctx->depth_near) * 0.5f);
+        *dw++ = gl_f32_bits((ctx->depth_far + ctx->depth_near) * 0.5f);
+        ctx->hw_depth_range_dirty = GL_FALSE;
+    }
+
+    /* A scissor box, or the test being switched, after the frame's registers were
+     * written. Two consecutive registers, so one packet - and like the viewport,
+     * nothing is emitted for a frame whose scissor was already current when it
+     * began. */
+    if (ctx->hw_scissor_dirty) {
+        uint32_t sc[2];
+        gl_compute_scissor(ctx, ctx->width ? ctx->width : 1920u,
+                           ctx->height ? ctx->height : 1080u, sc);
+        *dw++ = 0xc0026900u; /* PACKET3_SET_CONTEXT_REG, two data dwords */
+        *dw++ = 0x094u;      /* mmPA_SC_VPORT_SCISSOR_0_TL .. _BR */
+        *dw++ = sc[0];
+        *dw++ = sc[1];
+        ctx->hw_scissor_dirty = GL_FALSE;
+    }
+
+    /* A clip plane set, or enabled, after the frame's registers were written. Both
+     * the equations and the enable bits move together - a plane written without its
+     * enable does nothing, and an enable without its plane clips against whatever
+     * was there before. */
+    if (ctx->hw_clip_dirty) {
+        gl_hw_emit_clip_planes(ctx, &dw);
+        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmPA_CL_CLIP_CNTL */
+        *dw++ = 0x204u;
+        *dw++ = gl_compute_clip_cntl(ctx);
+        ctx->hw_clip_dirty = GL_FALSE;
+    }
+
+    /* A logic op switched, or its opcode changed, after the frame's registers were
+     * written. */
+    if (ctx->hw_color_control_dirty) {
+        *dw++ = 0xc0016900u; /* PACKET3_SET_CONTEXT_REG mmCB_COLOR_CONTROL (0x202) */
+        *dw++ = 0x202u;
+        *dw++ = gl_compute_cb_color_control(ctx);
+        ctx->hw_color_control_dirty = GL_FALSE;
+    }
+
+    /* The blend constant, only for a draw that reads it. CB_BLEND_RED, _GREEN,
+     * _BLUE and _ALPHA are consecutive from context offset 0x105 (gfx103.json,
+     * 0x28414..0x28420), and radeonsi writes them the same way - one sequence of
+     * the four floats' bits (gallium/drivers/radeonsi/si_state.c:730-738). */
+    if (ctx->hw_blend_color_dirty && gl_blend_reads_constant(ctx)) {
+        /*
+         * **Green goes in the alpha slot when the colour constant is read**,
+         * because on this part it is read from there.
+         *
+         * obSCEne measured it (`-2e9f`, sweep 20260921-run17, firmware 12.40; the
+         * arms are in `docs/hardware/agc-blend-and-export-fw1240.md`): the green
+         * channel of a `BLEND_CONSTANT_COLOR` blend takes `CB_BLEND_ALPHA` at
+         * `0x108` and ignores `CB_BLEND_GREEN` at `0x106`, whatever the packet
+         * shape or write order. Red and blue take their own registers. Writing
+         * green twice is the only way to make `glBlendColor` mean what GL says it
+         * means.
+         *
+         * **And a draw that reads both families is refused rather than
+         * half-served.** Both want `0x108`: the colour constant needs green there
+         * and the alpha constant needs alpha. Nothing can satisfy both, and a
+         * silently wrong channel is exactly what `D009` exists to prevent -
+         * `glBlendFuncSeparate(GL_CONSTANT_COLOR, ..., GL_CONSTANT_ALPHA, ...)` is
+         * legal GL and is rare, so it fails loudly here.
+         */
+        const GLboolean wants_color = gl_blend_reads_constant_color(ctx);
+        const GLboolean wants_alpha = gl_blend_reads_constant_alpha(ctx);
+
+        if (wants_color && wants_alpha) {
+            gl_record_error(ctx, GL_INVALID_OPERATION);
+        }
+
+        *dw++ = 0xc0046900u; /* PACKET3_SET_CONTEXT_REG, four data dwords */
+        *dw++ = 0x105u;      /* mmCB_BLEND_RED .. ALPHA */
+        *dw++ = gl_f32_bits(ctx->blend_color[0]);
+        *dw++ = gl_f32_bits(ctx->blend_color[1]);
+        *dw++ = gl_f32_bits(ctx->blend_color[2]);
+        /* The alpha slot carries green for a colour-constant draw, and the real
+           alpha otherwise. When both were asked for, the error above has already
+           been recorded and the colour constant is the one served. */
+        *dw++ = gl_f32_bits(wants_color ? ctx->blend_color[1] : ctx->blend_color[3]);
+        ctx->hw_blend_color_dirty = GL_FALSE;
+    }
+    hw->dw = dw;
+}
+
+/* The vertex stage's parameter count, the pixel shader and its inputs, the user data,
+ * and the draw. */
+static void gl_hw_tri_emit_draw(gl_context_t *ctx, const gl_tri_t *tri,
+                                gl_hw_draw_t *hw) {
+    gl_program_object_t *const prog = tri->prog;
+    uint32_t *dw = hw->dw;
+    const uint32_t params = hw->params;
+    const uint64_t ps_va = hw->ps_va, desc_table_va = hw->desc_table_va;
+    const uint32_t ps_rsrc2 = hw->ps_rsrc2;
+    const size_t vbo_offset = hw->vbo_offset;
+#ifndef OOPS_HOST_BUILD
+    const uint64_t dcb_t0 = hw->dcb_t0;
+#endif
+    /* The vertex stage with two parameters or three, switched only on a change. */
+    gl_hw_emit_param_count(ctx, &dw, params);
+
+    /* Emit Shader & User Data */
+    *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_LO_PS */
+    *dw++ = 0x08u;
+    *dw++ = (uint32_t)(ps_va >> 8);
+    *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_HI_PS */
+    *dw++ = 0x09u;
+    *dw++ = (uint32_t)(ps_va >> 40);
+    *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_PGM_RSRC2_PS */
+    *dw++ = 0x0bu;
+    *dw++ = ps_rsrc2;
+
+    /* **What the SPI hands the pixel stage**, which a compiled shader decides and
+     * the frame table cannot: `SPI_PS_INPUT_ENA` and `_ADDR` (context 0x1b3 and
+     * 0x1b4). The barycentrics always; a shader reading `gl_FragCoord` also asks
+     * for the window position, which the SPI then puts in v2..v5. A shader that
+     * read those without this would read whatever the registers held.
+     *
+     * Emitted only when it changes, because the frame table already set the value
+     * every fixed-function draw wants and most frames never leave it.
+     * `hw_input_ena` is put back to that value by `gl_hw_begin_frame`, alongside
+     * `hw_params`. */
+    {
+        const uint32_t want =
+            (prog != (gl_program_object_t *)0 && prog->fs && prog->hw_ps_words > 0u)
+                ? prog->hw_ps_input_ena
+                : (gl_polygon_stipple_on(ctx) ? 0x00000302u : 0x00000002u);
+        if (want != ctx->hw_input_ena) {
+            *dw++ = 0xc0016900u;
+            *dw++ = 0x1b3u;
+            *dw++ = want;
+            *dw++ = 0xc0016900u;
+            *dw++ = 0x1b4u;
+            *dw++ = want;
+            ctx->hw_input_ena = want;
+        }
+    }
+
+    /* **A shader that writes its own depth changes the depth block, in two
+     * registers.**
+     *
+     * `SPI_SHADER_Z_FORMAT` (0x1c4) has to say a Z is coming - `SPI_SHADER_32_R`,
+     * one value - or the export is made and nothing reads it. And
+     * `DB_SHADER_CONTROL` (0x203) has to stop testing early: the frame's value is
+     * `EARLY_Z_THEN_LATE_Z`, and a depth the shader computes is not known until the
+     * shader has run, so an early test would have used the interpolated depth and
+     * rejected fragments the shader was going to move. `LATE_Z` with
+     * `Z_EXPORT_ENABLE` is the pair that goes together - bits from `R_02880C` and
+     * `R_028710` for gfx103.
+     *
+     * Emitted only on a change, and put back by `gl_hw_begin_frame` to what the
+     * frame's own table wrote, exactly as the input-enable above. */
+    {
+        const GLboolean compiled_ps = (GLboolean)(prog != (gl_program_object_t *)0 &&
+                                                  prog->fs && prog->hw_ps_words > 0u);
+        const GLboolean depth_ps =
+            (GLboolean)(compiled_ps && prog->hw_ps_exports_depth);
+        /* **`KILL_ENABLE`, which `discard` does not survive without.** Clearing
+         * `exec` stops the shader writing; it does not stop the depth block, which
+         * with early Z has already tested, written and retired the pixel on the
+         * understanding that the shader cannot change the answer. The discarded
+         * fragment then keeps its colour and its depth, and the draw behind it is
+         * rejected by a depth that should not be there - which is `gl2-probe`'s
+         * `discard` exactly, and why `discard-in-loop` passed beside it: that one
+         * runs with no depth test, so there is no early Z to retire the pixel and
+         * the export's mask is the only thing deciding.
+         *
+         * From `uses_discard` in radeonsi (`si_state_shaders.cpp:1711`). `Z_ORDER`
+         * stays `EARLY_Z_THEN_LATE_Z` - case 1 of the table at `:1730` - so this is
+         * one bit and not a move to late Z. */
+        /* **The fixed-function path kills too**, and has the same bug for the same
+         * reason: the alpha test and the polygon stipple both clear `exec`, and
+         * neither has ever told the depth block. GL 1.x has no check that combines
+         * one with a depth test, so nothing has measured it - the register is wrong
+         * either way, and `GL_ALWAYS` is excluded because a test that keeps
+         * everything is not a kill. */
+        const GLboolean kill_ff =
+            (GLboolean)((ctx->cap_alpha_test && ctx->alpha_func != GL_ALWAYS) ||
+                        gl_polygon_stipple_on(ctx));
+        const GLboolean kill_ps =
+            (GLboolean)(compiled_ps ? prog->hw_ps_kills : kill_ff);
+        const uint32_t want_zfmt = depth_ps ? 1u : 0u;
+        const uint32_t want_dbsc =
+            (depth_ps ? 0x00000001u : 0x00000010u) | (kill_ps ? 0x00000040u : 0u);
+        if (want_zfmt != ctx->hw_z_format) {
+            *dw++ = 0xc0016900u;
+            *dw++ = 0x1c4u;
+            *dw++ = want_zfmt;
+            ctx->hw_z_format = want_zfmt;
+        }
+        /* **Its own comparison, not the format's.** A program that discards and
+         * does not write depth moves this register while the format stands still.
+         */
+        if (want_dbsc != ctx->hw_db_shader_control) {
+            *dw++ = 0xc0016900u;
+            *dw++ = 0x203u;
+            *dw++ = want_dbsc;
+            ctx->hw_db_shader_control = want_dbsc;
+        }
+    }
+
+    /* Pass Descriptor Table VA to PS User SGPRs 0 and 1
+     * (mmSPI_SHADER_USER_DATA_PS_0 = 0x0c, 0x0d) */
+    *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_PS_0 */
+    *dw++ = 0x0cu;
+    *dw++ = (uint32_t)desc_table_va;
+    *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_PS_1 */
+    *dw++ = 0x0du;
+    *dw++ = (uint32_t)(desc_table_va >> 32);
+
+    /* Pass VBO byte offset into GS User SGPR 0 (mmSPI_SHADER_USER_DATA_GS_0 = 0x8c)
+     */
+    *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_GS_0 */
+    *dw++ = 0x8cu;
+    *dw++ = (uint32_t)vbo_offset;
+    *dw++ = 0xc0017600u; /* PACKET3_SET_SH_REG mmSPI_SHADER_USER_DATA_VS_0 (legacy
+                            VS stage) */
+    *dw++ = 0x4cu;
+    *dw++ = (uint32_t)vbo_offset;
+
+    /* Dispatch Hardware Draw */
+    *dw++ = 0xc0002f00u; /* PACKET3_NUM_INSTANCES */
+    *dw++ = 1u;
+    *dw++ = 0xc0012d00u; /* DRAW_INDEX_AUTO */
+    *dw++ = 3u;
+    *dw++ = 2u;
+
+    ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
     ctx->triangles_drawn++;
-#else
-    gl_hw_fail(ctx, "no hardware pipeline: nothing is drawn");
+#ifndef OOPS_HOST_BUILD
+    ctx->hw_dcb_ns += oops_time_get_ns() - dcb_t0;
 #endif
 }
 
