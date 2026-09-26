@@ -7999,8 +7999,14 @@ static GLboolean gl_fb_attachment_size(gl_context_t *ctx, const gl_fb_attachment
     const gl_texture_object_t *tex = gl_find_texture(ctx, at->name);
     if (!tex)
         return GL_FALSE;
+    /* A cube attachment names one face, and each face has its own image. */
     gl_tex_view_t view;
-    if (!gl_tex_level_view(tex, at->level, &view))
+    const GLboolean have =
+        (at->textarget == GL_TEXTURE_2D)
+            ? gl_tex_level_view(tex, at->level, &view)
+            : gl_tex_face_view(tex, GL_CUBE_FACE_INDEX(at->textarget), at->level,
+                               &view);
+    if (!have)
         return GL_FALSE;
     *w = view.width;
     *h = view.height;

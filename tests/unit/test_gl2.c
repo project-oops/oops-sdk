@@ -1423,6 +1423,35 @@ static void test_gl2_framebuffer_objects(void) {
     oops_display_close(t.disp);
 }
 
+/* A cube-face attachment is sized from the face it names, not from face +X. */
+static void test_gl2_cube_face_attachment_is_sized_from_its_face(void) {
+    gl2_target_t t = gl2_target();
+    GLuint tex = 0, fb = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL_RGBA, 4, 4, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, 0, GL_RGBA, 8, 8, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_CUBE_MAP_POSITIVE_Y, tex, 0);
+    GLuint rb = 0;
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16_ARB, 8, 8);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb);
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
+    glDeleteTextures(1, &tex);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 /*
  * Function overloading (GLSL 1.10) resolves each call to the right signature, as in
  * mesa-demos' `simplex-noise.glsl`, which declares `permute` four times. Every overload
@@ -8316,6 +8345,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_array_length_constant_expressions);
     RUN_TEST(test_gl2_es_100_shaders);
     RUN_TEST(test_gl2_framebuffer_objects);
+    RUN_TEST(test_gl2_cube_face_attachment_is_sized_from_its_face);
     RUN_TEST(test_gl2_draw_into_a_framebuffer_object);
     RUN_TEST(test_gl2_blit_framebuffer_reads_the_read_binding);
     RUN_TEST(test_gl2_generate_mipmap);
