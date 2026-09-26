@@ -110,7 +110,9 @@ enum {
 /* The specification's minimum, which is what this provides. */
 #define OOPS_GL_ATTRIB_STACK_CAPACITY 16
 #define OOPS_GL_CLIENT_ATTRIB_STACK_CAPACITY 16
-#define OOPS_GL_MAX_TEXTURE_OBJECTS 256
+/* Texture names. SuperTux's menu alone exhausted 256; its tile and sprite images number
+ * in the thousands. 648 bytes each, in the context's host memory. */
+#define OOPS_GL_MAX_TEXTURE_OBJECTS 4096
 /* Framebuffer and renderbuffer objects. Fewer than textures because a program has a
  * handful of render targets where it has hundreds of images - Mesa sizes neither,
  * having no fixed pool, so these are this implementation's own and reported as
