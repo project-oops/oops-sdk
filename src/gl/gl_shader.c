@@ -56,6 +56,34 @@ static gl_context_t *gl2_ctx(void) {
     return ctx;
 }
 
+/*
+ * The context for `glCreateShader` and `glCreateProgram`, which raise its version to 2.0 rather
+ * than refusing a lower one.
+ *
+ * Asking for a shader object *is* the declaration that a title wants the programmable pipeline -
+ * `gl2_used` beside it already treats it that way, and the draw path skips the generic attribute
+ * slots until one of these two is called. A title that never calls them keeps its 1.x badge and
+ * pays nothing, which is what that note is protecting.
+ *
+ * The version is otherwise the caller's to set, through `glContextSetVersion`, and SDL only does so
+ * for a context asking for an ES profile. sm64 asks SDL for no profile and no version at all and
+ * then compiles a shader, which was `GL_INVALID_OPERATION` here and `Vertex shader compilation
+ * failed` on its own screen - a refusal on a badge rather than on a capability, for a pipeline this
+ * implementation has.
+ */
+static gl_context_t *gl2_ctx_adopt(void) {
+    gl_context_t *ctx = gl_get_ctx();
+    if (!ctx)
+        return (gl_context_t *)0;
+    if (!gl_version_at_least(ctx, 2u, 0u)) {
+        oops_log_info("GL", "a shader object was asked for on a GL %u.%u context: taking that as "
+                            "the request for 2.0 that it is",
+                      ctx->version_major, ctx->version_minor);
+        glContextSetVersion(2u, 0u);
+    }
+    return ctx;
+}
+
 gl_shader_object_t *gl_find_shader(gl_context_t *ctx, GLuint name) {
     if (!ctx || name == 0u)
         return (gl_shader_object_t *)0;
@@ -214,7 +242,7 @@ static void return_string(const char *src, GLsizei bufSize, GLsizei *length,
  * ------------------------------------------------------------------------- */
 
 GLuint glCreateShader(GLenum type) {
-    gl_context_t *ctx = gl2_ctx();
+    gl_context_t *ctx = gl2_ctx_adopt();
     if (!ctx)
         return 0u;
     if (type != GL_VERTEX_SHADER && type != GL_FRAGMENT_SHADER) {
@@ -425,7 +453,7 @@ void glGetShaderSource(GLuint shader, GLsizei bufSize, GLsizei *length,
  * ------------------------------------------------------------------------- */
 
 GLuint glCreateProgram(void) {
-    gl_context_t *ctx = gl2_ctx();
+    gl_context_t *ctx = gl2_ctx_adopt();
     if (!ctx)
         return 0u;
     for (int i = 0; i < OOPS_GL_MAX_PROGRAM_OBJECTS; i++) {
