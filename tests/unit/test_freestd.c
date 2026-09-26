@@ -548,8 +548,73 @@ static void test_freestd_sscanf_agrees_with_the_host(void) {
     }
 }
 
+/*
+ * The 128-bit division helpers, against **known answers rather than the host's `/`**.
+ *
+ * That is not squeamishness. On x86-64, `/` on a 128-bit integer *is* a call to
+ * `__udivti3`, and `freestd.c` is linked into this test - so comparing against the
+ * operator would compare the subject with itself and pass for an implementation that is
+ * consistently wrong. `oops-apps/common/rt/tests/rt_test.c` records the same trap from
+ * the other side, where it was solved by renaming the subject; here the answers are
+ * simply written down.
+ *
+ * The cases that matter are the signs, not the magnitudes. C truncates toward zero and
+ * gives the remainder the *dividend's* sign: `-7 / 2` is -3 remainder -1, where a
+ * floor-division implementation would say -4 remainder 1. And the most negative value
+ * is where negating in signed arithmetic would be undefined.
+ */
+typedef unsigned __int128 t_u128;
+typedef __int128 t_i128;
+
+extern t_u128 __udivti3(t_u128 a, t_u128 b);
+extern t_u128 __umodti3(t_u128 a, t_u128 b);
+extern t_i128 __divti3(t_i128 a, t_i128 b);
+extern t_i128 __modti3(t_i128 a, t_i128 b);
+
+static void test_freestd_int128_division(void) {
+    const t_i128 most_negative = (t_i128)((t_u128)1 << 127);
+    const t_i128 most_positive = ~most_negative;
+    const t_u128 two64 = (t_u128)1 << 64;
+
+    /* Unsigned: small, at the word boundary, and across it. */
+    ASSERT_TRUE(__udivti3(100, 7) == 14);
+    ASSERT_TRUE(__umodti3(100, 7) == 2);
+    ASSERT_TRUE(__udivti3(two64, 2) == ((t_u128)1 << 63));
+    ASSERT_TRUE(__umodti3(two64, 2) == 0);
+    ASSERT_TRUE(__udivti3(two64 + 5, two64) == 1);
+    ASSERT_TRUE(__umodti3(two64 + 5, two64) == 5);
+    ASSERT_TRUE(__udivti3(~(t_u128)0, 1) == ~(t_u128)0);
+
+    /* Signed: every sign combination of 7 and 2. Truncation toward zero, remainder
+     * takes the dividend's sign. */
+    ASSERT_TRUE(__divti3(7, 2) == 3);
+    ASSERT_TRUE(__modti3(7, 2) == 1);
+    ASSERT_TRUE(__divti3(-7, 2) == -3);
+    ASSERT_TRUE(__modti3(-7, 2) == -1);
+    ASSERT_TRUE(__divti3(7, -2) == -3);
+    ASSERT_TRUE(__modti3(7, -2) == 1);
+    ASSERT_TRUE(__divti3(-7, -2) == 3);
+    ASSERT_TRUE(__modti3(-7, -2) == -1);
+
+    /* Exact division leaves no remainder to carry a sign. */
+    ASSERT_TRUE(__divti3(-8, 2) == -4);
+    ASSERT_TRUE(__modti3(-8, 2) == 0);
+
+    /* The extremes, where an unsigned negation is the only correct one. */
+    ASSERT_TRUE(__divti3(most_negative, 1) == most_negative);
+    ASSERT_TRUE(__divti3(most_negative, 2) == -(t_i128)((t_u128)1 << 126));
+    ASSERT_TRUE(__modti3(most_negative, 2) == 0);
+    ASSERT_TRUE(__divti3(most_positive, -1) == -most_positive);
+    ASSERT_TRUE(__divti3(most_negative, most_negative) == 1);
+
+    /* A nanosecond count to seconds, which is the call libc++'s <filesystem> makes. */
+    ASSERT_TRUE(__divti3(-1500000000, 1000000000) == -1);
+    ASSERT_TRUE(__modti3(-1500000000, 1000000000) == -500000000);
+}
+
 void run_unit_tests_freestd(void) {
     TEST_SUITE_BEGIN("Freestanding Runtime Helpers");
+    RUN_TEST(test_freestd_int128_division);
     RUN_TEST(test_freestd_strings);
     RUN_TEST(test_freestd_formatting);
     RUN_TEST(test_freestd_nid);

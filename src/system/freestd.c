@@ -916,3 +916,86 @@ void *obs_bsearch(const void *key, const void *base, size_t count, size_t size,
   }
   return NULL;
 }
+
+/*
+ * 128-bit unsigned division helper for compiler-rt runtime.
+ * Under -nostdlib, clang emits calls to __udivti3 for `unsigned __int128 / __int128`.
+ */
+typedef unsigned __int128 oops_u128;
+
+oops_u128 __udivti3(oops_u128 num, oops_u128 den);
+
+oops_u128 __udivti3(oops_u128 num, oops_u128 den) {
+  if (den == 0) return 0;
+  if (den > num) return 0;
+  if (den == num) return 1;
+
+  oops_u128 quot = 0;
+  oops_u128 bit = 1;
+  oops_u128 d = den;
+
+  while (d <= num && (d & ((oops_u128)1 << 127)) == 0) {
+    d <<= 1;
+    bit <<= 1;
+  }
+
+  while (bit != 0) {
+    if (num >= d) {
+      num -= d;
+      quot |= bit;
+    }
+    d >>= 1;
+    bit >>= 1;
+  }
+  return quot;
+}
+
+/*
+ * The remainder and the signed pair, which arrived with libc++'s `<filesystem>`.
+ *
+ * `file_time_type` is nanoseconds in a 128-bit representation, so reporting a
+ * timestamp is a *signed* 128-bit divide. libc++ is linked `--whole-archive`, so
+ * every object in it lands in every C++ payload - which is how a title that never
+ * mentions `std::filesystem` came to fail its link on `__divti3`.
+ *
+ * **Magnitude and sign over the unsigned divide above**, rather than a second loop.
+ * C truncates toward zero and gives the remainder the *dividend's* sign, which is
+ * exactly what dividing absolute values and reapplying the signs produces - so there
+ * is one algorithm here to be right about, not two. `-7 / 2` is -3 remainder -1, not
+ * -4 remainder 1.
+ *
+ * **The negation is unsigned on purpose.** `-a` on the most negative `__int128` is
+ * signed overflow, which is undefined; casting first makes it the defined wrap that
+ * gives the correct magnitude. That value is the one case a sign-magnitude divider
+ * written the obvious way gets wrong.
+ */
+typedef __int128 oops_i128;
+
+oops_u128 __umodti3(oops_u128 num, oops_u128 den);
+oops_i128 __divti3(oops_i128 a, oops_i128 b);
+oops_i128 __modti3(oops_i128 a, oops_i128 b);
+
+oops_u128 __umodti3(oops_u128 num, oops_u128 den) {
+  if (den == 0) return 0;
+  return num - __udivti3(num, den) * den;
+}
+
+oops_i128 __divti3(oops_i128 a, oops_i128 b) {
+  const int negative = ((a < 0) != (b < 0));
+  const oops_u128 ua = (a < 0) ? (oops_u128)0 - (oops_u128)a : (oops_u128)a;
+  const oops_u128 ub = (b < 0) ? (oops_u128)0 - (oops_u128)b : (oops_u128)b;
+  const oops_u128 q = __udivti3(ua, ub);
+
+  return negative ? (oops_i128)((oops_u128)0 - q) : (oops_i128)q;
+}
+
+oops_i128 __modti3(oops_i128 a, oops_i128 b) {
+  const oops_u128 ua = (a < 0) ? (oops_u128)0 - (oops_u128)a : (oops_u128)a;
+  const oops_u128 ub = (b < 0) ? (oops_u128)0 - (oops_u128)b : (oops_u128)b;
+  const oops_u128 r = __umodti3(ua, ub);
+
+  /* The dividend's sign, not the divisor's - C's rule, and where a floor-division
+   * implementation would differ. */
+  return (a < 0) ? (oops_i128)((oops_u128)0 - r) : (oops_i128)r;
+}
+
