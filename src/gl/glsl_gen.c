@@ -1634,11 +1634,46 @@ static int argc_of(const glsl_gen_t *g, int32_t first_arg) {
     return n;
 }
 
-static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
-                                int32_t first_arg, int32_t node) {
-    const char *const nm = callee->text;
-    const size_t len = callee->length;
+/* The built-in families after the texture lookups, one function each. A family returns
+ * GEN_NOT_MINE for a name it does not generate; every other answer, an error included,
+ * is final. */
+typedef glsl_value_t (*gen_builtin_family_fn)(glsl_gen_t *g, const char *nm, size_t len,
+                                              const glsl_value_t *arg, int argc, int w,
+                                              int32_t first_arg, int32_t node);
+static const glsl_value_t GEN_NOT_MINE = {0u, -1};
+static glsl_value_t gen_tex_address(glsl_gen_t *g, glsl_value_t uv, GLboolean tex_cube,
+                                    GLboolean projective, int div_w,
+                                    GLboolean want_shadow, GLboolean want_oned,
+                                    uint32_t set, uint32_t want_dim, GLboolean biased,
+                                    int32_t coord_node, int32_t node);
+static glsl_value_t gen_tex_sample(glsl_gen_t *g, glsl_value_t uv, uint32_t set,
+                                   uint32_t want_dim, GLboolean want_shadow,
+                                   GLboolean biased, int32_t coord_node, int32_t node);
+static glsl_value_t gen_builtin_relational(glsl_gen_t *g, const char *nm, size_t len,
+                                           const glsl_value_t *arg, int argc, int w,
+                                           int32_t first_arg, int32_t node);
+static glsl_value_t gen_builtin_componentwise(glsl_gen_t *g, const char *nm, size_t len,
+                                              const glsl_value_t *arg, int argc, int w,
+                                              int32_t first_arg, int32_t node);
+static glsl_value_t gen_builtin_common(glsl_gen_t *g, const char *nm, size_t len,
+                                       const glsl_value_t *arg, int argc, int w,
+                                       int32_t first_arg, int32_t node);
+static glsl_value_t gen_builtin_step_dot(glsl_gen_t *g, const char *nm, size_t len,
+                                         const glsl_value_t *arg, int argc, int w,
+                                         int32_t first_arg, int32_t node);
+static glsl_value_t gen_builtin_inverse_trig(glsl_gen_t *g, const char *nm, size_t len,
+                                             const glsl_value_t *arg, int argc, int w,
+                                             int32_t first_arg, int32_t node);
+static glsl_value_t gen_builtin_matrix(glsl_gen_t *g, const char *nm, size_t len,
+                                       const glsl_value_t *arg, int argc, int w,
+                                       int32_t first_arg, int32_t node);
+static glsl_value_t gen_builtin_geometric(glsl_gen_t *g, const char *nm, size_t len,
+                                          const glsl_value_t *arg, int argc, int w,
+                                          int32_t first_arg, int32_t node);
 
+/* The texture lookups, or GEN_NOT_MINE for a name that is not one. */
+static glsl_value_t gen_builtin_texture(glsl_gen_t *g, const char *nm, size_t len,
+                                        int32_t first_arg, int32_t node) {
     /* `texture2D` is generated; the rest of section 8.7 is not. Each of the others
      * needs something this has no measurement for - a cube's coordinate is a direction
      * the hardware resolves to a face, a volume's is three components, a `Proj` form
@@ -1672,322 +1707,345 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
     const GLboolean tex_1dproj = nm_is(nm, len, "texture1DProj");
     const GLboolean tex_1dshadow = nm_is(nm, len, "shadow1D");
     const GLboolean tex_1dshadowproj = nm_is(nm, len, "shadow1DProj");
-    if (nm_is(nm, len, "texture2D") || tex_proj || tex_cube || tex_3d || tex_3dproj ||
-        tex_shadow || tex_shadowproj || tex_1d || tex_1dproj || tex_1dshadow ||
-        tex_1dshadowproj) {
-        /* The dim the lookup's *name* asks for; the sampler's has to match it below. */
-        const GLboolean want_shadow = (GLboolean)(tex_shadow || tex_shadowproj ||
-                                                  tex_1dshadow || tex_1dshadowproj);
-        const GLboolean want_oned =
-            (GLboolean)(tex_1d || tex_1dproj || tex_1dshadow || tex_1dshadowproj);
-        /* **A 1D lookup samples a 2D descriptor**, because that is what a 1D texture is
-         * described as - one row, TYPE 9. Telling the hardware `dim:SQ_RSRC_IMG_1D`
-         * would say something the descriptor does not. */
-        const uint32_t want_dim =
-            tex_cube ? GLSL_IMG_DIM_CUBE
-                     : ((tex_3d || tex_3dproj) ? GLSL_IMG_DIM_3D : GLSL_IMG_DIM_2D);
-        /* How many components the coordinate carries. A projective form carries one
-         * more than it samples - the divisor - a cube carries three that become a face
-         * and a place on it, and a shadow carries the reference in its third.
-         * `texture1D` takes a bare float, and `texture2DProj`'s two accepted widths are
-         * the one case decided from the argument. */
-        const int coord_w = tex_1d                                               ? 1
-                            : (tex_cube || tex_3d || tex_shadow || tex_1dshadow) ? 3
-                            : (tex_3dproj || tex_shadowproj || tex_1dshadowproj) ? 4
-                            : tex_1dproj                                         ? 2
-                            : tex_proj                                           ? 0
-                                                                                 : 2;
-        /* **Everything before the divisor is divided**, which is the reference's own
-         * rule and right for every form: one component for a 1D, two for a 2D, three
-         * for a volume, and for a shadow the reference along with them. */
-        const GLboolean projective =
-            (GLboolean)(tex_proj || tex_3dproj || tex_shadowproj || tex_1dproj ||
-                        tex_1dshadowproj);
-        /*
-         * **The third argument is a level-of-detail bias**, which GLSL 1.10 gives every
-         * fragment-stage lookup - `texture2D(s, c, bias)`. It is added to the level the
-         * derivatives worked out, so it is not a different lookup, just a different
-         * opcode with one more address register.
-         *
-         * Not offered for the shadow forms: those go through `image_sample_c`, whose
-         * biased spelling is a third opcode this has not read out of an assembler.
-         */
-        const int tex_argc = argc_of(g, first_arg);
-        const GLboolean biased = (GLboolean)(tex_argc == 3 && !want_shadow);
-        if (tex_argc != 2 && !biased) {
+    if (!(nm_is(nm, len, "texture2D") || tex_proj || tex_cube || tex_3d || tex_3dproj ||
+          tex_shadow || tex_shadowproj || tex_1d || tex_1dproj || tex_1dshadow ||
+          tex_1dshadowproj)) {
+        if (nm_prefix(nm, len, "texture") || nm_prefix(nm, len, "shadow")) {
             return gen_fail(
                 g,
-                want_shadow ? "a shadow lookup takes a sampler and a coordinate; the "
+                "texture2D, texture2DProj, textureCube, texture3D and texture3DProj "
+                "are generated; a shadow lookup is not. It is different in kind - it "
+                "compares against a reference rather than returning a texel, through "
+                "`image_sample_c` and a compare function in the sampler - and that "
+                "is not written here yet",
+                node);
+        }
+        return GEN_NOT_MINE;
+    }
+    /* The dim the lookup's *name* asks for; the sampler's has to match it below. */
+    const GLboolean want_shadow =
+        (GLboolean)(tex_shadow || tex_shadowproj || tex_1dshadow || tex_1dshadowproj);
+    const GLboolean want_oned =
+        (GLboolean)(tex_1d || tex_1dproj || tex_1dshadow || tex_1dshadowproj);
+    /* **A 1D lookup samples a 2D descriptor**, because that is what a 1D texture is
+     * described as - one row, TYPE 9. Telling the hardware `dim:SQ_RSRC_IMG_1D`
+     * would say something the descriptor does not. */
+    const uint32_t want_dim =
+        tex_cube ? GLSL_IMG_DIM_CUBE
+                 : ((tex_3d || tex_3dproj) ? GLSL_IMG_DIM_3D : GLSL_IMG_DIM_2D);
+    /* How many components the coordinate carries. A projective form carries one
+     * more than it samples - the divisor - a cube carries three that become a face
+     * and a place on it, and a shadow carries the reference in its third.
+     * `texture1D` takes a bare float, and `texture2DProj`'s two accepted widths are
+     * the one case decided from the argument. */
+    const int coord_w = tex_1d                                               ? 1
+                        : (tex_cube || tex_3d || tex_shadow || tex_1dshadow) ? 3
+                        : (tex_3dproj || tex_shadowproj || tex_1dshadowproj) ? 4
+                        : tex_1dproj                                         ? 2
+                        : tex_proj                                           ? 0
+                                                                             : 2;
+    /* **Everything before the divisor is divided**, which is the reference's own
+     * rule and right for every form: one component for a 1D, two for a 2D, three
+     * for a volume, and for a shadow the reference along with them. */
+    const GLboolean projective = (GLboolean)(tex_proj || tex_3dproj || tex_shadowproj ||
+                                             tex_1dproj || tex_1dshadowproj);
+    /*
+     * **The third argument is a level-of-detail bias**, which GLSL 1.10 gives every
+     * fragment-stage lookup - `texture2D(s, c, bias)`. It is added to the level the
+     * derivatives worked out, so it is not a different lookup, just a different
+     * opcode with one more address register.
+     *
+     * Not offered for the shadow forms: those go through `image_sample_c`, whose
+     * biased spelling is a third opcode this has not read out of an assembler.
+     */
+    const int tex_argc = argc_of(g, first_arg);
+    const GLboolean biased = (GLboolean)(tex_argc == 3 && !want_shadow);
+    if (tex_argc != 2 && !biased) {
+        return gen_fail(g,
+                        want_shadow
+                            ? "a shadow lookup takes a sampler and a coordinate; the "
                               "biased form goes through a different instruction and is "
                               "not generated"
                             : "a texture lookup takes a sampler and a coordinate, and "
                               "may take a level-of-detail bias after them",
-                node);
-        }
-        const glsl_node_t *sn = &g->ast->nodes[first_arg];
-        if (sn->kind != GLSL_NODE_IDENTIFIER) {
-            return gen_fail(
-                g,
-                "the sampler has to be named directly; there is no way to carry "
-                "one in a variable here",
-                node);
-        }
-        uint32_t set = 0u;
-        GLboolean found = GL_FALSE;
-        uint32_t samp_dim = GLSL_IMG_DIM_2D;
-        GLboolean samp_shadow = GL_FALSE;
-        GLboolean samp_oned = GL_FALSE;
-        for (int i = 0; i < g->sampler_count; i++) {
-            if (g->samplers[i].name_len == sn->length &&
-                nm_is(sn->text, sn->length, g->samplers[i].name)) {
-                set = g->samplers[i].set;
-                samp_dim = g->samplers[i].dim;
-                samp_shadow = g->samplers[i].shadow;
-                samp_oned = g->samplers[i].oned;
-                found = GL_TRUE;
-                break;
-            }
-        }
-        if (!found) {
-            return gen_fail(
-                g, "this name is not a sampler the draw path loads descriptors for",
-                node);
-        }
-        /* **The lookup and the sampler have to be the same shape.** The descriptor
-         * decides how the hardware walks the memory - a cube's six faces are one array
-         * under TYPE 0xb, a volume's slices are TYPE 0xa with the last one in WORD4 -
-         * and the shader decides how many address registers it hands over. Sampling a
-         * cube through the 2D path would send two registers where three are read, and
-         * the third would be whatever the allocator last left there. */
-        if (samp_dim != want_dim || samp_shadow != want_shadow ||
-            samp_oned != want_oned) {
-            return gen_fail(
-                g,
-                "this lookup does not match its sampler's type: texture1D takes "
-                "a sampler1D, texture2D a sampler2D, textureCube a samplerCube, "
-                "texture3D a sampler3D, and the shadow forms their own",
-                node);
-        }
-        const int32_t coord_node = g->ast->nodes[first_arg].sibling;
-        const glsl_type_t ct = glsl_type_of(g->sema, coord_node);
-        /* `texture2DProj` is the one form that takes either width - `vec3` divides by z
-         * and `vec4` by w, ignoring z - so its expected width is worked out here rather
-         * than above. */
-        /* `texture2DProj` and `texture1DProj` each take two widths - the extra
-         * component is ignored - so theirs is decided from the argument rather than the
-         * name. */
-        const int want_w = (coord_w != 0) ? coord_w : (ct == GLSL_TYPE_VEC4 ? 4 : 3);
-        const glsl_type_t want_t = (want_w == 4)   ? GLSL_TYPE_VEC4
-                                   : (want_w == 3) ? GLSL_TYPE_VEC3
-                                   : (want_w == 2) ? GLSL_TYPE_VEC2
-                                                   : GLSL_TYPE_FLOAT;
-        if (ct != want_t && !(tex_proj && ct == GLSL_TYPE_VEC3) &&
-            !(tex_1dproj && ct == GLSL_TYPE_VEC4)) {
-            return gen_fail(
-                g,
-                "this texture lookup's coordinate is not the width it takes: "
-                "texture1D a float, texture2D a vec2, textureCube a vec3 "
-                "direction, texture3D a vec3, a shadow form the reference in its "
-                "third, and a projective form one component more",
-                node);
-        }
-        glsl_value_t uv = gen_expr(g, coord_node);
-        if (is_bad(uv))
-            return uv;
-        if (uv.count != want_w && !(tex_1dproj && uv.count == 4)) {
-            return gen_fail(g, "this texture coordinate is not the width its type says",
-                            node);
-        }
-        /* Everything ahead of the divisor, which is the last component of whatever
-         * arrived. */
-        const int div_w = uv.count - 1;
-        /*
-         * **A cube's coordinate is a direction, and the hardware turns it into a
-         * face.**
-         *
-         * Four instructions do the selection - `v_cubeid_f32` names the face,
-         * `v_cubesc_f32` and `v_cubetc_f32` give the place on it, `v_cubema_f32` gives
-         * twice the major axis - and the shader divides by that and biases by a half to
-         * land in [0, 1]. The sampler then takes three address registers: u, v and the
-         * face. That is the sequence ACO emits, and `tools/shader/tex-cube.s` is the
-         * assembled copy these words come from.
-         *
-         * **The direction is not normalised and must not be**: scaling all three
-         * components leaves the face and the place on it alone, which is exactly why a
-         * direction works as a coordinate. `|ma|` is `max(ma, -ma)` rather than the
-         * VOP3 absolute-value modifier, so no encoding is needed beyond the four above.
-         */
-        if (tex_cube) {
-            glsl_value_t half = gen_const(g, 0.5, node);
-            if (is_bad(half))
-                return half;
-            glsl_value_t t = gen_alloc(g, 4, node);
-            if (is_bad(t))
-                return t;
-            const uint32_t sc = t.base + 0u, tc = t.base + 1u;
-            const uint32_t ma = t.base + 2u, neg = t.base + 3u;
-            const uint32_t X = GLSL_VOP3_VGPR(uv.base + 0u);
-            const uint32_t Y = GLSL_VOP3_VGPR(uv.base + 1u);
-            const uint32_t Z = GLSL_VOP3_VGPR(uv.base + 2u);
-            /* The three address registers, allocated as one run because `image_sample`
-             * reads them consecutively from `vaddr`. */
-            glsl_value_t addr = gen_alloc(g, 3, node);
-            if (is_bad(addr))
-                return addr;
-            glsl_emit_vop3(g->code, GLSL_VOP3_CUBEID_F32, addr.base + 2u, X, Y, Z);
-            glsl_emit_vop3(g->code, GLSL_VOP3_CUBESC_F32, sc, X, Y, Z);
-            glsl_emit_vop3(g->code, GLSL_VOP3_CUBETC_F32, tc, X, Y, Z);
-            glsl_emit_vop3(g->code, GLSL_VOP3_CUBEMA_F32, ma, X, Y, Z);
-            glsl_emit_neg_f32(g->code, neg, ma);
-            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, ma, neg, ma); /* |ma| */
-            glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, ma, ma);
-            glsl_emit_mul_f32(g->code, ma, half.base, ma); /* 1 / (2 |ma|) */
-            glsl_emit_mov(g->code, addr.base + 0u, half.base);
-            glsl_emit_fmac_f32(g->code, addr.base + 0u, sc, ma); /* u */
-            glsl_emit_mov(g->code, addr.base + 1u, half.base);
-            glsl_emit_fmac_f32(g->code, addr.base + 1u, tc, ma); /* v */
-            uv = addr;
-        }
-        if (projective) {
-            const uint32_t q = uv.base + (uint32_t)(uv.count - 1);
-            glsl_value_t zero = gen_const(g, 0.0, node);
-            if (is_bad(zero))
-                return zero;
-            glsl_value_t rcp = gen_alloc(g, 1, node);
-            if (is_bad(rcp))
-                return rcp;
-            glsl_value_t inv = gen_alloc(g, 1, node);
-            if (is_bad(inv))
-                return inv;
-            glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, rcp.base, q);
-            glsl_emit_cmp(g->code, GLSL_VOPC_NEQ_F32, q, zero.base);
-            /* `d = vcc ? s1 : s0`, so the **false** value comes first: a zero divisor
-             * takes the zero rather than the reciprocal's infinity. */
-            glsl_emit_cndmask(g->code, inv.base, zero.base, rcp.base);
-            /* Into its own run, after the coordinate, so the multiplies cannot read a
-             * component one of them has already overwritten - which for the 3D form,
-             * where the divisor is the fourth and the results are the first three, they
-             * otherwise would not, but the 2D vec4 form writes over `z` and the rule is
-             * worth having in one place. */
-            glsl_value_t st = gen_alloc(g, div_w, node);
-            if (is_bad(st))
-                return st;
-            for (int cc = 0; cc < div_w; cc++) {
-                glsl_emit_mul_f32(g->code, st.base + (uint32_t)cc,
-                                  uv.base + (uint32_t)cc, inv.base);
-            }
-            uv = st;
-        }
-
-        /*
-         * **A shadow lookup's reference comes first**, ahead of s and t.
-         *
-         * That order is not read off the ISA alone - obSCEne's `-b4e1` reports the
-         * VADDR range as `v[2:4] with ref_z in v2 at position 0` - and getting it wrong
-         * would sample at the reference and compare against a texture coordinate, which
-         * is a picture rather than an error.
-         *
-         * **The reference is clamped to [0, 1]**, low end first, which is GL 1.4
-         * (3.8.14) and the order `tools/shader/tex-shadow.s` follows softpipe in. The
-         * comparison itself is the sampler's: `DEPTH_COMPARE_FUNC` in its word 0
-         * already carries `GL_TEXTURE_COMPARE_FUNC`, so what the shader adds is the
-         * reference and the `_c` form of the instruction that hands it over.
-         */
-        if (want_shadow || want_oned) {
-            glsl_value_t zero = gen_const(g, 0.0, node);
-            if (is_bad(zero))
-                return zero;
-            const int aw = want_shadow ? 3 : 2;
-            glsl_value_t addr = gen_alloc(g, aw, node);
-            if (is_bad(addr))
-                return addr;
-            int at = 0;
-            if (want_shadow) {
-                glsl_value_t one = gen_const(g, 1.0, node);
-                if (is_bad(one))
-                    return one;
-                glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, addr.base + 0u, zero.base,
-                                  uv.base + 2u);
-                glsl_emit_vop2_op(g->code, GLSL_VOP2_MIN_F32, addr.base + 0u, one.base,
-                                  addr.base + 0u);
-                at = 1;
-            }
-            glsl_emit_mov(g->code, addr.base + (uint32_t)at, uv.base + 0u); /* s */
-            /* **`t` is a real coordinate for a 2D and a zero for a 1D**, because a 1D
-             * texture is one row of a 2D image - and the descriptor says 2D, so the
-             * sampler reads a `t` either way. Leaving it unwritten would sample at
-             * whatever the allocator had. */
-            glsl_emit_mov(g->code, addr.base + (uint32_t)at + 1u,
-                          want_oned ? zero.base : uv.base + 1u);
-            uv = addr;
-        }
-
-        /* **The sample's four registers are allocated after the coordinate**, so they
-         * cannot overlap it - `image_sample` reads `vaddr` and writes `vdata`, and an
-         * overlap would have it read back what it had just written for the second
-         * component. */
-        glsl_value_t out = gen_alloc(g, 4, node);
-        if (is_bad(out))
-            return out;
-        const uint32_t srsrc = GLSL_GEN_TEX_SGPR_BASE + set * GLSL_GEN_TEX_SGPR_STRIDE;
-        if (want_shadow) {
-            /* **One value comes back, not four** - `dmask:0x1` - and GL spreads it by
-             * the texture's `GL_DEPTH_TEXTURE_MODE`. This emits the `GL_LUMINANCE`
-             * spread,
-             * `(v, v, v, 1)`, which is that parameter's default; the other two modes
-             * are a per-texture choice made after the shader is compiled, and the draw
-             * path says so when it sees one. */
-            glsl_emit_image_sample_masked(g->code, GLSL_MIMG_SAMPLE_C, GLSL_IMG_DIM_2D,
-                                          0x1u, out.base, uv.base, srsrc, srsrc + 8u);
-            glsl_emit_s_waitcnt_vm(g->code);
-            glsl_emit_mov(g->code, out.base + 1u, out.base + 0u);
-            glsl_emit_mov(g->code, out.base + 2u, out.base + 0u);
-            glsl_emit_mov_imm(g->code, out.base + 3u, float_bits(1.0f));
-            return out;
-        }
-        /* **The bias goes first in the address run**, which means a fresh run: the
-         * coordinate is already in consecutive registers and there is no room in front
-         * of it. The move is the cost of the biased form, and only a biased lookup pays
-         * it. */
-        uint32_t addr_base = uv.base;
-        if (biased) {
-            const int32_t bias_node = g->ast->nodes[coord_node].sibling;
-            glsl_value_t b = gen_expr(g, bias_node);
-            if (is_bad(b))
-                return b;
-            if (b.count != 1) {
-                return gen_fail(g, "a texture lookup's bias is a single number", node);
-            }
-            glsl_value_t run = gen_alloc(g, uv.count + 1, node);
-            if (is_bad(run))
-                return run;
-            glsl_emit_mov(g->code, run.base, b.base);
-            for (int i = 0; i < uv.count; i++) {
-                glsl_emit_mov(g->code, run.base + 1u + (uint32_t)i,
-                              uv.base + (uint32_t)i);
-            }
-            addr_base = run.base;
-        }
-        glsl_emit_image_sample(g->code, biased ? GLSL_MIMG_SAMPLE_B : GLSL_MIMG_SAMPLE,
-                               want_dim, out.base, addr_base, srsrc, srsrc + 8u);
-        /* **A sample is not in order with what follows it.** Without this the next
-         * instruction reads the destination before the texture unit has written it,
-         * which is the same hazard `s_waitcnt lgkmcnt(0)` covers for the uniform block
-         * - and obSCEne measured that one returning all zeros when the wait was left
-         * out (`-6c0d`). */
-        glsl_emit_s_waitcnt_vm(g->code);
-        return out;
+                        node);
     }
-    if (nm_prefix(nm, len, "texture") || nm_prefix(nm, len, "shadow")) {
+    const glsl_node_t *sn = &g->ast->nodes[first_arg];
+    if (sn->kind != GLSL_NODE_IDENTIFIER) {
         return gen_fail(
             g,
-            "texture2D, texture2DProj, textureCube, texture3D and texture3DProj "
-            "are generated; a shadow lookup is not. It is different in kind - it "
-            "compares against a reference rather than returning a texel, through "
-            "`image_sample_c` and a compare function in the sampler - and that "
-            "is not written here yet",
+            "the sampler has to be named directly; there is no way to carry "
+            "one in a variable here",
             node);
     }
+    uint32_t set = 0u;
+    GLboolean found = GL_FALSE;
+    uint32_t samp_dim = GLSL_IMG_DIM_2D;
+    GLboolean samp_shadow = GL_FALSE;
+    GLboolean samp_oned = GL_FALSE;
+    for (int i = 0; i < g->sampler_count; i++) {
+        if (g->samplers[i].name_len == sn->length &&
+            nm_is(sn->text, sn->length, g->samplers[i].name)) {
+            set = g->samplers[i].set;
+            samp_dim = g->samplers[i].dim;
+            samp_shadow = g->samplers[i].shadow;
+            samp_oned = g->samplers[i].oned;
+            found = GL_TRUE;
+            break;
+        }
+    }
+    if (!found) {
+        return gen_fail(
+            g, "this name is not a sampler the draw path loads descriptors for", node);
+    }
+    /* **The lookup and the sampler have to be the same shape.** The descriptor
+     * decides how the hardware walks the memory - a cube's six faces are one array
+     * under TYPE 0xb, a volume's slices are TYPE 0xa with the last one in WORD4 -
+     * and the shader decides how many address registers it hands over. Sampling a
+     * cube through the 2D path would send two registers where three are read, and
+     * the third would be whatever the allocator last left there. */
+    if (samp_dim != want_dim || samp_shadow != want_shadow || samp_oned != want_oned) {
+        return gen_fail(
+            g,
+            "this lookup does not match its sampler's type: texture1D takes "
+            "a sampler1D, texture2D a sampler2D, textureCube a samplerCube, "
+            "texture3D a sampler3D, and the shadow forms their own",
+            node);
+    }
+    const int32_t coord_node = g->ast->nodes[first_arg].sibling;
+    const glsl_type_t ct = glsl_type_of(g->sema, coord_node);
+    /* `texture2DProj` is the one form that takes either width - `vec3` divides by z
+     * and `vec4` by w, ignoring z - so its expected width is worked out here rather
+     * than above. */
+    /* `texture2DProj` and `texture1DProj` each take two widths - the extra
+     * component is ignored - so theirs is decided from the argument rather than the
+     * name. */
+    const int want_w = (coord_w != 0) ? coord_w : (ct == GLSL_TYPE_VEC4 ? 4 : 3);
+    const glsl_type_t want_t = (want_w == 4)   ? GLSL_TYPE_VEC4
+                               : (want_w == 3) ? GLSL_TYPE_VEC3
+                               : (want_w == 2) ? GLSL_TYPE_VEC2
+                                               : GLSL_TYPE_FLOAT;
+    if (ct != want_t && !(tex_proj && ct == GLSL_TYPE_VEC3) &&
+        !(tex_1dproj && ct == GLSL_TYPE_VEC4)) {
+        return gen_fail(
+            g,
+            "this texture lookup's coordinate is not the width it takes: "
+            "texture1D a float, texture2D a vec2, textureCube a vec3 "
+            "direction, texture3D a vec3, a shadow form the reference in its "
+            "third, and a projective form one component more",
+            node);
+    }
+    glsl_value_t uv = gen_expr(g, coord_node);
+    if (is_bad(uv))
+        return uv;
+    if (uv.count != want_w && !(tex_1dproj && uv.count == 4)) {
+        return gen_fail(g, "this texture coordinate is not the width its type says",
+                        node);
+    }
+    /* Everything ahead of the divisor, which is the last component of whatever
+     * arrived. */
+    const int div_w = uv.count - 1;
+    return gen_tex_address(g, uv, tex_cube, projective, div_w, want_shadow, want_oned,
+                           set, want_dim, biased, coord_node, node);
+}
+
+/* A lookup's coordinate turned into the address run the sampler reads - a cube's
+ * face, a projective divide, a shadow's reference - then the sample. */
+static glsl_value_t gen_tex_address(glsl_gen_t *g, glsl_value_t uv, GLboolean tex_cube,
+                                    GLboolean projective, int div_w,
+                                    GLboolean want_shadow, GLboolean want_oned,
+                                    uint32_t set, uint32_t want_dim, GLboolean biased,
+                                    int32_t coord_node, int32_t node) {
+    /*
+     * **A cube's coordinate is a direction, and the hardware turns it into a
+     * face.**
+     *
+     * Four instructions do the selection - `v_cubeid_f32` names the face,
+     * `v_cubesc_f32` and `v_cubetc_f32` give the place on it, `v_cubema_f32` gives
+     * twice the major axis - and the shader divides by that and biases by a half to
+     * land in [0, 1]. The sampler then takes three address registers: u, v and the
+     * face. That is the sequence ACO emits, and `tools/shader/tex-cube.s` is the
+     * assembled copy these words come from.
+     *
+     * **The direction is not normalised and must not be**: scaling all three
+     * components leaves the face and the place on it alone, which is exactly why a
+     * direction works as a coordinate. `|ma|` is `max(ma, -ma)` rather than the
+     * VOP3 absolute-value modifier, so no encoding is needed beyond the four above.
+     */
+    if (tex_cube) {
+        glsl_value_t half = gen_const(g, 0.5, node);
+        if (is_bad(half))
+            return half;
+        glsl_value_t t = gen_alloc(g, 4, node);
+        if (is_bad(t))
+            return t;
+        const uint32_t sc = t.base + 0u, tc = t.base + 1u;
+        const uint32_t ma = t.base + 2u, neg = t.base + 3u;
+        const uint32_t X = GLSL_VOP3_VGPR(uv.base + 0u);
+        const uint32_t Y = GLSL_VOP3_VGPR(uv.base + 1u);
+        const uint32_t Z = GLSL_VOP3_VGPR(uv.base + 2u);
+        /* The three address registers, allocated as one run because `image_sample`
+         * reads them consecutively from `vaddr`. */
+        glsl_value_t addr = gen_alloc(g, 3, node);
+        if (is_bad(addr))
+            return addr;
+        glsl_emit_vop3(g->code, GLSL_VOP3_CUBEID_F32, addr.base + 2u, X, Y, Z);
+        glsl_emit_vop3(g->code, GLSL_VOP3_CUBESC_F32, sc, X, Y, Z);
+        glsl_emit_vop3(g->code, GLSL_VOP3_CUBETC_F32, tc, X, Y, Z);
+        glsl_emit_vop3(g->code, GLSL_VOP3_CUBEMA_F32, ma, X, Y, Z);
+        glsl_emit_neg_f32(g->code, neg, ma);
+        glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, ma, neg, ma); /* |ma| */
+        glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, ma, ma);
+        glsl_emit_mul_f32(g->code, ma, half.base, ma); /* 1 / (2 |ma|) */
+        glsl_emit_mov(g->code, addr.base + 0u, half.base);
+        glsl_emit_fmac_f32(g->code, addr.base + 0u, sc, ma); /* u */
+        glsl_emit_mov(g->code, addr.base + 1u, half.base);
+        glsl_emit_fmac_f32(g->code, addr.base + 1u, tc, ma); /* v */
+        uv = addr;
+    }
+    if (projective) {
+        const uint32_t q = uv.base + (uint32_t)(uv.count - 1);
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero))
+            return zero;
+        glsl_value_t rcp = gen_alloc(g, 1, node);
+        if (is_bad(rcp))
+            return rcp;
+        glsl_value_t inv = gen_alloc(g, 1, node);
+        if (is_bad(inv))
+            return inv;
+        glsl_emit_vop1_op(g->code, GLSL_VOP1_RCP_F32, rcp.base, q);
+        glsl_emit_cmp(g->code, GLSL_VOPC_NEQ_F32, q, zero.base);
+        /* `d = vcc ? s1 : s0`, so the **false** value comes first: a zero divisor
+         * takes the zero rather than the reciprocal's infinity. */
+        glsl_emit_cndmask(g->code, inv.base, zero.base, rcp.base);
+        /* Into its own run, after the coordinate, so the multiplies cannot read a
+         * component one of them has already overwritten - which for the 3D form,
+         * where the divisor is the fourth and the results are the first three, they
+         * otherwise would not, but the 2D vec4 form writes over `z` and the rule is
+         * worth having in one place. */
+        glsl_value_t st = gen_alloc(g, div_w, node);
+        if (is_bad(st))
+            return st;
+        for (int cc = 0; cc < div_w; cc++) {
+            glsl_emit_mul_f32(g->code, st.base + (uint32_t)cc, uv.base + (uint32_t)cc,
+                              inv.base);
+        }
+        uv = st;
+    }
+
+    /*
+     * **A shadow lookup's reference comes first**, ahead of s and t.
+     *
+     * That order is not read off the ISA alone - obSCEne's `-b4e1` reports the
+     * VADDR range as `v[2:4] with ref_z in v2 at position 0` - and getting it wrong
+     * would sample at the reference and compare against a texture coordinate, which
+     * is a picture rather than an error.
+     *
+     * **The reference is clamped to [0, 1]**, low end first, which is GL 1.4
+     * (3.8.14) and the order `tools/shader/tex-shadow.s` follows softpipe in. The
+     * comparison itself is the sampler's: `DEPTH_COMPARE_FUNC` in its word 0
+     * already carries `GL_TEXTURE_COMPARE_FUNC`, so what the shader adds is the
+     * reference and the `_c` form of the instruction that hands it over.
+     */
+    if (want_shadow || want_oned) {
+        glsl_value_t zero = gen_const(g, 0.0, node);
+        if (is_bad(zero))
+            return zero;
+        const int aw = want_shadow ? 3 : 2;
+        glsl_value_t addr = gen_alloc(g, aw, node);
+        if (is_bad(addr))
+            return addr;
+        int at = 0;
+        if (want_shadow) {
+            glsl_value_t one = gen_const(g, 1.0, node);
+            if (is_bad(one))
+                return one;
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MAX_F32, addr.base + 0u, zero.base,
+                              uv.base + 2u);
+            glsl_emit_vop2_op(g->code, GLSL_VOP2_MIN_F32, addr.base + 0u, one.base,
+                              addr.base + 0u);
+            at = 1;
+        }
+        glsl_emit_mov(g->code, addr.base + (uint32_t)at, uv.base + 0u); /* s */
+        /* **`t` is a real coordinate for a 2D and a zero for a 1D**, because a 1D
+         * texture is one row of a 2D image - and the descriptor says 2D, so the
+         * sampler reads a `t` either way. Leaving it unwritten would sample at
+         * whatever the allocator had. */
+        glsl_emit_mov(g->code, addr.base + (uint32_t)at + 1u,
+                      want_oned ? zero.base : uv.base + 1u);
+        uv = addr;
+    }
+    return gen_tex_sample(g, uv, set, want_dim, want_shadow, biased, coord_node, node);
+}
+
+/* The sample itself, from the address run in `uv`. */
+static glsl_value_t gen_tex_sample(glsl_gen_t *g, glsl_value_t uv, uint32_t set,
+                                   uint32_t want_dim, GLboolean want_shadow,
+                                   GLboolean biased, int32_t coord_node, int32_t node) {
+    /* **The sample's four registers are allocated after the coordinate**, so they
+     * cannot overlap it - `image_sample` reads `vaddr` and writes `vdata`, and an
+     * overlap would have it read back what it had just written for the second
+     * component. */
+    glsl_value_t out = gen_alloc(g, 4, node);
+    if (is_bad(out))
+        return out;
+    const uint32_t srsrc = GLSL_GEN_TEX_SGPR_BASE + set * GLSL_GEN_TEX_SGPR_STRIDE;
+    if (want_shadow) {
+        /* **One value comes back, not four** - `dmask:0x1` - and GL spreads it by
+         * the texture's `GL_DEPTH_TEXTURE_MODE`. This emits the `GL_LUMINANCE`
+         * spread,
+         * `(v, v, v, 1)`, which is that parameter's default; the other two modes
+         * are a per-texture choice made after the shader is compiled, and the draw
+         * path says so when it sees one. */
+        glsl_emit_image_sample_masked(g->code, GLSL_MIMG_SAMPLE_C, GLSL_IMG_DIM_2D,
+                                      0x1u, out.base, uv.base, srsrc, srsrc + 8u);
+        glsl_emit_s_waitcnt_vm(g->code);
+        glsl_emit_mov(g->code, out.base + 1u, out.base + 0u);
+        glsl_emit_mov(g->code, out.base + 2u, out.base + 0u);
+        glsl_emit_mov_imm(g->code, out.base + 3u, float_bits(1.0f));
+        return out;
+    }
+    /* **The bias goes first in the address run**, which means a fresh run: the
+     * coordinate is already in consecutive registers and there is no room in front
+     * of it. The move is the cost of the biased form, and only a biased lookup pays
+     * it. */
+    uint32_t addr_base = uv.base;
+    if (biased) {
+        const int32_t bias_node = g->ast->nodes[coord_node].sibling;
+        glsl_value_t b = gen_expr(g, bias_node);
+        if (is_bad(b))
+            return b;
+        if (b.count != 1) {
+            return gen_fail(g, "a texture lookup's bias is a single number", node);
+        }
+        glsl_value_t run = gen_alloc(g, uv.count + 1, node);
+        if (is_bad(run))
+            return run;
+        glsl_emit_mov(g->code, run.base, b.base);
+        for (int i = 0; i < uv.count; i++) {
+            glsl_emit_mov(g->code, run.base + 1u + (uint32_t)i, uv.base + (uint32_t)i);
+        }
+        addr_base = run.base;
+    }
+    glsl_emit_image_sample(g->code, biased ? GLSL_MIMG_SAMPLE_B : GLSL_MIMG_SAMPLE,
+                           want_dim, out.base, addr_base, srsrc, srsrc + 8u);
+    /* **A sample is not in order with what follows it.** Without this the next
+     * instruction reads the destination before the texture unit has written it,
+     * which is the same hazard `s_waitcnt lgkmcnt(0)` covers for the uniform block
+     * - and obSCEne measured that one returning all zeros when the wait was left
+     * out (`-6c0d`). */
+    glsl_emit_s_waitcnt_vm(g->code);
+    return out;
+}
+
+static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
+                                int32_t first_arg, int32_t node) {
+    const char *const nm = callee->text;
+    const size_t len = callee->length;
+    const glsl_value_t tex = gen_builtin_texture(g, nm, len, first_arg, node);
+    if (tex.count >= 0)
+        return tex;
 
     /* The arguments, left to right. Evaluated once each and into registers that outlive
      * the lowering below - a built-in that used an argument twice (`normalize`, `dot(v,
@@ -2036,6 +2094,30 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
             w = arg[i].count;
     }
 
+    static const gen_builtin_family_fn FAMILIES[] = {
+        gen_builtin_relational, gen_builtin_componentwise, gen_builtin_common,
+        gen_builtin_step_dot,   gen_builtin_inverse_trig,  gen_builtin_matrix,
+        gen_builtin_geometric,
+    };
+    for (size_t i = 0; i < sizeof(FAMILIES) / sizeof(FAMILIES[0]); i++) {
+        const glsl_value_t r = FAMILIES[i](g, nm, len, arg, argc, w, first_arg, node);
+        if (r.count >= 0)
+            return r;
+    }
+    return gen_fail(
+        g,
+        "only constructors and the built-ins with verified instructions are "
+        "generated; this name is neither, and no function of that name is "
+        "defined in this shader",
+        node);
+}
+
+/* The vector relational functions, the derivatives, `noise` and the reductions. */
+static glsl_value_t gen_builtin_relational(glsl_gen_t *g, const char *nm, size_t len,
+                                           const glsl_value_t *arg, int argc, int w,
+                                           int32_t first_arg, int32_t node) {
+    (void)w;
+    (void)first_arg;
     /* --- the vector relational family ------------------------------------
      *
      * **A `bvec` is what a `bool` already was, one per component**: a float that is 0.0
@@ -2184,7 +2266,14 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
         }
         return d;
     }
+    return GEN_NOT_MINE;
+}
 
+/* One instruction a component, the constant scales, and the transcendental ones. */
+static glsl_value_t gen_builtin_componentwise(glsl_gen_t *g, const char *nm, size_t len,
+                                              const glsl_value_t *arg, int argc, int w,
+                                              int32_t first_arg, int32_t node) {
+    (void)first_arg;
     /* --- one instruction a component ------------------------------------ */
     struct {
         const char *name;
@@ -2327,7 +2416,14 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
         gen_map1(g, GLSL_VOP1_EXP_F32, d, d);
         return d;
     }
+    return GEN_NOT_MINE;
+}
 
+/* `abs`, `sign`, `clamp`, `mix` and `mod`. */
+static glsl_value_t gen_builtin_common(glsl_gen_t *g, const char *nm, size_t len,
+                                       const glsl_value_t *arg, int argc, int w,
+                                       int32_t first_arg, int32_t node) {
+    (void)first_arg;
     /* `abs(x) = max(x, -x)`. Two instructions a component and no constant, rather than
      * the sign-bit clear - which would need `v_and_b32` and a literal mask, neither of
      * which is in the pinned table. */
@@ -2431,7 +2527,14 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
         }
         return d;
     }
+    return GEN_NOT_MINE;
+}
 
+/* `step`, `smoothstep` and `dot`. */
+static glsl_value_t gen_builtin_step_dot(glsl_gen_t *g, const char *nm, size_t len,
+                                         const glsl_value_t *arg, int argc, int w,
+                                         int32_t first_arg, int32_t node) {
+    (void)first_arg;
     /* `step(edge, x)` is 0 below the edge and 1 at or above it - so the comparison is
      * `x < edge` and the **false** arm is the 1, which is the arm `v_cndmask` takes
      * from `vsrc1`. */
@@ -2517,7 +2620,15 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
             return gen_fail(g, "wrong number of arguments", node);
         return gen_dot(g, arg[0], arg[1], node);
     }
+    return GEN_NOT_MINE;
+}
 
+/* `atan`, `asin` and `acos`. */
+static glsl_value_t gen_builtin_inverse_trig(glsl_gen_t *g, const char *nm, size_t len,
+                                             const glsl_value_t *arg, int argc, int w,
+                                             int32_t first_arg, int32_t node) {
+    (void)w;
+    (void)first_arg;
     /*
      * **`atan`, and `asin` and `acos` built on it - the same polynomial the reference
      * uses.**
@@ -2683,7 +2794,14 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
         }
         return out;
     }
+    return GEN_NOT_MINE;
+}
 
+/* `refract` and the matrix functions. */
+static glsl_value_t gen_builtin_matrix(glsl_gen_t *g, const char *nm, size_t len,
+                                       const glsl_value_t *arg, int argc, int w,
+                                       int32_t first_arg, int32_t node) {
+    (void)w;
     /*
      * **`refract`, which is the specification's formula and a select for the rest.**
      *
@@ -2833,7 +2951,14 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
         }
         return d;
     }
+    return GEN_NOT_MINE;
+}
 
+/* `length`, `distance`, `normalize`, `cross`, `reflect` and `faceforward`. */
+static glsl_value_t gen_builtin_geometric(glsl_gen_t *g, const char *nm, size_t len,
+                                          const glsl_value_t *arg, int argc, int w,
+                                          int32_t first_arg, int32_t node) {
+    (void)first_arg;
     if (nm_is(nm, len, "length")) {
         if (argc != 1)
             return gen_fail(g, "wrong number of arguments", node);
@@ -2968,13 +3093,7 @@ static glsl_value_t gen_builtin(glsl_gen_t *g, const glsl_node_t *callee,
         }
         return d;
     }
-
-    return gen_fail(
-        g,
-        "only constructors and the built-ins with verified instructions are "
-        "generated; this name is neither, and no function of that name is "
-        "defined in this shader",
-        node);
+    return GEN_NOT_MINE;
 }
 
 /* -------------------------------------------------------------------------
