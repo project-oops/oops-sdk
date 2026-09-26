@@ -26,9 +26,10 @@ void oops_assert_failed(const char *expr, const char *file, int line);
 #define assert(expr) ((expr) ? (void)0 : oops_assert_failed(#expr, __FILE__, __LINE__))
 #endif
 
-/* C11 spells the compile-time assertion `_Static_assert` and defines this spelling of it here, so
- * a header that writes `static_assert` in C is asking for this file. C++ and C23 have it as a
- * keyword, and NDEBUG does not remove it: it costs nothing at run time. */
+/* C11 spells the compile-time assertion `_Static_assert` and defines this spelling of
+ * it here, so a header that writes `static_assert` in C is asking for this file. C++
+ * and C23 have it as a keyword, and NDEBUG does not remove it: it costs nothing at run
+ * time. */
 #if !defined(__cplusplus) && !defined(static_assert) && __STDC_VERSION__ < 202311L
 #define static_assert _Static_assert
 #endif

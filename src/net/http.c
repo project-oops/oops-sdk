@@ -428,12 +428,14 @@ static int oops_http_tls_get(const char *url, oops_http_response_t *out_resp) {
         return OOPS_HTTP_ERR_CONNECT;
     }
 
-    /* Turn off the server-certificate checks. The release CDN presents a certificate whose CN is
-     * *.github.io while its SAN covers *.githubusercontent.com; the console's verifier keys on the
-     * CN, so the host-name check rejects an otherwise-valid, trusted certificate (0x80431073).
-     * Disabling SERVER_VERIFY alone leaves the independent checks armed, so clear them all: the
-     * payload is content-addressed by the catalogue, not trusted by TLS identity. Bits: SERVER_VERIFY
-     * 0x01, CN_CHECK 0x04, NOT_AFTER 0x08, NOT_BEFORE 0x10, KNOWN_CA 0x20. */
+    /* Turn off the server-certificate checks. The release CDN presents a certificate
+     * whose CN is
+     * *.github.io while its SAN covers *.githubusercontent.com; the console's verifier
+     * keys on the CN, so the host-name check rejects an otherwise-valid, trusted
+     * certificate (0x80431073). Disabling SERVER_VERIFY alone leaves the independent
+     * checks armed, so clear them all: the payload is content-addressed by the
+     * catalogue, not trusted by TLS identity. Bits: SERVER_VERIFY 0x01, CN_CHECK 0x04,
+     * NOT_AFTER 0x08, NOT_BEFORE 0x10, KNOWN_CA 0x20. */
     if (sceHttpsDisableOption)
         sceHttpsDisableOption(http_ctx, 0x01u | 0x04u | 0x08u | 0x10u | 0x20u);
 
@@ -476,8 +478,8 @@ static int oops_http_tls_get(const char *url, oops_http_response_t *out_resp) {
     if (sceHttpSetAutoRedirect) {
         sceHttpSetAutoRedirect(req, 1);
     }
-    /* Bound every blocking phase so a stalled connection surfaces as an error instead of hanging the
-     * caller. Microseconds. */
+    /* Bound every blocking phase so a stalled connection surfaces as an error instead
+     * of hanging the caller. Microseconds. */
     if (sceHttpSetResolveTimeOut)
         sceHttpSetResolveTimeOut(req, 10u * 1000u * 1000u);
     if (sceHttpSetConnectTimeOut)
@@ -613,8 +615,9 @@ static int oops_http_tls_get(const char *url, oops_http_response_t *out_resp) {
     return OOPS_HTTP_OK;
 }
 
-/* Tear down the shared TLS/HTTP context. Every error and success path funnels through here so the
- * order (template, http, ssl, net pool) is stated once. A zero id is skipped. */
+/* Tear down the shared TLS/HTTP context. Every error and success path funnels through
+ * here so the order (template, http, ssl, net pool) is stated once. A zero id is
+ * skipped. */
 static void oops_http_tls_teardown(int tmpl, int http_ctx, int ssl_ctx, int net_pool) {
     if (tmpl > 0 && sceHttpDeleteTemplate)
         sceHttpDeleteTemplate(tmpl);
@@ -626,10 +629,11 @@ static void oops_http_tls_teardown(int tmpl, int http_ctx, int ssl_ctx, int net_
         sceNetPoolDestroy(net_pool);
 }
 
-/* Copy the value of the (case-insensitive) Location header out of a raw response-header block into
- * dst. Returns 1 when found. A GitHub release redirects to a long signed CDN URL, so dst is sized
- * generously by the caller. */
-static int oops_http_find_location(const char *headers, size_t len, char *dst, size_t dst_sz) {
+/* Copy the value of the (case-insensitive) Location header out of a raw response-header
+ * block into dst. Returns 1 when found. A GitHub release redirects to a long signed CDN
+ * URL, so dst is sized generously by the caller. */
+static int oops_http_find_location(const char *headers, size_t len, char *dst,
+                                   size_t dst_sz) {
     if (!headers || !dst || dst_sz == 0)
         return 0;
     const char *end = headers + len;
@@ -691,12 +695,14 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
         return OOPS_HTTP_ERR_CONNECT;
     }
 
-    /* Turn off the server-certificate checks. The release CDN presents a certificate whose CN is
-     * *.github.io while its SAN covers *.githubusercontent.com; the console's verifier keys on the
-     * CN, so the host-name check rejects an otherwise-valid, trusted certificate (0x80431073).
-     * Disabling SERVER_VERIFY alone leaves the independent checks armed, so clear them all: the
-     * payload is content-addressed by the catalogue, not trusted by TLS identity. Bits: SERVER_VERIFY
-     * 0x01, CN_CHECK 0x04, NOT_AFTER 0x08, NOT_BEFORE 0x10, KNOWN_CA 0x20. */
+    /* Turn off the server-certificate checks. The release CDN presents a certificate
+     * whose CN is
+     * *.github.io while its SAN covers *.githubusercontent.com; the console's verifier
+     * keys on the CN, so the host-name check rejects an otherwise-valid, trusted
+     * certificate (0x80431073). Disabling SERVER_VERIFY alone leaves the independent
+     * checks armed, so clear them all: the payload is content-addressed by the
+     * catalogue, not trusted by TLS identity. Bits: SERVER_VERIFY 0x01, CN_CHECK 0x04,
+     * NOT_AFTER 0x08, NOT_BEFORE 0x10, KNOWN_CA 0x20. */
     if (sceHttpsDisableOption)
         sceHttpsDisableOption(http_ctx, 0x01u | 0x04u | 0x08u | 0x10u | 0x20u);
 
@@ -707,10 +713,10 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
         return OOPS_HTTP_ERR_CONNECT;
     }
 
-    /* Follow redirects by hand. A GitHub release 302-redirects to a signed CDN URL on a different
-     * host; the platform's auto-follow reuses the first host's SNI on the new connection, which the
-     * CDN rejects during the TLS handshake (0x80431073). A fresh connection per hop lets the SDK send
-     * the SNI that matches each host. */
+    /* Follow redirects by hand. A GitHub release 302-redirects to a signed CDN URL on a
+     * different host; the platform's auto-follow reuses the first host's SNI on the new
+     * connection, which the CDN rejects during the TLS handshake (0x80431073). A fresh
+     * connection per hop lets the SDK send the SNI that matches each host. */
     char cur_url[4096];
     size_t ci = 0;
     while (url[ci] && ci + 1 < sizeof(cur_url)) {
@@ -726,7 +732,8 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
     for (int hop = 0; hop < 8; hop++) {
         conn = sceHttpCreateConnectionWithURL(tmpl, cur_url, 1);
         if (conn <= 0) {
-            oops_log_warn("HTTP", "sceHttpCreateConnectionWithURL failed (conn=%d)", conn);
+            oops_log_warn("HTTP", "sceHttpCreateConnectionWithURL failed (conn=%d)",
+                          conn);
             oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
             return OOPS_HTTP_ERR_CONNECT;
         }
@@ -738,11 +745,12 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
             return OOPS_HTTP_ERR_CONNECT;
         }
 
-        /* Never let the platform follow: each host must get its own connection (see above). */
+        /* Never let the platform follow: each host must get its own connection (see
+         * above). */
         if (sceHttpSetAutoRedirect)
             sceHttpSetAutoRedirect(req, 0);
-        /* Bound every blocking phase so a stalled connection surfaces as an error instead of hanging
-         * the caller. Microseconds. */
+        /* Bound every blocking phase so a stalled connection surfaces as an error
+         * instead of hanging the caller. Microseconds. */
         if (sceHttpSetResolveTimeOut)
             sceHttpSetResolveTimeOut(req, 10u * 1000u * 1000u);
         if (sceHttpSetConnectTimeOut)
@@ -753,16 +761,18 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
             sceHttpSetRecvTimeOut(req, 20u * 1000u * 1000u);
         if (sceHttpAddRequestHeader) {
             sceHttpAddRequestHeader(req, "User-Agent", "OOPSy-daisy/1.0 (Prospero)", 0);
-            /* A GitHub release-asset API URL serves the binary only for this exact Accept; a
-             * wildcard returns the asset's JSON metadata instead. The CDN it redirects to ignores
-             * the header, so carrying it across the hop is harmless. */
+            /* A GitHub release-asset API URL serves the binary only for this exact
+             * Accept; a wildcard returns the asset's JSON metadata instead. The CDN it
+             * redirects to ignores the header, so carrying it across the hop is
+             * harmless. */
             sceHttpAddRequestHeader(req, "Accept", "application/octet-stream", 0);
             sceHttpAddRequestHeader(req, "Connection", "close", 0);
         }
 
         int send_rc = sceHttpSendRequest(req, (void *)0, 0);
         if (send_rc < 0) {
-            oops_log_warn("HTTP", "sceHttpSendRequest failed at hop %d: %d", hop, send_rc);
+            oops_log_warn("HTTP", "sceHttpSendRequest failed at hop %d: %d", hop,
+                          send_rc);
             sceHttpDeleteRequest(req);
             sceHttpDeleteConnection(conn);
             oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
@@ -792,7 +802,8 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
             if (!sceHttpGetAllResponseHeaders ||
                 sceHttpGetAllResponseHeaders(req, &hdr, &hsz) < 0 || !hdr ||
                 !oops_http_find_location(hdr, hsz, next, sizeof(next))) {
-                oops_log_warn("HTTP", "redirect %d with no Location header", status_code);
+                oops_log_warn("HTTP", "redirect %d with no Location header",
+                              status_code);
                 sceHttpDeleteRequest(req);
                 sceHttpDeleteConnection(conn);
                 oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);
@@ -813,7 +824,8 @@ static int oops_http_tls_get_to_file(const char *url, const char *dest_path,
             continue;
         }
 
-        oops_log_warn("HTTP", "TLS GET %s returned status %d (expected 200)", url, status_code);
+        oops_log_warn("HTTP", "TLS GET %s returned status %d (expected 200)", url,
+                      status_code);
         sceHttpDeleteRequest(req);
         sceHttpDeleteConnection(conn);
         oops_http_tls_teardown(tmpl, http_ctx, ssl_ctx, net_pool);

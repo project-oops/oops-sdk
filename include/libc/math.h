@@ -133,12 +133,21 @@ double fmax(double a, double b);
  * or a division that went wrong writes `isnan(x)`, and until these existed that was a compile
  * error rather than a link one - so it was the first thing a port had to edit. They are the
  * compiler's own builtins, which is exactly what a hosted <math.h> expands them to.
+ *
+ * C only. In C++ libc++ owns these names: it declares them as function templates in
+ * `std::__math` and lifts them into the global namespace itself. A function-like macro of the same
+ * name reaches those declarations first and expands them away, and the header that would undefine
+ * the macro - libc++'s own <math.h> - is not always the first to include this one. Ship of
+ * Harkinian's z64math.h is where that showed: it takes <math.h> after <cmath> has already opened
+ * the namespace, and every name below went missing.
  */
+#ifndef __cplusplus
 #define isnan(x)      __builtin_isnan(x)
 #define isinf(x)      __builtin_isinf(x)
 #define isfinite(x)   __builtin_isfinite(x)
 #define signbit(x)    __builtin_signbit(x)
 #define isnormal(x)   __builtin_isnormal(x)
+#endif
 
 /*
  * **The five classification categories, and `fpclassify` over them** (2026-09-21). The macros
@@ -157,8 +166,11 @@ double fmax(double a, double b);
 #define FP_SUBNORMAL 3
 #define FP_NORMAL    4
 
+/* C only, for the reason the classification macros above are. */
+#ifndef __cplusplus
 #define fpclassify(x)                                                          \
   __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, x)
+#endif
 
 /* The rest of what a port's own maths reaches for: the pieces that split or rebuild a float,
  * and log2's double form beside the float one that was already here. */

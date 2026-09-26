@@ -326,9 +326,9 @@ struct fbsd_sockaddr_in {
  *
  * The default is defined here, weak, rather than left as a weak reference: a weak
  * reference leaves the symbol undefined in the payload, and oops-apps' link guard
- * reports every undefined name whether it is weak or not. 0 means nothing is shimmed and
- * every bare name is available; a title linking the POSIX shim overrides this, a strong
- * definition beating a weak one.
+ * reports every undefined name whether it is weak or not. 0 means nothing is shimmed
+ * and every bare name is available; a title linking the POSIX shim overrides this, a
+ * strong definition beating a weak one.
  *
  * The null test below costs one compare and covers a link that has neither definition.
  */
@@ -383,7 +383,8 @@ static ssize_t_ p_recv(int s, void *b, size_t n, int f) {
     if (recv && bare_ok(OOPS_NET_SHIMMED_RECV))
         return recv(s, b, n, f);
     if (sys_call)
-        return (ssize_t_)sys_call(OOPS_SYS_RECVFROM, (long)s, (long)b, (long)n, (long)f, 0, 0);
+        return (ssize_t_)sys_call(OOPS_SYS_RECVFROM, (long)s, (long)b, (long)n, (long)f,
+                                  0, 0);
     return -1;
 }
 /* Whether the platform can report a datagram's sender at all. `oops_recvfrom`
@@ -392,7 +393,9 @@ static ssize_t_ p_recv(int s, void *b, size_t n, int f) {
  * reporting the wrong sender for every packet is the kind of wrong that looks
  * like a protocol bug in the game. */
 static int p_have_recvfrom(void) {
-    return (_recvfrom || (recvfrom && bare_ok(OOPS_NET_SHIMMED_RECVFROM)) || sys_call) ? 1 : 0;
+    return (_recvfrom || (recvfrom && bare_ok(OOPS_NET_SHIMMED_RECVFROM)) || sys_call)
+               ? 1
+               : 0;
 }
 
 static ssize_t_ p_recvfrom(int s, void *b, size_t n, int f, void *from,
@@ -402,7 +405,8 @@ static ssize_t_ p_recvfrom(int s, void *b, size_t n, int f, void *from,
     if (recvfrom && bare_ok(OOPS_NET_SHIMMED_RECVFROM))
         return recvfrom(s, b, n, f, from, fromlen);
     if (sys_call)
-        return (ssize_t_)sys_call(OOPS_SYS_RECVFROM, (long)s, (long)b, (long)n, (long)f, (long)from, (long)fromlen);
+        return (ssize_t_)sys_call(OOPS_SYS_RECVFROM, (long)s, (long)b, (long)n, (long)f,
+                                  (long)from, (long)fromlen);
     return -1;
 }
 static ssize_t_ p_sendto(int s, const void *b, size_t n, int f, const void *to,
@@ -412,7 +416,8 @@ static ssize_t_ p_sendto(int s, const void *b, size_t n, int f, const void *to,
     if (sendto && bare_ok(OOPS_NET_SHIMMED_SENDTO))
         return sendto(s, b, n, f, to, tl);
     if (sys_call)
-        return (ssize_t_)sys_call(OOPS_SYS_SENDTO, (long)s, (long)b, (long)n, (long)f, (long)to, (long)tl);
+        return (ssize_t_)sys_call(OOPS_SYS_SENDTO, (long)s, (long)b, (long)n, (long)f,
+                                  (long)to, (long)tl);
     return -1;
 }
 static int p_setsockopt(int s, int lv, int nm, const void *v, socklen_t_ l) {
@@ -421,7 +426,8 @@ static int p_setsockopt(int s, int lv, int nm, const void *v, socklen_t_ l) {
     if (setsockopt && bare_ok(OOPS_NET_SHIMMED_SETSOCKOPT))
         return setsockopt(s, lv, nm, v, l);
     if (sys_call)
-        return (int)sys_call(OOPS_SYS_SETSOCKOPT, (long)s, (long)lv, (long)nm, (long)v, (long)l, 0);
+        return (int)sys_call(OOPS_SYS_SETSOCKOPT, (long)s, (long)lv, (long)nm, (long)v,
+                             (long)l, 0);
     return -1;
 }
 static void p_close(int fd) {

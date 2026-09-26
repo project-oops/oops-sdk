@@ -537,10 +537,11 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
                 if (comp_size != uncomp_size) {
                     return OOPS_ZIP_ERR_BAD_HEADER;
                 }
-                /* 0755, not 0644: an installed homebrew title's eboot.bin (and its .prx modules)
-                 * must carry the execute bit or the console refuses to spawn the process (EACCES).
-                 * A title .zip stores its files 0644, so the extractor grants execute here; the bit
-                 * is harmless on the data files that share the tree. */
+                /* 0755, not 0644: an installed homebrew title's eboot.bin (and its .prx
+                 * modules) must carry the execute bit or the console refuses to spawn
+                 * the process (EACCES). A title .zip stores its files 0644, so the
+                 * extractor grants execute here; the bit is harmless on the data files
+                 * that share the tree. */
                 int fd = oops_fs_open(
                     target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0755);
                 if (fd < 0)
@@ -571,7 +572,8 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
                     return OOPS_ZIP_ERR_DECOMPRESS;
                 }
 
-                /* 0755 for the same reason as the STORED branch above: the eboot must be executable. */
+                /* 0755 for the same reason as the STORED branch above: the eboot must
+                 * be executable. */
                 int fd = oops_fs_open(
                     target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0755);
                 if (fd < 0) {
@@ -591,8 +593,9 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
             } else {
                 return OOPS_ZIP_ERR_UNSUPPORTED;
             }
-            /* Belt to the 0755 passed at open, which the kernel ignores when the file already
-             * exists: enforce the execute bit so a re-installed title's eboot stays runnable. */
+            /* Belt to the 0755 passed at open, which the kernel ignores when the file
+             * already exists: enforce the execute bit so a re-installed title's eboot
+             * stays runnable. */
             (void)oops_fs_chmod(target_path, 0755);
         }
 

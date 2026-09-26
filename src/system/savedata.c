@@ -162,10 +162,11 @@ int oops_savedata_mount(const char *dir_name, oops_savedata_mode_t mode,
     /* Refuses rather than silently unmounting the package. See
      * `oops_system_allow_sandbox_escape`. */
     if (!oops_system_sandbox_escape_allowed()) {
-        oops_log_error("SAVE",
-                       "refusing to leave the sandbox for /data: it unmounts /app0 and every "
-                       "asset in it. Call oops_system_allow_sandbox_escape() if this title "
-                       "accepts losing them.");
+        oops_log_error(
+            "SAVE",
+            "refusing to leave the sandbox for /data: it unmounts /app0 and every "
+            "asset in it. Call oops_system_allow_sandbox_escape() if this title "
+            "accepts losing them.");
         return -1;
     }
     (void)oops_system_escape_sandbox();
