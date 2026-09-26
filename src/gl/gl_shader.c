@@ -9,8 +9,10 @@
  * that only goes up, so a stale name finds nothing rather than a later object.
  * Deleting an attached shader or the program in use sets a flag and the object goes
  * with its last reference; meanwhile `glIsShader` answers GL_FALSE and
- * `glGetShaderiv(GL_DELETE_STATUS)` answers GL_TRUE without error. None of these calls
- * goes through the display-list recorder (2.15.1 and the list in 5.4).
+ * `glGetShaderiv(GL_DELETE_STATUS)` answers GL_TRUE without error. No call here goes
+ * through the display-list recorder. Section 5.4 keeps the object calls, the queries
+ * and the attribute arrays out of a list; glUseProgram, glUniform* and glVertexAttrib*,
+ * which it compiles into one, execute at once as well.
  */
 
 #include "gl_internal.h"
