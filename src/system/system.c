@@ -1118,6 +1118,25 @@ void oops_log_close_disk_sink(void) {
  *
  * Returns: 0 on success, -1 on connection failure or timeout.
  */
+
+/*
+ * **The opt-in that the two implicit escapes require.**
+ *
+ * This function is documented as explicit opt-in and behaves that way when a title calls it. The
+ * problem was the callers that reached it *without* the title asking: `oops_fs_get_storage_dir`
+ * and `oops_savedata_mount` both escaped on their way to `/data`, so a title that only wanted
+ * somewhere to write lost `/app0` and every asset in it - and found out wherever it next opened a
+ * texture, which is nowhere near the call that did it.
+ *
+ * Those two now refuse until a title says this is acceptable. Calling this function directly is
+ * unaffected.
+ */
+static int s_sandbox_escape_allowed = 0;
+
+void oops_system_allow_sandbox_escape(void) { s_sandbox_escape_allowed = 1; }
+
+int oops_system_sandbox_escape_allowed(void) { return s_sandbox_escape_allowed; }
+
 int oops_system_escape_sandbox(void) {
 #ifndef OOPS_HOST_BUILD
   /*

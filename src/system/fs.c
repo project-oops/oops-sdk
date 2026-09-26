@@ -45,6 +45,16 @@ int oops_fs_open(const char *path, int flags, int mode) {
   return fd;
 }
 
+/*
+ * Low-level descriptor open.
+ *
+ * **Why this bypasses platform libc open() on target** (REQ-20260925T1936Z-6c8d):
+ * Measured on physical hardware (gl-cts, GCTS00001, FW 12.40): calling platform libc open()
+ * returns a file descriptor where write(), fflush(), and fsync() report success (errno 0),
+ * but the bytes are silently discarded and reading back in the same process returns 0 bytes.
+ * Direct sys_call(SYS_open, ...) produces a descriptor that reliably commits data to storage.
+ * See docs/decisions/D013-libc-open-descriptor-discards-writes-route-through-sys-open.md.
+ */
 static int fs_open_raw(const char *path, int flags, int mode) {
 #ifndef OOPS_HOST_BUILD
   int target_flags = 0;
@@ -72,6 +82,27 @@ static int fs_open_raw(const char *path, int flags, int mode) {
   return open(path, host_flags, host_mode);
 #endif
 }
+
+#ifndef OOPS_HOST_BUILD
+#include <stdarg.h>
+#include "libc/fcntl.h"
+
+/*
+ * open() implementation for target payloads and hosted titles linking liboops.a.
+ * Routes open() calls through oops_fs_open() -> SYS_open so ported code writing with
+ * open()/fopen() gets a descriptor that actually commits data rather than discarding it.
+ */
+int open(const char *path, int flags, ...) {
+  int mode = 0644;
+  if (flags & OOPS_O_CREAT) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = va_arg(ap, int);
+    va_end(ap);
+  }
+  return oops_fs_open(path, flags, mode);
+}
+#endif
 
 int oops_fs_close(int fd) {
   if (fd < 0) {
@@ -460,6 +491,15 @@ int oops_fs_get_storage_dir(oops_storage_location_t loc, char *out_path, size_t 
   }
 
   if (resolved[0] == '\0') {
+    /* Refuses rather than silently unmounting the package. See
+     * `oops_system_allow_sandbox_escape`. */
+    if (!oops_system_sandbox_escape_allowed()) {
+      oops_log_error("FS",
+                     "refusing to leave the sandbox for /data: it unmounts /app0 and every asset "
+                     "in it. Write to /app0, which is writable, or call "
+                     "oops_system_allow_sandbox_escape() if this title accepts losing them.");
+      return -1;
+    }
     (void)oops_system_escape_sandbox();
     if (oops_fs_exists("/data")) {
       (void)oops_snprintf(resolved, sizeof(resolved), "/data/%s", app_id);

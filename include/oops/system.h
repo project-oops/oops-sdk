@@ -275,6 +275,25 @@ int oops_system_init_namespace(const struct payload_args *args);
 int oops_system_escape_sandbox(void);
 
 /**
+ * Say that this title accepts losing `/app0` in exchange for reaching `/data`.
+ *
+ * `oops_fs_get_storage_dir` and `oops_savedata_mount` must leave the sandbox to reach internal
+ * storage, and leaving it unmounts the package - every texture, shader and data file the title
+ * shipped. Both **refuse** until this is called, because the loss surfaces wherever the program
+ * next opens an asset rather than at the call that caused it, which is a long way to trace back.
+ *
+ * Most titles should not call this. `/app0` is writable, which is not obvious; internal storage is
+ * only needed when what a title writes has to survive a redeploy.
+ *
+ * `oops_system_escape_sandbox` itself is unaffected - that has always been the explicit door, and
+ * this is about the two helpers that used to walk through it uninvited.
+ */
+void oops_system_allow_sandbox_escape(void);
+
+/** Whether `oops_system_allow_sandbox_escape` has been called. */
+int oops_system_sandbox_escape_allowed(void);
+
+/**
  * Finish, on a platform where finishing is not permitted. Never returns.
  *
  * # Why a title cannot simply return or exit
