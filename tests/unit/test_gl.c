@@ -13707,15 +13707,14 @@ static void test_gl_proc_address_resolves_entry_points_by_name(void) {
   ASSERT_EQ(oops_gl_get_proc_address("glGenBuffers"), (void *)glGenBuffers);
 
   /* A GL name this GL does not have is NULL, which is what a program probing for an extension it
-   * can do without is asking. Neverball asks for all three of these and takes no for an answer;
-   * had they resolved to anything, it would have called them. */
+   * can do without is asking; Neverball asks for these two and takes no for an answer. */
   ASSERT_EQ(oops_gl_get_proc_address("glCreateShaderObjectARB"), NULL);
   ASSERT_EQ(oops_gl_get_proc_address("glStringMarkerGREMEDY"), NULL);
-  ASSERT_EQ(oops_gl_get_proc_address("glGenFramebuffers"), NULL);
 
-  /* Core GL 1.1 is linked by symbol and never asked for by name, so it is deliberately not in
-   * the table - and a name that is not GL's at all is certainly not. */
-  ASSERT_EQ(oops_gl_get_proc_address("glBegin"), NULL);
+  /* Core GL resolves by name too, for engines that bind every pointer from a string; a name
+   * that is not GL's is NULL. */
+  ASSERT_EQ(oops_gl_get_proc_address("glBegin"), (void *)glBegin);
+  ASSERT_EQ(oops_gl_get_proc_address("glGenFramebuffers"), (void *)glGenFramebuffers);
   ASSERT_EQ(oops_gl_get_proc_address("malloc"), NULL);
   ASSERT_EQ(oops_gl_get_proc_address(""), NULL);
   ASSERT_EQ(oops_gl_get_proc_address(NULL), NULL);
