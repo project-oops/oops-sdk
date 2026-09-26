@@ -46,8 +46,20 @@
 #ifndef OOPS_GL_PROCS_H
 #define OOPS_GL_PROCS_H
 
+/*
+ * **The core entry points are in `gl_procs_core.h`, and they are not optional.**
+ *
+ * The note above says core GL is linked by symbol and never looked up. That holds for a program
+ * that calls `glBegin`; it does not hold for one that fills every pointer from a string, and
+ * ioquake3 is one - it asked for 66 core names and this table answered none of them, which is a
+ * renderer that refuses to start rather than anything the linker could have told us. The core list
+ * is separate only because it is long and derived; it is part of the same table.
+ */
+#include "gl_procs_core.h"
+
 /* X(core name)  -  XS(core name, suffix) for each published suffixed spelling. */
 #define OOPS_GL_PROC_LIST(X, XS) \
+    OOPS_GL_PROC_LIST_CORE(X) \
     X(glActiveTexture) XS(glActiveTexture, ARB) \
     X(glBeginQuery) XS(glBeginQuery, ARB) \
     X(glBindBuffer) XS(glBindBuffer, ARB) \
