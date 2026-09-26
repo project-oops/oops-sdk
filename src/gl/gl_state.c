@@ -4769,14 +4769,8 @@ static int gl_tex_chain_levels(const gl_texture_object_t *tex) {
         return 0;
     int levels =
         gl_filter_uses_mipmaps(tex->min_filter) ? gl_tex_top_level(tex) - b + 1 : 1;
-    /* A volume's depth is a third axis to round and takes the same power-of-two test
-     * (`gl_tex_chain_layout_3d`). */
     if (levels > 1 &&
         ((bv.width & (bv.width - 1)) != 0 || (bv.height & (bv.height - 1)) != 0)) {
-        levels = 1;
-    }
-    if (levels > 1 && tex->target == GL_TEXTURE_3D &&
-        (bv.depth <= 0 || (bv.depth & (bv.depth - 1)) != 0)) {
         levels = 1;
     }
     return (levels == 1 && b == 0) ? 0 : levels;
