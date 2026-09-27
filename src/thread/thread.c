@@ -67,8 +67,13 @@ sceKernelInstallExceptionHandler(int signo, void (*handler)(int, void *, void *)
 __attribute__((weak)) int sceKernelRemoveExceptionHandler(int signo);
 __attribute__((weak)) int sceKernelRaiseException(void *thread, int signo);
 
+/* Defined below, beside the other diagnostics; called from the first thread creation.
+ */
+void oops_thread_dump_kernel_imports(void);
+
 oops_thread_t oops_thread_create(const char *name, void *(*entry)(void *), void *arg,
                                  int priority, size_t stack_size) {
+    oops_thread_dump_kernel_imports();
     if (!scePthreadCreate) {
         oops_log_warn("THREAD", "create: scePthreadCreate unavailable");
         return NULL;
@@ -146,6 +151,88 @@ int oops_thread_equal(oops_thread_t t1, oops_thread_t t2) {
 
 /* Mutex implementation */
 
+/*
+ * A mutex whose handle is still zero has never been through `scePthreadMutexInit`.
+ *
+ * Handing one to libkernel is not an error it reports: it dereferences the handle and
+ * takes a page fault at address 0x8, on whatever thread made the call, with a register
+ * dump naming libkernel rather than the caller. Ship of Harkinian and Spaghetti Kart
+ * both died exactly there - same faulting instruction, same `rax` of 0, both on a
+ * thread named `libcxx` - and the log said nothing about which lock it was.
+ *
+ * So the check belongs here, at the boundary that makes the call, rather than in any
+ * one caller: every consumer of `oops/thread.h` gets an honest -1 and a line naming the
+ * operation instead of a fault in somebody else's library.
+ */
+/*
+ * Where libkernel's threading entry points landed, once, at the first thread creation.
+ *
+ * A fatal signal reports `rip` and nothing about who owns it: a fault inside libkernel
+ * names libkernel, not the call that got there. The module is loaded at a fixed base,
+ * so the entry point with the largest address at or below a faulting `rip` is the
+ * function containing it, and that turns a register dump into a name. Printed at INFO
+ * once per process, which is the cost of one line against a run that otherwise ends in
+ * a guess.
+ */
+void oops_thread_dump_kernel_imports(void) {
+    static int done = 0;
+    if (done)
+        return;
+    done = 1;
+
+    struct {
+        const char *name;
+        const void *fn;
+    } const entries[] = {
+        {"scePthreadCreate", (const void *)scePthreadCreate},
+        {"scePthreadJoin", (const void *)scePthreadJoin},
+        {"scePthreadDetach", (const void *)scePthreadDetach},
+        {"scePthreadYield", (const void *)scePthreadYield},
+        {"scePthreadSelf", (const void *)scePthreadSelf},
+        {"scePthreadEqual", (const void *)scePthreadEqual},
+        {"scePthreadAttrInit", (const void *)scePthreadAttrInit},
+        {"scePthreadAttrDestroy", (const void *)scePthreadAttrDestroy},
+        {"scePthreadMutexInit", (const void *)scePthreadMutexInit},
+        {"scePthreadMutexLock", (const void *)scePthreadMutexLock},
+        {"scePthreadMutexTrylock", (const void *)scePthreadMutexTrylock},
+        {"scePthreadMutexUnlock", (const void *)scePthreadMutexUnlock},
+        {"scePthreadMutexDestroy", (const void *)scePthreadMutexDestroy},
+        {"scePthreadMutexattrInit", (const void *)scePthreadMutexattrInit},
+        {"scePthreadMutexattrSettype", (const void *)scePthreadMutexattrSettype},
+        {"scePthreadKeyCreate", (const void *)scePthreadKeyCreate},
+        {"scePthreadGetspecific", (const void *)scePthreadGetspecific},
+        {"scePthreadSetspecific", (const void *)scePthreadSetspecific},
+        {"scePthreadCondInit", (const void *)scePthreadCondInit},
+        {"scePthreadCondWait", (const void *)scePthreadCondWait},
+        {"scePthreadCondTimedwait", (const void *)scePthreadCondTimedwait},
+        {"scePthreadCondSignal", (const void *)scePthreadCondSignal},
+        {"scePthreadCondBroadcast", (const void *)scePthreadCondBroadcast},
+        {"scePthreadCondDestroy", (const void *)scePthreadCondDestroy},
+    };
+
+    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+        oops_log_info("THREAD", "import %-26s %p", entries[i].name, entries[i].fn);
+    }
+}
+
+static int oops_mutex_absent(const oops_mutex_t *mutex, const char *op) {
+    if (mutex && mutex->handle)
+        return 0;
+    oops_log_warn("THREAD", "mutex_%s on a mutex that was never initialised (mtx=%p)",
+                  op, (const void *)mutex);
+    return 1;
+}
+
+static int oops_cond_absent(const oops_cond_t *cond, const char *op) {
+    if (cond && cond->handle)
+        return 0;
+    oops_log_warn("THREAD",
+                  "cond_%s on a condition variable that was never "
+                  "initialised (cond=%p)",
+                  op, (const void *)cond);
+    return 1;
+}
+
 int oops_mutex_init(oops_mutex_t *mutex, const char *name) {
     if (!mutex || !scePthreadMutexInit)
         return -1;
@@ -155,25 +242,25 @@ int oops_mutex_init(oops_mutex_t *mutex, const char *name) {
 }
 
 int oops_mutex_lock(oops_mutex_t *mutex) {
-    if (!mutex || !scePthreadMutexLock)
+    if (!mutex || !scePthreadMutexLock || oops_mutex_absent(mutex, "lock"))
         return -1;
     return scePthreadMutexLock(&mutex->handle);
 }
 
 int oops_mutex_trylock(oops_mutex_t *mutex) {
-    if (!mutex || !scePthreadMutexTrylock)
+    if (!mutex || !scePthreadMutexTrylock || oops_mutex_absent(mutex, "trylock"))
         return -1;
     return scePthreadMutexTrylock(&mutex->handle);
 }
 
 int oops_mutex_unlock(oops_mutex_t *mutex) {
-    if (!mutex || !scePthreadMutexUnlock)
+    if (!mutex || !scePthreadMutexUnlock || oops_mutex_absent(mutex, "unlock"))
         return -1;
     return scePthreadMutexUnlock(&mutex->handle);
 }
 
 int oops_mutex_destroy(oops_mutex_t *mutex) {
-    if (!mutex || !scePthreadMutexDestroy)
+    if (!mutex || !scePthreadMutexDestroy || oops_mutex_absent(mutex, "destroy"))
         return -1;
     oops_log_trace("THREAD", "mutex_destroy mtx=%p", (void *)mutex);
     return scePthreadMutexDestroy(&mutex->handle);
@@ -255,13 +342,15 @@ int oops_cond_init(oops_cond_t *cond, const char *name) {
 }
 
 int oops_cond_wait(oops_cond_t *cond, oops_mutex_t *mutex) {
-    if (!cond || !mutex || !scePthreadCondWait)
+    if (!cond || !mutex || !scePthreadCondWait || oops_cond_absent(cond, "wait") ||
+        oops_mutex_absent(mutex, "wait"))
         return -1;
     return scePthreadCondWait(&cond->handle, &mutex->handle);
 }
 
 int oops_cond_timedwait(oops_cond_t *cond, oops_mutex_t *mutex, uint32_t timeout_us) {
-    if (!cond || !mutex || !scePthreadCondTimedwait)
+    if (!cond || !mutex || !scePthreadCondTimedwait ||
+        oops_cond_absent(cond, "timedwait") || oops_mutex_absent(mutex, "timedwait"))
         return -1;
     /* No fallback to the untimed wait: a caller who asked for a timeout relies on
      * coming back. */
@@ -269,19 +358,19 @@ int oops_cond_timedwait(oops_cond_t *cond, oops_mutex_t *mutex, uint32_t timeout
 }
 
 int oops_cond_signal(oops_cond_t *cond) {
-    if (!cond || !scePthreadCondSignal)
+    if (!cond || !scePthreadCondSignal || oops_cond_absent(cond, "signal"))
         return -1;
     return scePthreadCondSignal(&cond->handle);
 }
 
 int oops_cond_broadcast(oops_cond_t *cond) {
-    if (!cond || !scePthreadCondBroadcast)
+    if (!cond || !scePthreadCondBroadcast || oops_cond_absent(cond, "broadcast"))
         return -1;
     return scePthreadCondBroadcast(&cond->handle);
 }
 
 int oops_cond_destroy(oops_cond_t *cond) {
-    if (!cond || !scePthreadCondDestroy)
+    if (!cond || !scePthreadCondDestroy || oops_cond_absent(cond, "destroy"))
         return -1;
     oops_log_trace("THREAD", "cond_destroy cond=%p", (void *)cond);
     return scePthreadCondDestroy(&cond->handle);
