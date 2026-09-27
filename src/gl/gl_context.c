@@ -29,6 +29,81 @@ static void gl_klog_val(const char *tag, uint64_t val) {
     oops_log_debug("GL", "%s: 0x%llx", tag, (unsigned long long)val);
 }
 
+#ifndef OOPS_HOST_BUILD
+/*
+ * One line a second, at INFO, saying where the frame went.
+ *
+ * Every number below is already measured on every frame. What was missing was a way to
+ * read them without the reading changing the answer: the per-frame breakdown prints at
+ * DEBUG, a dozen klog syscalls a frame, and that instrument has set the frame rate
+ * before now - a Neverball frame measured 200ms of which 174ms was the printing of it.
+ * A second's worth accumulated and printed once costs one syscall a second, so the
+ * number it reports is the one the title would have had unobserved.
+ *
+ * `other` is the share of the frame this library did not spend - the program above it,
+ * and whatever the flip waited on. It is the first thing to read: a slow frame with
+ * `other` small is this library's to answer for, and one with `other` large is the
+ * port's, and until now that question took a hardware run per guess.
+ */
+static void gl_frame_budget_tick(gl_context_t *ctx) {
+    static uint64_t window_t0 = 0u;
+    static uint64_t frames = 0u, draw_calls = 0u;
+    static uint64_t flush_ns = 0u, draw_ns = 0u, patch_ns = 0u, dcb_ns = 0u;
+    static uint64_t tnl_ns = 0u, vbo_ns = 0u;
+
+    const uint64_t now = oops_time_get_ns();
+    if (window_t0 == 0u)
+        window_t0 = now;
+
+    frames++;
+    draw_calls += (uint64_t)ctx->hw_draw_calls;
+    flush_ns += ctx->hw_flush_ns;
+    draw_ns += ctx->hw_draw_ns;
+    patch_ns += ctx->hw_patch_ns;
+    dcb_ns += ctx->hw_dcb_ns;
+    tnl_ns += ctx->hw_tnl_ns;
+    vbo_ns += ctx->hw_vbo_ns;
+
+    const uint64_t window_ns = now - window_t0;
+    if (window_ns < 1000000000ull || frames == 0u) {
+        return;
+    }
+
+    if (gl_log_level >= (int)OOPS_LOG_INFO) {
+        /* Per frame, in microseconds. `draw` already contains `tnl`, `vbo` and `patch`,
+         * so they are named as its parts rather than added beside it. */
+        const uint64_t per = frames;
+        const uint64_t accounted = flush_ns + draw_ns;
+        const uint64_t other_ns = window_ns > accounted ? window_ns - accounted : 0u;
+        oops_log_info("GL",
+                      "frame budget: %llu frames in %llums (%llu fps) | per frame: "
+                      "flush %lluus draw %lluus (tnl %lluus vbo %lluus patch %lluus "
+                      "dcb %lluus) other %lluus | %llu draws",
+                      (unsigned long long)frames,
+                      (unsigned long long)(window_ns / 1000000u),
+                      (unsigned long long)((frames * 1000000000ull) / window_ns),
+                      (unsigned long long)(flush_ns / per / 1000u),
+                      (unsigned long long)(draw_ns / per / 1000u),
+                      (unsigned long long)(tnl_ns / per / 1000u),
+                      (unsigned long long)(vbo_ns / per / 1000u),
+                      (unsigned long long)(patch_ns / per / 1000u),
+                      (unsigned long long)(dcb_ns / per / 1000u),
+                      (unsigned long long)(other_ns / per / 1000u),
+                      (unsigned long long)(draw_calls / per));
+    }
+
+    window_t0 = now;
+    frames = 0u;
+    draw_calls = 0u;
+    flush_ns = 0u;
+    draw_ns = 0u;
+    patch_ns = 0u;
+    dcb_ns = 0u;
+    tnl_ns = 0u;
+    vbo_ns = 0u;
+}
+#endif /* OOPS_HOST_BUILD */
+
 __attribute__((weak)) int sceKernelUsleep(unsigned int microseconds);
 __attribute__((weak)) int sceAgcDriverSubmitCommandBuffer(void *queue, const void *dcb);
 __attribute__((weak)) int sceAgcDriverSubmitDcb(const oops_agc_dcb_desc *desc);
@@ -1900,6 +1975,7 @@ void glSwapBuffers(void) {
                 oops_log_info("GL", "%s", m);
             }
         }
+        gl_frame_budget_tick(ctx);
         ctx->hw_slot_collisions = 0u;
         ctx->hw_ps_ring_stale = 0u;
         ctx->hw_desc_slot_high = 0u;
