@@ -15,6 +15,14 @@
 #include "oops/display.h"
 #include "oops/input.h"
 #include "oops/keyboard.h"
+/*
+ * The trigonometry below comes from here rather than from `gl_matrix.c`'s `gl_sin`,
+ * `gl_cos` and `gl_sqrt`. GLUT is a windowing and shape library, not part of the
+ * renderer, and a title can take it without taking oops-gl: mesa-demos does exactly
+ * that, drawing through Mesa. Reaching into `gl_matrix.c` made that impossible, because
+ * it defines `glLoadTransposeMatrixf` and the rest, which collide with Mesa's own.
+ */
+#include "oops/math.h"
 #include "oops/mouse.h"
 #include "oops/system.h"
 #include "oops/time.h"
@@ -697,7 +705,7 @@ static float glut_dist2(const float a[3], const float b[3]) {
 }
 
 static void glut_normalize(float v[3]) {
-    const float n = gl_sqrt(glut_dot(v, v));
+    const float n = oops_sqrtf(glut_dot(v, v));
     if (n > 0.0f) {
         v[0] /= n;
         v[1] /= n;
@@ -965,10 +973,10 @@ static void glut_torus(GLdouble inner, GLdouble outer, GLint sides, GLint rings,
         glBegin(mode == GLU_FILL ? GL_QUAD_STRIP : GL_LINE_STRIP);
         for (GLint j = 0; j <= sides; j++) {
             const float theta = (float)(j % sides) * dtheta;
-            const float ct = gl_cos(theta), st = gl_sin(theta);
+            const float ct = oops_cosf(theta), st = oops_sinf(theta);
             for (int e = 0; e < 2; e++) {
                 const float phi = (float)(i + (1 - e)) * dphi;
-                const float cp = gl_cos(phi), sp = gl_sin(phi);
+                const float cp = oops_cosf(phi), sp = oops_sinf(phi);
                 const float nx = ct * cp, ny = ct * sp, nz = st;
                 const float r = (float)outer + (float)inner * ct;
                 glNormal3f(nx, ny, nz);
