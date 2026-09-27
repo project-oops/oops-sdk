@@ -329,6 +329,10 @@ void oops_display_close(oops_display_t *disp) {
     s_opened = 0;
 }
 
+int oops_display_any_open(void) {
+    return s_opened;
+}
+
 #if OOPS_TARGET_IS_PROSPERO
 /* Stubs for the gnm backend when the build targets prospero or trinity
  * (OOPS_TARGET_IS_PROSPERO), so code that calls gnm_* directly still links without

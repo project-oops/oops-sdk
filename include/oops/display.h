@@ -161,6 +161,17 @@ int oops_display_flip_index(oops_display_t *disp, int index);
 /* Close output and release video resources */
 void oops_display_close(oops_display_t *disp);
 
+/*
+ * Whether a display is open right now, without holding the handle.
+ *
+ * For code that must know whether this process has a video-out session before it calls
+ * something that needs one. The system's common dialogs are the case this exists for:
+ * they composite against the app's video-out, and driving them without one faults
+ * inside the platform's own library rather than returning an error - so the caller has
+ * to ask first. Nothing here opens a display; it only reports.
+ */
+int oops_display_any_open(void);
+
 #ifdef __cplusplus
 }
 #endif
