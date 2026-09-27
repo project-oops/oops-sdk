@@ -120,9 +120,68 @@ static void test_fs_storage_dir(void) {
     (void)oops_fs_unlink(file_path);
 }
 
+/*
+ * Path resolution, which every path crosses on its way to the kernel.
+ *
+ * A payload has no working directory the kernel resolves against, so a relative path
+ * reaches it unchanged and fails. This is pure string work with no syscall in it, and
+ * the only reason its mistakes ever needed a console to find is that nothing on this
+ * side used to call it. Both bugs below were found that expensive way once.
+ */
+const char *oops_fs_resolve_path(const char *path, char *buf, size_t max);
+
+static void test_fs_resolve_path(void) {
+    char buf[256];
+
+    /* A relative path is answered against the place the package is mounted. libzip
+     * opened "./soh.o2r" and failed while the file sat at /app0/soh.o2r. */
+    ASSERT_STR_EQ(oops_fs_resolve_path("./soh.o2r", buf, sizeof(buf)), "/app0/soh.o2r");
+    ASSERT_STR_EQ(oops_fs_resolve_path("soh.o2r", buf, sizeof(buf)), "/app0/soh.o2r");
+
+    /* `std::filesystem::absolute` leaves the dot in the middle when it joins a relative
+     * path to the working directory, and the kernel refuses that too. */
+    ASSERT_STR_EQ(oops_fs_resolve_path("/app0/./soh.o2r", buf, sizeof(buf)),
+                  "/app0/soh.o2r");
+    ASSERT_STR_EQ(oops_fs_resolve_path("/app0/mods/../soh.o2r", buf, sizeof(buf)),
+                  "/app0/soh.o2r");
+
+    /* An absolute path with nothing to resolve is unchanged. */
+    ASSERT_STR_EQ(oops_fs_resolve_path("/app0/soh.o2r", buf, sizeof(buf)),
+                  "/app0/soh.o2r");
+
+    /*
+     * A trailing `/.` survives, and this is the case that matters most: it asserts that
+     * what precedes it is a directory, and `common/posix`'s `is_directory` asks this
+     * kernel exactly that way - a file answers ENOTDIR. Collapsing it made every
+     * regular file open as a directory, and libultraship then built a
+     * `directory_iterator` over `soh.o2r` and threw.
+     */
+    ASSERT_STR_EQ(oops_fs_resolve_path("/app0/soh.o2r/.", buf, sizeof(buf)),
+                  "/app0/soh.o2r/.");
+    ASSERT_STR_EQ(oops_fs_resolve_path("./assets/.", buf, sizeof(buf)),
+                  "/app0/assets/.");
+
+    /* `..` never walks off the root, and the root itself stays a path. */
+    ASSERT_STR_EQ(oops_fs_resolve_path("/../..", buf, sizeof(buf)), "/");
+    ASSERT_STR_EQ(oops_fs_resolve_path("/", buf, sizeof(buf)), "/");
+
+    /* Too long to rewrite is returned as written, so it fails as the caller spelled it
+     * rather than resolving to some other file that happens to exist. */
+    {
+        char tiny[8];
+        ASSERT_STR_EQ(
+            oops_fs_resolve_path("/app0/a/very/long/path", tiny, sizeof(tiny)),
+            "/app0/a/very/long/path");
+    }
+
+    /* NULL in, NULL out, like every other call in this file. */
+    ASSERT_TRUE(oops_fs_resolve_path(NULL, buf, sizeof(buf)) == NULL);
+}
+
 void run_unit_tests_fs(void) {
     TEST_SUITE_BEGIN("High-Level Filesystem Subsystem");
     RUN_TEST(test_fs_null_safety);
     RUN_TEST(test_fs_read_write_seek);
     RUN_TEST(test_fs_storage_dir);
+    RUN_TEST(test_fs_resolve_path);
 }

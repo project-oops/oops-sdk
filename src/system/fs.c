@@ -55,9 +55,89 @@ int oops_fs_open(const char *path, int flags, int mode) {
  * Direct sys_call(SYS_open, ...) produces a descriptor that reliably commits data to storage.
  * See docs/decisions/D013-libc-open-descriptor-discards-writes-route-through-sys-open.md.
  */
+/* Compiled on the host too, and not static, so `tests/unit/test_fs.c` can reach it.
+ * It is pure string work with no syscall in it, and the only reason a mistake here ever
+ * needed a console to find was that nothing on this side could call it. */
+const char *oops_fs_resolve_path(const char *path, char *buf, size_t max);
+
+/*
+ * The path as this kernel needs it: absolute, with no `.` or `..` components left.
+ *
+ * A payload has no working directory the kernel resolves against, so a relative path
+ * reaches `SYS_open` unchanged and fails. Ported code hands out relative paths
+ * constantly - libzip opened `./soh.o2r` and failed while the file sat at
+ * `/app0/soh.o2r`, and `std::filesystem::absolute` had already turned the same name into
+ * `/app0/./soh.o2r`, which fails too for the `.` in the middle.
+ *
+ * This is the one place every path crosses into the kernel, which is why the resolution
+ * belongs here rather than in each caller: `open`, `stat` through `oops_fs_exists`,
+ * libzip and libc++'s filesystem all arrive at this function.
+ *
+ * The base is `/app0`, the place a package is mounted, which is what the POSIX layer's
+ * `getcwd` reports for the same reason. A path too long to rewrite is passed through
+ * untouched, so it fails as written rather than resolving to some other file.
+ */
+const char *oops_fs_resolve_path(const char *path, char *buf, size_t max) {
+  size_t n = 0;
+  const char *p;
+  int trailing_dot;
+
+  if (!path || !buf || max < 2u) return path;
+
+  /*
+   * A trailing `/.` is not noise to be tidied away: it asserts that what precedes it is a
+   * directory, and it is how `common/posix`'s `is_directory` asks this kernel that
+   * question - a file answers ENOTDIR. Collapsing it makes every regular file open as a
+   * directory, and a caller that believed the answer then iterated one: libultraship
+   * built a `directory_iterator` over `soh.o2r` and threw.
+   */
+  {
+    size_t plen = 0;
+    while (path[plen]) plen++;
+    trailing_dot = (plen == 1u && path[0] == '.') ||
+                   (plen >= 2u && path[plen - 1u] == '.' && path[plen - 2u] == '/');
+  }
+  if (path[0] != '/') {
+    const char *base = "/app0";
+    while (*base && n + 1u < max) buf[n++] = *base++;
+  }
+
+  for (p = path; *p;) {
+    const char *seg;
+    size_t len, i;
+
+    while (*p == '/') p++;
+    if (!*p) break;
+    seg = p;
+    while (*p && *p != '/') p++;
+    len = (size_t)(p - seg);
+
+    if (len == 1u && seg[0] == '.') continue;
+    if (len == 2u && seg[0] == '.' && seg[1] == '.') {
+      while (n > 0u && buf[n - 1u] != '/') n--;
+      if (n > 1u) n--; /* the separator too, but never the leading '/' */
+      continue;
+    }
+    if (n + len + 2u >= max) return path;
+    buf[n++] = '/';
+    for (i = 0; i < len; i++) buf[n++] = seg[i];
+  }
+  if (n == 0u) buf[n++] = '/';
+  if (trailing_dot && n + 3u < max) {
+    buf[n++] = '/';
+    buf[n++] = '.';
+  }
+  buf[n] = '\0';
+  return buf;
+}
+
 static int fs_open_raw(const char *path, int flags, int mode) {
 #ifndef OOPS_HOST_BUILD
+  char resolved[1024];
   int target_flags = 0;
+
+  path = oops_fs_resolve_path(path, resolved, sizeof(resolved));
+
   if ((flags & 3) == OOPS_O_RDONLY) target_flags |= 0;
   else if ((flags & 3) == OOPS_O_WRONLY) target_flags |= 1;
   else if ((flags & 3) == OOPS_O_RDWR) target_flags |= 2;
