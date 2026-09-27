@@ -23,6 +23,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `glBindFramebuffer`
 - `glBindRenderbuffer`
 - `glBindTexture`
+- `glBindVertexArray`
 - `glBitmap`
 - `glBlendColor`
 - `glBlendColorEXT`
@@ -115,6 +116,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `glDeleteRenderbuffers`
 - `glDeleteShader`
 - `glDeleteTextures`
+- `glDeleteVertexArrays`
 - `glDepthFunc`
 - `glDepthMask`
 - `glDepthRange`
@@ -181,6 +183,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `glGenQueriesARB`
 - `glGenRenderbuffers`
 - `glGenTextures`
+- `glGenVertexArrays`
 - `glGenerateMipmap`
 - `glGetActiveAttrib`
 - `glGetActiveUniform`
@@ -233,6 +236,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `glGetShaderSource`
 - `glGetShaderiv`
 - `glGetString`
+- `glGetStringi`
 - `glGetTexEnvfv`
 - `glGetTexEnviv`
 - `glGetTexGendv`
@@ -277,6 +281,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `glIsRenderbuffer`
 - `glIsShader`
 - `glIsTexture`
+- `glIsVertexArray`
 - `glLightModelf`
 - `glLightModelfv`
 - `glLightModeli`
@@ -760,6 +765,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 ## oops/display.h
 
 - `oops_display_adopted_index`
+- `oops_display_any_open`
 - `oops_display_clear`
 - `oops_display_close`
 - `oops_display_flip`

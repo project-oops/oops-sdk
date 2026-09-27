@@ -55,15 +55,17 @@ typedef struct {
 struct tm;
 
 /*
- * Two of the wide-character functions, because they are the two a C source reaches for without
- * asking for wide characters at all: a library that carries a wide-string file-path API alongside
- * its byte one compiles both, and miniaudio's `ma_copy_string_w` and `ma_wfopen` are that shape.
- * `_LIBCPP_HAS_WIDE_CHARACTERS 0` stands: this adds nothing to C++'s `std::wstring`, which is still
- * absent, and nothing here creates a wide-character locale.
+ * Two of the wide-character functions, because they are the two a C source reaches for
+ * without asking for wide characters at all: a library that carries a wide-string
+ * file-path API alongside its byte one compiles both, and miniaudio's
+ * `ma_copy_string_w` and `ma_wfopen` are that shape.
+ * `_LIBCPP_HAS_WIDE_CHARACTERS 0` stands: this adds nothing to C++'s `std::wstring`,
+ * which is still absent, and nothing here creates a wide-character locale.
  *
- * Both are exact rather than approximate, which is why they are here and the rest is not:
- * `wcslen` counts to the terminator, and `wcsrtombs` encodes UTF-8 from a `wchar_t` that is a
- * Unicode scalar value on this target. A caller converting a path it was given gets the path back.
+ * Both are exact rather than approximate, which is why they are here and the rest is
+ * not: `wcslen` counts to the terminator, and `wcsrtombs` encodes UTF-8 from a
+ * `wchar_t` that is a Unicode scalar value on this target. A caller converting a path
+ * it was given gets the path back.
  */
 size_t wcslen(const wchar_t *s);
 size_t wcsrtombs(char *dst, const wchar_t **src, size_t len, mbstate_t *ps);

@@ -14763,9 +14763,9 @@ static void test_glsl_emit_mat4_is_column_major(void) {
  * `oops_gl_get_proc_address` resolves entry points by name. A title that fills function
  * pointers from strings such as `"glGenBuffersARB"` calls address zero on a NULL.
  */
-/* A vertex array object holds the array state and a bind swaps it: what is set while one
- * object is bound is gone when another is, and comes back when the first is bound again.
- * The default object, name 0, is one of the two sides of that. */
+/* A vertex array object holds the array state and a bind swaps it: what is set while
+ * one object is bound is gone when another is, and comes back when the first is bound
+ * again. The default object, name 0, is one of the two sides of that. */
 static void test_gl_vertex_array_objects_swap_array_state(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -14790,7 +14790,8 @@ static void test_gl_vertex_array_objects_swap_array_state(void) {
     ASSERT_NE(vao[0], vao[1]);
     ASSERT_EQ(glIsVertexArray(vao[0]), GL_TRUE);
 
-    /* A name nothing generated is refused rather than created, and the binding stays. */
+    /* A name nothing generated is refused rather than created, and the binding stays.
+     */
     glBindVertexArray(vao[1] + 1000u);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
     glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &got);
@@ -14833,7 +14834,8 @@ static void test_gl_vertex_array_objects_swap_array_state(void) {
     ASSERT_EQ(ctx->array_vertex.pointer, (const void *)verts);
     ASSERT_EQ(ctx->vertex_attribs[3].enabled, GL_FALSE);
 
-    /* GL_ARRAY_BUFFER's binding is context state, not the object's: a bind leaves it. */
+    /* GL_ARRAY_BUFFER's binding is context state, not the object's: a bind leaves it.
+     */
     GLuint vbo = 0u;
     glGenBuffers(1, &vbo);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -14866,10 +14868,10 @@ static void test_gl_vertex_array_objects_swap_array_state(void) {
     oops_display_close(disp);
 }
 
-/* GL 3.0's indexed extension query answers the same list the string does, and the integer
- * version matches what `glContextSetVersion` was given. The pixel buffer targets accept an
- * unbind, which is all a backend saving GL state around its own drawing needs, and refuse a
- * real buffer. */
+/* GL 3.0's indexed extension query answers the same list the string does, and the
+ * integer version matches what `glContextSetVersion` was given. The pixel buffer
+ * targets accept an unbind, which is all a backend saving GL state around its own
+ * drawing needs, and refuse a real buffer. */
 static void test_gl_gl3_queries_answer_version_extensions_and_pixel_bindings(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -14892,8 +14894,8 @@ static void test_gl_gl3_queries_answer_version_extensions_and_pixel_bindings(voi
     for (GLint i = 0; i < count; i++) {
         const GLubyte *one = glGetStringi(GL_EXTENSIONS, (GLuint)i);
         ASSERT_NE(one, NULL);
-        ASSERT_TRUE(strstr((const char *)glGetString(GL_EXTENSIONS), (const char *)one) !=
-                    NULL);
+        ASSERT_TRUE(strstr((const char *)glGetString(GL_EXTENSIONS),
+                           (const char *)one) != NULL);
         ASSERT_TRUE(strchr((const char *)one, ' ') == NULL);
     }
     ASSERT_EQ(glGetStringi(GL_EXTENSIONS, (GLuint)count), NULL);

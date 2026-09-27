@@ -2581,9 +2581,10 @@ static void test_gl2_version_gating(void) {
     /* A name-returning call answers 0, a location -1, a predicate GL_FALSE, and every
      * one records GL_INVALID_OPERATION.
      *
-     * `glCreateShader` and `glCreateProgram` are the two exceptions and are checked at the end:
-     * asking for a shader object raises the context to 2.0 rather than being refused, so they have
-     * to come after everything that depends on the context still being 1.1. */
+     * `glCreateShader` and `glCreateProgram` are the two exceptions and are checked at
+     * the end: asking for a shader object raises the context to 2.0 rather than being
+     * refused, so they have to come after everything that depends on the context still
+     * being 1.1. */
     ASSERT_EQ(glIsShader(1u), GL_FALSE);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);
     ASSERT_EQ(glGetUniformLocation(1u, "x"), -1);
@@ -2642,10 +2643,11 @@ static void test_gl2_version_gating(void) {
     ASSERT_TRUE(sh != 0u);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
 
-    /* Narrowing again turns the rest of the surface back off - but not these two. Asking for a
-     * shader object on a lower version raises it to 2.0 instead of being refused: that request is
-     * how a title declares the programmable pipeline, and several ask SDL for no version at all and
-     * then compile a shader. What stays gated is everything that is not the declaration itself. */
+    /* Narrowing again turns the rest of the surface back off - but not these two.
+     * Asking for a shader object on a lower version raises it to 2.0 instead of being
+     * refused: that request is how a title declares the programmable pipeline, and
+     * several ask SDL for no version at all and then compile a shader. What stays gated
+     * is everything that is not the declaration itself. */
     glContextSetVersion(1, 5);
     glUseProgram(0);
     ASSERT_EQ(glGetError(), GL_INVALID_OPERATION);

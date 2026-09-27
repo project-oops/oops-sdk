@@ -57,28 +57,31 @@ static gl_context_t *gl2_ctx(void) {
 }
 
 /*
- * The context for `glCreateShader` and `glCreateProgram`, which raise its version to 2.0 rather
- * than refusing a lower one.
+ * The context for `glCreateShader` and `glCreateProgram`, which raise its version
+ * to 2.0 rather than refusing a lower one.
  *
- * Asking for a shader object *is* the declaration that a title wants the programmable pipeline -
- * `gl2_used` beside it already treats it that way, and the draw path skips the generic attribute
- * slots until one of these two is called. A title that never calls them keeps its 1.x badge and
- * pays nothing, which is what that note is protecting.
+ * Asking for a shader object *is* the declaration that a title wants the programmable
+ * pipeline - `gl2_used` beside it already treats it that way, and the draw path skips
+ * the generic attribute slots until one of these two is called. A title that never
+ * calls them keeps its 1.x badge and pays nothing, which is what that note is
+ * protecting.
  *
- * The version is otherwise the caller's to set, through `glContextSetVersion`, and SDL only does so
- * for a context asking for an ES profile. sm64 asks SDL for no profile and no version at all and
- * then compiles a shader, which was `GL_INVALID_OPERATION` here and `Vertex shader compilation
- * failed` on its own screen - a refusal on a badge rather than on a capability, for a pipeline this
- * implementation has.
+ * The version is otherwise the caller's to set, through `glContextSetVersion`, and SDL
+ * only does so for a context asking for an ES profile. sm64 asks SDL for no profile and
+ * no version at all and then compiles a shader, which was `GL_INVALID_OPERATION` here
+ * and `Vertex shader compilation failed` on its own screen - a refusal on a badge
+ * rather than on a capability, for a pipeline this implementation has.
  */
 static gl_context_t *gl2_ctx_adopt(void) {
     gl_context_t *ctx = gl_get_ctx();
     if (!ctx)
         return (gl_context_t *)0;
     if (!gl_version_at_least(ctx, 2u, 0u)) {
-        oops_log_info("GL", "a shader object was asked for on a GL %u.%u context: taking that as "
-                            "the request for 2.0 that it is",
-                      ctx->version_major, ctx->version_minor);
+        oops_log_info(
+            "GL",
+            "a shader object was asked for on a GL %u.%u context: taking that as "
+            "the request for 2.0 that it is",
+            ctx->version_major, ctx->version_minor);
         glContextSetVersion(2u, 0u);
     }
     return ctx;

@@ -299,14 +299,15 @@ int oops_input_poll(unsigned int port, oops_pad_state_t *out_state) {
     static uint32_t s_last_polled_buttons[OOPS_MAX_PADS] = {0};
     static int s_poll_ticks[OOPS_MAX_PADS] = {0};
     s_poll_ticks[port]++;
-    /* The first poll always reports, whatever it found. A pad that opens and then reads as
-     * disconnected says nothing on the conditions below - no button can change on a pad the caller
-     * has been told is absent, and a caller that believes it polls no further - so the one poll that
-     * happens is the one that has to speak. */
-    /* A stick that moves reports too. Without this the line fires on buttons alone, and a log full
-     * of `sticks=(8,3)` says only "nobody pressed a button while the stick was there" - which read
-     * as a stick that does not move, and cost a round of looking at the wrong thing. 16 of 127 is
-     * past the drift a resting stick shows and well inside any caller's deadzone. */
+    /* The first poll always reports, whatever it found. A pad that opens and then reads
+     * as disconnected says nothing on the conditions below - no button can change on a
+     * pad the caller has been told is absent, and a caller that believes it polls no
+     * further - so the one poll that happens is the one that has to speak. */
+    /* A stick that moves reports too. Without this the line fires on buttons alone, and
+     * a log full of `sticks=(8,3)` says only "nobody pressed a button while the stick
+     * was there" - which read as a stick that does not move, and cost a round of
+     * looking at the wrong thing. 16 of 127 is past the drift a resting stick shows and
+     * well inside any caller's deadzone. */
     static int8_t s_last_stick_x[OOPS_MAX_PADS] = {0};
     static int8_t s_last_stick_y[OOPS_MAX_PADS] = {0};
     const int stick_moved = (out_state->left_stick_x - s_last_stick_x[port] > 16) ||

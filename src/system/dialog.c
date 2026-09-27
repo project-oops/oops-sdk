@@ -25,10 +25,10 @@ __attribute__((weak)) bool sceCommonDialogIsUsed(void);
 
 /*
  * Weak on purpose. A common dialog composites against this process's video-out, and
- * `src/display.c` is what knows whether one is open. A weak undefined reference does not
- * pull that object out of the archive, so a build that links no display is unchanged -
- * the address is 0 and the check is skipped - while every build that does link one gets
- * the precondition enforced.
+ * `src/display.c` is what knows whether one is open. A weak undefined reference does
+ * not pull that object out of the archive, so a build that links no display is
+ * unchanged - the address is 0 and the check is skipped - while every build that does
+ * link one gets the precondition enforced.
  */
 __attribute__((weak)) int oops_display_any_open(void);
 
@@ -282,8 +282,9 @@ int oops_dialog_message_show(const char *message, oops_msg_dialog_button_t butto
      * often reaches one *because* something went wrong before the first frame - a
      * missing asset, say - so there may be no display at all. Asked for one then, the
      * platform's library faults on its own uninitialised state rather than returning an
-     * error, which costs the caller its process and its log. Refusing here is the honest
-     * answer, and it leaves the caller free to report the same message its own way.
+     * error, which costs the caller its process and its log. Refusing here is the
+     * honest answer, and it leaves the caller free to report the same message its own
+     * way.
      */
     if (&oops_display_any_open && !oops_display_any_open()) {
         oops_log_warn("DIALOG",

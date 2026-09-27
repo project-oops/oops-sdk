@@ -302,7 +302,8 @@ static struct oops_mem_block *mem_open_block(oops_mem_type_t type, size_t size,
         }
     }
     if (spare < 0) {
-        oops_log_warn("MEM", "oops_mem_alloc: out of carve blocks (max %d)", OOPS_MAX_BLOCKS);
+        oops_log_warn("MEM", "oops_mem_alloc: out of carve blocks (max %d)",
+                      OOPS_MAX_BLOCKS);
         return NULL;
     }
     uint8_t *base = (uint8_t *)mem_alloc_pages(OOPS_MEM_BLOCK_BYTES, 0x10000, type);
@@ -319,11 +320,12 @@ static struct oops_mem_block *mem_open_block(oops_mem_type_t type, size_t size,
 }
 
 void *oops_mem_alloc(size_t size, size_t alignment, oops_mem_type_t type) {
-    if (size == 0 || size > OOPS_MEM_SMALL_MAX || alignment > OOPS_MEM_SMALL_ALIGN_MAX ||
-        (alignment & (alignment - 1u)) != 0u)
+    if (size == 0 || size > OOPS_MEM_SMALL_MAX ||
+        alignment > OOPS_MEM_SMALL_ALIGN_MAX || (alignment & (alignment - 1u)) != 0u)
         return mem_alloc_pages(size, alignment, type);
 
-    size_t align = alignment < OOPS_MEM_SMALL_ALIGN_MIN ? OOPS_MEM_SMALL_ALIGN_MIN : alignment;
+    size_t align =
+        alignment < OOPS_MEM_SMALL_ALIGN_MIN ? OOPS_MEM_SMALL_ALIGN_MIN : alignment;
     struct oops_mem_block *b = mem_open_block(type, size, align);
     if (!b)
         return NULL;
