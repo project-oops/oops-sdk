@@ -153,6 +153,26 @@ static inline int pthread_attr_getschedparam(const pthread_attr_t *attr,
     }
     return ENOSYS;
 }
+/* A running thread's policy and priority, which fail the same way: there is no policy to read or
+ * set. Luanti's `Thread::setPriority` reads first and reports failure when that fails. */
+static inline int pthread_getschedparam(pthread_t thread, int *policy,
+                                        struct sched_param *param) {
+    (void)thread;
+    if (policy) {
+        *policy = 0;
+    }
+    if (param) {
+        param->sched_priority = 0;
+    }
+    return ENOSYS;
+}
+static inline int pthread_setschedparam(pthread_t thread, int policy,
+                                        const struct sched_param *param) {
+    (void)thread;
+    (void)policy;
+    (void)param;
+    return ENOSYS;
+}
 static inline int pthread_attr_setinheritsched(pthread_attr_t *attr, int inheritsched) {
     (void)attr;
     (void)inheritsched;
@@ -330,6 +350,14 @@ static inline int pthread_setcanceltype(int type, int *oldtype) {
 }
 
 static inline void pthread_testcancel(void) {}
+
+/* A request to cancel is refused with `ENOSYS` (78), since nothing would act on it. A caller
+ * that then joins waits for the thread to finish on its own - Luanti's `Thread::kill`, the
+ * fallback its destructor takes for a thread that was never asked to stop. */
+static inline int pthread_cancel(pthread_t thread) {
+    (void)thread;
+    return 78;
+}
 
 #define pthread_cleanup_push(routine, arg)                                                 \
     {                                                                                      \
