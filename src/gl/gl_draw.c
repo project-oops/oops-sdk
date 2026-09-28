@@ -2758,33 +2758,26 @@ gl_gl2_sampler_texture(gl_context_t *ctx, const gl_program_object_t *prog, int s
     } else {
         id = tu->bound_texture_2d ? tu->bound_texture_2d : OOPS_GL_DEFAULT_TEXTURE_2D;
     }
-    {
-        const gl_texture_object_t *probe = gl_lookup_texture(ctx, id);
-        if (!probe || !gl_texture_complete(probe))
-            return (gl_texture_object_t *)0;
-        /* A cube whose six faces have not all arrived has no array to sample, so it is
-         * treated as unbound, as the fixed-function path treats it. */
-        if (want_cube && probe->cube_hw_dim <= 0 && !probe->cube) {
-            return (gl_texture_object_t *)0;
-        }
-        /* A comparison's result is spread by the texture's `GL_DEPTH_TEXTURE_MODE`,
-         * chosen after the shader was compiled. The compiled path emits the default
-         * `GL_LUMINANCE` spread, and any other mode is logged once. */
-        if (st == GL_SAMPLER_2D_SHADOW && probe->depth_mode != GL_LUMINANCE &&
-            !ctx->hw_depth_mode_logged) {
-            oops_log_info(
-                "GL",
-                "a compiled shadow lookup spreads its comparison as GL_LUMINANCE: "
-                "GL_DEPTH_TEXTURE_MODE is a per-texture choice and the shader is "
-                "compiled once");
-            ctx->hw_depth_mode_logged = GL_TRUE;
-        }
+    const gl_texture_object_t *probe = gl_lookup_texture(ctx, id);
+    if (!probe || !gl_texture_complete(probe))
+        return (gl_texture_object_t *)0;
+    /* A cube whose six faces have not all arrived has no array to sample, so it is
+     * treated as unbound, as the fixed-function path treats it. */
+    if (want_cube && probe->cube_hw_dim <= 0 && !probe->cube) {
+        return (gl_texture_object_t *)0;
     }
-    for (int ti = 0; ti < OOPS_GL_MAX_TEXTURE_OBJECTS; ti++) {
-        if (ctx->textures[ti].used && ctx->textures[ti].id == id)
-            return &ctx->textures[ti];
+    /* A comparison's result is spread by the texture's `GL_DEPTH_TEXTURE_MODE`,
+     * chosen after the shader was compiled. The compiled path emits the default
+     * `GL_LUMINANCE` spread, and any other mode is logged once. */
+    if (st == GL_SAMPLER_2D_SHADOW && probe->depth_mode != GL_LUMINANCE &&
+        !ctx->hw_depth_mode_logged) {
+        oops_log_info(
+            "GL", "a compiled shadow lookup spreads its comparison as GL_LUMINANCE: "
+                  "GL_DEPTH_TEXTURE_MODE is a per-texture choice and the shader is "
+                  "compiled once");
+        ctx->hw_depth_mode_logged = GL_TRUE;
     }
-    return (gl_texture_object_t *)0;
+    return (gl_texture_object_t *)probe;
 }
 
 /* Builds the whole block: descriptors at 0x00 and 0x40, the uniform pool at 0x80.

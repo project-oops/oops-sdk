@@ -579,16 +579,10 @@ void glPopAttrib(void) {
             for (int i = 0; i < 4; i++) {
                 if (e->tex_param_id[u][i] == 0u)
                     continue;
-                gl_texture_object_t *t = (gl_texture_object_t *)0;
-                for (int k = 0; k < OOPS_GL_MAX_TEXTURE_OBJECTS; k++) {
-                    if (ctx->textures[k].used &&
-                        ctx->textures[k].id == e->tex_param_id[u][i]) {
-                        t = &ctx->textures[k];
-                        break;
-                    }
-                }
+                gl_texture_object_t *t = gl_texture_slot(ctx, e->tex_param_id[u][i]);
                 if (!t)
                     continue;
+
                 t->wrap_s = e->tex_params[u][i].wrap_s;
                 t->wrap_t = e->tex_params[u][i].wrap_t;
                 t->wrap_r = e->tex_params[u][i].wrap_r;

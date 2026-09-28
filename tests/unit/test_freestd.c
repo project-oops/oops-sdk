@@ -584,9 +584,86 @@ static void test_freestd_int128_division(void) {
     ASSERT_TRUE(__modti3(-1500000000, 1000000000) == -500000000);
 }
 
+/* `obs_memset`, `obs_memcpy`, and `obs_memcmp` over lengths 0-65 and misaligned
+ * pointers. */
+static void test_freestd_mem_operations(void) {
+    uint8_t src_buf[128];
+    uint8_t dst_buf[128];
+    uint8_t cmp_buf[128];
+
+    for (size_t len = 0; len <= 65; len++) {
+        for (size_t s_align = 0; s_align < 8; s_align++) {
+            for (size_t d_align = 0; d_align < 8; d_align++) {
+                /* 1. Test obs_memset */
+                memset(dst_buf, 0xAA, sizeof(dst_buf));
+                uint8_t *dst = dst_buf + 16 + d_align;
+                uint8_t fill_val = (uint8_t)(len ^ s_align ^ 0x5C);
+                void *ret_set = obs_memset(dst, (int)fill_val, len);
+                ASSERT_EQ(ret_set, (void *)dst);
+
+                /* Canaries before and after */
+                for (size_t i = 0; i < 16 + d_align; i++) {
+                    ASSERT_EQ(dst_buf[i], 0xAA);
+                }
+                for (size_t i = 0; i < len; i++) {
+                    ASSERT_EQ(dst[i], fill_val);
+                }
+                for (size_t i = 16 + d_align + len; i < sizeof(dst_buf); i++) {
+                    ASSERT_EQ(dst_buf[i], 0xAA);
+                }
+
+                /* 2. Test obs_memcpy */
+                memset(src_buf, 0xCC, sizeof(src_buf));
+                memset(dst_buf, 0x55, sizeof(dst_buf));
+                uint8_t *src = src_buf + 16 + s_align;
+                dst = dst_buf + 16 + d_align;
+                for (size_t i = 0; i < len; i++) {
+                    src[i] = (uint8_t)((i * 37u + len + 3u) & 0xFFu);
+                }
+                void *ret_cpy = obs_memcpy(dst, src, len);
+                ASSERT_EQ(ret_cpy, (void *)dst);
+
+                for (size_t i = 0; i < 16 + d_align; i++) {
+                    ASSERT_EQ(dst_buf[i], 0x55);
+                }
+                for (size_t i = 0; i < len; i++) {
+                    ASSERT_EQ(dst[i], src[i]);
+                }
+                for (size_t i = 16 + d_align + len; i < sizeof(dst_buf); i++) {
+                    ASSERT_EQ(dst_buf[i], 0x55);
+                }
+
+                /* 3. Test obs_memcmp: identical */
+                memcpy(cmp_buf, src_buf, sizeof(cmp_buf));
+                uint8_t *cmp = cmp_buf + 16 + d_align;
+                for (size_t i = 0; i < len; i++) {
+                    cmp[i] = src[i];
+                }
+                ASSERT_EQ(obs_memcmp(src, cmp, len), 0);
+
+                /* 3b. Test obs_memcmp: difference at each byte position */
+                if (len > 0) {
+                    for (size_t diff_pos = 0; diff_pos < len; diff_pos++) {
+                        cmp[diff_pos] = (uint8_t)(src[diff_pos] + 1u);
+                        if (src[diff_pos] < cmp[diff_pos]) {
+                            ASSERT_TRUE(obs_memcmp(src, cmp, len) < 0);
+                            ASSERT_TRUE(obs_memcmp(cmp, src, len) > 0);
+                        } else {
+                            ASSERT_TRUE(obs_memcmp(src, cmp, len) > 0);
+                            ASSERT_TRUE(obs_memcmp(cmp, src, len) < 0);
+                        }
+                        cmp[diff_pos] = src[diff_pos]; /* restore */
+                    }
+                }
+            }
+        }
+    }
+}
+
 void run_unit_tests_freestd(void) {
     TEST_SUITE_BEGIN("Freestanding Runtime Helpers");
     RUN_TEST(test_freestd_int128_division);
+    RUN_TEST(test_freestd_mem_operations);
     RUN_TEST(test_freestd_strings);
     RUN_TEST(test_freestd_formatting);
     RUN_TEST(test_freestd_nid);

@@ -45,8 +45,11 @@ __attribute__((weak)) int sceKernelGetHwSerialNumber(char *buffer);
 __attribute__((weak)) int sceKernelGetHwModelName(char *buffer);
 
 /* Weak graphics markers for generation detection */
+#if OOPS_TARGET_IS_PROSPERO
 __attribute__((weak)) extern void *sceAgcDriverGetDefaultOwner;
+#else
 __attribute__((weak)) extern void *sceGnmSubmitDone;
+#endif
 
 int oops_symbol_is_resolved(const void *fn_ptr) {
 #if defined(OOPS_HOST_BUILD) || !defined(__x86_64__)
@@ -162,9 +165,10 @@ int oops_system_get_info(oops_system_info_t *out_info) {
 
   /* 1. Generation detection (See obSCEne D121, D255: observed, never asserted)
    */
-  if ((void *)&sceAgcDriverGetDefaultOwner != NULL) {
-    out_info->generation = 5;
-  } else if ((void *)&sceGnmSubmitDone != NULL) {
+#if OOPS_TARGET_IS_PROSPERO
+  out_info->generation = 5;
+#else
+  if ((void *)&sceGnmSubmitDone != NULL) {
     out_info->generation = 4;
   } else {
 #if defined(OBSCENE_GEN) && (OBSCENE_GEN == 5)
@@ -176,6 +180,7 @@ int oops_system_get_info(oops_system_info_t *out_info) {
         0; /* Unknown: could-not-look must never be reported as a generation */
 #endif
   }
+#endif
 
   /* 2. User info */
   out_info->initial_user_id = oops_user_get_initial_user_id();

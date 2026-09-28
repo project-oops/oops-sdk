@@ -113,6 +113,9 @@ enum {
 /* Texture names. SuperTux's menu alone exhausted 256; its tile and sprite images number
  * in the thousands. 648 bytes each, in the context's host memory. */
 #define OOPS_GL_MAX_TEXTURE_OBJECTS 4096
+/* Texture hash table size: 8192 slots (50% max load factor) for bounded O(1) lookup. */
+#define OOPS_GL_TEX_HASH_SIZE 8192
+
 /* Framebuffer and renderbuffer objects. Fewer than textures because a program has a
  * handful of render targets where it has hundreds of images - Mesa sizes neither,
  * having no fixed pool, so these are this implementation's own and reported as
@@ -498,6 +501,15 @@ typedef struct gl_texture_object {
     GLsizei cube_hw_dim;
     GLboolean cube_hw_dirty;
 } gl_texture_object_t;
+
+/*
+ * Open-addressing hash table entry for texture lookup when slot `id - 1` misses.
+ * Stores texture id and corresponding index in ctx->textures[] (0..4095).
+ */
+typedef struct gl_tex_hash_entry {
+    GLuint id;
+    uint16_t slot;
+} gl_tex_hash_entry_t;
 
 /*
  * Framebuffer objects. A renderbuffer is an image with no sampling behind it:
@@ -1783,6 +1795,8 @@ typedef struct gl_context {
      * host build. */
     GLboolean zs_tiled;
     gl_texture_object_t textures[OOPS_GL_MAX_TEXTURE_OBJECTS];
+    gl_tex_hash_entry_t tex_hash[OOPS_GL_TEX_HASH_SIZE];
+
     /* Framebuffer objects, and which one a draw goes to. `bound_framebuffer` of 0 is
      * the window-system framebuffer - the display; a non-zero name redirects the colour
      * target in `gl_draw_targets`. */
@@ -3497,16 +3511,94 @@ static inline size_t gl_tex_chain_layout(GLsizei w, GLsizei h, int levels,
     return gl_tex_chain_layout_3d(w, h, 1, levels, offsets, pitches);
 }
 
-/* Slot `id - 1` first, then the scan.
+/*
+ * Open-addressing hash table for texture lookup when slot `id - 1` misses.
  *
- * `glGenTextures` hands out the lowest free name and `gl_find_or_create_texture` takes
- * the lowest free slot, so a texture called `n` is in slot `n - 1` unless deletion has
- * shuffled things - which makes the guess right almost always and wrong harmlessly,
- * since the same `used && id ==` test that ends the scan also validates it. No cache,
- * so nothing to invalidate when a texture is created, deleted or renamed. This runs
- * several times per draw. */
-/* The writable form of `gl_lookup_texture`, for the draw path's own scans. Same rule:
-   slot `id - 1` first, then the sweep that validates it. */
+ * Direct hit: If `id <= OOPS_GL_MAX_TEXTURE_OBJECTS` and `textures[id - 1].used &&
+ * textures[id - 1].id == id`, lookup is a single O(1) array access.
+ *
+ * Miss fallback: When slot `id - 1` misses (due to non-sequential IDs, IDs > 4096 such
+ * as default textures 0xfffffe01..0xfffffe04, or deletion churn), an open-addressed
+ * hash table with Knuth's multiplicative hashing and linear probing finds the slot.
+ * With a table size of 8,192 entries and at most 4,096 active textures (load factor
+ * alpha <= 50%), the expected probe count is bounded by: E[hit] <= 1/2 * (1 + 1 / (1 -
+ * alpha)) <= 1.5 probes E[miss] <= 1/2 * (1 + 1 / (1 - alpha)^2) <= 2.5 probes
+ * Worst-case probe bound is N + 1 <= 4097 (bounded by the table's empty slots, never
+ * scanning 2.65 MB of texture structs).
+ */
+static inline void gl_tex_hash_insert(gl_context_t *ctx, GLuint id, uint16_t slot) {
+    if (!ctx || id == 0u)
+        return;
+    uint32_t mask = (uint32_t)(OOPS_GL_TEX_HASH_SIZE - 1u);
+    uint32_t i = (uint32_t)((id * 2654435761u) >> 19) & mask;
+    while (ctx->tex_hash[i].id != 0u) {
+        if (ctx->tex_hash[i].id == id) {
+            ctx->tex_hash[i].slot = slot;
+            return;
+        }
+        i = (i + 1u) & mask;
+    }
+    ctx->tex_hash[i].id = id;
+    ctx->tex_hash[i].slot = slot;
+}
+
+static inline void gl_tex_hash_remove(gl_context_t *ctx, GLuint id) {
+    if (!ctx || id == 0u)
+        return;
+    uint32_t mask = (uint32_t)(OOPS_GL_TEX_HASH_SIZE - 1u);
+    uint32_t i = (uint32_t)((id * 2654435761u) >> 19) & mask;
+    while (ctx->tex_hash[i].id != 0u) {
+        if (ctx->tex_hash[i].id == id) {
+            /* Knuth Algorithm R (backward-shift deletion for linear probing) */
+            ctx->tex_hash[i].id = 0u;
+            ctx->tex_hash[i].slot = 0u;
+            uint32_t j = i;
+            for (;;) {
+                j = (j + 1u) & mask;
+                if (ctx->tex_hash[j].id == 0u)
+                    break;
+                uint32_t k =
+                    (uint32_t)((ctx->tex_hash[j].id * 2654435761u) >> 19) & mask;
+                int can_move;
+                if (j >= i) {
+                    can_move = (k <= i || k > j);
+                } else {
+                    can_move = (k <= i && k > j);
+                }
+                if (can_move) {
+                    ctx->tex_hash[i] = ctx->tex_hash[j];
+                    ctx->tex_hash[j].id = 0u;
+                    ctx->tex_hash[j].slot = 0u;
+                    i = j;
+                }
+            }
+            return;
+        }
+        i = (i + 1u) & mask;
+    }
+}
+
+static inline gl_texture_object_t *gl_tex_hash_lookup(gl_context_t *ctx, GLuint id) {
+    if (!ctx || id == 0u)
+        return (gl_texture_object_t *)0;
+    uint32_t mask = (uint32_t)(OOPS_GL_TEX_HASH_SIZE - 1u);
+    uint32_t i = (uint32_t)((id * 2654435761u) >> 19) & mask;
+    while (ctx->tex_hash[i].id != 0u) {
+        if (ctx->tex_hash[i].id == id) {
+            uint16_t slot = ctx->tex_hash[i].slot;
+            if (slot < (uint16_t)OOPS_GL_MAX_TEXTURE_OBJECTS &&
+                ctx->textures[slot].used && ctx->textures[slot].id == id) {
+                return &ctx->textures[slot];
+            }
+            return (gl_texture_object_t *)0;
+        }
+        i = (i + 1u) & mask;
+    }
+    return (gl_texture_object_t *)0;
+}
+
+/* The writable form of `gl_lookup_texture`: slot `id - 1` first, then hash table
+ * lookup. */
 static inline gl_texture_object_t *gl_texture_slot(gl_context_t *ctx, GLuint id) {
     if (!ctx || id == 0u)
         return (gl_texture_object_t *)0;
@@ -3515,11 +3607,7 @@ static inline gl_texture_object_t *gl_texture_slot(gl_context_t *ctx, GLuint id)
         if (t->used && t->id == id)
             return t;
     }
-    for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
-        if (ctx->textures[i].used && ctx->textures[i].id == id)
-            return &ctx->textures[i];
-    }
-    return (gl_texture_object_t *)0;
+    return gl_tex_hash_lookup(ctx, id);
 }
 
 /* The framebuffer and renderbuffer a name refers to. Here rather than beside the entry
@@ -3700,16 +3788,14 @@ static inline GLboolean gl_fbo_bound_target(gl_context_t *ctx, gl_fb_storage_t *
 
 static inline const gl_texture_object_t *gl_lookup_texture(const gl_context_t *ctx,
                                                            GLuint id) {
-    if (id != 0u && id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS) {
+    if (!ctx || id == 0u)
+        return (const gl_texture_object_t *)0;
+    if (id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS) {
         const gl_texture_object_t *t = &ctx->textures[id - 1u];
         if (t->used && t->id == id)
             return t;
     }
-    for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
-        if (ctx->textures[i].used && ctx->textures[i].id == id)
-            return &ctx->textures[i];
-    }
-    return (const gl_texture_object_t *)0;
+    return gl_tex_hash_lookup((gl_context_t *)ctx, id);
 }
 
 /* The texture a draw samples, by id, or 0 for none.

@@ -12466,6 +12466,68 @@ static void test_gl_texture_residency_is_honest(void) {
     oops_display_close(disp);
 }
 
+/*
+ * Textures are found directly when in slot id - 1, and via the bounded hash table
+ * when out-of-order, past 4096, or displaced by deletions.
+ */
+static void test_gl_texture_lookup_bounded(void) {
+    oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
+    void *ctx_handle = glContextCreate(disp);
+    gl_context_t *ctx = (gl_context_t *)ctx_handle;
+    (void)glGetError();
+
+    /* 1. Sequential allocation: ids 1..10 land in slots 0..9 and hit the direct slot.
+     */
+    GLuint ids[10];
+    glGenTextures(10, ids);
+    for (int i = 0; i < 10; i++) {
+        ASSERT_EQ(ids[i], (GLuint)(i + 1));
+        gl_texture_object_t *t = gl_texture_slot(ctx, ids[i]);
+        ASSERT_TRUE(t != NULL);
+        ASSERT_EQ(t->id, ids[i]);
+        ASSERT_TRUE(t == &ctx->textures[i]);
+    }
+
+    /* 2. Bind and create custom texture IDs past 4096 that cannot live in slot id - 1.
+     */
+    GLuint high_ids[] = {5000u, 99999u, 0xfffffe02u, 1234567u};
+    for (int i = 0; i < 4; i++) {
+        glBindTexture(GL_TEXTURE_2D, high_ids[i]);
+        gl_texture_object_t *t = gl_texture_slot(ctx, high_ids[i]);
+        ASSERT_TRUE(t != NULL);
+        ASSERT_EQ(t->id, high_ids[i]);
+    }
+
+    /* 3. Verify non-existent IDs return NULL without searching all 4096 slots. */
+    ASSERT_TRUE(gl_texture_slot(ctx, 424242u) == NULL);
+    ASSERT_TRUE(gl_texture_slot(ctx, 8888u) == NULL);
+    ASSERT_TRUE(gl_texture_slot(ctx, 0u) == NULL);
+
+    /* 4. Delete one high ID and verify it is removed from hash table while others
+     * remain. */
+    GLuint del_id = high_ids[1];
+    glDeleteTextures(1, &del_id);
+    ASSERT_TRUE(gl_texture_slot(ctx, del_id) == NULL);
+    /* Others still present and resolvable */
+    ASSERT_TRUE(gl_texture_slot(ctx, high_ids[0]) != NULL);
+    ASSERT_TRUE(gl_texture_slot(ctx, high_ids[2]) != NULL);
+    ASSERT_TRUE(gl_texture_slot(ctx, high_ids[3]) != NULL);
+
+    /* 5. Delete sequential textures and verify lookups return NULL. */
+    glDeleteTextures(10, ids);
+    for (int i = 0; i < 10; i++) {
+        ASSERT_TRUE(gl_texture_slot(ctx, ids[i]) == NULL);
+    }
+
+    /* Cleanup remaining */
+    glDeleteTextures(1, &high_ids[0]);
+    glDeleteTextures(1, &high_ids[2]);
+    glDeleteTextures(1, &high_ids[3]);
+
+    glContextDestroy(ctx_handle);
+    oops_display_close(disp);
+}
+
 /* glTexEnv, glHint and the buffer selectors refuse what does not exist rather than
  * accept it quietly, and every spelling of one call agrees on what is an error.
  */
@@ -15569,6 +15631,7 @@ void run_unit_tests_gl(void) {
     RUN_TEST(test_gl_integer_lighting_forms_convert_colours_by_range);
     RUN_TEST(test_gl_transpose_matrix_forms_transpose);
     RUN_TEST(test_gl_texture_residency_is_honest);
+    RUN_TEST(test_gl_texture_lookup_bounded);
     RUN_TEST(test_gl_tex_env_hint_and_buffer_selection_refuse_what_is_absent);
     RUN_TEST(test_glsl_lexer_munches_maximally_and_matches_whole_words);
     RUN_TEST(test_glsl_lexer_reads_the_number_forms);

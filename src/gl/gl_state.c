@@ -4139,21 +4139,29 @@ void glColorMaterial(GLenum face, GLenum mode) {
 static void *gl_buffer_alloc(size_t bytes);
 static void gl_buffer_release(void *p);
 
+static void gl_init_texture_object(gl_texture_object_t *tex, GLuint id) {
+    memset(tex, 0, sizeof(*tex));
+    tex->id = id;
+    tex->used = GL_TRUE;
+    tex->wrap_s = GL_REPEAT;
+    tex->wrap_t = GL_REPEAT;
+    tex->wrap_r = GL_REPEAT;
+    tex->depth = 1;
+    tex->min_filter = GL_NEAREST_MIPMAP_LINEAR;
+    tex->mag_filter = GL_LINEAR;
+    tex->priority = 1.0f;  /* border colour (0, 0, 0, 0) from the memset */
+    tex->max_level = 1000; /* GL 1.2's defaults; the base level 0 */
+    tex->min_lod = -1000.0f;
+    tex->max_lod = 1000.0f;
+    /* GL 1.4's depth-texture defaults: no comparison, GL_LEQUAL, read as
+     * luminance. */
+    tex->compare_mode = GL_NONE;
+    tex->compare_func = GL_LEQUAL;
+    tex->depth_mode = GL_LUMINANCE;
+}
+
 static gl_texture_object_t *gl_find_texture(gl_context_t *ctx, GLuint id) {
-    if (!ctx || id == 0)
-        return NULL;
-    /* Slot `id - 1` first, for the reason `gl_lookup_texture` gives. */
-    if (id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS) {
-        gl_texture_object_t *t = &ctx->textures[id - 1u];
-        if (t->used && t->id == id)
-            return t;
-    }
-    for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
-        if (ctx->textures[i].used && ctx->textures[i].id == id) {
-            return &ctx->textures[i];
-        }
-    }
-    return NULL;
+    return gl_texture_slot(ctx, id);
 }
 
 static gl_texture_object_t *gl_find_or_create_texture(gl_context_t *ctx, GLuint id) {
@@ -4163,27 +4171,21 @@ static gl_texture_object_t *gl_find_or_create_texture(gl_context_t *ctx, GLuint 
     if (tex)
         return tex;
 
+    /* Prefer slot id - 1 when free so subsequent lookups hit the direct O(1) slot. */
+    if (id <= (GLuint)OOPS_GL_MAX_TEXTURE_OBJECTS && !ctx->textures[id - 1u].used) {
+        uint16_t slot = (uint16_t)(id - 1u);
+        tex = &ctx->textures[slot];
+        gl_init_texture_object(tex, id);
+        gl_tex_hash_insert(ctx, id, slot);
+        return tex;
+    }
+
     for (int i = 0; i < OOPS_GL_MAX_TEXTURE_OBJECTS; i++) {
         if (!ctx->textures[i].used) {
-            tex = &ctx->textures[i];
-            memset(tex, 0, sizeof(*tex));
-            tex->id = id;
-            tex->used = GL_TRUE;
-            tex->wrap_s = GL_REPEAT;
-            tex->wrap_t = GL_REPEAT;
-            tex->wrap_r = GL_REPEAT;
-            tex->depth = 1;
-            tex->min_filter = GL_NEAREST_MIPMAP_LINEAR;
-            tex->mag_filter = GL_LINEAR;
-            tex->priority = 1.0f;  /* border colour (0, 0, 0, 0) from the memset */
-            tex->max_level = 1000; /* GL 1.2's defaults; the base level 0 */
-            tex->min_lod = -1000.0f;
-            tex->max_lod = 1000.0f;
-            /* GL 1.4's depth-texture defaults: no comparison, GL_LEQUAL, read as
-             * luminance. */
-            tex->compare_mode = GL_NONE;
-            tex->compare_func = GL_LEQUAL;
-            tex->depth_mode = GL_LUMINANCE;
+            uint16_t slot = (uint16_t)i;
+            tex = &ctx->textures[slot];
+            gl_init_texture_object(tex, id);
+            gl_tex_hash_insert(ctx, id, slot);
             return tex;
         }
     }
@@ -4694,6 +4696,7 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
             continue;
         gl_texture_object_t *tex = gl_find_texture(ctx, id);
         if (tex) {
+            gl_tex_hash_remove(ctx, id);
             gl_tex_storage_release_sync(ctx);
 #ifndef OOPS_HOST_BUILD
             if (tex->garlic_data) {

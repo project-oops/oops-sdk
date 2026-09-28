@@ -21,6 +21,7 @@ extern "C" {
 #endif
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define RAND_MAX 0x7fffffff
 #define EXIT_SUCCESS 0
@@ -116,15 +117,22 @@ char *getenv(const char *name);
 int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
 /*
- * `NAME=value`, stored through `setenv`. POSIX has `putenv` keep the caller's string, so a
- * later change to it changes the environment; here the value is copied into the fixed
- * storage above, like `setenv`'s. A string with no `=` is refused.
+ * `NAME=value`, stored through `setenv`. POSIX has `putenv` keep the caller's string,
+ * so a later change to it changes the environment; here the value is copied into the
+ * fixed storage above, like `setenv`'s. A string with no `=` is refused.
  */
 int putenv(char *string);
 
-/* The template's trailing `XXXXXX` filled in until the name is free, and the file created
- * and opened read-write; the descriptor, or -1. */
+/* The template's trailing `XXXXXX` filled in until the name is free, and the file
+ * created and opened read-write; the descriptor, or -1. */
 int mkstemp(char *tmpl);
+
+/* FreeBSD's random numbers, from the kernel's `getrandom`: they cannot fail, so a kernel
+ * refusal aborts rather than handing back predictable bytes. libc++'s `std::random_device`
+ * is `arc4random` on this target. */
+uint32_t arc4random(void);
+void arc4random_buf(void *buf, size_t n);
+uint32_t arc4random_uniform(uint32_t upper_bound);
 
 /* `alloca` has to unwind with the frame, so it is the compiler's builtin, as in every C
  * library. */

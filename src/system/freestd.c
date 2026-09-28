@@ -136,35 +136,101 @@ size_t obs_format_hex(char *dest, uint64_t value) {
     return 2 + n;
 }
 
-#if !defined(OBSCENE_HOST_BUILD) && !defined(OOPS_HOST_BUILD)
-void *memset(void *dest, int value, size_t len) {
-    unsigned char *d = (unsigned char *)dest;
-    for (size_t i = 0; i < len; i++) {
-        d[i] = (unsigned char)value;
+/*
+ * Memory operations: machine-word / rep-string operations safe under optimisation.
+ *
+ * Clang's loop-idiom recognition recognizes byte loops and replaces them with calls
+ * to memcpy/memset even under -ffreestanding, which creates recursive self-calls when
+ * compiling memcpy/memset themselves. Using __attribute__((no_builtin)) and inline
+ * assembly rep movsb / rep stosb on x86-64 completely prevents self-recursion and
+ * self-naming relocations while providing maximum single-cycle throughput on modern x86.
+ */
+__attribute__((no_builtin)) void *obs_memset(void *dest, int value, size_t len) {
+#if defined(__x86_64__)
+    void *d = dest;
+    size_t n = len;
+    __asm__ volatile("rep stosb" : "+D"(d), "+c"(n) : "a"((uint8_t)value) : "memory");
+    return dest;
+#else
+    uint8_t *d = (uint8_t *)dest;
+    uint8_t v = (uint8_t)value;
+    uint64_t w = ((uint64_t)v << 56) | ((uint64_t)v << 48) | ((uint64_t)v << 40) |
+                 ((uint64_t)v << 32) | ((uint64_t)v << 24) | ((uint64_t)v << 16) |
+                 ((uint64_t)v << 8) | (uint64_t)v;
+    while (len >= 8) {
+        typedef uint64_t __attribute__((aligned(1))) unaligned_u64;
+        *(unaligned_u64 *)d = w;
+        d += 8;
+        len -= 8;
+    }
+    while (len > 0) {
+        *d++ = v;
+        len--;
     }
     return dest;
+#endif
 }
 
-void *memcpy(void *dest, const void *src, size_t len) {
-    unsigned char *d = (unsigned char *)dest;
-    const unsigned char *s = (const unsigned char *)src;
-    for (size_t i = 0; i < len; i++) {
-        d[i] = s[i];
+__attribute__((no_builtin)) void *obs_memcpy(void *dest, const void *src, size_t len) {
+#if defined(__x86_64__)
+    void *d = dest;
+    const void *s = src;
+    size_t n = len;
+    __asm__ volatile("rep movsb" : "+D"(d), "+S"(s), "+c"(n) : : "memory");
+    return dest;
+#else
+    uint8_t *d = (uint8_t *)dest;
+    const uint8_t *s = (const uint8_t *)src;
+    while (len >= 8) {
+        typedef uint64_t __attribute__((aligned(1))) unaligned_u64;
+        *(unaligned_u64 *)d = *(const unaligned_u64 *)s;
+        d += 8;
+        s += 8;
+        len -= 8;
+    }
+    while (len > 0) {
+        *d++ = *s++;
+        len--;
     }
     return dest;
+#endif
 }
 
-int memcmp(const void *s1, const void *s2, size_t len) {
-    const unsigned char *p1 = (const unsigned char *)s1;
-    const unsigned char *p2 = (const unsigned char *)s2;
-    for (size_t i = 0; i < len; i++) {
-        if (p1[i] != p2[i]) {
-            return (int)(p1[i] - p2[i]);
+__attribute__((no_builtin)) int obs_memcmp(const void *s1, const void *s2, size_t len) {
+    const uint8_t *p1 = (const uint8_t *)s1;
+    const uint8_t *p2 = (const uint8_t *)s2;
+    typedef uint64_t __attribute__((aligned(1))) unaligned_u64;
+    while (len >= 8) {
+        uint64_t w1 = *(const unaligned_u64 *)p1;
+        uint64_t w2 = *(const unaligned_u64 *)p2;
+        if (w1 != w2) {
+            for (size_t i = 0; i < 8; i++) {
+                if (p1[i] != p2[i]) {
+                    return (int)p1[i] - (int)p2[i];
+                }
+            }
         }
+        p1 += 8;
+        p2 += 8;
+        len -= 8;
+    }
+    while (len > 0) {
+        if (*p1 != *p2) {
+            return (int)*p1 - (int)*p2;
+        }
+        p1++;
+        p2++;
+        len--;
     }
     return 0;
 }
+
+#if !defined(OBSCENE_HOST_BUILD) && !defined(OOPS_HOST_BUILD)
+void *memset(void *dest, int value, size_t len) __attribute__((alias("obs_memset")));
+void *memcpy(void *dest, const void *src, size_t len) __attribute__((alias("obs_memcpy")));
+int memcmp(const void *s1, const void *s2, size_t len) __attribute__((alias("obs_memcmp")));
 #endif
+
 
 static inline uint32_t sha1_rol(uint32_t val, int bits) {
     return (val << bits) | (val >> (32 - bits));
