@@ -127,9 +127,9 @@ int putenv(char *string);
  * created and opened read-write; the descriptor, or -1. */
 int mkstemp(char *tmpl);
 
-/* FreeBSD's random numbers, from the kernel's `getrandom`: they cannot fail, so a kernel
- * refusal aborts rather than handing back predictable bytes. libc++'s `std::random_device`
- * is `arc4random` on this target. */
+/* FreeBSD's random numbers, from the kernel's `getrandom`: they cannot fail, so a
+ * kernel refusal aborts rather than handing back predictable bytes. libc++'s
+ * `std::random_device` is `arc4random` on this target. */
 uint32_t arc4random(void);
 void arc4random_buf(void *buf, size_t n);
 uint32_t arc4random_uniform(uint32_t upper_bound);

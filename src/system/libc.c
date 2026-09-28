@@ -2062,6 +2062,43 @@ int mkstemp(char *tmpl) {
     return -1;
 }
 
+/* FreeBSD's `getrandom` (syscall 563), 256 bytes a call at most. `arc4random` has no way
+ * to report failure, so a refusal ends the program rather than returning guessable bytes. */
+void arc4random_buf(void *buf, size_t n) {
+    unsigned char *p = (unsigned char *)buf;
+    while (n > 0u) {
+        const size_t want = n < 256u ? n : 256u;
+        const long got = sys_call(563, (long)p, (long)want, 0, 0, 0, 0);
+        if (got <= 0) {
+            oops_klog("arc4random", "the kernel refused getrandom");
+            abort();
+        }
+        p += got;
+        n -= (size_t)got;
+    }
+}
+
+uint32_t arc4random(void) {
+    uint32_t v;
+    arc4random_buf(&v, sizeof(v));
+    return v;
+}
+
+/* Rejection sampling, as FreeBSD's: values below `2^32 % upper_bound` are drawn again so
+ * every result in [0, upper_bound) is equally likely. */
+uint32_t arc4random_uniform(uint32_t upper_bound) {
+    uint32_t min;
+    uint32_t r;
+    if (upper_bound < 2u) {
+        return 0u;
+    }
+    min = (0u - upper_bound) % upper_bound;
+    do {
+        r = arc4random();
+    } while (r < min);
+    return r % upper_bound;
+}
+
 /* A file under the package's writable directory, unlinked while open so that nothing is left
  * behind: the kernel keeps the storage until the stream is closed, which is `tmpfile`'s
  * contract. */
