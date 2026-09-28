@@ -25,6 +25,9 @@ extern "C" {
 #define SEEK_CUR 1
 #define SEEK_END 2
 #define BUFSIZ 1024
+/* The longest path a buffer must hold: FreeBSD's `PATH_MAX`, as `sys/param.h` reports
+ * it. */
+#define FILENAME_MAX 1024
 
 /* `FILE` is declared once, whichever of this header and `<wchar.h>` comes first: POSIX
  * has both define it, and a repeated typedef is an error in C99. */
