@@ -39,6 +39,17 @@ typedef uint32_t gid_t;
 #define _GID_T_DECLARED
 #endif
 
+/* The BSD unsigned shorthands, which socket code still spells (luasocket's `u_short`).
+ * The guard is shared with oops-apps' `common/posix/include/sys/types.h`, which
+ * declares the same. */
+#ifndef _OOPS_BSD_UTYPES_DECLARED
+#define _OOPS_BSD_UTYPES_DECLARED
+typedef unsigned char u_char;
+typedef unsigned short u_short;
+typedef unsigned int u_int;
+typedef unsigned long u_long;
+#endif
+
 #ifndef _MODE_T_DECLARED
 typedef uint32_t mode_t;
 #define _MODE_T_DECLARED
