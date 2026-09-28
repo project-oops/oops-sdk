@@ -104,6 +104,12 @@ long double strtold(const char *s, char **end);
 char *getenv(const char *name);
 int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
+/*
+ * `NAME=value`, stored through `setenv`. POSIX has `putenv` keep the caller's string, so a
+ * later change to it changes the environment; here the value is copied into the fixed
+ * storage above, like `setenv`'s. A string with no `=` is refused.
+ */
+int putenv(char *string);
 
 /* `alloca` has to unwind with the frame, so it is the compiler's builtin, as in every C
  * library. */

@@ -711,6 +711,22 @@ int unsetenv(const char *name) {
   return 0;
 }
 
+/* `NAME=value`, split and stored by `setenv`: see <stdlib.h> for how this differs. */
+int putenv(char *string) {
+  char name[sizeof(s_env_name[0])];
+  size_t n = 0;
+
+  if (!string) return -1;
+  while (string[n] && string[n] != '=') {
+    if (n + 1 >= sizeof(name)) return -1;
+    name[n] = string[n];
+    n++;
+  }
+  if (string[n] != '=' || n == 0) return -1;
+  name[n] = '\0';
+  return setenv(name, string + n + 1, 1);
+}
+
 long long llabs(long long x) { return (x < 0) ? -x : x; }
 
 div_t div(int num, int den) {
