@@ -443,6 +443,24 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
 
     const uint8_t *cd_ptr = data + cd_offset;
 
+    /*
+     * The parent directory the last file went into.
+     *
+     * `mkdir_recursive` stats every component of the path it is given, so calling it once
+     * per file costs a `stat` per directory level per file - for an archive of 7,700 XML
+     * files five levels deep, 38,500 syscalls of which about a hundred do anything. That is
+     * not a rounding error on this platform: it was the whole of the unpack time, and a
+     * title unpacking its asset definitions sat on a black screen long enough to look
+     * hung.
+     *
+     * Entries in an archive are written in directory order, so consecutive files almost
+     * always share a parent. Remembering the last one and skipping the walk when it has not
+     * changed leaves the directories still created exactly when first needed - out-of-order
+     * entries simply pay the walk again, which is correct rather than merely cheaper.
+     */
+    char last_parent[512];
+    last_parent[0] = '\0';
+
     for (uint16_t entry = 0; entry < total_entries; entry++) {
         if (cd_ptr + 46 > data + zip_size) {
             oops_log_warn("ZIP", "entry %u exceeds archive boundary", entry);
@@ -513,7 +531,11 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
             }
             if (last_slash) {
                 *last_slash = '\0';
-                mkdir_recursive(parent);
+                if (obs_strcmp(parent, last_parent) != 0) {
+                    mkdir_recursive(parent);
+                    obs_strncpy(last_parent, parent, sizeof(last_parent) - 1);
+                    last_parent[sizeof(last_parent) - 1] = '\0';
+                }
             }
 
             /* Read local header */

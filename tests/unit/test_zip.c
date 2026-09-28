@@ -389,6 +389,138 @@ static void test_zip_path_traversal_rejection(void) {
     ASSERT_EQ(rc, OOPS_ZIP_ERR_PARAM);
 }
 
+/*
+ * Nested directories, and an entry that goes back to one already used.
+ *
+ * The extractor remembers the parent directory of the last file so it does not walk and
+ * stat every path component again for the next one - which for an archive of 7,700 files
+ * five levels deep was 38,500 syscalls, of which about a hundred did anything, and was the
+ * whole of the unpack time on hardware.
+ *
+ * The thing that optimisation can break is a file whose parent is *not* the previous one,
+ * so this archive is deliberately ordered to do that: two files sharing a parent (the case
+ * the cache is for), then a file in a different tree, then a fourth file back in the first
+ * tree. If the cache were ever wrong about what exists, that fourth file would be the one
+ * written into a directory that is not there.
+ */
+static void test_zip_extract_nested_out_of_order(void) {
+    static const char *const names[] = {
+        "deep/a/b/one.txt",
+        "deep/a/b/two.txt",  /* same parent as the last - the cache hit */
+        "other/c/three.txt", /* a different tree - the cache must move */
+        "deep/a/b/four.txt", /* back to the first tree - the case that can break */
+    };
+    const size_t count = sizeof(names) / sizeof(names[0]);
+    const char *content = "x";
+    const uint32_t clen = 1;
+
+    uint8_t zip[1024];
+    size_t pos = 0;
+    size_t local_off[4];
+
+    for (size_t i = 0; i < count; i++) {
+        uint16_t nlen = (uint16_t)strlen(names[i]);
+        local_off[i] = pos;
+        put_u32(zip + pos, 0x04034b50);
+        pos += 4;
+        put_u16(zip + pos, 10);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2; /* STORED */
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u32(zip + pos, 0);
+        pos += 4;
+        put_u32(zip + pos, clen);
+        pos += 4;
+        put_u32(zip + pos, clen);
+        pos += 4;
+        put_u16(zip + pos, nlen);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        memcpy(zip + pos, names[i], nlen);
+        pos += nlen;
+        memcpy(zip + pos, content, clen);
+        pos += clen;
+    }
+
+    size_t cd_offset = pos;
+    for (size_t i = 0; i < count; i++) {
+        uint16_t nlen = (uint16_t)strlen(names[i]);
+        put_u32(zip + pos, 0x02014b50);
+        pos += 4;
+        put_u16(zip + pos, 20);
+        pos += 2;
+        put_u16(zip + pos, 10);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2; /* STORED */
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u32(zip + pos, 0);
+        pos += 4;
+        put_u32(zip + pos, clen);
+        pos += 4;
+        put_u32(zip + pos, clen);
+        pos += 4;
+        put_u16(zip + pos, nlen);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u32(zip + pos, 0);
+        pos += 4;
+        put_u32(zip + pos, (uint32_t)local_off[i]);
+        pos += 4;
+        memcpy(zip + pos, names[i], nlen);
+        pos += nlen;
+    }
+    size_t cd_size = pos - cd_offset;
+
+    put_u32(zip + pos, 0x06054b50);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, (uint16_t)count);
+    pos += 2;
+    put_u16(zip + pos, (uint16_t)count);
+    pos += 2;
+    put_u32(zip + pos, (uint32_t)cd_size);
+    pos += 4;
+    put_u32(zip + pos, (uint32_t)cd_offset);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
+
+    const char *out_dir = "/tmp/test_oops_zip_nested";
+    ASSERT_EQ(oops_zip_extract_mem(zip, pos, out_dir), OOPS_ZIP_OK);
+
+    /* Every one of them, including the fourth. */
+    for (size_t i = 0; i < count; i++) {
+        char target[256];
+        snprintf(target, sizeof(target), "%s/%s", out_dir, names[i]);
+        ASSERT_EQ(oops_fs_exists(target), 1);
+        ASSERT_EQ(oops_fs_file_size(target), (int64_t)clen);
+        (void)oops_fs_unlink(target);
+    }
+}
+
 void run_unit_tests_zip(void) {
     TEST_SUITE_BEGIN("Freestanding ZIP Archive Extractor & Deflate");
     RUN_TEST(test_zip_null_params);
@@ -396,4 +528,5 @@ void run_unit_tests_zip(void) {
     RUN_TEST(test_zip_extract_stored);
     RUN_TEST(test_zip_extract_deflated);
     RUN_TEST(test_zip_path_traversal_rejection);
+    RUN_TEST(test_zip_extract_nested_out_of_order);
 }
