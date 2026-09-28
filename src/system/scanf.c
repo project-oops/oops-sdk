@@ -10,8 +10,9 @@
  * first.
  *
  * Floats accumulate in double and are not correctly rounded; the exponent is clamped at
- * 10^400. `fscanf` and `scanf` are absent: they need character pushback, which this
- * SDK's file handles do not have, so a loader scans each line it read with `fgets`.
+ * 10^400. `fscanf` is built on `obs_vsscanf_consumed`: it reads ahead, scans, and seeks
+ * the stream back to where the scan stopped (`src/system/libc.c`). `scanf` is absent,
+ * since standard input cannot seek.
  */
 #include "oops/freestd.h"
 
@@ -323,6 +324,17 @@ static void obs_scan_store_int(va_list *ap, int len, int is_signed,
 }
 
 int obs_vsscanf(const char *s, const char *fmt, va_list args) {
+    return obs_vsscanf_consumed(s, fmt, args, NULL);
+}
+
+/* `consumed`, when given, receives how many characters of `s` the scan read - the
+ * offset a stream reader seeks back to, which is how `fscanf` in `src/system/libc.c`
+ * leaves the stream exactly where the conversion stopped. */
+int obs_vsscanf_consumed(const char *s, const char *fmt, va_list args,
+                         size_t *consumed) {
+    if (consumed != NULL) {
+        *consumed = 0;
+    }
     if (s == NULL || fmt == NULL) {
         return -1;
     }
@@ -563,6 +575,9 @@ int obs_vsscanf(const char *s, const char *fmt, va_list args) {
 
 done:
     va_end(ap);
+    if (consumed != NULL) {
+        *consumed = (size_t)(p - s);
+    }
     /* C's rule, and the one a loader's read loop turns on: the input running out before
      * anything was assigned is end of file, which is not the same answer as a line that
      * did not parse. */

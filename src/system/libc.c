@@ -1346,8 +1346,7 @@ int asprintf(char **ret, const char *fmt, ...) {
 }
 
 /* The conversion is `obs_vsscanf` in `src/system/scanf.c`, which builds on the host too so that
- * `test_scanf.c` can run it. See `<libc/stdio.h>` for why a loader needs this and why `fscanf`
- * is not beside it. */
+ * `test_scanf.c` can run it. See `<libc/stdio.h>` for why a loader needs this. */
 int vsscanf(const char *s, const char *fmt, va_list args) { return obs_vsscanf(s, fmt, args); }
 
 int sscanf(const char *s, const char *fmt, ...) {
@@ -1356,6 +1355,123 @@ int sscanf(const char *s, const char *fmt, ...) {
     const int n = obs_vsscanf(s, fmt, args);
     va_end(args);
     return n;
+}
+
+/*
+ * A stream scanned by reading ahead and seeking back. The scan runs over up to 4 KiB read from
+ * where the stream stands - a held-back `ungetc` character first - and the stream is then
+ * repositioned to exactly the character the scan stopped at, which is more than C's one
+ * character of pushback promises. That needs a stream that can seek, so standard input and the
+ * log streams are refused with `ESPIPE`; a single conversion longer than the read-ahead is
+ * truncated at it.
+ */
+int vfscanf(FILE *f, const char *fmt, va_list args) {
+    char buf[4096];
+    size_t got;
+    size_t used = 0;
+    long start;
+    int n;
+
+    if (!f || f->is_log) {
+        errno = ESPIPE;
+        return EOF;
+    }
+    start = ftell(f);
+    if (start < 0) {
+        errno = ESPIPE;
+        return EOF;
+    }
+    if (f->pushback >= 0) {
+        start -= 1;
+    }
+    got = fread(buf, 1, sizeof(buf) - 1, f);
+    if (got == 0) {
+        return EOF;
+    }
+    buf[got] = '\0';
+    n = obs_vsscanf_consumed(buf, fmt, args, &used);
+    (void)fseeko(f, (off_t)(start + (long)used), SEEK_SET);
+    if (used >= got && got < sizeof(buf) - 1) {
+        f->eof = 1; /* the scan read to the end of the file, as a real one would have */
+    }
+    return n;
+}
+
+int fscanf(FILE *f, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    const int n = vfscanf(f, fmt, args);
+    va_end(args);
+    return n;
+}
+
+/* A payload is one process: there is no second one for a pipe to connect to. `pclose` fails on
+ * the handle nothing could have produced. */
+FILE *popen(const char *command, const char *mode) {
+    (void)command;
+    (void)mode;
+    errno = ENOSYS;
+    return NULL;
+}
+
+int pclose(FILE *f) {
+    (void)f;
+    errno = ECHILD;
+    return -1;
+}
+
+/* The trailing `XXXXXX` replaced from the clock and a counter until the name is free, then
+ * created. `oops_fs_open` has no exclusive create (`<libc/fcntl.h>`), so freeness is asked
+ * first; with one process there is no one to take the name in between. */
+int mkstemp(char *tmpl) {
+    static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    static unsigned serial;
+    size_t len;
+    char *x;
+    int attempt;
+
+    if (!tmpl) {
+        errno = EINVAL;
+        return -1;
+    }
+    len = strlen(tmpl);
+    if (len < 6 || strcmp(tmpl + len - 6, "XXXXXX") != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    x = tmpl + len - 6;
+    for (attempt = 0; attempt < 100; attempt++) {
+        unsigned v = (unsigned)oops_time_get_ms() * 2654435761u + ++serial;
+        for (int i = 0; i < 6; i++) {
+            x[i] = digits[v % 36u];
+            v /= 36u;
+        }
+        if (!oops_fs_exists(tmpl)) {
+            const int fd =
+                oops_fs_open(tmpl, OOPS_O_RDWR | OOPS_O_CREAT | OOPS_O_TRUNC, 0600);
+            if (fd < 0) return -1;
+            return fd;
+        }
+    }
+    errno = EEXIST;
+    return -1;
+}
+
+/* A file under the package's writable directory, unlinked while open so that nothing is left
+ * behind: the kernel keeps the storage until the stream is closed, which is `tmpfile`'s
+ * contract. */
+FILE *tmpfile(void) {
+    static unsigned serial;
+    char path[64];
+    FILE *f;
+
+    (void)oops_snprintf(path, sizeof(path), "/app0/.tmpfile-%u-%u",
+                        (unsigned)oops_time_get_ms(), ++serial);
+    f = fopen(path, "w+");
+    if (f) {
+        (void)oops_fs_unlink(path);
+    }
+    return f;
 }
 
 int vfprintf(FILE *f, const char *fmt, va_list args) {

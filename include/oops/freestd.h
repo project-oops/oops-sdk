@@ -90,6 +90,10 @@ int oops_snprintf(char *buf, size_t size, const char *fmt, ...)
 int obs_vsscanf(const char *s, const char *fmt, va_list args);
 int obs_sscanf(const char *s, const char *fmt, ...)
     __attribute__((format(scanf, 2, 3)));
+/* `obs_vsscanf`, also reporting how many characters of `s` it read; `fscanf` seeks by
+ * it. */
+int obs_vsscanf_consumed(const char *s, const char *fmt, va_list args,
+                         size_t *consumed);
 
 #ifdef __cplusplus
 }

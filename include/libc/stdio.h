@@ -158,10 +158,23 @@ off_t ftello(FILE *f);
  * number of assignments, or `EOF` when the input ran out before the first one, which
  * is how a read loop tells end of file from a line that did not parse.
  *
- * `fscanf` and `scanf` are not provided: read the line with `fgets` and scan it.
+ * `fscanf` reads ahead, scans, and seeks the stream back to exactly where the scan
+ * stopped, so it needs a stream that can seek: standard input and the log streams fail
+ * with `ESPIPE`, and a single conversion longer than its 4 KiB read-ahead is cut at it.
+ * `scanf` is not provided, standard input being the stream that cannot seek.
  */
 int sscanf(const char *s, const char *fmt, ...) __attribute__((format(scanf, 2, 3)));
 int vsscanf(const char *s, const char *fmt, va_list args);
+int fscanf(FILE *f, const char *fmt, ...) __attribute__((format(scanf, 2, 3)));
+int vfscanf(FILE *f, const char *fmt, va_list args);
+
+/* `popen` fails with `ENOSYS` and `pclose` with `ECHILD`: a payload is one process, and
+ * there is no second one for a pipe to reach. */
+FILE *popen(const char *command, const char *mode);
+int pclose(FILE *f);
+/* A file in the package's writable directory, unlinked while open, so it is gone once
+ * closed. */
+FILE *tmpfile(void);
 
 #ifdef __cplusplus
 }

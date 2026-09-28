@@ -260,6 +260,39 @@ static void test_freestd_qsort_and_bsearch(void) {
     }
 }
 
+/* `obs_vsscanf_consumed` through a variadic wrapper, since a `va_list` needs one. */
+static int scan_consumed(const char *s, size_t *used, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    const int n = obs_vsscanf_consumed(s, fmt, args, used);
+    va_end(args);
+    return n;
+}
+
+/* The count `fscanf` seeks back by: the characters the scan read and no more, so the
+ * next read starts at the first one it did not convert. LuaJIT's `io.read("*n")` reads
+ * numbers one at a time from a line holding several, and depends on exactly this. */
+static void test_freestd_sscanf_consumed(void) {
+    size_t used = 99;
+    double d = 0.0;
+
+    ASSERT_EQ(scan_consumed("1.5 2 3\n", &used, "%lf", &d), 1);
+    ASSERT_FLOAT_NEAR((float)d, 1.5f, 1e-6f);
+    ASSERT_EQ(used, 3u); /* "1.5", not the space after it */
+
+    ASSERT_EQ(scan_consumed(" 2 3\n", &used, "%lf", &d), 1);
+    ASSERT_EQ(used, 2u); /* the leading space the conversion skips counts */
+
+    /* A literal that does not match stops the scan where it failed. */
+    int a = 0;
+    ASSERT_EQ(scan_consumed("7x", &used, "%dy", &a), 1);
+    ASSERT_EQ(used, 1u);
+
+    /* No input: end of file, and nothing read. */
+    ASSERT_EQ(scan_consumed("", &used, "%d", &a), -1);
+    ASSERT_EQ(used, 0u);
+}
+
 /* `obs_sscanf` handles the lines an asset loader meets - OBJ vertices and faces, MTL
  * colours, key-value pairs - and returns the assigned count, or `EOF` on no input. */
 static void test_freestd_sscanf(void) {
@@ -562,5 +595,6 @@ void run_unit_tests_freestd(void) {
     RUN_TEST(test_freestd_sets_and_tokens);
     RUN_TEST(test_freestd_qsort_and_bsearch);
     RUN_TEST(test_freestd_sscanf);
+    RUN_TEST(test_freestd_sscanf_consumed);
     RUN_TEST(test_freestd_sscanf_agrees_with_the_host);
 }

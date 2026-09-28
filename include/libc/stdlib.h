@@ -111,6 +111,10 @@ int unsetenv(const char *name);
  */
 int putenv(char *string);
 
+/* The template's trailing `XXXXXX` filled in until the name is free, and the file created
+ * and opened read-write; the descriptor, or -1. */
+int mkstemp(char *tmpl);
+
 /* `alloca` has to unwind with the frame, so it is the compiler's builtin, as in every C
  * library. */
 #define alloca(n) __builtin_alloca(n)
