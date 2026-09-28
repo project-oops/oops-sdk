@@ -51,15 +51,23 @@ __attribute__((weak)) int scePthreadCondSignal(void *cond);
 __attribute__((weak)) int scePthreadCondBroadcast(void *cond);
 __attribute__((weak)) int scePthreadCondDestroy(void *cond);
 
-/* Platform semaphore symbols */
-__attribute__((weak)) int sceKernelCreateSema(int32_t *sema, const char *name,
+/*
+ * Platform semaphore symbols. The handle is pointer-sized: `sceKernelCreateSema` writes
+ * eight bytes through its out-parameter, measured on hardware as a guard word after an
+ * `int` coming back zeroed (obscene `018-relational/handle-fits-its-out-parameter`).
+ * Declared `int32_t *`, the upper half landed on whatever the compiler placed next to
+ * the local - in `oops_sem_init` that was the caller's saved `rbx`, so SDL's
+ * `SDL_CreateSemaphore` returned its allocation with the low half zeroed and Neverball
+ * faulted freeing it.
+ */
+__attribute__((weak)) int sceKernelCreateSema(int64_t *sema, const char *name,
                                               uint32_t attr, int init_count,
                                               int max_count, const void *opt);
-__attribute__((weak)) int sceKernelWaitSema(int32_t sema, int need,
+__attribute__((weak)) int sceKernelWaitSema(int64_t sema, int need,
                                             const void *timeout);
-__attribute__((weak)) int sceKernelPollSema(int32_t sema, int need);
-__attribute__((weak)) int sceKernelSignalSema(int32_t sema, int signal);
-__attribute__((weak)) int sceKernelDeleteSema(int32_t sema);
+__attribute__((weak)) int sceKernelPollSema(int64_t sema, int need);
+__attribute__((weak)) int sceKernelSignalSema(int64_t sema, int signal);
+__attribute__((weak)) int sceKernelDeleteSema(int64_t sema);
 
 /* Exception handling (libkernel, resolved by name). The handler receives (signum,
  * arg1, arg2), as measured on hardware. */
@@ -453,10 +461,10 @@ int oops_sem_init(oops_sem_t *sem, const char *name, int initial_count, int max_
     if (!sem || !sceKernelCreateSema)
         return -1;
     const char *sema_name = name ? name : "oops_sem";
-    int32_t handle = 0;
+    int64_t handle = 0;
     int rc = sceKernelCreateSema(&handle, sema_name, 0, initial_count, max_count, NULL);
-    oops_log_debug("THREAD", "sem_init '%s' init=%d max=%d -> handle=%d rc=%d",
-                   sema_name, initial_count, max_count, handle, rc);
+    oops_log_debug("THREAD", "sem_init '%s' init=%d max=%d -> handle=%lld rc=%d",
+                   sema_name, initial_count, max_count, (long long)handle, rc);
     if (rc == 0) {
         sem->handle = handle;
         sem->max_count = max_count;
@@ -489,7 +497,7 @@ int oops_sem_signal(oops_sem_t *sem, int count) {
 int oops_sem_destroy(oops_sem_t *sem) {
     if (!sem || !sceKernelDeleteSema || sem->handle <= 0)
         return -1;
-    oops_log_debug("THREAD", "sem_destroy handle=%d", sem->handle);
+    oops_log_debug("THREAD", "sem_destroy handle=%lld", (long long)sem->handle);
     int rc = sceKernelDeleteSema(sem->handle);
     sem->handle = -1;
     return rc;

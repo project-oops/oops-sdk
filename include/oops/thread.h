@@ -25,10 +25,13 @@ typedef struct oops_cond {
     uint32_t reserved[8];
 } oops_cond_t;
 
+/* `handle` is 64 bits because the platform's is: `sceKernelCreateSema` writes eight
+ * bytes through its out-parameter (obscene
+ * `018-relational/handle-fits-its-out-parameter`). The struct stays 32 bytes. */
 typedef struct oops_sem {
-    int32_t handle;
+    int64_t handle;
     int32_t max_count;
-    uint32_t reserved[6];
+    uint32_t reserved[5];
 } oops_sem_t;
 
 /* Thread management */
