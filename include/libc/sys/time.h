@@ -49,7 +49,9 @@ int utimes(const char *path, const struct timeval times[2]);
 #endif
 
 /* FreeBSD's conversions between the microsecond and nanosecond forms, which BSD code
- * expects this header to carry (Luanti's `porting.h`). Macros, as there. */
+ * expects this header to carry (Luanti's `porting.h`). Macros, as there, and guarded
+ * because oops-apps' `common/posix/include/sys/time.h` defines them too. */
+#ifndef TIMEVAL_TO_TIMESPEC
 #define TIMEVAL_TO_TIMESPEC(tv, ts)                                                    \
     do {                                                                               \
         (ts)->tv_sec = (tv)->tv_sec;                                                   \
@@ -60,5 +62,6 @@ int utimes(const char *path, const struct timeval times[2]);
         (tv)->tv_sec = (ts)->tv_sec;                                                   \
         (tv)->tv_usec = (ts)->tv_nsec / 1000;                                          \
     } while (0)
+#endif
 
 #endif /* OOPS_LIBC_SYS_TIME_H */
