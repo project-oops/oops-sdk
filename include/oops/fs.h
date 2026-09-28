@@ -19,6 +19,9 @@ extern "C" {
 #define OOPS_O_CREAT 0x0200
 #define OOPS_O_TRUNC 0x0400
 #define OOPS_O_APPEND 0x0008
+/* Open a directory, to read its entries rather than its contents. `oops_fs_opendir`
+ * asks for it and falls back to a plain read-only open when the platform refuses. */
+#define OOPS_O_DIRECTORY 0x00020000
 
 /* Seek origins */
 #define OOPS_SEEK_SET 0

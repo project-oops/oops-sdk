@@ -145,6 +145,7 @@ static int fs_open_raw(const char *path, int flags, int mode) {
   if (flags & OOPS_O_CREAT) target_flags |= 0x0200;
   if (flags & OOPS_O_TRUNC) target_flags |= 0x0400;
   if (flags & OOPS_O_APPEND) target_flags |= 0x0008;
+  if (flags & OOPS_O_DIRECTORY) target_flags |= 0x00020000;
 
   int target_mode = mode ? mode : 0644;
   return (int)sys_call(SYS_open, (long)path, target_flags, target_mode, 0, 0, 0);
@@ -469,6 +470,34 @@ struct oops_bsd_dirent {
   char d_name[256];
 };
 
+/*
+ * Who fills that buffer.
+ *
+ * This asked `sys_call(SYS_getdents)` and nothing else, which was wrong twice over. This
+ * kernel does not answer syscall 272 - `obscene/data/obscene-report.txt` carries no
+ * `getdents` among the exports - and the failure was silent: `opendir` succeeded,
+ * `readdir` returned "end of directory" on its first call, and a directory with files in
+ * it read as empty. Ship of Harkinian looked for the ROM sitting beside its own
+ * `eboot.bin` and did not see it, and said so in a message that was wrong.
+ *
+ * What the platform does export is `sceKernelGetdents` and `sceKernelGetdirentries`
+ * (obscene-report.txt:577-578, both `present|shared`), and `oops-apps/common/symbols.txt`
+ * already named the first for the loader - it was declared and never called. Both are
+ * asked for by name, with the raw syscall kept last so a kernel that does answer it still
+ * works, and a route that answers nothing is a warning rather than an empty directory.
+ */
+__attribute__((weak)) int sceKernelGetdents(int fd, char *buf, int nbytes);
+__attribute__((weak)) int sceKernelGetdirentries(int fd, char *buf, int nbytes,
+                                                 long *basep);
+
+#define OOPS_DIR_ROUTE_GETDENTS 1
+#define OOPS_DIR_ROUTE_GETDIRENTRIES 2
+#define OOPS_DIR_ROUTE_SYSCALL 3
+
+/* Which route answered, chosen once and then kept. Directory reading is not per-title
+ * behaviour, so one process needs to work this out once. */
+static int s_dir_route;
+
 #endif
 
 struct oops_dir {
@@ -491,7 +520,19 @@ oops_dir_t *oops_fs_opendir(const char *path) {
     return NULL;
   }
 
-  dir->fd = oops_fs_open(path, OOPS_O_RDONLY, 0);
+  /*
+   * `O_DIRECTORY` first, then plain read-only.
+   *
+   * A plain read-only open of a directory succeeds here and hands back a descriptor that
+   * every directory reader then refuses - which is how a directory with files in it read as
+   * empty. Asking for a directory says what the descriptor is for, and a platform that does
+   * not know the flag refuses the open rather than answering wrongly, so the fallback is
+   * safe and the two together cost one extra syscall on the platforms that need it.
+   */
+  dir->fd = oops_fs_open(path, OOPS_O_RDONLY | OOPS_O_DIRECTORY, 0);
+  if (dir->fd < 0) {
+    dir->fd = oops_fs_open(path, OOPS_O_RDONLY, 0);
+  }
   if (dir->fd < 0) {
     oops_log_debug("FS", "opendir failed to open %s", path);
     oops_free(dir);
@@ -505,6 +546,84 @@ oops_dir_t *oops_fs_opendir(const char *path) {
   return dir;
 }
 
+#ifndef OOPS_HOST_BUILD
+
+static long oops_dir_read_route(int route, oops_dir_t *dir) {
+  long base = 0;
+
+  switch (route) {
+    case OOPS_DIR_ROUTE_GETDENTS:
+      if (sceKernelGetdents == NULL) {
+        return -1;
+      }
+      return (long)sceKernelGetdents(dir->fd, dir->buf, OOPS_DIRENT_BUF);
+    case OOPS_DIR_ROUTE_GETDIRENTRIES:
+      if (sceKernelGetdirentries == NULL) {
+        return -1;
+      }
+      return (long)sceKernelGetdirentries(dir->fd, dir->buf, OOPS_DIRENT_BUF, &base);
+    default:
+      return sys_call(SYS_getdents, dir->fd, (long)dir->buf, OOPS_DIRENT_BUF, 0, 0, 0);
+  }
+}
+
+static const char *oops_dir_route_name(int route) {
+  switch (route) {
+    case OOPS_DIR_ROUTE_GETDENTS:
+      return "sceKernelGetdents";
+    case OOPS_DIR_ROUTE_GETDIRENTRIES:
+      return "sceKernelGetdirentries";
+    default:
+      return "sys_call(getdents)";
+  }
+}
+
+/*
+ * Fill the buffer, choosing a route the first time.
+ *
+ * While choosing, only a positive count settles it: a route that is not there answers zero
+ * as readily as an empty directory does, and taking that for the end is exactly the
+ * failure this replaced. So the choice needs bytes, and a directory that really is empty
+ * costs one pass down the list and then reads as empty, which it is.
+ */
+static long oops_dir_fill(oops_dir_t *dir) {
+  int route;
+  int saw_end = 0;
+
+  if (s_dir_route != 0) {
+    return oops_dir_read_route(s_dir_route, dir);
+  }
+
+  for (route = OOPS_DIR_ROUTE_GETDENTS; route <= OOPS_DIR_ROUTE_SYSCALL; route++) {
+    long n = oops_dir_read_route(route, dir);
+    if (n > 0) {
+      s_dir_route = route;
+      oops_log_info("FS", "directories are read through %s", oops_dir_route_name(route));
+      return n;
+    }
+    if (n == 0) {
+      saw_end = 1;
+    } else {
+      /* Say what each one answered, not just that none worked. "Refused" alone sent a day
+       * after the descriptor when the reader was fine, and the other way round. */
+      oops_log_warn("FS", "%s(fd=%d) -> %ld, errno=%d", oops_dir_route_name(route),
+                    dir->fd, n, sys_get_errno());
+    }
+  }
+
+  if (saw_end) {
+    return 0;
+  }
+  oops_log_warn("FS",
+                "no directory reader answered for fd=%d - sceKernelGetdents %s, "
+                "sceKernelGetdirentries %s",
+                dir->fd, (sceKernelGetdents != NULL) ? "bound" : "unbound",
+                (sceKernelGetdirentries != NULL) ? "bound" : "unbound");
+  return -1;
+}
+
+#endif
+
 int oops_fs_readdir(oops_dir_t *dir, oops_dirent_t *out) {
   if (dir == NULL || out == NULL) {
     return -1;
@@ -514,7 +633,7 @@ int oops_fs_readdir(oops_dir_t *dir, oops_dirent_t *out) {
   for (;;) {
     if (dir->offset >= dir->used) {
       /* Buffer drained: ask for more. Zero means the directory is finished. */
-      long n = sys_call(SYS_getdents, dir->fd, (long)dir->buf, OOPS_DIRENT_BUF, 0, 0, 0);
+      long n = oops_dir_fill(dir);
       if (n < 0) {
         return -1;
       }
