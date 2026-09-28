@@ -53,6 +53,12 @@ extern "C" {
 #define F_SETFD 2
 #define F_GETFL 3
 #define F_SETFL 4
+/* Always set: nothing here can exec, which is why `O_CLOEXEC` is 0 (`common/posix`'s
+ * `fcntl` answers `F_GETFD` with it). Guarded because that layer's `fcntl.h` has it
+ * too. */
+#ifndef FD_CLOEXEC
+#define FD_CLOEXEC 1
+#endif
 
 /*
  * The `*at()` family's anchor. `openat(dirfd, path, ...)` resolves `path` relative to

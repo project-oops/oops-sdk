@@ -195,6 +195,14 @@ int oops_setsockopt(int sock, int level, int optname, const void *optval,
     (void)optlen;
     return -1;
 }
+int oops_getsockopt(int sock, int level, int optname, void *optval, size_t *optlen) {
+    (void)sock;
+    (void)level;
+    (void)optname;
+    (void)optval;
+    (void)optlen;
+    return -1;
+}
 int oops_set_nonblocking(int sock, int nonblocking) {
     (void)sock;
     (void)nonblocking;
@@ -242,6 +250,7 @@ __attribute__((weak)) long sys_call(long num, long a1, long a2, long a3, long a4
 #define OOPS_SYS_CONNECT 98
 #define OOPS_SYS_BIND 104
 #define OOPS_SYS_SETSOCKOPT 105
+#define OOPS_SYS_GETSOCKOPT 118 /* FreeBSD's number; not yet measured here */
 #define OOPS_SYS_LISTEN 106
 #define OOPS_SYS_SENDTO 133
 
@@ -275,6 +284,12 @@ __attribute__((weak)) int _setsockopt(int s, int level, int name, const void *va
                                       socklen_t_ len);
 __attribute__((weak)) int setsockopt(int s, int level, int name, const void *val,
                                      socklen_t_ len);
+/* Exported by libkernel (obSCEne's export report), but the call is not yet exercised
+ * on hardware - `oops/net.h` says so at `oops_getsockopt`. No bare `getsockopt`,
+ * because oops-apps' POSIX shim defines that name over this function, and binding to
+ * it would recurse (see below). */
+__attribute__((weak)) int _getsockopt(int s, int level, int name, void *val,
+                                      socklen_t_ *len);
 __attribute__((weak)) int close(int fd);
 __attribute__((weak)) int _close(int fd);
 /* errno lives behind __error(); try-again is 35 (EAGAIN) on this console,
@@ -427,6 +442,14 @@ static int p_setsockopt(int s, int lv, int nm, const void *v, socklen_t_ l) {
         return setsockopt(s, lv, nm, v, l);
     if (sys_call)
         return (int)sys_call(OOPS_SYS_SETSOCKOPT, (long)s, (long)lv, (long)nm, (long)v,
+                             (long)l, 0);
+    return -1;
+}
+static int p_getsockopt(int s, int lv, int nm, void *v, socklen_t_ *l) {
+    if (_getsockopt)
+        return _getsockopt(s, lv, nm, v, l);
+    if (sys_call)
+        return (int)sys_call(OOPS_SYS_GETSOCKOPT, (long)s, (long)lv, (long)nm, (long)v,
                              (long)l, 0);
     return -1;
 }
@@ -639,6 +662,19 @@ int oops_setsockopt(int sock, int level, int optname, const void *optval,
     if (sock < 0)
         return -1;
     return p_setsockopt(sock, level, optname, optval, (socklen_t_)optlen);
+}
+
+int oops_getsockopt(int sock, int level, int optname, void *optval, size_t *optlen) {
+    socklen_t_ len;
+    int rc;
+
+    if (sock < 0 || optlen == NULL)
+        return -1;
+    len = (socklen_t_)*optlen;
+    rc = p_getsockopt(sock, level, optname, optval, &len);
+    if (rc == 0)
+        *optlen = (size_t)len;
+    return rc;
 }
 
 int oops_set_nonblocking(int sock, int nonblocking) {

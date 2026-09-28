@@ -42,6 +42,11 @@ static inline int isblank(int c) {
 static inline int isprint(int c) {
     return c >= 0x20 && c < 0x7f;
 }
+/* XSI, and the one of these that is not locale-dependent anywhere (NetSurf's URL
+ * code). */
+static inline int isascii(int c) {
+    return (unsigned)c < 0x80u;
+}
 static inline int isgraph(int c) {
     return c > 0x20 && c < 0x7f;
 }

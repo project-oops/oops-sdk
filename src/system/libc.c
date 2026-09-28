@@ -1082,6 +1082,16 @@ char *strdup(const char *s) {
     return copy;
 }
 
+char *strndup(const char *s, size_t n) {
+    if (!s) return (char *)0;
+    const size_t len = strnlen(s, n);
+    char *copy = (char *)oops_malloc(len + 1u);
+    if (!copy) return (char *)0;
+    memcpy(copy, s, len);
+    copy[len] = '\0';
+    return copy;
+}
+
 char *strtok_r(char *s, const char *delim, char **save) {
     return obs_strtok_r(s, delim, save);
 }

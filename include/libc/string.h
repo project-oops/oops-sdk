@@ -47,6 +47,8 @@ size_t strxfrm(char *dest, const char *src, size_t n);
  * it; `strtok_r` is the reentrant form for new code.
  */
 char *strdup(const char *s);
+/* At most `n` bytes of `s`, always terminated: POSIX 2008 (NetSurf). */
+char *strndup(const char *s, size_t n);
 char *strtok(char *s, const char *delim);
 char *strtok_r(char *s, const char *delim, char **save);
 size_t strspn(const char *s, const char *accept);

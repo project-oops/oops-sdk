@@ -105,6 +105,13 @@ long oops_recvfrom(int sock, void *buf, size_t len, int flags, char *from_ip,
                    size_t ip_len, uint16_t *from_port);
 int oops_setsockopt(int sock, int level, int optname, const void *optval,
                     size_t optlen);
+/* Reads an option back; 0, or -1. `*optlen` is the buffer size in and the option's
+ * size out. Through libkernel's `_getsockopt`, which obSCEne's export report lists as
+ * present beside `_setsockopt`, and FreeBSD's SYS_getsockopt (118) when that does not
+ * bind. **The call itself is not yet exercised on hardware**, unlike the ones above. A
+ * non-blocking `connect` reads `SO_ERROR` through it to learn how the connection went,
+ * which is what cURL does. */
+int oops_getsockopt(int sock, int level, int optname, void *optval, size_t *optlen);
 int oops_set_nonblocking(int sock, int nonblocking);
 /* Whether a socket result means "try again": reads errno via __error() (EAGAIN
  * 35) for the POSIX path, or the sceNet-encoded 0x80410123 where that layer is

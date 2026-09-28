@@ -4,6 +4,7 @@
  * weakly bound.
  */
 #include "oops/thread.h"
+#include "oops/heap.h" /* the per-thread destructor list below */
 #include "oops/system.h"
 
 /* Platform thread symbols */
@@ -329,6 +330,76 @@ int oops_tls_set(oops_tls_key_t key, const void *value) {
     if (!scePthreadSetspecific)
         return -1;
     return scePthreadSetspecific(key, value);
+}
+
+/*
+ * `__cxa_thread_atexit`: the C++ ABI's hook for a `thread_local` object with a
+ * destructor, run when its thread ends. It is here, beside the keys it is built on,
+ * rather than in a C++ runtime: oops-apps' libc++abi is built without threads, which
+ * empties its own `cxa_thread_atexit.cpp`, and a title that has thread-locals has this
+ * module.
+ *
+ * The technique is libc++abi's fallback for a C library without
+ * `__cxa_thread_atexit_impl`: a per-thread list, newest first, held in a key whose
+ * destructor runs it. The platform's keys run their destructors at thread exit and
+ * clear the value first, so a destructor that registers another starts a fresh list the
+ * platform runs on its next pass. Nothing runs for the main thread, which leaves
+ * through `exit` - the same as `__cxa_atexit`.
+ */
+struct oops_thread_dtor {
+    void (*fn)(void *);
+    void *obj;
+    struct oops_thread_dtor *next;
+};
+
+static oops_tls_key_t s_thread_dtors;
+static int s_thread_dtors_state; /* 0 unmade, 1 being made, 2 ready, -1 unavailable */
+
+static void oops_run_thread_dtors(void *head) {
+    struct oops_thread_dtor *e = (struct oops_thread_dtor *)head;
+    while (e) {
+        struct oops_thread_dtor *next = e->next;
+        e->fn(e->obj);
+        oops_free(e);
+        e = next;
+    }
+}
+
+static int oops_thread_dtors_ready(void) {
+    for (;;) {
+        const int state = __atomic_load_n(&s_thread_dtors_state, __ATOMIC_ACQUIRE);
+        int unmade = 0;
+        if (state == 2 || state == -1)
+            return state == 2;
+        if (state == 0 &&
+            __atomic_compare_exchange_n(&s_thread_dtors_state, &unmade, 1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            const int made =
+                oops_tls_create(&s_thread_dtors, oops_run_thread_dtors) == 0;
+            __atomic_store_n(&s_thread_dtors_state, made ? 2 : -1, __ATOMIC_RELEASE);
+            return made;
+        }
+    }
+}
+
+int __cxa_thread_atexit(void (*destructor)(void *), void *obj, void *dso);
+int __cxa_thread_atexit(void (*destructor)(void *), void *obj, void *dso) {
+    struct oops_thread_dtor *e;
+
+    (void)dso;
+    if (!oops_thread_dtors_ready())
+        return -1;
+    e = (struct oops_thread_dtor *)oops_malloc(sizeof(*e));
+    if (!e)
+        return -1;
+    e->fn = destructor;
+    e->obj = obj;
+    e->next = (struct oops_thread_dtor *)oops_tls_get(s_thread_dtors);
+    if (oops_tls_set(s_thread_dtors, e) != 0) {
+        oops_free(e);
+        return -1;
+    }
+    return 0;
 }
 
 /* Condition variable implementation */
