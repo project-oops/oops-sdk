@@ -622,6 +622,23 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
         }
 
         cd_ptr += 46 + fname_len + extra_len + comment_len;
+
+        /*
+         * Say where it has got to, occasionally.
+         *
+         * An archive of a few files extracts between two log lines and needs nothing. One
+         * of 7,700 takes long enough that the two lines are minutes apart, and in between
+         * there is no way to tell slow from hung - not from the log, and not from a screen
+         * that has nothing on it yet. A title unpacking its assets looked exactly like a
+         * title that had died, and was killed for it more than once.
+         *
+         * Every 500 entries, so a large archive reports about fifteen times: enough to see
+         * it moving and to estimate the rest, few enough that it cannot swamp a log that
+         * drops bursts. Per-entry logging exists at debug and costs six times the run.
+         */
+        if (((entry + 1) % 500) == 0) {
+            oops_log_info("ZIP", "%u/%u entries", entry + 1, total_entries);
+        }
     }
 
     return OOPS_ZIP_OK;
