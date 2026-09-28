@@ -24,8 +24,9 @@ endif
 ifneq ($(OOPS_CC_MAJOR),$(OOPS_CLANG_MAJOR))
 $(error toolchain: this build is pinned to clang $(OOPS_CLANG_MAJOR) and `$(lastword $(CC))` \
 reports major "$(OOPS_CC_MAJOR)" (empty means it is not runnable). \
-The two runners that carry the pin are WSL `oops-builder` and the container \
-`silkeh/clang:$(OOPS_CLANG_MAJOR)`; see oops-mesa#D013. Do not work around this by passing CC - the \
+Any clang $(OOPS_CLANG_MAJOR) carries the pin: a local one on PATH first, which is much the \
+fastest, else the container `silkeh/clang:$(OOPS_CLANG_MAJOR)`, which defines the version, else \
+WSL. See oops-mesa#D013 and CONVENTIONS section 8. Do not work around this by passing CC - the \
 split between runners is the defect it was written for)
 endif
 

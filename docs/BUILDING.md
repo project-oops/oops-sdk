@@ -11,14 +11,25 @@ There is one command and it is `bin/oops-sdk`.
 **`clang`, `ar` and `make`, and nothing else.** oops-sdk is the bottom of the target-side
 stack - it depends on no sibling checkout, and a clone of only this repository builds.
 
-**On Windows, build it under WSL.** Not a preference: the toolchain has to cross-compile to a
-FreeBSD-derived target, and the Windows shell has no `clang` on `PATH` here. A native
-`make` gets as far as the first compile and stops with `CreateProcess ... failed`, which
-looks like a broken makefile and is not.
+**On Windows, put a clang 21 on `PATH` and build.** The toolchain has to cross-compile to a
+FreeBSD-derived target, which clang does natively - a `-target x86_64-unknown-freebsd`
+freestanding build needs no sysroot and no Linux. A Windows shell with no `clang` gets as far
+as the first compile and stops with `CreateProcess ... failed`, which looks like a broken
+makefile and is not; that error means the toolchain is missing, not that the host is wrong.
 
-**A Linux container is the same route without WSL.** Mount the checkout and run
+This is the first choice in [CONVENTIONS section 8][conv] and not just tidiness: a container
+and a WSL distribution both reach these sources across a filesystem boundary, measured at
+about 10ms per file open against about 1ms locally, and a build opens enough files for that
+to be most of its running time.
+
+**A Linux container is the authoritative version.** Mount the checkout and run
 `./bin/oops-sdk check` and `make test` inside any image that has `clang`, `make` and
-`binutils`; the checkout is all the build needs.
+`binutils`; the checkout is all the build needs. When a local toolchain and
+`silkeh/clang:21` disagree, the container is right.
+
+**WSL is the last resort**, for a machine with neither.
+
+[conv]: https://github.com/project-oops/OOPS/blob/main/docs/CONVENTIONS.md#8-toolchain
 
 ## Why the build is a cross-compile even on Linux
 
