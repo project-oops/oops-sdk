@@ -25,6 +25,7 @@
 #include "libc/strings.h"
 #include "libc/time.h"
 #include "libc/wchar.h"
+#include "libc/wctype.h"
 #include "libc/sys/time.h"
 #include "oops/time.h"
 #include "oops/freestd.h"
@@ -350,6 +351,598 @@ size_t wcsrtombs(char *dst, const wchar_t **src, size_t len, mbstate_t *ps) {
     return written;
 }
 
+/* ---------------------------------------------------------------------------
+ * The rest of <wchar.h>, and <wctype.h>. `wchar_t` is a Unicode scalar value and the
+ * multibyte encoding is UTF-8, as `wcsrtombs` above already has it; `<wchar.h>` says what
+ * the classification covers.
+ * ------------------------------------------------------------------------- */
+
+/* An incomplete sequence carries across calls in `mbstate_t`: `__state` the bits decoded so
+   far, `__bytes` the continuation bytes still wanted in its low byte and the sequence's full
+   length above it, which the overlong check needs. */
+static mbstate_t s_mbrtowc_state, s_mbrlen_state, s_mbsrtowcs_state, s_wcrtomb_state;
+
+size_t mbrtowc(wchar_t *pwc, const char *s, size_t n, mbstate_t *ps) {
+    uint32_t cp;
+    unsigned need, total;
+    size_t i = 0u;
+
+    if (!ps) ps = &s_mbrtowc_state;
+    if (!s) {
+        ps->__state = 0u;
+        ps->__bytes = 0u;
+        return 0u;
+    }
+    if (n == 0u) return (size_t)-2;
+    cp = ps->__state;
+    need = ps->__bytes & 0xffu;
+    total = ps->__bytes >> 8;
+    if (need == 0u) {
+        const unsigned char b = (unsigned char)s[i++];
+        if (b < 0x80u) {
+            cp = b;
+            total = 1u;
+        } else if ((b & 0xe0u) == 0xc0u) {
+            cp = b & 0x1fu;
+            need = 1u;
+            total = 2u;
+        } else if ((b & 0xf0u) == 0xe0u) {
+            cp = b & 0x0fu;
+            need = 2u;
+            total = 3u;
+        } else if ((b & 0xf8u) == 0xf0u && b <= 0xf4u) {
+            cp = b & 0x07u;
+            need = 3u;
+            total = 4u;
+        } else {
+            errno = EILSEQ;
+            return (size_t)-1;
+        }
+    }
+    while (need > 0u && i < n) {
+        const unsigned char c = (unsigned char)s[i++];
+        if ((c & 0xc0u) != 0x80u) {
+            ps->__state = 0u;
+            ps->__bytes = 0u;
+            errno = EILSEQ;
+            return (size_t)-1;
+        }
+        cp = (cp << 6) | (c & 0x3fu);
+        need--;
+    }
+    if (need > 0u) {
+        ps->__state = cp;
+        ps->__bytes = need | (total << 8);
+        return (size_t)-2;
+    }
+    ps->__state = 0u;
+    ps->__bytes = 0u;
+    if ((total == 2u && cp < 0x80u) || (total == 3u && cp < 0x800u) ||
+        (total == 4u && cp < 0x10000u) || (cp >= 0xd800u && cp <= 0xdfffu) || cp > 0x10ffffu) {
+        errno = EILSEQ;
+        return (size_t)-1;
+    }
+    if (pwc) *pwc = (wchar_t)cp;
+    return cp == 0u ? 0u : i;
+}
+
+size_t mbrlen(const char *s, size_t n, mbstate_t *ps) {
+    return mbrtowc(NULL, s, n, ps ? ps : &s_mbrlen_state);
+}
+
+int mbsinit(const mbstate_t *ps) { return !ps || ps->__bytes == 0u; }
+
+size_t wcrtomb(char *s, wchar_t wc, mbstate_t *ps) {
+    const uint32_t c = (uint32_t)wc;
+    (void)ps;
+    (void)s_wcrtomb_state;
+    if (!s) return 1u; /* the reset sequence is the terminator alone */
+    if (c < 0x80u) {
+        s[0] = (char)c;
+        return 1u;
+    }
+    if (c < 0x800u) {
+        s[0] = (char)(0xc0u | (c >> 6));
+        s[1] = (char)(0x80u | (c & 0x3fu));
+        return 2u;
+    }
+    if (c < 0x10000u) {
+        if (c >= 0xd800u && c <= 0xdfffu) {
+            errno = EILSEQ;
+            return (size_t)-1;
+        }
+        s[0] = (char)(0xe0u | (c >> 12));
+        s[1] = (char)(0x80u | ((c >> 6) & 0x3fu));
+        s[2] = (char)(0x80u | (c & 0x3fu));
+        return 3u;
+    }
+    if (c <= 0x10ffffu) {
+        s[0] = (char)(0xf0u | (c >> 18));
+        s[1] = (char)(0x80u | ((c >> 12) & 0x3fu));
+        s[2] = (char)(0x80u | ((c >> 6) & 0x3fu));
+        s[3] = (char)(0x80u | (c & 0x3fu));
+        return 4u;
+    }
+    errno = EILSEQ;
+    return (size_t)-1;
+}
+
+wint_t btowc(int c) { return (c >= 0 && c < 0x80) ? (wint_t)c : WEOF; }
+int wctob(wint_t wc) { return (wc >= 0 && wc < 0x80) ? (int)wc : EOF; }
+
+/* At most `nms` bytes of `*src` into at most `len` wide characters. */
+size_t mbsnrtowcs(wchar_t *dst, const char **src, size_t nms, size_t len, mbstate_t *ps) {
+    const char *p = *src;
+    size_t count = 0u;
+
+    if (!ps) ps = &s_mbsrtowcs_state;
+    while (!dst || count < len) {
+        wchar_t wc;
+        size_t r;
+        if (nms == 0u) break;
+        r = mbrtowc(&wc, p, nms, ps);
+        if (r == (size_t)-1) {
+            if (dst) *src = p;
+            return (size_t)-1;
+        }
+        if (r == (size_t)-2) {
+            p += nms; /* consumed into the state, to be finished by the next call */
+            break;
+        }
+        if (r == 0u) {
+            if (dst) {
+                dst[count] = L'\0';
+                *src = NULL;
+            }
+            return count;
+        }
+        if (dst) dst[count] = wc;
+        count++;
+        p += r;
+        if (nms != (size_t)-1) nms -= r;
+    }
+    if (dst) *src = p;
+    return count;
+}
+
+size_t mbsrtowcs(wchar_t *dst, const char **src, size_t len, mbstate_t *ps) {
+    return mbsnrtowcs(dst, src, (size_t)-1, len, ps);
+}
+
+/* At most `nwc` wide characters of `*src` into at most `len` bytes. */
+size_t wcsnrtombs(char *dst, const wchar_t **src, size_t nwc, size_t len, mbstate_t *ps) {
+    const wchar_t *p = *src;
+    size_t written = 0u;
+    char buf[4];
+
+    (void)ps;
+    while (nwc-- > 0u) {
+        const size_t n = wcrtomb(buf, *p, NULL);
+        if (n == (size_t)-1) {
+            if (dst) *src = p;
+            return (size_t)-1;
+        }
+        if (*p == L'\0') {
+            if (dst) {
+                if (written + 1u > len) break;
+                dst[written] = '\0';
+                *src = NULL;
+            }
+            return written;
+        }
+        if (dst) {
+            if (written + n > len) break;
+            memcpy(dst + written, buf, n);
+        }
+        written += n;
+        p++;
+    }
+    if (dst) *src = p;
+    return written;
+}
+
+int mbtowc(wchar_t *pwc, const char *s, size_t n) {
+    mbstate_t st = {0u, 0u};
+    size_t r;
+    if (!s) return 0; /* UTF-8 carries no shift state */
+    r = mbrtowc(pwc, s, n, &st);
+    if (r == (size_t)-1 || r == (size_t)-2) {
+        errno = EILSEQ;
+        return -1;
+    }
+    return (int)r;
+}
+
+int mblen(const char *s, size_t n) { return mbtowc(NULL, s, n); }
+
+int wctomb(char *s, wchar_t wc) {
+    size_t r;
+    if (!s) return 0;
+    r = wcrtomb(s, wc, NULL);
+    return r == (size_t)-1 ? -1 : (int)r;
+}
+
+size_t mbstowcs(wchar_t *dst, const char *src, size_t n) {
+    mbstate_t st = {0u, 0u};
+    return mbsrtowcs(dst, &src, n, &st);
+}
+
+size_t wcstombs(char *dst, const wchar_t *src, size_t n) {
+    return wcsrtombs(dst, &src, n, NULL);
+}
+
+/* The string functions. */
+wchar_t *wcscpy(wchar_t *d, const wchar_t *s) {
+    wchar_t *r = d;
+    while ((*d++ = *s++) != L'\0') {
+    }
+    return r;
+}
+
+wchar_t *wcsncpy(wchar_t *d, const wchar_t *s, size_t n) {
+    size_t i = 0u;
+    for (; i < n && s[i] != L'\0'; i++) d[i] = s[i];
+    for (; i < n; i++) d[i] = L'\0';
+    return d;
+}
+
+wchar_t *wcscat(wchar_t *d, const wchar_t *s) {
+    wcscpy(d + wcslen(d), s);
+    return d;
+}
+
+wchar_t *wcsncat(wchar_t *d, const wchar_t *s, size_t n) {
+    wchar_t *p = d + wcslen(d);
+    size_t i = 0u;
+    for (; i < n && s[i] != L'\0'; i++) p[i] = s[i];
+    p[i] = L'\0';
+    return d;
+}
+
+int wcscmp(const wchar_t *a, const wchar_t *b) {
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return (*a > *b) - (*a < *b);
+}
+
+int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
+    for (; n > 0u; n--, a++, b++) {
+        if (*a != *b) return (*a > *b) - (*a < *b);
+        if (*a == L'\0') return 0;
+    }
+    return 0;
+}
+
+/* One locale, whose collation is code-point order, as `strcoll` has it. */
+int wcscoll(const wchar_t *a, const wchar_t *b) { return wcscmp(a, b); }
+
+size_t wcsxfrm(wchar_t *d, const wchar_t *s, size_t n) {
+    const size_t len = wcslen(s);
+    if (n > len) wcscpy(d, s);
+    return len;
+}
+
+wchar_t *wcschr(const wchar_t *s, wchar_t c) {
+    for (;; s++) {
+        if (*s == c) return (wchar_t *)s;
+        if (*s == L'\0') return NULL;
+    }
+}
+
+wchar_t *wcsrchr(const wchar_t *s, wchar_t c) {
+    const wchar_t *hit = NULL;
+    for (;; s++) {
+        if (*s == c) hit = s;
+        if (*s == L'\0') return (wchar_t *)hit;
+    }
+}
+
+size_t wcsspn(const wchar_t *s, const wchar_t *accept) {
+    size_t n = 0u;
+    while (s[n] != L'\0' && wcschr(accept, s[n])) n++;
+    return n;
+}
+
+size_t wcscspn(const wchar_t *s, const wchar_t *reject) {
+    size_t n = 0u;
+    while (s[n] != L'\0' && !wcschr(reject, s[n])) n++;
+    return n;
+}
+
+wchar_t *wcspbrk(const wchar_t *s, const wchar_t *accept) {
+    s += wcscspn(s, accept);
+    return *s ? (wchar_t *)s : NULL;
+}
+
+wchar_t *wcsstr(const wchar_t *hay, const wchar_t *needle) {
+    const size_t n = wcslen(needle);
+    if (n == 0u) return (wchar_t *)hay;
+    for (; *hay; hay++) {
+        if (*hay == *needle && wcsncmp(hay, needle, n) == 0) return (wchar_t *)hay;
+    }
+    return NULL;
+}
+
+wchar_t *wcstok(wchar_t *s, const wchar_t *delim, wchar_t **save) {
+    if (!s) s = *save;
+    if (!s) return NULL;
+    s += wcsspn(s, delim);
+    if (*s == L'\0') {
+        *save = NULL;
+        return NULL;
+    }
+    wchar_t *end = s + wcscspn(s, delim);
+    if (*end) {
+        *end = L'\0';
+        *save = end + 1;
+    } else {
+        *save = NULL;
+    }
+    return s;
+}
+
+wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n) {
+    for (; n > 0u; n--, s++) {
+        if (*s == c) return (wchar_t *)s;
+    }
+    return NULL;
+}
+
+int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
+    for (; n > 0u; n--, a++, b++) {
+        if (*a != *b) return (*a > *b) - (*a < *b);
+    }
+    return 0;
+}
+
+wchar_t *wmemcpy(wchar_t *d, const wchar_t *s, size_t n) {
+    return (wchar_t *)memcpy(d, s, n * sizeof(wchar_t));
+}
+
+wchar_t *wmemmove(wchar_t *d, const wchar_t *s, size_t n) {
+    return (wchar_t *)memmove(d, s, n * sizeof(wchar_t));
+}
+
+wchar_t *wmemset(wchar_t *d, wchar_t c, size_t n) {
+    for (size_t i = 0u; i < n; i++) d[i] = c;
+    return d;
+}
+
+/* The numeric conversions. A number is ASCII, so the wide prefix is narrowed one for one, the
+   narrow conversion runs on it, and the end pointer maps back by the same count. */
+#define OOPS_WNUM_MAX 512
+static size_t oops_wnarrow(const wchar_t *s, char *buf) {
+    size_t n = 0u;
+    while (n + 1u < OOPS_WNUM_MAX && s[n] > 0 && s[n] < 0x80) {
+        buf[n] = (char)s[n];
+        n++;
+    }
+    buf[n] = '\0';
+    return n;
+}
+
+#define OOPS_WCSTO(name, type, narrow, ...)                                                \
+    type name(const wchar_t *s, wchar_t **end, ##__VA_ARGS__) {                            \
+        char buf[OOPS_WNUM_MAX];                                                           \
+        char *e;                                                                           \
+        (void)oops_wnarrow(s, buf);                                                        \
+        const type v = narrow;                                                             \
+        if (end) *end = (wchar_t *)s + (e - buf);                                          \
+        return v;                                                                          \
+    }
+OOPS_WCSTO(wcstol, long, strtol(buf, &e, base), int base)
+OOPS_WCSTO(wcstoul, unsigned long, strtoul(buf, &e, base), int base)
+OOPS_WCSTO(wcstoll, long long, strtoll(buf, &e, base), int base)
+OOPS_WCSTO(wcstoull, unsigned long long, strtoull(buf, &e, base), int base)
+OOPS_WCSTO(wcstod, double, strtod(buf, &e))
+OOPS_WCSTO(wcstof, float, strtof(buf, &e))
+OOPS_WCSTO(wcstold, long double, strtold(buf, &e))
+#undef OOPS_WCSTO
+
+/* The format narrowed to UTF-8, formatted by `vsnprintf`, and the result decoded. `<wchar.h>`
+   says what that does not cover. */
+int vswprintf(wchar_t *dst, size_t n, const wchar_t *fmt, va_list args) {
+    char nfmt[512];
+    char out[2048];
+    const wchar_t *fp = fmt;
+    const char *op = out;
+    size_t len;
+    mbstate_t st = {0u, 0u};
+
+    if (wcsrtombs(nfmt, &fp, sizeof(nfmt), NULL) == (size_t)-1 || fp != NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    const int m = vsnprintf(out, sizeof(out), nfmt, args);
+    if (m < 0 || (size_t)m >= sizeof(out)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    len = mbsrtowcs(NULL, &op, 0u, &st);
+    if (len == (size_t)-1 || len + 1u > n) {
+        if (n > 0u) dst[0] = L'\0';
+        errno = EOVERFLOW;
+        return -1; /* C: a result that does not fit is an error, not a truncation */
+    }
+    op = out;
+    (void)mbsrtowcs(dst, &op, n, &st);
+    return (int)len;
+}
+
+int swprintf(wchar_t *dst, size_t n, const wchar_t *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    const int r = vswprintf(dst, n, fmt, args);
+    va_end(args);
+    return r;
+}
+
+size_t wcsftime(wchar_t *dst, size_t n, const wchar_t *fmt, const struct tm *t) {
+    char nfmt[256];
+    char out[1024];
+    const wchar_t *fp = fmt;
+    const char *op = out;
+    mbstate_t st = {0u, 0u};
+
+    if (wcsrtombs(nfmt, &fp, sizeof(nfmt), NULL) == (size_t)-1 || fp != NULL) return 0u;
+    if (strftime(out, sizeof(out), nfmt, t) == 0u) return 0u;
+    const size_t len = mbsrtowcs(NULL, &op, 0u, &st);
+    if (len == (size_t)-1 || len + 1u > n) return 0u;
+    op = out;
+    (void)mbsrtowcs(dst, &op, n, &st);
+    return len;
+}
+
+/* Wide characters on a byte stream: UTF-8 in and out. The streams carry no orientation. */
+wint_t fgetwc(FILE *f) {
+    mbstate_t st = {0u, 0u};
+    for (;;) {
+        const int c = fgetc(f);
+        char b;
+        wchar_t wc;
+        if (c == EOF) return WEOF;
+        b = (char)c;
+        const size_t r = mbrtowc(&wc, &b, 1u, &st);
+        if (r == (size_t)-2) continue;
+        if (r == (size_t)-1) return WEOF;
+        return (wint_t)wc;
+    }
+}
+
+wint_t getwc(FILE *f) { return fgetwc(f); }
+wint_t getwchar(void) { return fgetwc(stdin); }
+
+wint_t fputwc(wchar_t wc, FILE *f) {
+    char buf[4];
+    const size_t n = wcrtomb(buf, wc, NULL);
+    if (n == (size_t)-1 || fwrite(buf, 1u, n, f) != n) return WEOF;
+    return (wint_t)wc;
+}
+
+wint_t putwc(wchar_t wc, FILE *f) { return fputwc(wc, f); }
+wint_t putwchar(wchar_t wc) { return fputwc(wc, stdout); }
+
+/* One byte of pushback on the stream, so only a character that is one byte in UTF-8. */
+wint_t ungetwc(wint_t wc, FILE *f) {
+    if (wc == WEOF || wc >= 0x80) return WEOF;
+    return ungetc((int)wc, f) == EOF ? WEOF : wc;
+}
+
+int fputws(const wchar_t *s, FILE *f) {
+    for (; *s; s++) {
+        if (fputwc(*s, f) == WEOF) return EOF;
+    }
+    return 0;
+}
+
+int fwide(FILE *f, int mode) {
+    (void)f;
+    (void)mode;
+    return 0; /* no orientation is kept: byte and wide calls mix on one stream */
+}
+
+/* <wctype.h>. Exact for ASCII and Latin-1; `<wctype.h>` says what holds above them. */
+static int oops_in(wint_t c, wint_t lo, wint_t hi) { return c >= lo && c <= hi; }
+
+int iswcntrl(wint_t c) {
+    return oops_in(c, 0, 0x1f) || oops_in(c, 0x7f, 0x9f) || c == 0x2028 || c == 0x2029;
+}
+int iswdigit(wint_t c) { return oops_in(c, '0', '9'); }
+int iswxdigit(wint_t c) {
+    return iswdigit(c) || oops_in(c, 'a', 'f') || oops_in(c, 'A', 'F');
+}
+int iswspace(wint_t c) {
+    return c == ' ' || oops_in(c, '\t', '\r') || c == 0x85 || c == 0x1680 ||
+           oops_in(c, 0x2000, 0x2006) || oops_in(c, 0x2008, 0x200a) || c == 0x2028 ||
+           c == 0x2029 || c == 0x205f || c == 0x3000;
+}
+int iswblank(wint_t c) {
+    return c == ' ' || c == '\t' || c == 0x1680 || oops_in(c, 0x2000, 0x2006) ||
+           oops_in(c, 0x2008, 0x200a) || c == 0x205f || c == 0x3000;
+}
+int iswupper(wint_t c) {
+    return oops_in(c, 'A', 'Z') || (oops_in(c, 0xc0, 0xde) && c != 0xd7) ||
+           (oops_in(c, 0x391, 0x3a9) && c != 0x3a2) || oops_in(c, 0x400, 0x42f);
+}
+int iswlower(wint_t c) {
+    return oops_in(c, 'a', 'z') || (oops_in(c, 0xdf, 0xff) && c != 0xf7) || c == 0xb5 ||
+           oops_in(c, 0x3b1, 0x3c9) || oops_in(c, 0x430, 0x45f);
+}
+int iswalpha(wint_t c) {
+    if (c < 0x80) return oops_in(c, 'a', 'z') || oops_in(c, 'A', 'Z');
+    if (c < 0x100) return c == 0xaa || c == 0xb5 || c == 0xba ||
+                          (c >= 0xc0 && c != 0xd7 && c != 0xf7);
+    /* Above Latin-1: letters, less the punctuation, symbol and private-use blocks. */
+    return c <= 0x10ffff && !oops_in(c, 0xd800, 0xdfff) && !oops_in(c, 0x2000, 0x2bff) &&
+           !oops_in(c, 0x3000, 0x303f) && !oops_in(c, 0xe000, 0xf8ff) &&
+           !oops_in(c, 0xfe30, 0xfe4f) && !oops_in(c, 0xff00, 0xff20);
+}
+int iswalnum(wint_t c) { return iswalpha(c) || iswdigit(c); }
+int iswprint(wint_t c) {
+    return c >= 0x20 && c <= 0x10ffff && !iswcntrl(c) && !oops_in(c, 0xd800, 0xdfff);
+}
+int iswgraph(wint_t c) { return iswprint(c) && !iswspace(c); }
+int iswpunct(wint_t c) { return iswgraph(c) && !iswalnum(c); }
+
+wint_t towupper(wint_t c) {
+    if (oops_in(c, 'a', 'z') || (oops_in(c, 0xe0, 0xfe) && c != 0xf7)) return c - 0x20;
+    if (c == 0xff) return 0x178;
+    if (oops_in(c, 0x3b1, 0x3c9) && c != 0x3c2) return c - 0x20;
+    if (oops_in(c, 0x430, 0x44f)) return c - 0x20;
+    if (oops_in(c, 0x450, 0x45f)) return c - 0x50;
+    return c;
+}
+
+wint_t towlower(wint_t c) {
+    if (oops_in(c, 'A', 'Z') || (oops_in(c, 0xc0, 0xde) && c != 0xd7)) return c + 0x20;
+    if (c == 0x178) return 0xff;
+    if (oops_in(c, 0x391, 0x3a9) && c != 0x3a2) return c + 0x20;
+    if (oops_in(c, 0x410, 0x42f)) return c + 0x20;
+    if (oops_in(c, 0x400, 0x40f)) return c + 0x50;
+    return c;
+}
+
+static const char *const s_wctype_names[] = {"",      "alnum", "alpha", "blank", "cntrl",
+                                             "digit", "graph", "lower", "print", "punct",
+                                             "space", "upper", "xdigit"};
+
+wctype_t wctype(const char *name) {
+    for (wctype_t i = 1u; i < sizeof(s_wctype_names) / sizeof(s_wctype_names[0]); i++) {
+        if (strcmp(name, s_wctype_names[i]) == 0) return i;
+    }
+    return 0u;
+}
+
+int iswctype(wint_t c, wctype_t t) {
+    switch (t) {
+    case 1: return iswalnum(c);
+    case 2: return iswalpha(c);
+    case 3: return iswblank(c);
+    case 4: return iswcntrl(c);
+    case 5: return iswdigit(c);
+    case 6: return iswgraph(c);
+    case 7: return iswlower(c);
+    case 8: return iswprint(c);
+    case 9: return iswpunct(c);
+    case 10: return iswspace(c);
+    case 11: return iswupper(c);
+    case 12: return iswxdigit(c);
+    default: return 0;
+    }
+}
+
+wctrans_t wctrans(const char *name) {
+    if (strcmp(name, "tolower") == 0) return 1;
+    if (strcmp(name, "toupper") == 0) return 2;
+    return 0;
+}
+
+wint_t towctrans(wint_t c, wctrans_t t) {
+    return t == 1 ? towlower(c) : t == 2 ? towupper(c) : c;
+}
+
 int strcmp(const char *a, const char *b) { return obs_strcmp(a, b); }
 int strncmp(const char *a, const char *b, size_t n) { return obs_strncmp(a, b, n); }
 char *strncpy(char *dest, const char *src, size_t n) { return obs_strncpy(dest, src, n); }
@@ -532,6 +1125,18 @@ void *calloc(size_t count, size_t size) { return oops_calloc(count, size); }
 void *realloc(void *ptr, size_t size) { return oops_realloc(ptr, size); }
 void *aligned_alloc(size_t alignment, size_t size) { return oops_aligned_alloc(alignment, size); }
 void free(void *ptr) { oops_free(ptr); }
+
+/* `aligned_alloc` with POSIX's contract: any size (rounded up here to the multiple C17 wants),
+ * an alignment that is a power of two and a multiple of a pointer, and an error number
+ * returned rather than set. */
+int posix_memalign(void **out, size_t alignment, size_t size) {
+    if (!out || alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0) {
+        return EINVAL;
+    }
+    size = (size + alignment - 1) & ~(alignment - 1);
+    *out = oops_aligned_alloc(alignment, size ? size : alignment);
+    return *out ? 0 : ENOMEM;
+}
 
 int abs(int x) { return (x < 0) ? -x : x; }
 long labs(long x) { return (x < 0) ? -x : x; }
@@ -1678,6 +2283,9 @@ struct tm *gmtime(const time_t *t) {
 /* UTC, as `include/libc/time.h` says: there is no timezone to apply. */
 struct tm *localtime_r(const time_t *t, struct tm *out) { return gmtime_r(t, out); }
 struct tm *localtime(const time_t *t) { return gmtime(t); }
+
+/* The one timezone is UTC (<libc/time.h>), so there is nothing to load. */
+void tzset(void) {}
 
 time_t mktime(struct tm *tm) {
     if (!tm) return (time_t)-1;

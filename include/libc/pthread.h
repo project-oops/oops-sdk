@@ -303,6 +303,43 @@ static inline int pthread_cond_timedwait_us(pthread_cond_t *c, pthread_mutex_t *
     pthread_cond_timedwait_us((c), (m), (long long)(abstime)->tv_sec,                  \
                               (long long)(abstime)->tv_nsec)
 
+/*
+ * **Cancellation: there is none, and the state calls say so truthfully.** Nothing here can
+ * cancel a thread (`pthread_cancel` is absent), so a thread's cancellation state is always
+ * the default - enabled, deferred - and never acted on. The two setters accept a valid value,
+ * report that default as the previous one, and change nothing a cancel could observe;
+ * `pthread_testcancel` has no pending cancel to act on. The cleanup macros are the standard
+ * block pair: `pthread_cleanup_pop(1)` runs the handler, `pop(0)` discards it. glslang's
+ * thread teardown (`OSDependent/Unix/ossource.cpp`) uses all of these.
+ */
+#define PTHREAD_CANCEL_ENABLE 0
+#define PTHREAD_CANCEL_DISABLE 1
+#define PTHREAD_CANCEL_DEFERRED 0
+#define PTHREAD_CANCEL_ASYNCHRONOUS 2
+
+static inline int pthread_setcancelstate(int state, int *oldstate) {
+    if (state != PTHREAD_CANCEL_ENABLE && state != PTHREAD_CANCEL_DISABLE) return 22;
+    if (oldstate) *oldstate = PTHREAD_CANCEL_ENABLE;
+    return 0;
+}
+
+static inline int pthread_setcanceltype(int type, int *oldtype) {
+    if (type != PTHREAD_CANCEL_DEFERRED && type != PTHREAD_CANCEL_ASYNCHRONOUS) return 22;
+    if (oldtype) *oldtype = PTHREAD_CANCEL_DEFERRED;
+    return 0;
+}
+
+static inline void pthread_testcancel(void) {}
+
+#define pthread_cleanup_push(routine, arg)                                                 \
+    {                                                                                      \
+        void (*oops_cleanup_routine_)(void *) = (routine);                                 \
+        void *oops_cleanup_arg_ = (arg);
+
+#define pthread_cleanup_pop(execute)                                                       \
+    if (execute) oops_cleanup_routine_(oops_cleanup_arg_);                                 \
+    }
+
 #ifdef __cplusplus
 }
 #endif

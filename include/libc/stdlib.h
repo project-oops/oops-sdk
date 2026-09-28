@@ -26,15 +26,26 @@ extern "C" {
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 
-/* There is exactly one locale ("C"), so characters are single-byte and MB_CUR_MAX is
- * the constant 1. */
-#define MB_CUR_MAX ((size_t)1)
+/* There is exactly one locale, and its multibyte encoding is UTF-8 (`<wchar.h>`), so a
+ * character is at most four bytes. libc++'s `codecvt` sizes its conversion buffers by
+ * this. */
+#define MB_CUR_MAX ((size_t)4)
+
+/* The stateless multibyte conversions, UTF-8 each way: `<wchar.h>` has the rest. */
+int mblen(const char *s, size_t n);
+int mbtowc(wchar_t *pwc, const char *s, size_t n);
+int wctomb(char *s, wchar_t wc);
+size_t mbstowcs(wchar_t *dst, const char *src, size_t n);
+size_t wcstombs(char *dst, const wchar_t *src, size_t n);
 
 void *malloc(size_t size);
 void *calloc(size_t count, size_t size);
 void *realloc(void *ptr, size_t size);
 void *aligned_alloc(size_t alignment, size_t size);
 void free(void *ptr);
+/* 0, `EINVAL` for an alignment that is not a power of two at least a pointer wide, or
+ * `ENOMEM`. Any size: it is rounded up to the alignment. */
+int posix_memalign(void **out, size_t alignment, size_t size);
 
 int abs(int x);
 long labs(long x);

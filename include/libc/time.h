@@ -58,7 +58,11 @@ clock_t clock(void);
  * `gmtime` and `localtime` return a pointer to one static `struct tm`, which is what C says and
  * what makes them unsafe to call from two threads at once. `gmtime_r` takes the buffer instead
  * and is the one to reach for in a thread.
+ *
+ * `tzset` loads the timezone `localtime` uses, which here is always UTC: it returns having
+ * nothing to load.
  */
+void tzset(void);
 struct tm {
   int tm_sec;   /* 0-60, 60 for a leap second */
   int tm_min;   /* 0-59 */

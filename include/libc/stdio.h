@@ -26,9 +26,16 @@ extern "C" {
 #define SEEK_END 2
 #define BUFSIZ 1024
 
+/* `FILE` is declared once, whichever of this header and `<wchar.h>` comes first: POSIX
+ * has both define it, and a repeated typedef is an error in C99. */
+#ifndef OOPS_FILE_DECLARED
+#define OOPS_FILE_DECLARED
+typedef struct oops_FILE FILE;
+#endif
+
 /* An open file: the descriptor, and what has happened to it. A port keeps the pointer
  * and passes it back; nothing here needs it to be anything larger. */
-typedef struct oops_FILE {
+struct oops_FILE {
     int fd;
     int eof;
     int err;
@@ -49,7 +56,7 @@ typedef struct oops_FILE {
     unsigned int wbuf_len;
     unsigned int wbuf_cap;
     int nobuf;
-} FILE;
+};
 
 extern FILE *stdout;
 extern FILE *stderr;

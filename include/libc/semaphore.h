@@ -18,6 +18,8 @@
 
 #include <errno.h>
 #include <oops/thread.h>
+#include <oops/time.h> /* oops_time_sleep_ms, for sem_timedwait */
+#include <time.h>      /* clock_gettime and struct timespec, likewise */
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,6 +79,32 @@ static inline int sem_trywait(sem_t *sem) {
         return -1;
     }
     return 0;
+}
+
+/*
+ * `sem_wait` with a deadline, as an absolute `CLOCK_REALTIME` time. The kernel's
+ * semaphore has no timed wait here, so this tries the count and sleeps a millisecond
+ * between tries until it is taken or the deadline passes - the same polling `select` in
+ * oops-apps' POSIX layer does. `ETIMEDOUT` when the deadline passes first, as POSIX has
+ * it.
+ */
+static inline int sem_timedwait(sem_t *sem, const struct timespec *abstime) {
+    if (!abstime || abstime->tv_nsec < 0 || abstime->tv_nsec >= 1000000000L) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (;;) {
+        struct timespec now;
+        if (oops_sem_poll(sem, 1) == 0) {
+            return 0;
+        }
+        if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec > abstime->tv_sec ||
+            (now.tv_sec == abstime->tv_sec && now.tv_nsec >= abstime->tv_nsec)) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        oops_time_sleep_ms(1u);
+    }
 }
 
 #ifdef __cplusplus
