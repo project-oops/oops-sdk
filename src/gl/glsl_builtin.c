@@ -51,7 +51,7 @@ typedef enum {
     BI_GEN2, /* (genType, genType) -> genType                 pow, atan(y,x), reflect */
     BI_GEN2_SCALAR,  /* (genType, genType|float) -> genType           mod, min, max */
     BI_GEN3_SCALAR,  /* (genType, genType|float, genType|float)       clamp */
-    BI_MIX,          /* (genType, genType, genType|float)             mix */
+    BI_MIX,          /* (genType, genType, genType|float|genBType)    mix */
     BI_STEP,         /* (genType|float, genType) -> the second's type step */
     BI_SMOOTHSTEP,   /* (genType|float, same, genType)                smoothstep */
     BI_GEN3,         /* three genType -> genType                      faceforward */
@@ -299,11 +299,27 @@ glsl_type_t glsl_builtin_call_type(glsl_sema_t *s, const char *name, size_t len,
         return args[0];
 
     case BI_MIX:
-        if (argc != 3 || !is_gen(args[0]) || args[1] != args[0] ||
-            !gen_or_scalar(args[0], args[2])) {
+        if (argc != 3 || !is_gen(args[0]) || args[1] != args[0])
             break;
+        /*
+         * The selector is a float of the same shape - or a scalar one - and blends;
+         * or a bool of the same shape, and chooses. The second form is 1.30's, and it
+         * arrives here from shaders that declare 1.20 and use it anyway. Every desktop
+         * driver takes it, so refusing it only makes this the odd compiler out - and
+         * `fromLinear` in Fast3D's fragment shader, which every frame of a libultraship
+         * port compiles, is written that way.
+         *
+         * Nothing below the type check has to change. A bvec is held as 0.0 or 1.0 a
+         * component in both back ends, so `a + (b - a) * t` already reads as "b where
+         * true, a where false" - which is the choosing form, exactly.
+         */
+        if (gen_or_scalar(args[0], args[2]))
+            return args[0];
+        if (glsl_type_base(args[2]) == GLSL_TYPE_BOOL &&
+            glsl_type_components(args[2]) == glsl_type_components(args[0])) {
+            return args[0];
         }
-        return args[0];
+        break;
 
     case BI_STEP:
         /* The result is the second argument's type: `step(0.5, v)` is a vec of v's

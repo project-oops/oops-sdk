@@ -133,6 +133,46 @@ static void test_freestd_snprintf_floats(void) {
     ASSERT_STR_EQ(buf, "w=90.0 h=520.0 n=61");
 }
 
+/*
+ * A precision on `%s` is a maximum, and the text need not end inside it.
+ *
+ * `%.*s` is how one line is printed out of a buffer that runs on - the shader dump in
+ * `gl_shader.c` prints a source a line at a time that way. Ignoring the precision there
+ * put the whole remaining source on every line.
+ */
+static void test_freestd_snprintf_string_precision(void) {
+    char buf[128];
+    /* Deliberately unterminated within the precision: reading for a NUL that is not
+     * there is the fault the precision has to stop. */
+    const char *lines = "first\nsecond\nthird";
+
+    oops_snprintf(buf, sizeof(buf), "%.*s", 5, lines);
+    ASSERT_STR_EQ(buf, "first");
+
+    oops_snprintf(buf, sizeof(buf), "%.*s", 6, lines + 6);
+    ASSERT_STR_EQ(buf, "second");
+
+    /* A literal precision, and one longer than the string, which stops at its end. */
+    oops_snprintf(buf, sizeof(buf), "%.2s", "abcdef");
+    ASSERT_STR_EQ(buf, "ab");
+    oops_snprintf(buf, sizeof(buf), "%.99s", "abc");
+    ASSERT_STR_EQ(buf, "abc");
+
+    /* Zero prints nothing, and a width still pads what the precision left. */
+    oops_snprintf(buf, sizeof(buf), "[%.0s]", "abc");
+    ASSERT_STR_EQ(buf, "[]");
+    oops_snprintf(buf, sizeof(buf), "[%6.3s][%-6.3s]", "abcdef", "abcdef");
+    ASSERT_STR_EQ(buf, "[   abc][abc   ]");
+
+    /* No precision is unchanged: the whole string, as before. */
+    oops_snprintf(buf, sizeof(buf), "%s", "abcdef");
+    ASSERT_STR_EQ(buf, "abcdef");
+
+    /* The argument after it still lands in the right place. */
+    oops_snprintf(buf, sizeof(buf), "%.*s=%d", 3, "keyXX", 7);
+    ASSERT_STR_EQ(buf, "key=7");
+}
+
 /* The set functions and the tokeniser (`strspn`, `strcspn`, `strpbrk`, `strtok_r`)
  * handle an empty set, a string that is all delimiters, and a trailing delimiter. */
 static void test_freestd_sets_and_tokens(void) {
@@ -669,6 +709,7 @@ void run_unit_tests_freestd(void) {
     RUN_TEST(test_freestd_nid);
     RUN_TEST(test_freestd_snprintf);
     RUN_TEST(test_freestd_snprintf_floats);
+    RUN_TEST(test_freestd_snprintf_string_precision);
     RUN_TEST(test_freestd_sets_and_tokens);
     RUN_TEST(test_freestd_qsort_and_bsearch);
     RUN_TEST(test_freestd_sscanf);

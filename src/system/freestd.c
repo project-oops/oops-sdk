@@ -608,7 +608,19 @@ int oops_vsnprintf(char *buf, size_t size, const char *fmt, va_list args) {
             const char *s = va_arg(args, const char *);
             if (s == NULL)
                 s = "(null)";
-            len = obs_strlen(s);
+            /*
+             * A precision on `%s` is a maximum, and the argument need not be terminated
+             * within it - `%.*s` is how a caller prints one line out of a buffer that
+             * runs on past it. So the length is measured up to the precision and stops
+             * there, rather than being measured first and truncated after: reading for
+             * a terminator that is not there is the fault this avoids.
+             */
+            if (precision >= 0) {
+                while (len < (size_t)precision && s[len] != '\0')
+                    len++;
+            } else {
+                len = obs_strlen(s);
+            }
             snprintf_puts(&ctx, s, len, left_align, width, ' ');
         } else if (spec == 'c') {
             char c = (char)va_arg(args, int);

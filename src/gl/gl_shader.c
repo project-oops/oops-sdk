@@ -332,6 +332,64 @@ void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
     s->info_log[0] = '\0';
 }
 
+/*
+ * Say what failed to compile, with the source beside it.
+ *
+ * A port that generates its shaders - and Fast3D generates a fresh one per combiner
+ * mode - has no file to open when the compile is refused. The diagnostic on its own is
+ * a line and a column into a string nobody kept: working out that "18:17" meant a `mix`
+ * with a bool selector took reading the template it was expanded from, in another
+ * repository, and counting. That is exactly the guessing a log exists to remove.
+ *
+ * So on a failed compile the source goes out with the message, numbered, with the
+ * offending line marked. It is unconditional rather than behind `gl=debug`, because
+ * nobody sets a log channel before the failure they did not expect - and a shader that
+ * will not compile stops the port dead, so this is never chatter on a healthy run.
+ */
+static void shader_report_failure(const gl_shader_object_t *s) {
+    unsigned bad_line = 0u, bad_col = 0u;
+    const char *p;
+
+    oops_log_warn("GL", "%s shader compilation failed: %s",
+                  s->type == GL_VERTEX_SHADER ? "vertex" : "fragment", s->info_log);
+
+    /* The diagnostic opens "<line>:<column>: ". Pull them out so the dump can point at
+     * the line, and carry on without a marker if it is worded some other way. */
+    for (p = s->info_log; *p >= '0' && *p <= '9'; p++)
+        bad_line = bad_line * 10u + (unsigned)(*p - '0');
+    if (*p == ':') {
+        for (p++; *p >= '0' && *p <= '9'; p++)
+            bad_col = bad_col * 10u + (unsigned)(*p - '0');
+    } else {
+        bad_line = 0u;
+    }
+
+    {
+        const char *line = s->source;
+        const char *end = s->source + s->source_len;
+        unsigned n = 1u;
+        while (line < end) {
+            const char *nl = line;
+            while (nl < end && *nl != '\n')
+                nl++;
+            oops_log_warn("GL", "%c%4u | %.*s", (n == bad_line) ? '>' : ' ', n,
+                          (int)(nl - line), line);
+            if (n == bad_line && bad_col > 0u) {
+                /* A caret under the column, so the reader does not count either. */
+                char caret[128];
+                unsigned i = 0u;
+                while (i + 1u < sizeof(caret) && i + 1u < bad_col)
+                    caret[i++] = ' ';
+                caret[i++] = '^';
+                caret[i] = '\0';
+                oops_log_warn("GL", "      | %s", caret);
+            }
+            line = (nl < end) ? nl + 1 : end;
+            n++;
+        }
+    }
+}
+
 void glCompileShader(GLuint shader) {
     gl_context_t *ctx = gl2_ctx();
     if (!ctx)
@@ -356,6 +414,8 @@ void glCompileShader(GLuint shader) {
     s->unit = glsl_unit_compile(s->type, s->source, s->source_len, s->info_log,
                                 sizeof(s->info_log));
     s->compiled = (GLboolean)(s->unit != (glsl_unit_t *)0);
+    if (!s->compiled)
+        shader_report_failure(s);
 }
 
 void glDeleteShader(GLuint shader) {

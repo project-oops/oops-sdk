@@ -10,6 +10,7 @@
 #include "oops/system.h"
 
 #ifdef OOPS_HOST_BUILD
+#include <errno.h> /* the host's `errno`; the target reads it with `sys_get_errno` */
 #include <sys/mman.h>
 #include <unistd.h>
 #endif

@@ -4604,6 +4604,157 @@ static void test_gl2_vector_relationals_reduce_a_bvec(void) {
     glContextDestroy(ctx);
 }
 
+/*
+ * `mix` chooses per component when its selector is a bvec.
+ *
+ * The three-argument form is 1.30's, and shaders that declare 1.20 use it anyway -
+ * Fast3D's `fromLinear`, which every libultraship port compiles on its first frame, is
+ * `mix(higher, lower, cutoff)` with `cutoff` a `bvec3` from `lessThan`. Refusing it
+ * stopped Ship of Harkinian at its first shader.
+ *
+ * It selects rather than blends: the second argument where the selector is true, the
+ * first where it is false. The case that matters is a selector that differs per
+ * component, which a scalar broadcast would get wrong in two of three places.
+ */
+static void test_gl2_mix_chooses_on_a_bool_selector(void) {
+    void *ctx = gl2_context();
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+
+    /* `lessThan((0,1,2),(1,1,1))` is `(true,false,false)`, so the result takes `lower`
+     * in x and `higher` in y and z: (0.25, 0.5, 0.5) against a blend's (0.375, ...). */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  vec3 higher = vec3(0.5, 0.5, 0.5);\n"
+                    "  vec3 lower = vec3(0.25, 0.25, 0.25);\n"
+                    "  bvec3 cutoff = lessThan(vec3(0.0, 1.0, 2.0), vec3(1.0));\n"
+                    "  vec3 m = mix(higher, lower, cutoff);\n"
+                    "  gl_FragColor = vec4(m, 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f); /* true: the second argument */
+    ASSERT_NEAR(o[1], 0.5f, 1e-6f);  /* false: the first */
+    ASSERT_NEAR(o[2], 0.5f, 1e-6f);
+
+    /* `fromLinear` itself, the shape that failed on hardware. sRGB encodes 0.5 linear
+     * as about 0.7354 through the `pow` branch; the low component takes the linear
+     * branch, 0.001 * 12.92. Both branches in one call is the point. */
+    compile_and_run(
+        ctx, VS_ONE_VARYING,
+        "vec4 fromLinear(vec4 linearRGB) {\n"
+        "  bvec3 cutoff = lessThan(linearRGB.rgb, vec3(0.0031308));\n"
+        "  vec3 higher = vec3(1.055) * pow(linearRGB.rgb, vec3(1.0/2.4)) - vec3(0.055);\n"
+        "  vec3 lower = linearRGB.rgb * vec3(12.92);\n"
+        "  return vec4(mix(higher, lower, cutoff), linearRGB.a);\n"
+        "}\n"
+        "void main() {\n"
+        "  gl_FragColor = fromLinear(vec4(0.5, 0.001, 0.5, 1.0));\n"
+        "}\n",
+        attr, o);
+    ASSERT_NEAR(o[0], 0.735357f, 2e-3f); /* above the cutoff: the gamma branch */
+    ASSERT_NEAR(o[1], 0.01292f, 2e-3f);  /* below it: the linear one */
+    ASSERT_NEAR(o[2], 0.735357f, 2e-3f);
+    ASSERT_NEAR(o[3], 1.0f, 1e-6f);
+
+    /* A scalar float selector still blends, which is the 1.10 form and must not have
+     * been broken by widening the rule. */
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "void main() {\n"
+                    "  gl_FragColor = vec4(mix(vec3(0.0), vec3(1.0), 0.25), 1.0);\n"
+                    "}\n",
+                    attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-6f);
+
+    glContextDestroy(ctx);
+}
+
+/*
+ * The Fast3D fragment shader compiles - the real one, as libultraship generates it.
+ *
+ * Every port on that engine - Ship of Harkinian, Starship, 2 Ship 2 Harkinian - builds
+ * this from one template per colour-combiner mode and compiles it on the frame it is
+ * first needed. One built-in it did not have stopped Ship of Harkinian at its first
+ * shader, before a pixel; the diagnostic was a line and a column into a string that had
+ * never been written down. Holding a faithful expansion here turns that into a host
+ * failure that names itself.
+ *
+ * This is the common case: one texture, alpha, no fog, no mask, no clamp, one cycle.
+ * Its interesting parts are not the arithmetic - they are the shapes that a 1.10-era
+ * front end is entitled to find surprising, and which the template uses anyway:
+ *
+ *   - `mix` whose selector is a `bvec3`, which is 1.30's overload,
+ *   - a `sampler2D` passed as a function parameter,
+ *   - a `vec2` built out of two `int` uniforms read from arrays,
+ *   - a local variable named after the function it is declared in,
+ *   - macros that capture their caller's locals (`TEX_OFFSET`).
+ */
+static void test_gl2_the_fast3d_fragment_shader_compiles(void) {
+    void *ctx = gl2_context();
+
+    static const char *const FAST3D_FS =
+        "#version 120\n"
+        "varying vec2 vTexCoord0;\n"
+        "varying vec4 vInput1;\n"
+        "uniform sampler2D uTex0;\n"
+        "uniform int frame_count;\n"
+        "uniform float noise_scale;\n"
+        "uniform int texture_width[2];\n"
+        "uniform int texture_height[2];\n"
+        "uniform int texture_filtering[2];\n"
+        "#define TEX_OFFSET(off) texture2D(tex, texCoord - off / texSize)\n"
+        "#define WRAP(x, low, high) mod((x)-(low), (high)-(low)) + (low)\n"
+        "float random(in vec3 value) {\n"
+        "    float random = dot(sin(value), vec3(12.9898, 78.233, 37.719));\n"
+        "    return fract(sin(random) * 143758.5453);\n"
+        "}\n"
+        "vec4 fromLinear(vec4 linearRGB){\n"
+        "    bvec3 cutoff = lessThan(linearRGB.rgb, vec3(0.0031308));\n"
+        "    vec3 higher = vec3(1.055)*pow(linearRGB.rgb, vec3(1.0/2.4)) - vec3(0.055);\n"
+        "    vec3 lower = linearRGB.rgb * vec3(12.92);\n"
+        "    return vec4(mix(higher, lower, cutoff), linearRGB.a);\n"
+        "}\n"
+        "vec4 filter3point(in sampler2D tex, in vec2 texCoord, in vec2 texSize) {\n"
+        "    vec2 offset = fract(texCoord*texSize - vec2(0.5));\n"
+        "    offset -= step(1.0, offset.x + offset.y);\n"
+        "    vec4 c0 = TEX_OFFSET(offset);\n"
+        "    vec4 c1 = TEX_OFFSET(vec2(offset.x - sign(offset.x), offset.y));\n"
+        "    vec4 c2 = TEX_OFFSET(vec2(offset.x, offset.y - sign(offset.y)));\n"
+        "    return c0 + abs(offset.x)*(c1-c0) + abs(offset.y)*(c2-c0);\n"
+        "}\n"
+        "vec4 hookTexture2D(in int id, sampler2D tex, in vec2 uv, in vec2 texSize) {\n"
+        "    return texture2D(tex, uv);\n"
+        "}\n"
+        "#define TEX_SIZE(tex) vec2(texture_width[tex], texture_height[tex])\n"
+        "void main() {\n"
+        "    vec2 texSize0 = TEX_SIZE(0);\n"
+        "    vec2 vTexCoordAdj0 = vTexCoord0;\n"
+        "    vec4 texVal0 = hookTexture2D(0, uTex0, vTexCoordAdj0, texSize0);\n"
+        "    vec4 texel;\n"
+        "    texel = texVal0 * vInput1;\n"
+        "    texel = WRAP(texel, -0.51, 1.51);\n"
+        "    texel = clamp(texel, 0.0, 1.0);\n"
+        "    gl_FragColor = texel;\n"
+        "}\n";
+
+    ASSERT_TRUE(compiles(GL_FRAGMENT_SHADER, FAST3D_FS));
+
+    /* The vertex half of the same pair, which the same template generates. */
+    ASSERT_TRUE(compiles(GL_VERTEX_SHADER,
+                         "#version 110\n"
+                         "attribute vec4 aVtxPos;\n"
+                         "attribute vec2 aTexCoord0;\n"
+                         "attribute vec4 aInput1;\n"
+                         "varying vec2 vTexCoord0;\n"
+                         "varying vec4 vInput1;\n"
+                         "void main() {\n"
+                         "    vTexCoord0 = aTexCoord0;\n"
+                         "    vInput1 = aInput1;\n"
+                         "    gl_Position = aVtxPos;\n"
+                         "}\n"));
+
+    glContextDestroy(ctx);
+}
+
 /* `gl_Color` in a fragment shader reads the parameter the link assigned it. */
 static void test_gl2_gl_color_lands_where_the_link_put_it(void) {
     void *ctx = gl2_context();
@@ -8544,6 +8695,8 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_derivatives_are_quad_reads_under_whole_quad_mode);
     RUN_TEST(test_gl2_frag_depth_exports_before_the_colour);
     RUN_TEST(test_gl2_vector_relationals_reduce_a_bvec);
+    RUN_TEST(test_gl2_mix_chooses_on_a_bool_selector);
+    RUN_TEST(test_gl2_the_fast3d_fragment_shader_compiles);
     RUN_TEST(test_gl2_gl_color_lands_where_the_link_put_it);
     RUN_TEST(test_gl2_matrix_products_are_two_products);
     RUN_TEST(test_gl2_integers_are_floats_kept_whole);
