@@ -44,7 +44,17 @@ typedef struct oops_ime_param {
     uint32_t max_text_len;    /* Max chars allowed */
     float pos_x;
     float pos_y;
+    uint32_t flags; /* OOPS_IME_FLAG_*, 0 for none */
 } oops_ime_param_t;
+
+/*
+ * `OOPS_IME_FLAG_PASSWORD` masks the entry as it is typed and implies no learning: a
+ * password never reaches the system's dictionary or its suggestions. `NO_LEARNING` alone
+ * keeps ordinary text out of them - right for anything a game asks for, where nothing
+ * typed is worth suggesting back to the player in another program.
+ */
+#define OOPS_IME_FLAG_PASSWORD 0x1u
+#define OOPS_IME_FLAG_NO_LEARNING 0x2u
 
 int oops_dialog_ime_open(const oops_ime_param_t *param);
 oops_ime_status_t oops_dialog_ime_poll(void);

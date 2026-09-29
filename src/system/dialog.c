@@ -108,6 +108,15 @@ typedef struct {
     uint8_t reserved[12];
 } sce_ime_dialog_result_t;
 
+/*
+ * `SceImeDialogParam.option` bits, as public reimplementations of the platform give
+ * them and two agree: masked entry, and no learning into the system dictionary.
+ * Candidates until a run here confirms them; the password field showing dots is that
+ * run.
+ */
+#define SCE_IME_OPTION_PASSWORD 0x00000004u
+#define SCE_IME_OPTION_NO_LEARNING 0x00000020u
+
 int oops_dialog_ime_open(const oops_ime_param_t *param) {
     if (!param)
         return -1;
@@ -166,6 +175,12 @@ int oops_dialog_ime_open(const oops_ime_param_t *param) {
     sce_param.placeholder = param->placeholder ? s_ime_placeholder_buffer : NULL;
     sce_param.posX = param->pos_x;
     sce_param.posY = param->pos_y;
+    if (param->flags & OOPS_IME_FLAG_PASSWORD) {
+        sce_param.option |= SCE_IME_OPTION_PASSWORD | SCE_IME_OPTION_NO_LEARNING;
+    }
+    if (param->flags & OOPS_IME_FLAG_NO_LEARNING) {
+        sce_param.option |= SCE_IME_OPTION_NO_LEARNING;
+    }
 
     int rc = sceImeDialogInit(&sce_param, NULL);
     if (rc == 0) {
