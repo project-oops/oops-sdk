@@ -1160,8 +1160,11 @@ void *glContextCreate(struct oops_display *disp) {
     ctx->fb0_depth_buffer = depth;
     ctx->depth_buffer = depth;
     ctx->depth_px = depth_px;
+    ctx->fb0_depth_px = depth_px;
+    ctx->fb0_stencil_buffer = stencil;
     ctx->stencil_buffer = stencil;
     ctx->stencil_px = stencil_px;
+    ctx->fb0_stencil_px = stencil_px;
 
     /* Stencil defaults, all from the specification: the test off, GL_ALWAYS with
      * reference 0 and both masks all-ones, every operation GL_KEEP, and the clear value
@@ -2210,13 +2213,21 @@ void gl_draw_targets(gl_context_t *ctx) {
      * second addressing path.
      */
     gl_fb_storage_t fbo;
-    float *fbo_depth = NULL;
-    if (gl_fbo_bound_target(ctx, &fbo, &fbo_depth)) {
+    gl_fbo_depth_t zs;
+    if (gl_fbo_bound_target(ctx, &fbo, &zs)) {
         ctx->framebuffer = fbo.pixels;
         ctx->fb_also = NULL;
         ctx->width = (uint32_t)fbo.width;
         ctx->height = (uint32_t)fbo.height;
-        ctx->depth_buffer = fbo_depth;
+        ctx->depth_buffer = zs.depth;
+        /* The attachment's stencil half, or none. A framebuffer object with depth and
+         * no stencil leaves this NULL, which `gl_stencil_active` already reads as no
+         * stencil test - the same way a NULL depth buffer reads as no depth test. */
+        ctx->stencil_buffer = zs.stencil;
+        /* And their real extents, or a clear writes the display's surface size into an
+         * attachment a fraction of it. */
+        ctx->depth_px = zs.depth_px;
+        ctx->stencil_px = zs.stencil_px;
         /* An attachment is linear, whatever swizzle the display's buffers are in. */
         ctx->hw_rx = GL_FALSE;
         ctx->color_tiled = GL_FALSE;
@@ -2226,6 +2237,9 @@ void gl_draw_targets(gl_context_t *ctx) {
     ctx->width = ctx->fb0_width;
     ctx->height = ctx->fb0_height;
     ctx->depth_buffer = ctx->fb0_depth_buffer;
+    ctx->stencil_buffer = ctx->fb0_stencil_buffer;
+    ctx->depth_px = ctx->fb0_depth_px;
+    ctx->stencil_px = ctx->fb0_stencil_px;
     ctx->hw_rx = ctx->fb0_hw_rx;
     ctx->color_tiled = ctx->fb0_color_tiled;
 

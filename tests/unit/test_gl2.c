@@ -1436,6 +1436,70 @@ static void test_gl2_packed_depth_stencil_serves_both_points(void) {
     oops_display_close(t.disp);
 }
 
+/*
+ * A bound framebuffer object moves the depth and stencil extents too.
+ *
+ * `glClear` writes `depth_px` floats starting at `depth_buffer`, and the whole surface
+ * rather than `width * height` - a tiled depth surface is read in whole blocks, so its
+ * padding has to be cleared with it. That makes the extent and the pointer a pair: the
+ * pointer moved to the attachment when a framebuffer object was bound and the extent
+ * did not, so clearing a small attachment wrote the display's surface size into it -
+ * on this console 1920 x 1152 floats, 8.8MB, into an allocation a fraction of that.
+ *
+ * They are checked here rather than by clearing and looking for damage because the
+ * damage is out of bounds by construction: there is nothing legitimate to read that
+ * would show it.
+ */
+static void test_gl2_binding_a_framebuffer_moves_the_depth_extent(void) {
+    gl2_target_t t = gl2_target();
+    gl_context_t *c = (gl_context_t *)t.ctx;
+    GLuint fb = 0, colour = 0, ds = 0;
+
+    const size_t display_depth_px = c->depth_px;
+    const size_t display_stencil_px = c->stencil_px;
+    ASSERT_TRUE(display_depth_px > 0);
+
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glGenRenderbuffers(1, &colour);
+    glBindRenderbuffer(GL_RENDERBUFFER, colour);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 16, 16);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                              colour);
+    glGenRenderbuffers(1, &ds);
+    glBindRenderbuffer(GL_RENDERBUFFER, ds);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 16, 16);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                              GL_RENDERBUFFER, ds);
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+    /* Bound: the extent is the attachment's own, exactly. A bound below the display's
+     * would pass while the extent had not moved at all, which is the failure this is
+     * here to catch - on a build machine there is no tiling, so 16 x 16 is the whole
+     * allocation and the number is not approximate. */
+    ASSERT_TRUE(c->depth_buffer != NULL);
+    ASSERT_TRUE(c->depth_px == (size_t)(16 * 16));
+    ASSERT_TRUE(c->depth_px != display_depth_px);
+
+    /* A clear now stays inside it. It is the call the fault came through. */
+    glClear((GLbitfield)(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                         GL_STENCIL_BUFFER_BIT));
+    ASSERT_TRUE(glGetError() == GL_NO_ERROR);
+
+    /* Unbound: the display's surface and its extent come back together. */
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    ASSERT_TRUE(c->depth_px == display_depth_px);
+    ASSERT_TRUE(c->stencil_px == display_stencil_px);
+    ASSERT_TRUE(c->depth_buffer == c->fb0_depth_buffer);
+    ASSERT_TRUE(c->stencil_buffer == c->fb0_stencil_buffer);
+
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &colour);
+    glDeleteRenderbuffers(1, &ds);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 /* Framebuffer and renderbuffer objects: names, attachments, queries and completeness.
  */
 static void test_gl2_framebuffer_objects(void) {
@@ -8755,6 +8819,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_es_100_shaders);
     RUN_TEST(test_gl2_framebuffer_objects);
     RUN_TEST(test_gl2_packed_depth_stencil_serves_both_points);
+    RUN_TEST(test_gl2_binding_a_framebuffer_moves_the_depth_extent);
     RUN_TEST(test_gl2_cube_face_attachment_is_sized_from_its_face);
     RUN_TEST(test_gl2_draw_into_a_framebuffer_object);
     RUN_TEST(test_gl2_blit_framebuffer_reads_the_read_binding);

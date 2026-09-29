@@ -531,6 +531,30 @@ typedef struct gl_renderbuffer_object {
      * is freed and whether the command processor can be pointed at it. False on a build
      * machine, where there is no GPU and the heap is the only allocator. */
     GLboolean gpu_resident;
+    /*
+     * A depth renderbuffer the depth block can address.
+     *
+     * A colour renderbuffer is linear and the colour block reads it that way, but the
+     * depth block has no linear mode: DB_Z_INFO's SW_MODE is 24 (64KB_Z_X) and the
+     * surface has to be laid out to match, padded to whole 128 x 128 blocks. So a depth
+     * renderbuffer is allocated to the tiled extent rather than to `width * height`,
+     * and this says the allocation is that shape - which is what lets a framebuffer
+     * object carry a depth attachment on hardware at all.
+     *
+     * `stencil` is the other half of a packed `GL_DEPTH24_STENCIL8`. It is a surface of
+     * its own because the hardware keeps them apart - DB_STENCIL_INFO and its own base
+     * registers - and it pads to 256 x 256 blocks rather than depth's 128 x 128, one
+     * byte a pixel giving a different block shape for the same 64 KiB.
+     */
+    GLboolean depth_surface;
+    uint8_t *stencil;
+    /* What was actually allocated, in elements. The clear writes the whole surface -
+     * the padding included, since the depth block reads blocks whole - so it has to be
+     * told this extent and not `width * height`, which would leave the padding of a
+     * tiled surface unwritten, and not the display's, which would write off the end of
+     * a small attachment. */
+    size_t depth_px;
+    size_t stencil_px;
 } gl_renderbuffer_object_t;
 
 typedef enum {
@@ -1830,6 +1854,12 @@ typedef struct gl_context {
      * no depth attachment leaves `depth_buffer` NULL, which the draw path already reads
      * as "no depth test here" - so an attachment-less depth needs no special case. */
     float *fb0_depth_buffer;
+    /* And its stencil surface, parked for the same reason: a framebuffer object's
+     * stencil is its own attachment, and the display's has to come back when nothing
+     * is bound. */
+    uint8_t *fb0_stencil_buffer;
+    size_t fb0_depth_px;
+    size_t fb0_stencil_px;
     /* And the display's tiling, which an attachment does not share. On the console
      * the scanout buffers are in a 64KB_R_X swizzle and `hw_rx`/`color_tiled` say so;
      * an attachment is linear whatever the display is. Both are parked here and cleared
@@ -3692,7 +3722,27 @@ typedef struct {
      * a build machine, which `gl_tex_level_view` does not carry, so it is asked
      * separately below. */
     GLboolean gpu_resident;
+    /* Set for a depth attachment whose storage is laid out as the depth block reads it
+     * - 64KB_Z_X, padded to whole blocks. A linear one cannot be a hardware depth
+     * surface whatever else is true of it. */
+    GLboolean depth_surface;
+    /* A packed depth-stencil attachment's stencil half, or NULL. */
+    uint8_t *stencil;
+    /* The two surfaces' allocated extents - see the renderbuffer object. */
+    size_t depth_px;
+    size_t stencil_px;
 } gl_fb_storage_t;
+
+/* The depth side of whatever a draw is targeting: the two surfaces and how big they
+ * really are. Carried together because a clear needs all four and getting the extent
+ * from somewhere else than the pointer is how a small attachment gets written off the
+ * end of. */
+typedef struct {
+    float *depth;
+    uint8_t *stencil;
+    size_t depth_px;
+    size_t stencil_px;
+} gl_fbo_depth_t;
 
 static inline GLboolean gl_fb_attachment_storage(gl_context_t *ctx,
                                                  const gl_fb_attachment_t *at,
@@ -3702,6 +3752,10 @@ static inline GLboolean gl_fb_attachment_storage(gl_context_t *ctx,
     out->height = 0;
     out->pitch = 0;
     out->gpu_resident = GL_FALSE;
+    out->depth_surface = GL_FALSE;
+    out->stencil = (uint8_t *)0;
+    out->depth_px = 0;
+    out->stencil_px = 0;
     if (!ctx || !at || at->kind == GL_FB_ATTACH_NONE)
         return GL_FALSE;
 
@@ -3714,6 +3768,10 @@ static inline GLboolean gl_fb_attachment_storage(gl_context_t *ctx,
         out->height = rb->height;
         out->pitch = (size_t)rb->width;
         out->gpu_resident = rb->gpu_resident;
+        out->depth_surface = rb->depth_surface;
+        out->stencil = rb->stencil;
+        out->depth_px = rb->depth_px;
+        out->stencil_px = rb->stencil_px;
         return GL_TRUE;
     }
 
@@ -3757,8 +3815,11 @@ static inline GLboolean gl_fb_attachment_storage(gl_context_t *ctx,
  * buffer as no depth test rather than as an error.
  */
 static inline GLboolean gl_fbo_bound_target(gl_context_t *ctx, gl_fb_storage_t *colour,
-                                            float **depth) {
-    *depth = (float *)0;
+                                            gl_fbo_depth_t *zs) {
+    zs->depth = (float *)0;
+    zs->stencil = (uint8_t *)0;
+    zs->depth_px = 0;
+    zs->stencil_px = 0;
     if (!gl_fbo_path_can_render(ctx))
         return GL_FALSE;
     gl_framebuffer_object_t *fb = gl_framebuffer_slot(ctx, ctx->bound_framebuffer);
@@ -3779,17 +3840,23 @@ static inline GLboolean gl_fbo_bound_target(gl_context_t *ctx, gl_fb_storage_t *
             ds.height != colour->height) {
             return GL_FALSE;
         }
-        /* A depth attachment is software-path only. The console's depth surface is
-         * 64KB_Z_X tiled and programmed through its own registers, so pointing the
-         * depth test at a linear renderbuffer would have the rasteriser and the command
-         * processor addressing different memory. The whole framebuffer is refused
-         * rather than drawn with its depth attachment ignored. */
-        if (ctx->use_hardware)
+        /*
+         * On hardware the attachment has to be a depth surface, not merely memory of
+         * the right size. The depth block addresses 64KB_Z_X and has no linear mode, so
+         * a linear allocation would have the rasteriser and the command processor
+         * reading different pixels - which is why this refused every depth attachment
+         * on hardware until `glRenderbufferStorage` learned to lay one out properly. A
+         * depth texture is still linear, and still refused.
+         */
+        if (ctx->use_hardware && !ds.depth_surface)
             return GL_FALSE;
         /* The depth renderbuffer is one word a sample, which is what the software
          * rasteriser's depth buffer is - it reads them as floats, so this names the
-         * same words that way. */
-        *depth = (float *)(void *)ds.pixels;
+         * same words that way. On hardware the same address goes to DB_Z_READ_BASE. */
+        zs->depth = (float *)(void *)ds.pixels;
+        zs->stencil = ds.stencil;
+        zs->depth_px = ds.depth_px;
+        zs->stencil_px = ds.stencil_px;
     }
     return GL_TRUE;
 }

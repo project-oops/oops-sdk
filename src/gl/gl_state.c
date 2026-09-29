@@ -8030,9 +8030,18 @@ GLboolean glIsTexture(GLuint texture) {
  * a build machine, so releasing it asks which; `gl_buffer_release` on a Garlic
  * allocation is the wrong free. */
 static void gl_renderbuffer_storage_release(gl_renderbuffer_object_t *rb) {
-    if (!rb || !rb->pixels) {
-        if (rb)
-            rb->gpu_resident = GL_FALSE;
+    if (!rb)
+        return;
+#ifndef OOPS_HOST_BUILD
+    /* The packed format's stencil half is its own allocation and goes with it. */
+    if (rb->stencil) {
+        oops_mem_free(rb->stencil);
+        rb->stencil = NULL;
+    }
+#endif
+    if (!rb->pixels) {
+        rb->gpu_resident = GL_FALSE;
+        rb->depth_surface = GL_FALSE;
         return;
     }
 #ifndef OOPS_HOST_BUILD
@@ -8046,6 +8055,9 @@ static void gl_renderbuffer_storage_release(gl_renderbuffer_object_t *rb) {
 #endif
     rb->pixels = NULL;
     rb->gpu_resident = GL_FALSE;
+    rb->depth_surface = GL_FALSE;
+    rb->depth_px = 0;
+    rb->stencil_px = 0;
 }
 
 /* Local names for the lookups in `gl_internal.h`, which `gl_draw_targets` shares. */
@@ -8348,13 +8360,39 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width,
     rb->width = width;
     rb->height = height;
     if (width > 0 && height > 0) {
-        const size_t bytes = (size_t)width * (size_t)height * sizeof(uint32_t);
+        /*
+         * A depth renderbuffer is shaped for the depth block, not for the rasteriser.
+         *
+         * DB_Z_INFO has no linear mode - SW_MODE is 24, 64KB_Z_X - so a depth surface
+         * the command processor can address has to be padded to whole blocks: 128 x 128
+         * for 32-bit depth, and 256 x 256 for the byte-a-pixel stencil half, which is
+         * the same 64 KiB split differently between the axes. Allocating `width *
+         * height` and pointing DB_Z_READ_BASE at it would have the depth block read
+         * past the end of every surface narrower than its padding.
+         *
+         * A colour renderbuffer stays linear: the colour block is told so, and the
+         * rasteriser addresses it by width.
+         */
+        const GLboolean is_depth = (GLboolean)(internalformat == GL_DEPTH_COMPONENT16_ARB ||
+                                               internalformat == GL_DEPTH_COMPONENT24 ||
+                                               internalformat == GL_DEPTH24_STENCIL8);
+        const GLboolean is_packed = (GLboolean)(internalformat == GL_DEPTH24_STENCIL8);
+        size_t px = (size_t)width * (size_t)height;
 #ifndef OOPS_HOST_BUILD
-        rb->pixels = (uint32_t *)oops_mem_alloc(bytes, 64u * 1024u, OOPS_MEM_WC_GARLIC);
+        if (is_depth) {
+            px = (size_t)(((uint32_t)width + 127u) & ~127u) *
+                 (size_t)(((uint32_t)height + 127u) & ~127u);
+        }
+        rb->pixels = (uint32_t *)oops_mem_alloc(px * sizeof(uint32_t), 64u * 1024u,
+                                                OOPS_MEM_WC_GARLIC);
         rb->gpu_resident = (GLboolean)(rb->pixels != NULL);
+        rb->depth_surface = (GLboolean)(is_depth && rb->pixels != NULL);
 #else
-        rb->pixels = (uint32_t *)gl_buffer_alloc(bytes);
+        /* No GPU on a build machine: the software rasteriser reads a depth buffer by
+         * width, so the tiled padding would only waste memory and hide a mistake. */
+        rb->pixels = (uint32_t *)gl_buffer_alloc(px * sizeof(uint32_t));
         rb->gpu_resident = GL_FALSE;
+        rb->depth_surface = GL_FALSE;
 #endif
         if (!rb->pixels) {
             rb->width = 0;
@@ -8362,7 +8400,25 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width,
             gl_record_error(ctx, GL_OUT_OF_MEMORY);
             return;
         }
-        memset(rb->pixels, 0, bytes);
+        memset(rb->pixels, 0, px * sizeof(uint32_t));
+        rb->depth_px = px;
+
+#ifndef OOPS_HOST_BUILD
+        if (is_packed) {
+            const size_t spx = (size_t)(((uint32_t)width + 255u) & ~255u) *
+                               (size_t)(((uint32_t)height + 255u) & ~255u);
+            rb->stencil = (uint8_t *)oops_mem_alloc(spx, 64u * 1024u, OOPS_MEM_WC_GARLIC);
+            if (!rb->stencil) {
+                gl_renderbuffer_storage_release(rb);
+                rb->width = 0;
+                rb->height = 0;
+                gl_record_error(ctx, GL_OUT_OF_MEMORY);
+                return;
+            }
+            memset(rb->stencil, 0, spx);
+            rb->stencil_px = spx;
+        }
+#endif
     }
     /* Storage is what made this attachment renderable, or what moved it. */
     gl_draw_targets(ctx);
@@ -8798,10 +8854,10 @@ GLenum glCheckFramebufferStatus(GLenum target) {
      * for a combination the implementation cannot render to.
      */
     gl_fb_storage_t colour;
-    float *depth = NULL;
+    gl_fbo_depth_t zs;
     const GLuint saved = ctx->bound_framebuffer;
     ctx->bound_framebuffer = fb->id;
-    const GLboolean renderable = gl_fbo_bound_target(ctx, &colour, &depth);
+    const GLboolean renderable = gl_fbo_bound_target(ctx, &colour, &zs);
     ctx->bound_framebuffer = saved;
     return renderable ? (GLenum)GL_FRAMEBUFFER_COMPLETE
                       : (GLenum)GL_FRAMEBUFFER_UNSUPPORTED;
