@@ -3944,6 +3944,97 @@ static void gl_draw_triangle_pv(gl_context_t *ctx, const gl_vertex_t *v0,
 
 static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
                                      const gl_vertex_t *v1, const gl_vertex_t *v2,
+                                     const gl_vertex_t *pv);
+
+/* The vertex `t` of the way from `a` to `b`. Every attribute is linear along an edge in
+ * object space - position, colour, normal, the texture coordinates after generation and
+ * the texture matrix, fog - so the vertex where an edge meets a plane is the plain
+ * interpolation of the two. The edge flag is the starting vertex's. */
+static void gl_vertex_lerp(gl_vertex_t *out, const gl_vertex_t *a, const gl_vertex_t *b,
+                           float t) {
+#define GL_LERP(f) out->f = a->f + (b->f - a->f) * t
+    GL_LERP(x);
+    GL_LERP(y);
+    GL_LERP(z);
+    GL_LERP(w);
+    GL_LERP(r);
+    GL_LERP(g);
+    GL_LERP(b);
+    GL_LERP(a);
+    GL_LERP(nx);
+    GL_LERP(ny);
+    GL_LERP(nz);
+    GL_LERP(sr);
+    GL_LERP(sg);
+    GL_LERP(sb);
+    GL_LERP(fogc);
+#undef GL_LERP
+    out->edge = a->edge;
+    for (int u = 0; u < OOPS_GL_MAX_TEXTURE_UNITS; u++) {
+        for (int k = 0; k < 4; k++) {
+            out->tc[u][k] = a->tc[u][k] + (b->tc[u][k] - a->tc[u][k]) * t;
+        }
+    }
+    for (int i = 0; i < OOPS_GL_MAX_VERTEX_ATTRIBS; i++) {
+        for (int k = 0; k < 4; k++) {
+            out->attrib[i][k] =
+                a->attrib[i][k] + (b->attrib[i][k] - a->attrib[i][k]) * t;
+        }
+    }
+}
+
+/*
+ * Clips a triangle to the near plane, `z >= -w` in clip space (`d` is each vertex's
+ * z + w, negative behind the plane), and draws what is in front: one triangle when one
+ * vertex is in front, two when two are.
+ *
+ * Without it, a vertex behind the eye had its w clamped to a small positive number and
+ * was divided anyway, which threw it across the screen with its sign lost. The triangle
+ * then drew as a streak or failed the facing test and vanished, so ground and walls
+ * beside the camera popped in and out as it moved - q3rally's terrain, where large
+ * triangles pass under the car all the time.
+ *
+ * Winding is kept, so culling and two-sided lighting see the same facing, and the
+ * provoking vertex is the original one for flat shading.
+ */
+/* Set while the pieces of a clipped triangle are drawn. A GL context is used from one
+ * thread, as GL requires. */
+static int s_near_clipping;
+
+static void gl_draw_triangle_near_clipped(gl_context_t *ctx, const gl_vertex_t *v0,
+                                          const gl_vertex_t *v1, const gl_vertex_t *v2,
+                                          const gl_vertex_t *pv, const float d[3]) {
+    const gl_vertex_t *in[3] = {v0, v1, v2};
+    gl_vertex_t out[4];
+    int n = 0;
+
+    for (int i = 0; i < 3; i++) {
+        const int j = (i + 1) % 3;
+        const int in_i = d[i] >= 0.0f;
+        const int in_j = d[j] >= 0.0f;
+        if (in_i) {
+            out[n++] = *in[i];
+        }
+        if (in_i != in_j) {
+            gl_vertex_lerp(&out[n++], in[i], in[j], d[i] / (d[i] - d[j]));
+        }
+    }
+    if (n < 3) {
+        return; /* wholly behind the plane */
+    }
+    /* The cut vertices lie on the plane, and rounding can put one a hair behind it
+     * when it is transformed again; the pieces are drawn unclipped rather than cut a
+     * second time. */
+    s_near_clipping = 1;
+    gl_draw_triangle_pv_body(ctx, &out[0], &out[1], &out[2], pv);
+    if (n == 4) {
+        gl_draw_triangle_pv_body(ctx, &out[0], &out[2], &out[3], pv);
+    }
+    s_near_clipping = 0;
+}
+
+static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
+                                     const gl_vertex_t *v1, const gl_vertex_t *v2,
                                      const gl_vertex_t *pv) {
     if (!ctx || !v0 || !v1 || !v2)
         return;
@@ -3989,6 +4080,14 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
         mat4_transform_vec4(c0, &ctx->mvp, in0);
         mat4_transform_vec4(c1, &ctx->mvp, in1);
         mat4_transform_vec4(c2, &ctx->mvp, in2);
+
+        /* A triangle crossing the near plane is cut at it, into the one or two
+         * triangles in front, and those are drawn instead. */
+        const float d[3] = {c0[2] + c0[3], c1[2] + c1[3], c2[2] + c2[3]};
+        if (!s_near_clipping && (d[0] < 0.0f || d[1] < 0.0f || d[2] < 0.0f)) {
+            gl_draw_triangle_near_clipped(ctx, v0, v1, v2, pv, d);
+            return;
+        }
     }
 
     /* Simple near-plane guard: cull if completely behind camera */
