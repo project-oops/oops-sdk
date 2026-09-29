@@ -182,6 +182,24 @@ static void gl_hw_dump_stream(const gl_context_t *ctx, uint32_t total_words) {
                   32u); /* both units' T#/S# */
     gl_klog_words("stipple", payload + OOPS_GL_STIPPLE_OFFSET / 4u,
                   OOPS_GL_STIPPLE_WORDS);
+    /* The GL 2.0 path's own tables, which the lines above predate: each program's
+     * block (its image and sampler descriptors, then its uniforms) and each resident
+     * draw's attribute table (base low, base high, stride, size per location). These
+     * are where a shader-driven draw's fetch addresses live - the descriptor table
+     * above is the fixed-function one - so a stray address in a GL 2.0 draw is in one
+     * of these. Only the slots this submission used. */
+    for (uint32_t s = 0; s <= ctx->hw_gl2_slot && s < 8u; s++) {
+        gl_klog_val("oracle-gl2-slot", (uint64_t)s);
+        gl_klog_words("gl2", payload + gl_hw_gl2_slot_offset(s) / 4u,
+                      OOPS_GL_GL2_SLOT_STRIDE / 4u);
+    }
+    for (uint32_t a = 0; a <= ctx->hw_attrib_slot && a < 8u; a++) {
+        gl_klog_val("oracle-attrib-slot", (uint64_t)a);
+        gl_klog_words("attrib",
+                      payload + (OOPS_GL_ATTRIB_SLOT_OFFSET +
+                                 a * OOPS_GL_ATTRIB_SLOT_STRIDE) / 4u,
+                      OOPS_GL_ATTRIB_SLOT_STRIDE / 4u);
+    }
 }
 
 /* A GPU-only clear with no draw call, read back by the CPU. The CPU writes a sentinel
@@ -299,7 +317,11 @@ void gl_color_cpu_drain(gl_context_t *ctx) {
 /* The real work, wrapped below so every exit is timed. */
 static void gl_hw_flush_body(gl_context_t *ctx);
 
+/* Which GL call asked for the submission being built, for the dump below. */
+static const char *s_flush_fn;
+
 void gl_hw_flush_at(gl_context_t *ctx, const char *fn) {
+    s_flush_fn = fn;
     if (ctx) {
         ctx->hw_flushes++;
         /* A linear scan: the table is small and each submit it counts costs far more.
@@ -508,7 +530,25 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
     __builtin_ia32_sfence();
 #endif
 
-    if (ctx->hw_dump_pending) {
+    /*
+     * Under `gl=debug`, the first submissions describe themselves before they go.
+     *
+     * A submission that faults the GPU never reports: the fault is asynchronous, the
+     * process dies inside the fence wait below, and every line this function prints
+     * afterwards is lost with it. So the report that matters - what the faulting
+     * submission contained - has to be written before the submit, and the first few
+     * submissions of a title are where a stray address shows up. Which GL call asked
+     * for the submission comes first, since that alone often names the path.
+     */
+    const GLboolean early_dump =
+        (GLboolean)(gl_log_level >= (int)OOPS_LOG_DEBUG && ctx->hw_flushes <= 8u);
+    if (early_dump) {
+        oops_log_info("GL", "submit %u via %s: %u words, draws textured %u untextured %u",
+                      (unsigned)ctx->hw_flushes, s_flush_fn ? s_flush_fn : "(unnamed)",
+                      (unsigned)total_words, (unsigned)ctx->hw_draws_textured,
+                      (unsigned)ctx->hw_draws_untextured);
+    }
+    if (ctx->hw_dump_pending || early_dump) {
         gl_hw_dump_stream(ctx, total_words);
     }
 

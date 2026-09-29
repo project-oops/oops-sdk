@@ -8193,6 +8193,13 @@ static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint fir
     if (!gl_hw_attribs_gpu(ctx, adst, count))
         return;
 #endif
+    /* Counted like the ring path's. They were not, so a frame of nothing but resident
+     * draws - every frame of a port that keeps its vertices in buffer objects - reported
+     * zero draws of either kind, and read as a frame that drew nothing. */
+    if (prog->hw_tex_sets > 0)
+        ctx->hw_draws_textured++;
+    else
+        ctx->hw_draws_untextured++;
 
     /* Emit render state */
     gl_hw_draw_t hw;
