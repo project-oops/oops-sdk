@@ -654,6 +654,8 @@ int agc_display_try_gpu_tiler(agc_display_t *disp) {
  * flipped. agc_display_flip passes the display's own linear surface;
  * agc_display_present passes a caller's. With `src` NULL the next buffer is
  * flipped as it stands - a renderer drew it in place (agc_display_flip_scanout). */
+static void agc_hide_splash_once(void); /* below, beside agc_display_flip_index */
+
 static int agc_display_flip_from(agc_display_t *disp, const uint32_t *src) {
   if (!disp || !disp->ready)
     return -1;
@@ -711,6 +713,8 @@ static int agc_display_flip_from(agc_display_t *disp, const uint32_t *src) {
     if (frc != 0 || disp->flip_count <= 5) {
       agc_log("agc-flip-rc", "SubmitFlip rc", (uint64_t)(uint32_t)frc);
     }
+    if (frc == 0)
+      agc_hide_splash_once();
   }
 
   uint64_t t_submit_done = oops_time_get_us();
@@ -777,6 +781,31 @@ int agc_display_adopted_index(const agc_display_t *disp, int nth) {
 /* Flip a buffer by its index, as it stands - nothing tiled or copied into it.
  * This display's own two are 0 and 1; an adopted buffer's index comes from
  * agc_display_adopted_index. */
+/*
+ * Take the system's launch splash down once a frame of ours has been submitted.
+ *
+ * A package that carries `sce_sys/pic1.dds` - selfish writes one for every title - makes
+ * the shell show it as the launch splash (a `LaunchingGame` transition naming the image)
+ * and keep it over the title until the title calls sceSystemServiceHideSplashScreen.
+ * Nothing called it, so every such title flipped correctly beneath a splash that never
+ * went away: a black screen with a healthy flip count. A package without the image
+ * (`CustomImageFade`, no image) is revealed by the shell on its own, which is why titles
+ * packaged before selfish began writing it were visible.
+ *
+ * Here rather than in each renderer because every present path - the CPU flip, the GL
+ * context, oops-mesa's scanout flip - submits through this file. Once per process: the
+ * splash is the process's, not the display's, and a display reopened after the loading
+ * screen must not raise it again.
+ */
+static void agc_hide_splash_once(void) {
+  static int hidden = 0;
+  if (hidden)
+    return;
+  hidden = 1;
+  const int rc = oops_system_hide_splash();
+  oops_log_info("AGC", "launch splash hidden after the first flip (rc=%d)", rc);
+}
+
 int agc_display_flip_index(agc_display_t *disp, int index) {
   if (!disp || !disp->ready || disp->handle <= 0 || !sceVideoOutSubmitFlip)
     return -1;
@@ -789,6 +818,7 @@ int agc_display_flip_index(agc_display_t *disp, int index) {
     return -1;
   }
   disp->flip_count++;
+  agc_hide_splash_once();
   return 0;
 }
 
