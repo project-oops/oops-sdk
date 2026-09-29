@@ -14557,6 +14557,26 @@ static void test_glsl_emit_matches_the_assembler(void) {
      * operation as well. */
     ASSERT_EQ(words[16], 0xbf8cc07fu); /* s_waitcnt lgkmcnt(0) */
 
+    /* Vector memory through a 64-bit VGPR address: how a resident draw fetches its
+     * vertices. SADDR (bits 22:16 of the second word) has to be NULL, 0x7d, or the
+     * instruction becomes the SGPR-base form and never reads the high VGPR - which is
+     * what these were, and a vertex buffer above 4GB faulted the GPU at its own low
+     * half. Words from `llvm-mc -arch=amdgcn -mcpu=gfx1030 -show-encoding` for
+     * `global_load_dword{,x2,x3,x4} v4.., v[2:3], off`. */
+    glsl_code_init(&c, words, 64);
+    glsl_emit_global_load_dword(&c, 4u, 2u, 0u);
+    glsl_emit_global_load_dwordx2(&c, 4u, 2u, 0u);
+    glsl_emit_global_load_dwordx3(&c, 4u, 2u, 0u);
+    glsl_emit_global_load_dwordx4(&c, 4u, 2u, 0u);
+    ASSERT_EQ(words[0], 0xdc308000u);
+    ASSERT_EQ(words[1], 0x047d0002u); /* vdst v4, SADDR off, vaddr v[2:3] */
+    ASSERT_EQ(words[2], 0xdc348000u);
+    ASSERT_EQ(words[3], 0x047d0002u);
+    ASSERT_EQ(words[4], 0xdc3c8000u);
+    ASSERT_EQ(words[5], 0x047d0002u); /* not 0x04007d02: `v2, s[0:1]`, 32 bits */
+    ASSERT_EQ(words[6], 0xdc388000u);
+    ASSERT_EQ(words[7], 0x047d0002u);
+
     /* An SGPR as a VOP source costs no register and no move - but only in `src0`,
      * because `vsrc1` is eight bits and always a VGPR. */
     glsl_code_init(&c, words, 64);

@@ -304,28 +304,55 @@ void glsl_emit_s_waitcnt_exp(glsl_code_t *c) {
     put(c, 0xbf8cff0fu);
 }
 
+/*
+ * The second word of a GLOBAL load: ADDR [7:0], DATA [15:8], SADDR [22:16], VDST
+ * [31:24].
+ *
+ * SADDR has to be NULL (0x7d) for the address to be the 64-bit pair `v[vaddr:vaddr+1]`.
+ * Any other value switches the instruction to its other form - a 32-bit offset in
+ * `vaddr` added to an SGPR-pair base - and the high VGPR is never read. These four
+ * loads had 0x7d in DATA, which a load ignores, and SADDR zero, which is `s[0:1]`: so
+ * they were `global_load v, v2, s[0:1]`, and every vertex fetch lost the top half of
+ * its address.
+ *
+ * It showed as a GPU page fault in the payload's own string literals - `0x02752000` -
+ * for a vertex buffer at `0x2_02752000`, beside the fence and canary. Every allocation
+ * the GPU sees here is above 4GB, so any resident draw faulted; the only reason it went
+ * unnoticed is that until Ship of Harkinian, ports fed their vertices through the ring.
+ *
+ * Checked against LLVM, not the reference: `llvm-mc -mcpu=gfx1030` encodes
+ * `global_load_dwordx3 v[4:6], v[2:3], off` as `... 0x02,0x00,0x7d,0x04`, and
+ * `global_load_dwordx3 v[4:6], v2, s[0:1]` as `... 0x02,0x00,0x00,0x04` - which is
+ * what these produced.
+ */
+#define GLSL_GLOBAL_SADDR_NULL (0x7du << 16)
+
+static uint32_t global_load_word1(uint32_t vdst, uint32_t vaddr) {
+    return ((vdst & 0xffu) << 24) | GLSL_GLOBAL_SADDR_NULL | (vaddr & 0xffu);
+}
+
 void glsl_emit_global_load_dwordx4(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
                                    uint32_t offset) {
     put(c, 0xdc388000u | (offset & 0xfffu));
-    put(c, ((vdst & 0xffu) << 24) | 0x7d00u | (vaddr & 0xffu));
+    put(c, global_load_word1(vdst, vaddr));
 }
 
 void glsl_emit_global_load_dwordx3(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
                                    uint32_t offset) {
     put(c, 0xdc3c8000u | (offset & 0xfffu));
-    put(c, ((vdst & 0xffu) << 24) | 0x7d00u | (vaddr & 0xffu));
+    put(c, global_load_word1(vdst, vaddr));
 }
 
 void glsl_emit_global_load_dwordx2(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
                                    uint32_t offset) {
     put(c, 0xdc348000u | (offset & 0xfffu));
-    put(c, ((vdst & 0xffu) << 24) | 0x7d00u | (vaddr & 0xffu));
+    put(c, global_load_word1(vdst, vaddr));
 }
 
 void glsl_emit_global_load_dword(glsl_code_t *c, uint32_t vdst, uint32_t vaddr,
                                  uint32_t offset) {
     put(c, 0xdc308000u | (offset & 0xfffu));
-    put(c, ((vdst & 0xffu) << 24) | 0x7d00u | (vaddr & 0xffu));
+    put(c, global_load_word1(vdst, vaddr));
 }
 
 /* -------------------------------------------------------------------------
