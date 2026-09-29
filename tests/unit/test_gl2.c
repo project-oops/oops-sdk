@@ -4721,7 +4721,18 @@ static void test_gl2_the_fast3d_fragment_shader_compiles(void) {
         "    vec4 c2 = TEX_OFFSET(vec2(offset.x, offset.y - sign(offset.y)));\n"
         "    return c0 + abs(offset.x)*(c1-c0) + abs(offset.y)*(c2-c0);\n"
         "}\n"
+        /*
+         * Three-point filtering is the default (`Fast3dWindow.cpp` asks for
+         * `FILTER_THREE_POINT`), so this branch is in the shader the port actually
+         * builds - and with it, `texture_filtering[id]` indexes a uniform array by a
+         * function parameter. It resolves because the call passes a literal and the
+         * body is inlined, which is the only reason a register file can be indexed at
+         * all here.
+         */
         "vec4 hookTexture2D(in int id, sampler2D tex, in vec2 uv, in vec2 texSize) {\n"
+        "    if(texture_filtering[id] == 0) {\n"
+        "        return filter3point(tex, uv, texSize);\n"
+        "    }\n"
         "    return texture2D(tex, uv);\n"
         "}\n"
         "#define TEX_SIZE(tex) vec2(texture_width[tex], texture_height[tex])\n"
