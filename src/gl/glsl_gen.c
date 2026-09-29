@@ -114,6 +114,25 @@ static glsl_gen_var_t *gen_find(glsl_gen_t *g, const char *name, size_t len) {
     return (glsl_gen_var_t *)0;
 }
 
+/* The sampler table entry a name means, or -1. Backwards for the same reason as
+ * `gen_find`: a function's sampler parameter is pushed after the uniforms and has to
+ * shadow one of the same name, and a parameter passed on to a further call resolves
+ * through the entry its caller pushed. */
+static int gen_find_sampler(const glsl_gen_t *g, const char *name, size_t len) {
+    for (int i = g->sampler_count - 1; i >= 0; i--) {
+        /* By length on both sides: a uniform's name is terminated, but a parameter's
+         * points into the shader's source text and is not. */
+        if (g->samplers[i].name_len != len)
+            continue;
+        size_t k = 0;
+        while (k < len && g->samplers[i].name[k] == name[k])
+            k++;
+        if (k == len)
+            return i;
+    }
+    return -1;
+}
+
 static glsl_gen_var_t *gen_declare(glsl_gen_t *g, const char *name, size_t len,
                                    glsl_type_t type, glsl_value_t home, int32_t node) {
     if (g->var_count >= GLSL_GEN_MAX_VARS) {
@@ -1487,16 +1506,14 @@ static glsl_value_t gen_builtin_texture(glsl_gen_t *g, const char *nm, size_t le
     uint32_t samp_dim = GLSL_IMG_DIM_2D;
     GLboolean samp_shadow = GL_FALSE;
     GLboolean samp_oned = GL_FALSE;
-    for (int i = 0; i < g->sampler_count; i++) {
-        if (g->samplers[i].name_len == sn->length &&
-            nm_is(sn->text, sn->length, g->samplers[i].name)) {
-            set = g->samplers[i].set;
-            samp_dim = g->samplers[i].dim;
-            samp_shadow = g->samplers[i].shadow;
-            samp_oned = g->samplers[i].oned;
-            found = GL_TRUE;
-            break;
-        }
+    /* A uniform, or a function's sampler parameter standing for one. */
+    const int si = gen_find_sampler(g, sn->text, sn->length);
+    if (si >= 0) {
+        set = g->samplers[si].set;
+        samp_dim = g->samplers[si].dim;
+        samp_shadow = g->samplers[si].shadow;
+        samp_oned = g->samplers[si].oned;
+        found = GL_TRUE;
     }
     if (!found) {
         return gen_fail(
@@ -2753,6 +2770,11 @@ static GLboolean has_early_return(const glsl_gen_t *g, int32_t node, int32_t ski
                    has_early_return(g, n->c, skip) || has_early_return(g, n->d, skip));
 }
 
+/* Defined with the loop rules below; the inliner asks it whether a body writes a
+ * parameter it would otherwise fold to a constant. */
+static GLboolean assigns_name(const glsl_gen_t *g, int32_t node, const char *name,
+                              size_t len);
+
 static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_arg,
                                   int32_t node) {
     const glsl_node_t *fn = &g->ast->nodes[fn_node];
@@ -2805,7 +2827,16 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
     /* The arguments are evaluated in the caller's scope, before the parameters shadow
      * anything. */
     glsl_value_t argv[GEN_MAX_ARGS];
+    /* The sampler table entry each argument names, or -1 for an ordinary value. */
+    int arg_samp[GEN_MAX_ARGS];
+    /* Whether each argument is a compile-time constant, and which, worked out here in
+     * the caller's scope - before a parameter of the same name can shadow what the
+     * argument means. */
+    GLboolean arg_is_const[GEN_MAX_ARGS];
+    double arg_const[GEN_MAX_ARGS];
     int argc = 0;
+    /* Restored when the call ends, which drops every sampler parameter it pushed. */
+    const int samplers_before = g->sampler_count;
     for (int32_t a = first_arg; a != GLSL_NO_NODE; a = g->ast->nodes[a].sibling) {
         if (argc >= GEN_MAX_ARGS) {
             return gen_fail(g, "more arguments than this generator carries", node);
@@ -2817,7 +2848,19 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
         glsl_gen_var_t *av = (an->kind == GLSL_NODE_IDENTIFIER)
                                  ? gen_find(g, an->text, an->length)
                                  : (glsl_gen_var_t *)0;
-        if (av && av->array_size > 0) {
+        /* A sampler has no registers - it is a descriptor set the draw path loads - so
+         * it is passed by which set it is, not evaluated. Fast3D's `hookTexture2D(0,
+         * uTex0, ...)` is the shape; refusing it refused every textured draw a
+         * libultraship port makes. */
+        arg_samp[argc] = (an->kind == GLSL_NODE_IDENTIFIER && !av)
+                             ? gen_find_sampler(g, an->text, an->length)
+                             : -1;
+        arg_const[argc] = 0.0;
+        arg_is_const[argc] = const_of(g, a, &arg_const[argc]);
+        if (arg_samp[argc] >= 0) {
+            argv[argc].base = 0u;
+            argv[argc].count = 0;
+        } else if (av && av->array_size > 0) {
             argv[argc] = av->value;
             argv[argc].count = av->value.count * av->array_size;
         } else {
@@ -2895,6 +2938,39 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
         const GLboolean writes_back = (GLboolean)(pn->qualifier == GLSL_TOK_KW_OUT ||
                                                   pn->qualifier == GLSL_TOK_KW_INOUT);
         const glsl_type_t pt = gen_node_type(g, pn);
+        if (glsl_type_is_sampler(pt)) {
+            /* A sampler parameter becomes a second name for the argument's set, for
+             * as long as the body is being generated. Nothing is copied: there is
+             * nothing to copy. The lookup's shape check then holds the parameter to
+             * the same dimension and comparison mode as the uniform behind it. */
+            const int src = arg_samp[bound];
+            if (src < 0) {
+                (void)gen_fail(g,
+                               "a sampler parameter has to be passed a sampler by name",
+                               node);
+                break;
+            }
+            if (g->sampler_count >=
+                (int)(GLSL_GEN_MAX_TEX_SETS + GLSL_GEN_MAX_SAMPLER_ALIASES)) {
+                (void)gen_fail(g,
+                               "more sampler parameters in scope at once than this "
+                               "generator carries",
+                               node);
+                break;
+            }
+            g->samplers[g->sampler_count] = g->samplers[src];
+            g->samplers[g->sampler_count].name = pn->text;
+            g->samplers[g->sampler_count].name_len = pn->length;
+            g->samplers[g->sampler_count].alias = GL_TRUE;
+            g->sampler_count++;
+            /* The semantic stage types each lookup from its argument, so it has to
+             * know the parameter's name as a sampler too. */
+            if (!glsl_declare(g->sema, pn->text, pn->length, pt, GL_FALSE)) {
+                g->sema->error = (const char *)0;
+            }
+            bound++;
+            continue;
+        }
         if (!is_generated(pt)) {
             (void)gen_fail(
                 g, "only float, vec, mat, bool and struct parameters are generated",
@@ -2976,8 +3052,27 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
             bound++;
             continue;
         }
-        if (!gen_declare(g, pn->text, pn->length, pt, home, node))
+        glsl_gen_var_t *pv = gen_declare(g, pn->text, pn->length, pt, home, node);
+        if (!pv)
             break;
+        /*
+         * A parameter whose argument is a constant is that constant, while the body
+         * leaves it alone - so an index through it is known when the shader is compiled.
+         * Fast3D's `hookTexture2D(0, ...)` reads `texture_filtering[id]`, and an array is
+         * a run of registers here that a value known only at run time cannot index; with
+         * the call inlined and `id` bound to 0, it is `texture_filtering[0]`.
+         *
+         * Only a scalar `in` parameter the body never assigns: GLSL parameters are
+         * writable copies, and a constant that was assigned is a constant no longer.
+         * `assigns_name` is deliberately blunt, so a shadowing inner declaration costs
+         * the folding, never correctness. The register copy is still made; this only
+         * lets `const_of` see through it.
+         */
+        if (!writes_back && pwidth == 1 && arg_is_const[bound] &&
+            !assigns_name(g, fn->c, pn->text, pn->length)) {
+            pv->is_const = GL_TRUE;
+            pv->const_val = arg_const[bound];
+        }
         if (!glsl_declare(g->sema, pn->text, pn->length, pt, GL_FALSE)) {
             g->sema->error = (const char *)0;
         }
@@ -3037,6 +3132,8 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
     g->inline_depth--;
     glsl_scope_pop(g->sema);
     g->var_count = vars_before;
+    /* The sampler parameters go out of scope with the rest. */
+    g->sampler_count = samplers_before;
     /* After the writeback, which read the parameters' registers, and after the return
      * move, which wrote the caller's. Nothing below is live. */
     gen_release(g, call_mark);
@@ -4385,6 +4482,7 @@ GLboolean glsl_gen_declare_sampler(glsl_gen_t *g, const char *name, size_t len,
     g->samplers[g->sampler_count].dim = dim;
     g->samplers[g->sampler_count].shadow = shadow;
     g->samplers[g->sampler_count].oned = oned;
+    g->samplers[g->sampler_count].alias = GL_FALSE;
     g->sampler_count++;
     /* And into the semantic stage, which types the lookup from its argument types; an
      * unknown sampler would make the whole call `GLSL_TYPE_ERROR`. */

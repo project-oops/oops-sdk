@@ -999,6 +999,10 @@ void glsl_emit_dpp_sub(glsl_code_t *c, uint32_t dst, uint32_t src0, uint32_t vsr
  * static assertions in `gl_internal.h` and below stop a fifth set running past the end.
  */
 #define GLSL_GEN_MAX_TEX_SETS OOPS_GL_GL2_TEX_SETS
+/* Sampler parameters in scope at once, across every inlined call on the stack. A
+ * parameter is a second name for a uniform's descriptor set, not a set of its own, so
+ * these cost nothing on the GPU - only a table entry while the body is generated. */
+#define GLSL_GEN_MAX_SAMPLER_ALIASES 16
 #define GLSL_GEN_LIVE_SGPR 52u
 #define GLSL_GEN_EXEC_SGPR_BASE 53u
 /* Eight levels of nested `if`, what fits below the ceiling beside four sampler sets. A
@@ -1125,7 +1129,10 @@ typedef struct {
          * `gl_state.c` describes it (TYPE 9, the 2D one). Its `dim` is 2D, and this
          * records that the coordinate is one component with a zero beside it. */
         GLboolean oned;
-    } samplers[GLSL_GEN_MAX_TEX_SETS];
+        /* Set on an entry that is a function's sampler parameter rather than a
+         * uniform: a second name for the same set, alive while the call is inlined. */
+        GLboolean alias;
+    } samplers[GLSL_GEN_MAX_TEX_SETS + GLSL_GEN_MAX_SAMPLER_ALIASES];
     int sampler_count;
     const char *error; /* the first failure, which stops everything after it */
     int error_line, error_column;

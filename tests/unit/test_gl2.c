@@ -4926,9 +4926,12 @@ static void test_gl2_the_fast3d_fragment_shader_compiles(void) {
          * Three-point filtering is the default (`Fast3dWindow.cpp` asks for
          * `FILTER_THREE_POINT`), so this branch is in the shader the port actually
          * builds - and with it, `texture_filtering[id]` indexes a uniform array by a
-         * function parameter. It resolves because the call passes a literal and the
-         * body is inlined, which is the only reason a register file can be indexed at
-         * all here.
+         * function parameter, and `tex` is a sampler passed as one. Both have to be
+         * *generated*, not only accepted: the front end took them from the start, while
+         * the generator refused the sampler ("this name has no register") and then the
+         * index ("an index has to be known"), and on hardware every draw with this
+         * program was refused. The call passes a literal and the body is inlined, so
+         * `id` folds to it; `tex` becomes a second name for `uTex0`'s set.
          */
         "vec4 hookTexture2D(in int id, sampler2D tex, in vec2 uv, in vec2 texSize) {\n"
         "    if(texture_filtering[id] == 0) {\n"
@@ -4951,18 +4954,80 @@ static void test_gl2_the_fast3d_fragment_shader_compiles(void) {
     ASSERT_TRUE(compiles(GL_FRAGMENT_SHADER, FAST3D_FS));
 
     /* The vertex half of the same pair, which the same template generates. */
-    ASSERT_TRUE(compiles(GL_VERTEX_SHADER,
-                         "#version 110\n"
-                         "attribute vec4 aVtxPos;\n"
-                         "attribute vec2 aTexCoord0;\n"
-                         "attribute vec4 aInput1;\n"
-                         "varying vec2 vTexCoord0;\n"
-                         "varying vec4 vInput1;\n"
-                         "void main() {\n"
-                         "    vTexCoord0 = aTexCoord0;\n"
-                         "    vInput1 = aInput1;\n"
-                         "    gl_Position = aVtxPos;\n"
-                         "}\n"));
+    static const char *const FAST3D_VS = "#version 110\n"
+                                         "attribute vec4 aVtxPos;\n"
+                                         "attribute vec2 aTexCoord0;\n"
+                                         "attribute vec4 aInput1;\n"
+                                         "varying vec2 vTexCoord0;\n"
+                                         "varying vec4 vInput1;\n"
+                                         "void main() {\n"
+                                         "    vTexCoord0 = aTexCoord0;\n"
+                                         "    vInput1 = aInput1;\n"
+                                         "    gl_Position = aVtxPos;\n"
+                                         "}\n";
+    ASSERT_TRUE(compiles(GL_VERTEX_SHADER, FAST3D_VS));
+
+    /* And generated, not only accepted. The front end taking a shader says nothing
+     * about the console: the code generator has its own, narrower, idea of what it can
+     * build, and a program it cannot build is refused at every draw. On hardware this
+     * one was, twenty-seven thousand times, with "this name has no register" - so the
+     * whole pair goes through the generator here. */
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    float o[4];
+    compile_and_run(ctx, FAST3D_VS, FAST3D_FS, attr, o);
+
+    glContextDestroy(ctx);
+}
+
+/*
+ * A parameter bound to a constant indexes like the constant - once per call site.
+ *
+ * An array is a run of registers here, and a register file cannot be indexed by a value
+ * known only at run time. Inlining makes `w[i]` in `pick(0)` into `w[0]`, provided the
+ * generator sees through the parameter's register copy. Two calls with different
+ * constants, so a first call's constant leaking into the second would show as the
+ * wrong element rather than pass unnoticed.
+ *
+ * And a parameter the body assigns is not a constant any more. Folding it would read
+ * the element the argument named, not the one the body moved to: a wrong value with no
+ * error. Refusing costs a shader a code path; miscompiling costs a frame nobody can
+ * explain. So that one has to be refused.
+ */
+static void test_gl2_a_constant_parameter_indexes_per_call(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+    float o[4];
+    const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    const float w[2] = {0.25f, 0.75f};
+
+    const GLuint prog = linked_program(VS_ONE_VARYING,
+                                       "uniform float w[2];\n"
+                                       "float pick(in int i) { return w[i]; }\n"
+                                       "void main() {\n"
+                                       "  gl_FragColor = vec4(pick(0), pick(1), 0.0, 1.0);\n"
+                                       "}\n");
+    ASSERT_TRUE(prog != 0);
+    glUseProgram(prog);
+    glUniform1fv(glGetUniformLocation(prog, "w"), 2, w);
+    compile_and_run_prog(ctx, prog, attr, o);
+    ASSERT_NEAR(o[0], 0.25f, 1e-3f); /* pick(0): the first element */
+    ASSERT_NEAR(o[1], 0.75f, 1e-3f); /* pick(1): the second, not the first again */
+
+    /* The body moves the index: refused at generation, never folded to w[0]. */
+    const GLuint moved = linked_program(VS_ONE_VARYING,
+                                        "uniform float w[2];\n"
+                                        "float pick(in int i) { i = i + 1; return w[i]; }\n"
+                                        "void main() {\n"
+                                        "  gl_FragColor = vec4(pick(0), 0.0, 0.0, 1.0);\n"
+                                        "}\n");
+    const gl_program_object_t *pm = gl_find_program(c, moved);
+    ASSERT_TRUE(pm != NULL);
+    static uint32_t words[512];
+    uint32_t count = 0u, vgprs = 0u, usg = 0u, ena = 0u;
+    char log[256] = {0};
+    ASSERT_EQ(gl_program_compile_fragment(pm, words, 512u, &count, &vgprs, &usg, &ena,
+                                          log, sizeof(log)),
+              GL_FALSE);
 
     glContextDestroy(ctx);
 }
@@ -8912,6 +8977,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_vector_relationals_reduce_a_bvec);
     RUN_TEST(test_gl2_mix_chooses_on_a_bool_selector);
     RUN_TEST(test_gl2_the_fast3d_fragment_shader_compiles);
+    RUN_TEST(test_gl2_a_constant_parameter_indexes_per_call);
     RUN_TEST(test_gl2_gl_color_lands_where_the_link_put_it);
     RUN_TEST(test_gl2_matrix_products_are_two_products);
     RUN_TEST(test_gl2_integers_are_floats_kept_whole);
