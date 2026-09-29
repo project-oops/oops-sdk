@@ -150,6 +150,46 @@ uint64_t oops_time_get_epoch_seconds(void) {
 #endif
 }
 
+/*
+ * libkernel's `sceKernelConvertUtcToLocaltime` (present on the hardware: obscene
+ * `data/hardware/ps5-full.txt:14210`). The prototype is the one public reimplementations
+ * of the platform give - `(time_t utc, time_t *local, struct timesec *, uint64_t *dst)`,
+ * the struct being `time_t t; uint32_t west_sec; uint32_t dst_sec;` - which makes it a
+ * candidate until a run here confirms it. So only `*local` is read, the other two
+ * out-params get buffers far larger than the struct (a kernel out-param wider than its
+ * declaration has cost this SDK a heap before), and an answer no real zone could give is
+ * refused rather than passed on.
+ */
+__attribute__((weak)) int sceKernelConvertUtcToLocaltime(int64_t utc, int64_t *local,
+                                                         void *timesec, void *dst_sec);
+
+int oops_time_utc_offset(int64_t utc_seconds, int32_t *offset_s) {
+  if (offset_s == NULL) {
+    return -1;
+  }
+  *offset_s = 0;
+#ifndef OOPS_HOST_BUILD
+  if (!sceKernelConvertUtcToLocaltime || utc_seconds <= 0) {
+    return -1;
+  }
+  int64_t local = 0;
+  uint64_t timesec[8] = {0};
+  uint64_t dst[8] = {0};
+  if (sceKernelConvertUtcToLocaltime(utc_seconds, &local, timesec, dst) != 0) {
+    return -1;
+  }
+  const int64_t offset = local - utc_seconds;
+  if (offset < -14 * 3600 || offset > 14 * 3600 || offset % 900 != 0) {
+    return -1;
+  }
+  *offset_s = (int32_t)offset;
+  return 0;
+#else
+  (void)utc_seconds;
+  return -1;
+#endif
+}
+
 uint64_t oops_time_get_ns(void) {
   if (sceKernelGetProcessTimeCounter) {
     return scale(oops_time_get_counter(), 1000000000ULL,

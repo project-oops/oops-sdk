@@ -1057,6 +1057,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_connect`
 - `oops_dns_build_query`
 - `oops_dns_parse_response`
+- `oops_getsockopt`
 - `oops_htonl`
 - `oops_htons`
 - `oops_listen`

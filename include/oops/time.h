@@ -22,6 +22,17 @@ void oops_time_init(void);
  */
 uint64_t oops_time_get_epoch_seconds(void);
 
+/*
+ * The console's offset from UTC at `utc_seconds`, in seconds east (UTC+1 is 3600),
+ * daylight saving included - what a C library's `localtime` adds. From libkernel, which
+ * every process has loaded, so there is no module to load and no import to miss.
+ *
+ * Returns 0 and fills `*offset_s`, or -1 when the platform did not answer or answered
+ * something no time zone is (beyond 14 hours, or off a quarter-hour); the caller then
+ * uses UTC rather than a wrong zone.
+ */
+int oops_time_utc_offset(int64_t utc_seconds, int32_t *offset_s);
+
 /* The process clocks: raw tick and counter values with their frequencies, and time
  * since process start in nanoseconds, microseconds, milliseconds and seconds. */
 uint64_t oops_time_get_ticks(void);
