@@ -2079,8 +2079,8 @@ typedef struct gl_context {
     const uint32_t *hw_prelude; /* glSetHardwarePrelude: words every frame's stream
                                    opens with, or NULL */
     uint32_t hw_prelude_words;
-    uint32_t *readback; /* CPU-cached copy of the render target, made by the CP at the
-                           end of every submission */
+    uint32_t *readback; /* CPU-cached copy of the render target, made by the CP when a
+                           reader first asks for the last submission's pixels */
     /* The colour buffer that copy is of, or NULL once the CPU has written into it since
      * (gl_raster.c's gl_raster_sync) - see gl_color_read_source. */
     const uint32_t *readback_of;
@@ -2093,6 +2093,14 @@ typedef struct gl_context {
     /* On the scanout path the copy is tiled like its buffer; glGetFrameReadback detiles
      * it into this, the linear image its callers index. */
     uint32_t *readback_lin;
+    /* The colour buffers the last submission's copies are owed of, made by the first
+     * reader (gl_readback_settle) rather than at the end of every submission; NULL once
+     * made or once the CPU has written into the buffer. */
+    const uint32_t *readback_owed;
+    const uint32_t *readback_also_owed;
+    /* The page the owed copy is submitted from, with its fence word; allocated the
+     * first time a copy is made. */
+    uint32_t *readback_cmd;
 
     /* glPushAttrib. The specification requires at least 16 deep. */
     gl_attrib_entry_t attrib_stack[OOPS_GL_ATTRIB_STACK_CAPACITY];
@@ -4148,14 +4156,17 @@ static inline const uint32_t *gl_read_target(const gl_context_t *ctx) {
                ? ctx->front_fb
                : ctx->back_fb;
 }
+void gl_readback_settle(gl_context_t *ctx);
+
 /* A colour buffer's pixels, for the CPU to read, after the caller's flush. On the
- * console this is the CP's CPU-cached copy, when the last submission made one of this
- * very buffer and the CPU has not written into the buffer since. Otherwise it is the
- * buffer itself. */
-static inline const uint32_t *gl_color_read_source(const gl_context_t *ctx,
+ * console this is the CP's CPU-cached copy, when the last submission owes one of this
+ * very buffer (made here, on first read) and the CPU has not written into the buffer
+ * since. Otherwise it is the buffer itself. */
+static inline const uint32_t *gl_color_read_source(gl_context_t *ctx,
                                                    const uint32_t *buf) {
     if (!buf || ctx->hw_frames_confirmed == 0u)
         return buf;
+    gl_readback_settle(ctx);
     if (ctx->readback && ctx->readback_of == buf)
         return ctx->readback;
     /* Either target answers here, not just the one the last draw called primary.

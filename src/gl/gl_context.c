@@ -331,6 +331,99 @@ void gl_hw_flush_at(gl_context_t *ctx, const char *fn) {
 #endif
 }
 
+/* Words into `readback_cmd` its fence word sits at, past any copy stream. */
+#define OOPS_GL_READBACK_FENCE_DW 0x200u
+
+/*
+ * Makes the copy the last submission owes (gl_hw_flush_body): the CP copies each owed
+ * colour buffer into its CPU-cached copy, exactly as the submission's own tail used to,
+ * in a submission of its own that this waits for. That submission's work has already
+ * retired - the flush waited on its fence - so the copy reads what it drew. A copy that
+ * cannot be made leaves the reader on the buffer itself, the path a CPU write already
+ * takes (gl_color_read_source).
+ */
+void gl_readback_settle(gl_context_t *ctx) {
+    if (!ctx || (!ctx->readback_owed && !ctx->readback_also_owed))
+        return;
+    const uint32_t *owed = ctx->readback_owed;
+    const uint32_t *also = ctx->readback_also_owed;
+    ctx->readback_owed = NULL;
+    ctx->readback_also_owed = NULL;
+#ifndef OOPS_HOST_BUILD
+    if (!ctx->readback_cmd)
+        ctx->readback_cmd =
+            (uint32_t *)oops_mem_alloc(0x1000, 0x1000, OOPS_MEM_WB_ONION);
+    if (!ctx->readback_cmd ||
+        (!sceAgcDriverSubmitCommandBuffer && !sceAgcDriverSubmitDcb))
+        return;
+    volatile uint32_t *fence_w =
+        (volatile uint32_t *)(ctx->readback_cmd + OOPS_GL_READBACK_FENCE_DW);
+    const uint64_t fence_gpu = (uint64_t)(uintptr_t)fence_w;
+    const uint32_t bytes = (uint32_t)gl_color_words(ctx) * 4u;
+    uint32_t *dw = ctx->readback_cmd;
+    if (owed)
+        gl_hw_emit_dma_copy(&dw, (uint64_t)(uintptr_t)owed,
+                            (uint64_t)(uintptr_t)ctx->readback, bytes);
+    if (also)
+        gl_hw_emit_dma_copy(&dw, (uint64_t)(uintptr_t)also,
+                            (uint64_t)(uintptr_t)ctx->readback_also, bytes);
+    /* The copies are CP_SYNC, so this end-of-pipe write follows them. */
+    *dw++ = 0xc0064900u; /* RELEASE_MEM: CACHE_FLUSH_AND_INV_TS with GL2 writeback */
+    *dw++ = 0x06603514u;
+    *dw++ = 0x20000000u; /* DATA_SEL=1: the 32-bit word below */
+    *dw++ = (uint32_t)fence_gpu;
+    *dw++ = (uint32_t)(fence_gpu >> 32);
+    *dw++ = 0xbeefcafeu;
+    *dw++ = 0u;
+    *dw++ = 0u;
+    for (int p = 0; p < 16; p++) {
+        dw[p] = 0xffff1000u;
+    }
+    dw += 16;
+    const uint32_t total_words = (uint32_t)(dw - ctx->readback_cmd);
+
+    fence_w[0] = 0x11111111u;
+#if defined(__x86_64__)
+    __builtin_ia32_clflush((const void *)fence_w);
+    for (size_t p = 0; p < (size_t)total_words * sizeof(uint32_t); p += 64) {
+        __builtin_ia32_clflush((const void *)((const char *)ctx->readback_cmd + p));
+    }
+    __builtin_ia32_sfence();
+#endif
+    oops_agc_dcb_desc desc;
+    desc.gpu_addr = (uint64_t)(uintptr_t)ctx->readback_cmd;
+    desc.size = total_words;
+    desc.flags = 0u;
+    desc.pad = 0u;
+    const int rc = sceAgcDriverSubmitCommandBuffer
+                       ? sceAgcDriverSubmitCommandBuffer(ctx->agc_queue, &desc)
+                       : sceAgcDriverSubmitDcb(&desc);
+    if (rc != 0) {
+        gl_klog_val("readback-copy-submit-rc", (uint64_t)(uint32_t)rc);
+        return;
+    }
+    for (int iter = 0; iter < 100000; iter++) {
+#if defined(__x86_64__)
+        __builtin_ia32_clflush((const void *)fence_w);
+#endif
+        if (fence_w[0] == 0xbeefcafeu) {
+            ctx->readback_of = owed;
+            ctx->readback_also_of = also;
+            return;
+        }
+        if (sceKernelUsleep) {
+            sceKernelUsleep(10);
+        }
+    }
+    /* Bounded as the submission's own fence wait is, and said, since a reader then
+     * takes the buffer itself. */
+    gl_klog_val("readback-copy-timeout-fence", (uint64_t)fence_w[0]);
+#else
+    (void)owed;
+    (void)also;
+#endif
+}
+
 static void gl_hw_flush_body(gl_context_t *ctx) {
     /* Before the early return: a flush promises that everything issued so far is
      * visible, including for a frame with nothing to submit - a glDrawPixels followed
@@ -366,34 +459,18 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
     *dw++ = 0xbeefcafeu;
     *dw++ = 0u;
     *dw++ = 0u;
-    /* The CP waits for that fence, which the event writes only once the CB and DB
-     * caches are flushed and L2 written back, then copies the finished render target
-     * into the CPU-cached readback buffer. WAIT_REG_MEM: function EQUAL, memory space,
-     * polled by the ME. */
+    /* The render target's CPU-cached copy is owed, not made: a title that never reads
+     * its colour buffer pays nothing, where a copy of the whole target at the end of
+     * every submission cost a GL frame of several submissions several full-frame DMAs,
+     * each behind a fence wait. The first reader makes it (gl_readback_settle). A draw
+     * under GL_FRONT_AND_BACK writes both surfaces and `glReadPixels` may read either,
+     * so the second target's copy is owed too. */
     ctx->readback_of = NULL;
     ctx->readback_also_of = NULL;
-    if (ctx->readback && ctx->framebuffer) {
-        ctx->readback_of = ctx->framebuffer;
-        *dw++ = 0xc0053c00u;
-        *dw++ = 0x00000013u;
-        *dw++ = (uint32_t)fence_gpu;
-        *dw++ = (uint32_t)(fence_gpu >> 32);
-        *dw++ = 0xbeefcafeu;
-        *dw++ = 0xffffffffu;
-        *dw++ = 4u;
-        gl_hw_emit_dma_copy(&dw, (uint64_t)(uintptr_t)ctx->framebuffer,
-                            (uint64_t)(uintptr_t)ctx->readback,
-                            (uint32_t)gl_color_words(ctx) * 4u);
-        /* The second colour target is copied too, behind the same wait: the fence is
-         * already satisfied when the first copy is issued. A draw under
-         * GL_FRONT_AND_BACK writes both surfaces and `glReadPixels` may read either. */
-        if (ctx->readback_also && ctx->fb_also) {
-            ctx->readback_also_of = ctx->fb_also;
-            gl_hw_emit_dma_copy(&dw, (uint64_t)(uintptr_t)ctx->fb_also,
-                                (uint64_t)(uintptr_t)ctx->readback_also,
-                                (uint32_t)gl_color_words(ctx) * 4u);
-        }
-    }
+    ctx->readback_owed = (ctx->readback && ctx->framebuffer) ? ctx->framebuffer : NULL;
+    ctx->readback_also_owed = (ctx->readback_owed && ctx->readback_also && ctx->fb_also)
+                                  ? ctx->fb_also
+                                  : NULL;
     *dw++ = 0xc0064900u; /* RELEASE_MEM: the same event, DATA_SEL=3: the 64-bit GPU
                             clock counter */
     *dw++ = 0x06603514u;
@@ -1748,6 +1825,8 @@ void glContextDestroy(void *ctx_handle) {
         oops_mem_free(ctx->readback);
     if (ctx->readback_also)
         oops_mem_free(ctx->readback_also);
+    if (ctx->readback_cmd)
+        oops_mem_free(ctx->readback_cmd);
     if (ctx->fence)
         oops_mem_free(ctx->fence);
     if (ctx->canary)

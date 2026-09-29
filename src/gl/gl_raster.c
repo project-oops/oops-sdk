@@ -438,6 +438,8 @@ static void gl_raster_sync(gl_context_t *ctx) {
      * buffers (gl_draw_targets' `fb_also`). */
     ctx->readback_of = NULL;
     ctx->readback_also_of = NULL;
+    ctx->readback_owed = NULL;
+    ctx->readback_also_owed = NULL;
 }
 
 /*

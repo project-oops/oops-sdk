@@ -5337,9 +5337,10 @@ static void test_pm4_gl_compiled_shader_exports_to_both_colour_targets(void) {
     oops_display_close(disp);
 }
 
-/* A two-target submission copies both targets back, so `glReadPixels` of either reads
- * the CP's copy rather than the surface: two `DMA_DATA` packets after the fence wait,
- * one per target, and a tag on each copy naming the buffer it holds. */
+/* A two-target submission owes a copy of both targets, made when something reads one
+ * (gl_readback_settle): the submission itself carries no copy, and once made, a tag on
+ * each copy names the buffer it holds, so `glReadPixels` of either reads the CP's copy
+ * rather than the surface. */
 static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
     oops_display_t *disp = oops_display_open(OOPS_DISPLAY_BACKEND_AUTO, 64, 64);
     void *ctx_handle = glContextCreate(disp);
@@ -5386,10 +5387,10 @@ static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
      * build. */
     gl_hw_flush(ctx);
 
-    /* One `DMA_DATA` per target, each from its surface to its own copy. The fills a
-     * clear emits share the packet header, so the source address is what tells them
-     * apart - a fill's second word is the colour, and these carry the CP_SYNC/TC_L2
-     * selectors. */
+    /* No `DMA_DATA` copy in the submission: the copies are owed. The fills a clear
+     * emits share the packet header, so the selectors and source address are what tell
+     * a copy apart - a fill's second word is the colour, and a copy carries the
+     * CP_SYNC/TC_L2 selectors. */
     /* Scanned over the whole buffer, not `dcb_words`, because the submit reset the
      * count. `dcb` was zeroed above, so what is left in it is the submission. */
     size_t copies = 0;
@@ -5409,11 +5410,19 @@ static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
             front_copied = GL_TRUE;
         }
     }
-    ASSERT_EQ(copies, 2u);
-    ASSERT_TRUE(back_copied);
-    ASSERT_TRUE(front_copied);
-    ASSERT_TRUE(ctx->readback_of == ctx->back_fb);
-    ASSERT_TRUE(ctx->readback_also_of == ctx->front_fb);
+    ASSERT_EQ(copies, 0u);
+    ASSERT_TRUE(!back_copied && !front_copied);
+    ASSERT_TRUE(ctx->readback_owed == ctx->back_fb);
+    ASSERT_TRUE(ctx->readback_also_owed == ctx->front_fb);
+    ASSERT_TRUE(ctx->readback_of == NULL);
+    ASSERT_TRUE(ctx->readback_also_of == NULL);
+
+    /* A host build has no CP to make the copies, so they are tagged as
+     * `gl_readback_settle` tags them once made. */
+    ctx->readback_owed = NULL;
+    ctx->readback_also_owed = NULL;
+    ctx->readback_of = ctx->back_fb;
+    ctx->readback_also_of = ctx->front_fb;
 
     /* A read of either buffer takes its own copy; the two sentinels differ. */
     ctx->hw_frames_confirmed = 1u;
@@ -5438,6 +5447,8 @@ static void test_pm4_gl_both_colour_targets_are_copied_back(void) {
     glDrawPixels(1, 1, GL_RGBA, GL_UNSIGNED_BYTE, red);
     ASSERT_TRUE(ctx->readback_of == NULL);
     ASSERT_TRUE(ctx->readback_also_of == NULL);
+    ASSERT_TRUE(ctx->readback_owed == NULL);
+    ASSERT_TRUE(ctx->readback_also_owed == NULL);
 
     glDrawBuffer(GL_BACK);
     glReadBuffer(GL_BACK);
