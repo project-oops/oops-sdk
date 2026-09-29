@@ -2517,11 +2517,25 @@ char *setlocale(int category, const char *locale) {
  * sys/time
  * --------------------------------------------------------------------------- */
 
+/*
+ * Wall-clock time to the microsecond: the epoch read once, then advanced by the monotonic
+ * counter. The kernel's epoch source has one-second resolution, and a `tv_usec` of 0 made
+ * every timer built on this one a one-second timer - ioquake3's `Sys_Milliseconds` among
+ * them, whose frame loop then ran at two frames a second doing no work.
+ */
 int gettimeofday(struct timeval *tv, void *tz) {
+    static uint64_t s_epoch_base_us;
+    static uint64_t s_mono_base_us;
+
     (void)tz;
     if (tv) {
-        tv->tv_sec = (time_t)oops_time_get_epoch_seconds();
-        tv->tv_usec = 0;
+        if (s_epoch_base_us == 0u) {
+            s_epoch_base_us = oops_time_get_epoch_seconds() * 1000000u;
+            s_mono_base_us = oops_time_get_us();
+        }
+        const uint64_t now_us = s_epoch_base_us + (oops_time_get_us() - s_mono_base_us);
+        tv->tv_sec = (time_t)(now_us / 1000000u);
+        tv->tv_usec = (long)(now_us % 1000000u);
     }
     return 0;
 }
