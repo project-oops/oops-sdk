@@ -1227,6 +1227,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_time_init`
 - `oops_time_sleep_ms`
 - `oops_time_sleep_us`
+- `oops_time_utc_offset`
 
 ## oops/videodec.h
 
