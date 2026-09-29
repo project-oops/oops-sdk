@@ -2436,6 +2436,19 @@ void glTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset
 #define GL_RGB565 0x8D62
 #define GL_STENCIL_INDEX8 0x8D48
 
+/*
+ * Packed depth-stencil.
+ *
+ * One 32-bit word holding 24 bits of depth and 8 of stencil, which is how a program
+ * that wants both asks for them - `GL_DEPTH_STENCIL_ATTACHMENT` names the pair in a
+ * single call rather than attaching the same buffer twice. libultraship builds every
+ * framebuffer this way, and so does most code written against 3.0 or ES 3.0.
+ */
+#define GL_DEPTH_STENCIL 0x84F9
+#define GL_UNSIGNED_INT_24_8 0x84FA
+#define GL_DEPTH24_STENCIL8 0x88F0
+#define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
+
 void glGenFramebuffers(GLsizei n, GLuint *framebuffers);
 void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers);
 void glBindFramebuffer(GLenum target, GLuint framebuffer);

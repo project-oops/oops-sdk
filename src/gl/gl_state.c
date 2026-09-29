@@ -8068,12 +8068,24 @@ static gl_fb_attachment_t *gl_fb_attachment_for(gl_framebuffer_object_t *fb,
     case GL_COLOR_ATTACHMENT0:
         return &fb->color0;
     case GL_DEPTH_ATTACHMENT:
+    /* Both halves of a packed buffer live in the one attachment; the depth slot is
+     * the one that answers for it, and whoever attaches mirrors it into the stencil
+     * slot so that a draw reading either finds it. */
+    case GL_DEPTH_STENCIL_ATTACHMENT:
         return &fb->depth;
     case GL_STENCIL_ATTACHMENT:
         return &fb->stencil;
     default:
         return NULL;
     }
+}
+
+/* The second slot a packed depth-stencil attachment also occupies, or NULL. */
+static gl_fb_attachment_t *gl_fb_attachment_mirror(gl_framebuffer_object_t *fb,
+                                                   GLenum attachment) {
+    if (fb && attachment == GL_DEPTH_STENCIL_ATTACHMENT)
+        return &fb->stencil;
+    return NULL;
 }
 
 /* An attachment's size, and whether it has storage at all. A texture level that was
@@ -8313,6 +8325,12 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width,
     case GL_DEPTH_COMPONENT16_ARB:
     case GL_DEPTH_COMPONENT24:
     case GL_STENCIL_INDEX8:
+    /* Packed depth-stencil, which is what a program asking for both requests. The
+     * storage below is one 32-bit word a pixel whatever the format, which is exactly
+     * what 24 bits of depth and 8 of stencil need, so it costs nothing to accept -
+     * and refusing it left libultraship's framebuffers with a depth attachment that
+     * had been asked for, refused, and attached anyway. */
+    case GL_DEPTH24_STENCIL8:
         break;
     default:
         gl_record_error(ctx, GL_INVALID_ENUM);
@@ -8602,6 +8620,7 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
         return;
     }
     gl_fb_attachment_t *at = gl_fb_attachment_for(fb, attachment);
+    gl_fb_attachment_t *mirror = gl_fb_attachment_mirror(fb, attachment);
     if (!at) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
@@ -8617,6 +8636,8 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
     }
     if (texture == 0) {
         memset(at, 0, sizeof(*at));
+        if (mirror)
+            memset(mirror, 0, sizeof(*mirror));
         gl_draw_targets(ctx);
         return;
     }
@@ -8628,6 +8649,10 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
     at->name = texture;
     at->textarget = textarget;
     at->level = level;
+    /* A packed attachment occupies the stencil point as well - see the renderbuffer
+     * entry point below. */
+    if (mirror)
+        *mirror = *at;
     /* The target the draw path holds was chosen from the attachments as they were. */
     gl_draw_targets(ctx);
 }
@@ -8647,12 +8672,15 @@ void glFramebufferRenderbuffer(GLenum target, GLenum attachment,
         return;
     }
     gl_fb_attachment_t *at = gl_fb_attachment_for(fb, attachment);
+    gl_fb_attachment_t *mirror = gl_fb_attachment_mirror(fb, attachment);
     if (!at) {
         gl_record_error(ctx, GL_INVALID_ENUM);
         return;
     }
     if (renderbuffer == 0) {
         memset(at, 0, sizeof(*at));
+        if (mirror)
+            memset(mirror, 0, sizeof(*mirror));
         gl_draw_targets(ctx);
         return;
     }
@@ -8664,6 +8692,11 @@ void glFramebufferRenderbuffer(GLenum target, GLenum attachment,
     at->name = renderbuffer;
     at->textarget = 0;
     at->level = 0;
+    /* `GL_DEPTH_STENCIL_ATTACHMENT` attaches one buffer to both points, so the stencil
+     * slot names the same renderbuffer rather than being left empty - otherwise a
+     * framebuffer that asked for stencil is complete without one. */
+    if (mirror)
+        *mirror = *at;
     gl_draw_targets(ctx);
 }
 

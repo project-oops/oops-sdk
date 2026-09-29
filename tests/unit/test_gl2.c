@@ -1362,6 +1362,80 @@ static void test_gl2_structs_run(void) {
     oops_display_close(t.disp);
 }
 
+/*
+ * Packed depth-stencil: the framebuffer libultraship actually builds.
+ *
+ * `gfx_opengl.cpp` makes every one of its framebuffers this way - a `GL_DEPTH24_STENCIL8`
+ * renderbuffer hung on `GL_DEPTH_STENCIL_ATTACHMENT` - and so does most code written
+ * against GL 3.0 or ES 3.0. Refusing the format returned `GL_INVALID_ENUM` and left the
+ * renderbuffer with no storage, which the program then attached anyway: a depth buffer
+ * that had been asked for, refused, and hung on the framebuffer regardless. Ship of
+ * Harkinian raised twenty-eight of those errors before its first frame.
+ *
+ * The one call has to furnish both attachment points, or a framebuffer that asked for
+ * stencil reports itself complete without one.
+ */
+static void test_gl2_packed_depth_stencil_serves_both_points(void) {
+    gl2_target_t t = gl2_target();
+    GLuint fb = 0, rb = 0, colour = 0;
+    GLint name = -1;
+
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glGenRenderbuffers(1, &colour);
+    glBindRenderbuffer(GL_RENDERBUFFER, colour);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 32, 32);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                              colour);
+
+    /* Exactly libultraship's three lines. */
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 32, 32);
+    ASSERT_TRUE(glGetError() == GL_NO_ERROR); /* the format is taken */
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                              GL_RENDERBUFFER, rb);
+    ASSERT_TRUE(glGetError() == GL_NO_ERROR);
+
+    /* Storage was really allocated, so the attachment is renderable rather than
+     * present-and-empty - which is the difference the fault turned on. */
+    ASSERT_TRUE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+    /* One call, both points: depth and stencil each name that renderbuffer. */
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+    ASSERT_TRUE((GLuint)name == rb);
+    name = -1;
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+    ASSERT_TRUE((GLuint)name == rb);
+
+    /* Detaching through the packed point clears both, or the stencil slot keeps naming
+     * a renderbuffer the program believes it has let go. */
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                              GL_RENDERBUFFER, 0);
+    /* The type, not the name: asking an empty point for its object name is itself an
+     * error, so the type is what says the point is empty. */
+    name = -1;
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &name);
+    ASSERT_TRUE(name == GL_NONE);
+    name = -1;
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &name);
+    ASSERT_TRUE(name == GL_NONE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
+    glDeleteRenderbuffers(1, &colour);
+    glContextDestroy(t.ctx);
+    oops_display_close(t.disp);
+}
+
 /* Framebuffer and renderbuffer objects: names, attachments, queries and completeness.
  */
 static void test_gl2_framebuffer_objects(void) {
@@ -8680,6 +8754,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_array_length_constant_expressions);
     RUN_TEST(test_gl2_es_100_shaders);
     RUN_TEST(test_gl2_framebuffer_objects);
+    RUN_TEST(test_gl2_packed_depth_stencil_serves_both_points);
     RUN_TEST(test_gl2_cube_face_attachment_is_sized_from_its_face);
     RUN_TEST(test_gl2_draw_into_a_framebuffer_object);
     RUN_TEST(test_gl2_blit_framebuffer_reads_the_read_binding);
