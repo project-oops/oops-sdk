@@ -177,6 +177,13 @@ int oops_dialog_ime_open(const oops_ime_param_t *param) {
     sce_param.posY = param->pos_y;
     if (param->flags & OOPS_IME_FLAG_PASSWORD) {
         sce_param.option |= SCE_IME_OPTION_PASSWORD | SCE_IME_OPTION_NO_LEARNING;
+        /* The dialog takes a password only as basic Latin or a number, and refuses to
+         * open for any other type - measured: SuperTuxKart's password field opened
+         * nothing with the default type. A default-typed password becomes basic Latin;
+         * a number stays a number. */
+        if (param->type != OOPS_IME_TYPE_NUMBER) {
+            sce_param.type = (int32_t)OOPS_IME_TYPE_BASIC_LATIN;
+        }
     }
     if (param->flags & OOPS_IME_FLAG_NO_LEARNING) {
         sce_param.option |= SCE_IME_OPTION_NO_LEARNING;
