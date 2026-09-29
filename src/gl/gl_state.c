@@ -5474,6 +5474,49 @@ static void gl_vbo_store_free(void *p, GLboolean gpu) {
     gl_heap_free(p);
 }
 
+/* Frees everything retired, once nothing queued can name it: called after a submit's
+ * fence, and whenever there is no frame open. */
+void gl_vbo_retire_drain(gl_context_t *ctx) {
+    if (!ctx)
+        return;
+    for (uint32_t i = 0; i < ctx->hw_vbo_retire_n; i++) {
+        gl_vbo_store_free(ctx->hw_vbo_retire[i], ctx->hw_vbo_retire_gpu[i]);
+        ctx->hw_vbo_retire[i] = NULL;
+    }
+    ctx->hw_vbo_retire_n = 0u;
+}
+
+/*
+ * Releases a buffer store that a draw already built may still name.
+ *
+ * With a frame open on hardware, a resident draw earlier in it may have written this
+ * store's address into its attribute table, and the GPU reads that at the submit. So
+ * the store is parked and freed after the fence - `gl_vbo_retire_drain`. Freeing now
+ * works for as long as the freed carve's block happens to stay mapped, which is why
+ * this ran a thousand frames of Ship of Harkinian before faulting.
+ *
+ * With no frame open nothing can name it, and it goes at once. A full list submits the
+ * frame early, which drains it: a bound on the memory held, not on correctness.
+ */
+static void gl_vbo_store_retire(gl_context_t *ctx, void *p, GLboolean gpu) {
+    if (!p)
+        return;
+    /* Bookkeeping only, so a build machine compiles it too: its contexts never have a
+     * hardware frame open, and a test that opens one can watch the list. */
+    if (ctx && ctx->use_hardware && ctx->hw_frame_active) {
+        if (ctx->hw_vbo_retire_n >= OOPS_GL_VBO_RETIRE_MAX) {
+            gl_hw_flush(ctx); /* drains the list after its fence */
+        }
+        if (ctx->hw_frame_active && ctx->hw_vbo_retire_n < OOPS_GL_VBO_RETIRE_MAX) {
+            ctx->hw_vbo_retire[ctx->hw_vbo_retire_n] = p;
+            ctx->hw_vbo_retire_gpu[ctx->hw_vbo_retire_n] = gpu;
+            ctx->hw_vbo_retire_n++;
+            return;
+        }
+    }
+    gl_vbo_store_free(p, gpu);
+}
+
 gl_buffer_object_t *gl_find_buffer(gl_context_t *ctx, GLuint name) {
     if (!ctx || name == 0u)
         return NULL;
@@ -5488,6 +5531,8 @@ gl_buffer_object_t *gl_find_buffer(gl_context_t *ctx, GLuint name) {
 void gl_free_all_buffers(gl_context_t *ctx) {
     if (!ctx)
         return;
+    /* Teardown: whatever a last frame retired goes with everything else. */
+    gl_vbo_retire_drain(ctx);
     for (int i = 0; i < OOPS_GL_MAX_BUFFER_OBJECTS; i++) {
         gl_vbo_store_free(ctx->buffers[i].data, ctx->buffers[i].gpu_visible);
         ctx->buffers[i].data = NULL;
@@ -5588,7 +5633,7 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
         gl_buffer_object_t *buf = gl_find_buffer(ctx, buffers[i]);
         if (!buf)
             continue; /* name 0 and unknown names are silently ignored, as GL says */
-        gl_vbo_store_free(buf->data, buf->gpu_visible);
+        gl_vbo_store_retire(ctx, buf->data, buf->gpu_visible);
         buf->data = NULL;
         buf->gpu_visible = GL_FALSE;
         buf->size = 0;
@@ -5688,9 +5733,11 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     }
 
     /* Replaced, not resized: glBufferData respecifies the whole store, so the old one
-     * goes even when the size is unchanged. Arrays find the new storage because they
-     * keep the name, not an address. */
-    gl_vbo_store_free(buf->data, buf->gpu_visible);
+     * goes even when the size is unchanged. Arrays that come later find the new
+     * storage because they keep the name - but a resident draw already built keeps the
+     * old store's address, so the old store is retired until that draw has run, not
+     * freed (`gl_vbo_store_retire`). */
+    gl_vbo_store_retire(ctx, buf->data, buf->gpu_visible);
     buf->data = NULL;
     buf->gpu_visible = GL_FALSE;
     buf->size = 0;

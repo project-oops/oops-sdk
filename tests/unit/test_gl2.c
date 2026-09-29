@@ -1500,6 +1500,69 @@ static void test_gl2_binding_a_framebuffer_moves_the_depth_extent(void) {
     oops_display_close(t.disp);
 }
 
+/*
+ * Respecifying a buffer mid-frame retires the old store instead of freeing it.
+ *
+ * A resident draw writes its buffer's address into an attribute table that the GPU
+ * reads at the submit. libultraship calls glBufferData before every draw, so by the
+ * time a frame is submitted, every draw but the last names a store that has since been
+ * replaced. Those stores have to survive until the submit has run. Freeing them at
+ * once ran a thousand frames of Ship of Harkinian and then faulted the GPU, on the
+ * frame where a freed carve was the last in its block and the block was unmapped.
+ *
+ * A build machine never opens a hardware frame, so the test opens one by hand. Only
+ * the bookkeeping runs: nothing here submits.
+ */
+static void test_gl2_respecified_buffer_waits_for_the_frame(void) {
+    void *ctx = gl2_context();
+    gl_context_t *c = (gl_context_t *)ctx;
+    GLuint vbo = 0;
+    const float first[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    const float second[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(first), first, GL_STREAM_DRAW);
+    const gl_buffer_object_t *buf = gl_find_buffer(c, vbo);
+    ASSERT_TRUE(buf != NULL && buf->data != NULL);
+    void *const old_store = buf->data;
+
+    /* A frame being built on hardware: the case where a draw may name the store. */
+    const GLboolean saved_hw = c->use_hardware, saved_frame = c->hw_frame_active;
+    c->use_hardware = GL_TRUE;
+    c->hw_frame_active = GL_TRUE;
+    ASSERT_EQ(c->hw_vbo_retire_n, 0u);
+
+    glBufferData(GL_ARRAY_BUFFER, sizeof(second), second, GL_STREAM_DRAW);
+    buf = gl_find_buffer(c, vbo);
+    ASSERT_TRUE(buf->data != old_store);   /* a new store, as respecification says */
+    ASSERT_EQ(c->hw_vbo_retire_n, 1u);     /* the old one parked, not freed */
+    ASSERT_TRUE(c->hw_vbo_retire[0] == old_store);
+    /* Still readable, and still what the earlier draw was given. */
+    ASSERT_TRUE(((const float *)old_store)[0] == 1.0f);
+
+    /* Deleting drops the current store the same way. */
+    glDeleteBuffers(1, &vbo);
+    ASSERT_EQ(c->hw_vbo_retire_n, 2u);
+
+    /* After the frame: everything retired goes. */
+    gl_vbo_retire_drain(c);
+    ASSERT_EQ(c->hw_vbo_retire_n, 0u);
+
+    /* With no frame open nothing can name a store, and nothing is parked. */
+    c->hw_frame_active = GL_FALSE;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(first), first, GL_STREAM_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(second), second, GL_STREAM_DRAW);
+    ASSERT_EQ(c->hw_vbo_retire_n, 0u);
+    glDeleteBuffers(1, &vbo);
+
+    c->use_hardware = saved_hw;
+    c->hw_frame_active = saved_frame;
+    glContextDestroy(ctx);
+}
+
 /* Framebuffer and renderbuffer objects: names, attachments, queries and completeness.
  */
 static void test_gl2_framebuffer_objects(void) {
@@ -8820,6 +8883,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_framebuffer_objects);
     RUN_TEST(test_gl2_packed_depth_stencil_serves_both_points);
     RUN_TEST(test_gl2_binding_a_framebuffer_moves_the_depth_extent);
+    RUN_TEST(test_gl2_respecified_buffer_waits_for_the_frame);
     RUN_TEST(test_gl2_cube_face_attachment_is_sized_from_its_face);
     RUN_TEST(test_gl2_draw_into_a_framebuffer_object);
     RUN_TEST(test_gl2_blit_framebuffer_reads_the_read_binding);

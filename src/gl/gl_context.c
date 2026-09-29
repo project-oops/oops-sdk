@@ -453,6 +453,8 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
      * colour buffer too, so the drain precedes it. */
     gl_color_cpu_drain(ctx);
     if (!ctx->use_hardware || !ctx->hw_frame_active || ctx->dcb_words == 0) {
+        /* Nothing recorded, so nothing can name a retired store. */
+        gl_vbo_retire_drain(ctx);
         return;
     }
 
@@ -593,6 +595,10 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
             gl_klog_val("fence-timeout-frames-ok", (uint64_t)ctx->hw_frames_confirmed);
         }
     }
+    /* The submission has run - or never will, if the fence timed out - so the buffer
+     * stores its draws named can go now. Held back on a timeout they would leak for
+     * nothing: a GPU that has not finished in a second is not going to read them. */
+    gl_vbo_retire_drain(ctx);
 
     if (ctx->canary) {
 #if defined(__x86_64__)

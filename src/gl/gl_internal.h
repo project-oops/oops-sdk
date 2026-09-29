@@ -136,6 +136,10 @@ enum {
  * at once, and one that ignores GL_OUT_OF_MEMORY goes on to pass byte offsets as client
  * pointers. 1024 is 40 KB of context; `gl_array_base` indexes this table directly. */
 #define OOPS_GL_MAX_BUFFER_OBJECTS 1024
+/* Buffer stores a frame may retire before it is submitted - one per respecification.
+ * Full means the frame is submitted early and the list drained, so this bounds memory
+ * held, never correctness. */
+#define OOPS_GL_VBO_RETIRE_MAX 1024
 #define OOPS_GL_MAX_QUERY_OBJECTS 64
 /* GL 2.0's generic vertex attribute slots. 16 is the specification's minimum for
  * GL_MAX_VERTEX_ATTRIBS, so a program that asks the limit and packs to it gets what it
@@ -2106,6 +2110,20 @@ typedef struct gl_context {
     uint32_t hw_clear_expected;
     GLboolean hw_dump_pending;  /* log the next submission's stream, shaders and fence:
                                    the oracle record */
+    /*
+     * Buffer stores released while a frame is being built, freed once it has run.
+     *
+     * A resident draw writes its buffer's address into an attribute table the GPU
+     * reads at the submit, not at the call. So `glBufferData` replacing a store, or
+     * `glDeleteBuffers` dropping one, cannot free the old store at once: an earlier
+     * draw in the same frame still names it. libultraship respecifies its vertex buffer
+     * before every draw, and freeing immediately ran for a thousand frames and then
+     * faulted the GPU the day a freed carve was the last in its block and the block was
+     * unmapped. Parked here, freed after the fence.
+     */
+    void *hw_vbo_retire[OOPS_GL_VBO_RETIRE_MAX];
+    GLboolean hw_vbo_retire_gpu[OOPS_GL_VBO_RETIRE_MAX];
+    uint32_t hw_vbo_retire_n;
     const uint32_t *hw_prelude; /* glSetHardwarePrelude: words every frame's stream
                                    opens with, or NULL */
     uint32_t hw_prelude_words;
@@ -2882,6 +2900,8 @@ gl_buffer_object_t *gl_find_buffer(gl_context_t *ctx, GLuint name);
 /* Releases every buffer object's storage. Called from glContextDestroy, and living
  * beside the allocation in gl_state.c so the choice of allocator stays in one file. */
 void gl_free_all_buffers(gl_context_t *ctx);
+/* Frees the buffer stores retired while a frame was built (`hw_vbo_retire`). */
+void gl_vbo_retire_drain(gl_context_t *ctx);
 const uint8_t *gl_array_base(const gl_context_t *ctx, const gl_client_array_t *a);
 /* How many names `glGetString(GL_EXTENSIONS)` holds - GL_NUM_EXTENSIONS's answer. */
 int gl_extension_count(gl_context_t *ctx);
