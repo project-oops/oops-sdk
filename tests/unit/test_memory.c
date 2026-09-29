@@ -37,6 +37,32 @@ static void test_memory_phys_unknown_is_minus_one(void) {
     ASSERT_EQ(oops_mem_get_phys(&local), -1);
 }
 
+/*
+ * Nothing the allocator did not map is GPU memory.
+ *
+ * The console fault this exists for was the GPU reading a page of the payload's own
+ * string literals: an address from the image, handed out as if it were a mapping. So
+ * the cases are the places such an address comes from - a string literal, a static,
+ * the stack and the heap - and each has to be refused. A build machine has no direct
+ * memory, so the positive half cannot be shown here; refusing the rest is the half
+ * that decides whether a stray pointer reaches the GPU.
+ */
+static void test_memory_is_gpu_refuses_what_it_did_not_map(void) {
+    static const char literal[] = "a string literal, as in .rodata.str1.1";
+    static int in_data = 1;
+    int on_stack = 0;
+    void *on_heap = malloc(64);
+
+    ASSERT_TRUE(oops_mem_is_gpu(literal, sizeof(literal)) == 0);
+    ASSERT_TRUE(oops_mem_is_gpu(&in_data, sizeof(in_data)) == 0);
+    ASSERT_TRUE(oops_mem_is_gpu(&on_stack, sizeof(on_stack)) == 0);
+    ASSERT_TRUE(oops_mem_is_gpu(on_heap, 64) == 0);
+    ASSERT_TRUE(oops_mem_is_gpu(NULL, 16) == 0);
+    /* A range that wraps the address space is not a range. */
+    ASSERT_TRUE(oops_mem_is_gpu((const void *)(uintptr_t)(UINTPTR_MAX - 4u), 64) == 0);
+    free(on_heap);
+}
+
 /* On a host with no platform, every direct call rejects rather than fabricating
  * a mapping. */
 static void test_memory_direct_contract_on_host(void) {
@@ -72,6 +98,7 @@ void run_unit_tests_memory(void) {
     RUN_TEST(test_memory_alloc_zero_and_null);
     RUN_TEST(test_memory_alloc_refuses_wrapping_size);
     RUN_TEST(test_memory_phys_unknown_is_minus_one);
+    RUN_TEST(test_memory_is_gpu_refuses_what_it_did_not_map);
     RUN_TEST(test_memory_direct_contract_on_host);
     RUN_TEST(test_memory_reserve_va_contract_on_host);
 }

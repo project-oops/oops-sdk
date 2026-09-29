@@ -10,6 +10,7 @@
 #ifndef OOPS_HOST_BUILD
 #include "oops/time.h"   /* the draw path is timed - see hw_draw_ns */
 #include "oops/system.h" /* oops_log_level_t, for gating the per-draw trace */
+#include "oops/memory.h" /* oops_mem_is_gpu - every fetch address is checked */
 #else
 /* The desktop harness's geometry dump writes through stdio; the payload has neither. */
 #include <stdio.h>
@@ -4455,6 +4456,14 @@ static void gl_tri_screen(gl_context_t *ctx, const gl_tri_t *tri,
     *out2 = sv2;
 }
 
+#ifndef OOPS_HOST_BUILD
+/* Defined with the rest of the fetch checks, below the ring stage. */
+static GLboolean gl_hw_block_textures_gpu(gl_context_t *ctx,
+                                          const gl_program_object_t *prog,
+                                          const uint32_t *block);
+static GLboolean gl_hw_texture_gpu(const gl_texture_object_t *obj);
+#endif
+
 /* One triangle through the hardware path (AMD RDNA2 GFX10.3): the pixel shader's slots
  * and the descriptors brought up to date, the vertices written into the ring, then the
  * command words. */
@@ -4471,6 +4480,16 @@ static void gl_draw_triangle_hw(gl_context_t *ctx, const gl_tri_t *tri) {
         gl_hw_tri_desc_slot(ctx, hw->base_unit, hw->eff_tex, hw->eff_obj,
                             hw->unit1_obj);
     gl_hw_tri_ring(ctx, tri, hw);
+#ifndef OOPS_HOST_BUILD
+    /* After the ring stage, which is where the GL 2.0 block is built from prepared
+     * descriptors, and before anything referencing it is written. The vertices of this
+     * path go through the ring, which is GPU memory by construction, so only the
+     * textures can carry a stray address. */
+    if ((hw->gl2_block_used && !gl_hw_block_textures_gpu(ctx, tri->prog, hw->gl2_block)) ||
+        !gl_hw_texture_gpu(hw->eff_obj) || !gl_hw_texture_gpu(hw->unit1_obj)) {
+        return;
+    }
+#endif
     gl_hw_tri_payload(ctx, tri, hw);
     gl_hw_tri_vertices(ctx, tri, hw);
     gl_hw_tri_shader(ctx, tri, hw);
@@ -5091,6 +5110,100 @@ static void gl_hw_trace_draw(gl_context_t *ctx, gl_texture_object_t *eff_obj) {
             }
         }
     }
+}
+#endif
+
+/* -------------------------------------------------------------------------
+ * Every address a shader fetches from is GPU memory, or the draw does not happen
+ *
+ * A texture descriptor and a vertex attribute each hand the GPU a raw virtual address,
+ * and the GPU reads it later, on its own. If that address is the process's image, its
+ * heap or its stack - anything `oops_mem_alloc` did not map - the read is an
+ * asynchronous page fault: `GPU_FAULT_PAGE_FAULT_ASYNC`, "no thread information", a
+ * page address and nothing else. Ship of Harkinian died of exactly that across a day
+ * of runs, reading a page of the eboot's string literals, and nothing on the CPU side
+ * could say which of several hundred resources had carried the address there.
+ *
+ * So the addresses are checked where they are known, before the draw is emitted, and a
+ * draw that would fault is refused with a line naming the resource instead. The check
+ * reads what was actually written - the built descriptor and the built attribute
+ * table - rather than the objects they came from, because it is the written address the
+ * GPU follows. It is a walk over the allocator's slot table per fetch, which a draw
+ * with a handful of textures and attributes affords.
+ *
+ * Only on hardware: a build machine has no GPU and every address is the heap.
+ * ------------------------------------------------------------------------- */
+#ifndef OOPS_HOST_BUILD
+static uint32_t s_nongpu_refusals;
+
+static void gl_hw_report_nongpu(const char *what, GLuint id, uint64_t va, size_t len) {
+    s_nongpu_refusals++;
+    /* Every one of the first few, in full; after that, one line in 256 so a frame
+     * loop cannot bury the log but a persisting fault is still visibly persisting. */
+    if (s_nongpu_refusals <= 16u || (s_nongpu_refusals & 255u) == 0u) {
+        oops_log_warn("GL",
+                      "draw refused: %s %u points the GPU at 0x%llx (+%zu bytes), which "
+                      "is not GPU memory - %u refused so far",
+                      what, (unsigned)id, (unsigned long long)va, len,
+                      (unsigned)s_nongpu_refusals);
+    }
+}
+
+/* The texture sets a built GL 2.0 block carries. An empty set is all zeroes and is
+ * skipped; a set the shader samples has a base, and that base is what is checked. */
+static GLboolean gl_hw_block_textures_gpu(gl_context_t *ctx,
+                                          const gl_program_object_t *prog,
+                                          const uint32_t *block) {
+    for (int s = 0; s < prog->hw_tex_sets && s < (int)OOPS_GL_GL2_TEX_SETS; s++) {
+        const uint32_t *set = block + (size_t)s * (OOPS_GL_DESC_UNIT_STRIDE / 4u);
+        /* SQ_IMG_RSRC_WORD0/1: BASE_ADDRESS[39:8] and BASE_ADDRESS_HI[47:40]. */
+        const uint64_t va =
+            ((uint64_t)set[0] << 8) | ((uint64_t)(set[1] & 0xffu) << 40);
+        if (va == 0u)
+            continue;
+        if (!oops_mem_is_gpu((const void *)(uintptr_t)va, 1u)) {
+            const gl_texture_object_t *obj = gl_gl2_sampler_texture(ctx, prog, s);
+            gl_hw_report_nongpu("texture", obj ? obj->id : 0u, va, 1u);
+            return GL_FALSE;
+        }
+    }
+    return GL_TRUE;
+}
+
+/* One texture object's own descriptor, for the fixed-function stages, which copy
+ * `img_desc` into a descriptor slot rather than into a GL 2.0 block. */
+static GLboolean gl_hw_texture_gpu(const gl_texture_object_t *obj) {
+    if (!obj)
+        return GL_TRUE;
+    const uint64_t va = ((uint64_t)obj->img_desc[0] << 8) |
+                        ((uint64_t)(obj->img_desc[1] & 0xffu) << 40);
+    if (va == 0u)
+        return GL_TRUE; /* no descriptor built: the stage samples nothing */
+    if (!oops_mem_is_gpu((const void *)(uintptr_t)va, 1u)) {
+        gl_hw_report_nongpu("texture", obj->id, va, 1u);
+        return GL_FALSE;
+    }
+    return GL_TRUE;
+}
+
+/* A built attribute table: four words a location, base low and high, stride, size. The
+ * span checked is the whole range the draw's vertices will be fetched from. */
+static GLboolean gl_hw_attribs_gpu(gl_context_t *ctx, const uint32_t *adst,
+                                   GLsizei count) {
+    for (uint32_t loc = 0; loc < OOPS_GL_MAX_VERTEX_ATTRIBS; loc++) {
+        const uint64_t va = (uint64_t)adst[loc * 4u + 0u] |
+                            ((uint64_t)adst[loc * 4u + 1u] << 32);
+        if (va == 0u)
+            continue;
+        const size_t stride = adst[loc * 4u + 2u];
+        const size_t span = count > 0 ? (size_t)count * (stride ? stride : 4u) : 1u;
+        if (!oops_mem_is_gpu((const void *)(uintptr_t)va, span)) {
+            gl_hw_report_nongpu("vertex attribute buffer", ctx->vertex_attribs[loc].buffer,
+                                va, span);
+            return GL_FALSE;
+        }
+    }
+    return GL_TRUE;
 }
 #endif
 
@@ -8001,6 +8114,12 @@ static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint fir
 
     uint32_t gl2_block[OOPS_GL_GL2_SLOT_STRIDE / 4u];
     gl_gl2_build_block(ctx, prog, gl2_block);
+#ifndef OOPS_HOST_BUILD
+    /* Before the block is committed to a slot, so a refused draw leaves nothing
+     * behind. */
+    if (!gl_hw_block_textures_gpu(ctx, prog, gl2_block))
+        return;
+#endif
 
     const void *slot =
         (const char *)ctx->gpu_payload + gl_hw_gl2_slot_offset(ctx->hw_gl2_slot);
@@ -8066,6 +8185,14 @@ static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint fir
     }
 #endif
     const uint64_t attrib_table_va = payload_va + aoff;
+#ifndef OOPS_HOST_BUILD
+    /* The attribute slot is spent either way; an unreferenced one is harmless, and a
+     * vertex fetch from memory the GPU has not mapped is not. `gl_vbo_store_alloc`
+     * falls back to the heap when Onion is exhausted and says so in `gpu_visible`,
+     * which this path never read - so the check is on the address it actually wrote. */
+    if (!gl_hw_attribs_gpu(ctx, adst, count))
+        return;
+#endif
 
     /* Emit render state */
     gl_hw_draw_t hw;

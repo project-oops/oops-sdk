@@ -399,3 +399,25 @@ int64_t oops_mem_get_phys(const void *ptr) {
      * mean this. */
     return -1;
 }
+
+int oops_mem_is_gpu(const void *ptr, size_t len) {
+    if (!ptr)
+        return 0;
+    const uintptr_t addr = (uintptr_t)ptr;
+    /* A zero length still has to start inside something. */
+    const uintptr_t last = addr + (len ? len - 1u : 0u);
+    if (last < addr)
+        return 0; /* wrapped */
+    /* Carves are made from blocks that are themselves page allocations, so the slot
+     * table covers every address `oops_mem_alloc` has ever returned. The whole range
+     * has to sit in one slot: two adjacent mappings are not one object. */
+    for (int i = 0; i < OOPS_MAX_ALLOCS; i++) {
+        if (!s_alloc_slots[i].in_use)
+            continue;
+        const uintptr_t base = (uintptr_t)s_alloc_slots[i].vaddr;
+        const uintptr_t end = base + s_alloc_slots[i].size;
+        if (addr >= base && last < end)
+            return 1;
+    }
+    return 0;
+}

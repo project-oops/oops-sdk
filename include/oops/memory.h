@@ -62,6 +62,12 @@ void oops_mem_free(void *ptr);
  * "unknown". */
 int64_t oops_mem_get_phys(const void *ptr);
 
+/* Whether all of [ptr, ptr + len) lies inside one managed allocation - memory the GPU
+ * has mapped. The process's own image, its heap and its stack are not, and an address
+ * into any of them handed to the GPU is an asynchronous page fault with no thread and no
+ * backtrace. Asking before a submit turns that into a message naming the resource. */
+int oops_mem_is_gpu(const void *ptr, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
