@@ -352,7 +352,10 @@ int oops_fs_mkdir(const char *path, int mode) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
+  /* Resolved, as `oops_fs_rename` explains. */
+  char resolved[1024];
   int target_mode = mode ? mode : 0755;
+  path = oops_fs_resolve_path(path, resolved, sizeof(resolved));
   int rc = (int)sys_call(SYS_mkdir, (long)path, target_mode, 0, 0, 0, 0);
 #else
   mode_t host_mode = mode ? (mode_t)mode : 0755;
@@ -367,6 +370,22 @@ int oops_fs_rename(const char *from, const char *to) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
+  /*
+   * Both paths resolved, for the reason `fs_open_raw` resolves its one: a payload has no
+   * working directory, so a relative name reaches the kernel unchanged and fails. Opening
+   * has resolved since the archive was reported missing while it sat in /app0; these five
+   * calls never did, and a caller mixing them looks as though only *some* of its file
+   * operations work.
+   *
+   * This is what stranded `oot.o2r`. libultraship writes an archive to `<name>.<random>.part`
+   * and renames it into place, ZAPD is handed `--otrfile oot.o2r` relative, and the rename
+   * was the one step that could not see /app0. The conversion ran to 547 of 547 and left a
+   * `.part` file behind with nothing to say why.
+   */
+  char from_buf[1024];
+  char to_buf[1024];
+  from = oops_fs_resolve_path(from, from_buf, sizeof(from_buf));
+  to = oops_fs_resolve_path(to, to_buf, sizeof(to_buf));
   int rc = (int)sys_call(SYS_rename, (long)from, (long)to, 0, 0, 0, 0);
 #else
   int rc = rename(from, to);
@@ -380,6 +399,9 @@ int oops_fs_chmod(const char *path, int mode) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
+  /* Resolved, as `oops_fs_rename` explains. */
+  char resolved[1024];
+  path = oops_fs_resolve_path(path, resolved, sizeof(resolved));
   int rc = (int)sys_call(SYS_chmod, (long)path, mode, 0, 0, 0, 0);
 #else
   int rc = chmod(path, (mode_t)mode);
@@ -393,6 +415,9 @@ int oops_fs_rmdir(const char *path) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
+  /* Resolved, as `oops_fs_rename` explains. */
+  char resolved[1024];
+  path = oops_fs_resolve_path(path, resolved, sizeof(resolved));
   int rc = (int)sys_call(SYS_rmdir, (long)path, 0, 0, 0, 0, 0);
 #else
   int rc = rmdir(path);
@@ -459,7 +484,19 @@ int oops_fs_rmtree(const char *path) {
 
 #ifndef OOPS_HOST_BUILD
 
-#define OOPS_DIRENT_BUF 4096
+/*
+ * 64K, because a smaller buffer is not a smaller read - it is a refusal.
+ *
+ * `getdents` does not fill a buffer up to whatever size it is given and stop: it returns a
+ * whole block of directory entries or `EINVAL`, and this filesystem's blocks are larger
+ * than 4K. Both readers answered `0x80020016` - libkernel's `0x80020000 | errno`, so errno
+ * 22 - for every directory on the console, which read as "empty directory" all the way up
+ * through `readdir` to `std::filesystem::directory_iterator`.
+ *
+ * The buffer sits in the `oops_dir` this allocates per open directory, not on a stack, so
+ * the cost is 64K while a directory is being walked and nothing at all otherwise.
+ */
+#define OOPS_DIRENT_BUF 65536
 #define OOPS_DT_DIR 4 /* FreeBSD's DT_DIR */
 
 struct oops_bsd_dirent {
@@ -693,6 +730,9 @@ int oops_fs_unlink(const char *path) {
     return -1;
   }
 #ifndef OOPS_HOST_BUILD
+  /* Resolved, as `oops_fs_rename` explains. */
+  char resolved[1024];
+  path = oops_fs_resolve_path(path, resolved, sizeof(resolved));
   int rc = (int)sys_call(SYS_unlink, (long)path, 0, 0, 0, 0, 0);
 #else
   int rc = unlink(path);
