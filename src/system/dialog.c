@@ -121,6 +121,21 @@ int oops_dialog_ime_open(const oops_ime_param_t *param) {
         return -1;
     }
 
+    /* The keyboard composites against video-out and runs under the common-dialog
+     * system, the same two preconditions as the message dialog below. */
+    if (&oops_display_any_open && !oops_display_any_open()) {
+        oops_log_warn("DIALOG", "no display is open, so the IME dialog has nothing to "
+                                "composite against; refusing rather than faulting");
+        return -1;
+    }
+    if (sceCommonDialogInitialize) {
+        const int crc = sceCommonDialogInitialize();
+        if (crc != 0 && (unsigned int)crc != OOPS_COMMON_DIALOG_ALREADY_INITIALIZED) {
+            oops_log_warn("DIALOG", "sceCommonDialogInitialize failed rc=0x%x", crc);
+            return crc;
+        }
+    }
+
     int user_id = param->user_id;
     if (user_id < 0) {
         user_id = oops_user_get_initial_user_id();
