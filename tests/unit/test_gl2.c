@@ -1365,12 +1365,13 @@ static void test_gl2_structs_run(void) {
 /*
  * Packed depth-stencil: the framebuffer libultraship actually builds.
  *
- * `gfx_opengl.cpp` makes every one of its framebuffers this way - a `GL_DEPTH24_STENCIL8`
- * renderbuffer hung on `GL_DEPTH_STENCIL_ATTACHMENT` - and so does most code written
- * against GL 3.0 or ES 3.0. Refusing the format returned `GL_INVALID_ENUM` and left the
- * renderbuffer with no storage, which the program then attached anyway: a depth buffer
- * that had been asked for, refused, and hung on the framebuffer regardless. Ship of
- * Harkinian raised twenty-eight of those errors before its first frame.
+ * `gfx_opengl.cpp` makes every one of its framebuffers this way - a
+ * `GL_DEPTH24_STENCIL8` renderbuffer hung on `GL_DEPTH_STENCIL_ATTACHMENT` - and so
+ * does most code written against GL 3.0 or ES 3.0. Refusing the format returned
+ * `GL_INVALID_ENUM` and left the renderbuffer with no storage, which the program then
+ * attached anyway: a depth buffer that had been asked for, refused, and hung on the
+ * framebuffer regardless. Ship of Harkinian raised twenty-eight of those errors before
+ * its first frame.
  *
  * The one call has to furnish both attachment points, or a framebuffer that asked for
  * stencil reports itself complete without one.
@@ -1535,8 +1536,8 @@ static void test_gl2_respecified_buffer_waits_for_the_frame(void) {
 
     glBufferData(GL_ARRAY_BUFFER, sizeof(second), second, GL_STREAM_DRAW);
     buf = gl_find_buffer(c, vbo);
-    ASSERT_TRUE(buf->data != old_store);   /* a new store, as respecification says */
-    ASSERT_EQ(c->hw_vbo_retire_n, 1u);     /* the old one parked, not freed */
+    ASSERT_TRUE(buf->data != old_store); /* a new store, as respecification says */
+    ASSERT_EQ(c->hw_vbo_retire_n, 1u);   /* the old one parked, not freed */
     ASSERT_TRUE(c->hw_vbo_retire[0] == old_store);
     /* Still readable, and still what the earlier draw was given. */
     ASSERT_TRUE(((const float *)old_store)[0] == 1.0f);
@@ -3204,13 +3205,13 @@ static void test_gl2_compiles_a_whole_vertex_shader(void) {
         printf("\n    vs compile failed: %s\n", log);
     ASSERT_EQ(ok, GL_TRUE);
     ASSERT_EQ(count, p->hw_vs_words);
-    ASSERT_EQ(user_sgprs,
-              4u); /* uniform block in s[8:9], attribute table in s[10:11] */
-    ASSERT_EQ(p->hw_vs_user_sgprs, 4u);
+    ASSERT_EQ(user_sgprs, 5u); /* uniform block in s[8:9], attribute table in s[10:11],
+                                  base vert in s12 */
+    ASSERT_EQ(p->hw_vs_user_sgprs, 5u);
 
     /* Epilogue: ends with s_endpgm */
     ASSERT_EQ(words[count - 1u], 0xbf810000u); /* s_endpgm */
-    ASSERT_EQ(words[count - 2u], 0xbefe030cu); /* s_mov_b32 exec_lo, s12 */
+    ASSERT_EQ(words[count - 2u], 0xbefe030du); /* s_mov_b32 exec_lo, s13 */
     ASSERT_EQ(words[count - 3u], 0xbf8cff0fu); /* s_waitcnt expcnt(0) */
 
     glContextDestroy(ctx);
@@ -4840,18 +4841,18 @@ static void test_gl2_mix_chooses_on_a_bool_selector(void) {
     /* `fromLinear` itself, the shape that failed on hardware. sRGB encodes 0.5 linear
      * as about 0.7354 through the `pow` branch; the low component takes the linear
      * branch, 0.001 * 12.92. Both branches in one call is the point. */
-    compile_and_run(
-        ctx, VS_ONE_VARYING,
-        "vec4 fromLinear(vec4 linearRGB) {\n"
-        "  bvec3 cutoff = lessThan(linearRGB.rgb, vec3(0.0031308));\n"
-        "  vec3 higher = vec3(1.055) * pow(linearRGB.rgb, vec3(1.0/2.4)) - vec3(0.055);\n"
-        "  vec3 lower = linearRGB.rgb * vec3(12.92);\n"
-        "  return vec4(mix(higher, lower, cutoff), linearRGB.a);\n"
-        "}\n"
-        "void main() {\n"
-        "  gl_FragColor = fromLinear(vec4(0.5, 0.001, 0.5, 1.0));\n"
-        "}\n",
-        attr, o);
+    compile_and_run(ctx, VS_ONE_VARYING,
+                    "vec4 fromLinear(vec4 linearRGB) {\n"
+                    "  bvec3 cutoff = lessThan(linearRGB.rgb, vec3(0.0031308));\n"
+                    "  vec3 higher = vec3(1.055) * pow(linearRGB.rgb, vec3(1.0/2.4)) - "
+                    "vec3(0.055);\n"
+                    "  vec3 lower = linearRGB.rgb * vec3(12.92);\n"
+                    "  return vec4(mix(higher, lower, cutoff), linearRGB.a);\n"
+                    "}\n"
+                    "void main() {\n"
+                    "  gl_FragColor = fromLinear(vec4(0.5, 0.001, 0.5, 1.0));\n"
+                    "}\n",
+                    attr, o);
     ASSERT_NEAR(o[0], 0.735357f, 2e-3f); /* above the cutoff: the gamma branch */
     ASSERT_NEAR(o[1], 0.01292f, 2e-3f);  /* below it: the linear one */
     ASSERT_NEAR(o[2], 0.735357f, 2e-3f);
@@ -4910,7 +4911,8 @@ static void test_gl2_the_fast3d_fragment_shader_compiles(void) {
         "}\n"
         "vec4 fromLinear(vec4 linearRGB){\n"
         "    bvec3 cutoff = lessThan(linearRGB.rgb, vec3(0.0031308));\n"
-        "    vec3 higher = vec3(1.055)*pow(linearRGB.rgb, vec3(1.0/2.4)) - vec3(0.055);\n"
+        "    vec3 higher = vec3(1.055)*pow(linearRGB.rgb, vec3(1.0/2.4)) - "
+        "vec3(0.055);\n"
         "    vec3 lower = linearRGB.rgb * vec3(12.92);\n"
         "    return vec4(mix(higher, lower, cutoff), linearRGB.a);\n"
         "}\n"
@@ -5000,12 +5002,12 @@ static void test_gl2_a_constant_parameter_indexes_per_call(void) {
     const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
     const float w[2] = {0.25f, 0.75f};
 
-    const GLuint prog = linked_program(VS_ONE_VARYING,
-                                       "uniform float w[2];\n"
-                                       "float pick(in int i) { return w[i]; }\n"
-                                       "void main() {\n"
-                                       "  gl_FragColor = vec4(pick(0), pick(1), 0.0, 1.0);\n"
-                                       "}\n");
+    const GLuint prog = linked_program(
+        VS_ONE_VARYING, "uniform float w[2];\n"
+                        "float pick(in int i) { return w[i]; }\n"
+                        "void main() {\n"
+                        "  gl_FragColor = vec4(pick(0), pick(1), 0.0, 1.0);\n"
+                        "}\n");
     ASSERT_TRUE(prog != 0);
     glUseProgram(prog);
     glUniform1fv(glGetUniformLocation(prog, "w"), 2, w);
@@ -5014,12 +5016,12 @@ static void test_gl2_a_constant_parameter_indexes_per_call(void) {
     ASSERT_NEAR(o[1], 0.75f, 1e-3f); /* pick(1): the second, not the first again */
 
     /* The body moves the index: refused at generation, never folded to w[0]. */
-    const GLuint moved = linked_program(VS_ONE_VARYING,
-                                        "uniform float w[2];\n"
-                                        "float pick(in int i) { i = i + 1; return w[i]; }\n"
-                                        "void main() {\n"
-                                        "  gl_FragColor = vec4(pick(0), 0.0, 0.0, 1.0);\n"
-                                        "}\n");
+    const GLuint moved = linked_program(
+        VS_ONE_VARYING, "uniform float w[2];\n"
+                        "float pick(in int i) { i = i + 1; return w[i]; }\n"
+                        "void main() {\n"
+                        "  gl_FragColor = vec4(pick(0), 0.0, 0.0, 1.0);\n"
+                        "}\n");
     const gl_program_object_t *pm = gl_find_program(c, moved);
     ASSERT_TRUE(pm != NULL);
     static uint32_t words[512];

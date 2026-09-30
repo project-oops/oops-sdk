@@ -139,6 +139,7 @@ void glPushAttrib(GLbitfield mask) {
     e->index_mask = ctx->index_mask;
 
     e->cap_depth_test = ctx->cap_depth_test;
+    e->cap_depth_clamp = ctx->cap_depth_clamp;
     e->cap_cull_face = ctx->cap_cull_face;
     e->cap_blend = ctx->cap_blend;
     e->cap_scissor_test = ctx->cap_scissor_test;
@@ -497,6 +498,7 @@ void glPopAttrib(void) {
     if (all_enables || (mask & GL_TRANSFORM_BIT)) {
         ctx->cap_normalize = e->cap_normalize;
         ctx->cap_rescale_normal = e->cap_rescale_normal;
+        ctx->cap_depth_clamp = e->cap_depth_clamp;
         /* The clip planes are already in eye space, so they restore as stored - putting
          * them back through a modelview inverse would transform them a second time. */
         for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {

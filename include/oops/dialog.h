@@ -49,9 +49,9 @@ typedef struct oops_ime_param {
 
 /*
  * `OOPS_IME_FLAG_PASSWORD` masks the entry as it is typed and implies no learning: a
- * password never reaches the system's dictionary or its suggestions. `NO_LEARNING` alone
- * keeps ordinary text out of them - right for anything a game asks for, where nothing
- * typed is worth suggesting back to the player in another program.
+ * password never reaches the system's dictionary or its suggestions. `NO_LEARNING`
+ * alone keeps ordinary text out of them - right for anything a game asks for, where
+ * nothing typed is worth suggesting back to the player in another program.
  */
 #define OOPS_IME_FLAG_PASSWORD 0x1u
 #define OOPS_IME_FLAG_NO_LEARNING 0x2u

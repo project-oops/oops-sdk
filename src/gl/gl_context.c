@@ -195,10 +195,11 @@ static void gl_hw_dump_stream(const gl_context_t *ctx, uint32_t total_words) {
     }
     for (uint32_t a = 0; a <= ctx->hw_attrib_slot && a < 8u; a++) {
         gl_klog_val("oracle-attrib-slot", (uint64_t)a);
-        gl_klog_words("attrib",
-                      payload + (OOPS_GL_ATTRIB_SLOT_OFFSET +
-                                 a * OOPS_GL_ATTRIB_SLOT_STRIDE) / 4u,
-                      OOPS_GL_ATTRIB_SLOT_STRIDE / 4u);
+        gl_klog_words(
+            "attrib",
+            payload +
+                (OOPS_GL_ATTRIB_SLOT_OFFSET + a * OOPS_GL_ATTRIB_SLOT_STRIDE) / 4u,
+            OOPS_GL_ATTRIB_SLOT_STRIDE / 4u);
     }
 }
 
@@ -545,7 +546,8 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
     const GLboolean early_dump =
         (GLboolean)(gl_log_level >= (int)OOPS_LOG_DEBUG && ctx->hw_flushes <= 8u);
     if (early_dump) {
-        oops_log_info("GL", "submit %u via %s: %u words, draws textured %u untextured %u",
+        oops_log_info("GL",
+                      "submit %u via %s: %u words, draws textured %u untextured %u",
                       (unsigned)ctx->hw_flushes, s_flush_fn ? s_flush_fn : "(unnamed)",
                       (unsigned)total_words, (unsigned)ctx->hw_draws_textured,
                       (unsigned)ctx->hw_draws_untextured);

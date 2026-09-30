@@ -758,7 +758,8 @@ typedef struct {
     float cur_fog_coord;
 
     /* GL_ENABLE_BIT, and the individual buffer bits that also carry an enable */
-    GLboolean cap_depth_test, cap_cull_face, cap_blend, cap_scissor_test;
+    GLboolean cap_depth_test, cap_depth_clamp, cap_cull_face, cap_blend,
+        cap_scissor_test;
     GLboolean cap_lighting, cap_normalize,
         cap_color_material;       /* the texture enables: tex_units */
     GLboolean cap_rescale_normal; /* also GL_TRANSFORM_BIT, with GL_NORMALIZE */
@@ -1337,6 +1338,7 @@ typedef struct gl_context {
 
     /* Capabilities */
     GLboolean cap_depth_test;
+    GLboolean cap_depth_clamp;
     GLboolean cap_cull_face;
     GLboolean cap_blend;
     GLboolean cap_scissor_test;
@@ -2108,8 +2110,8 @@ typedef struct gl_context {
     uint32_t hw_clear_colour;
     uint32_t hw_clear_matched;
     uint32_t hw_clear_expected;
-    GLboolean hw_dump_pending;  /* log the next submission's stream, shaders and fence:
-                                   the oracle record */
+    GLboolean hw_dump_pending; /* log the next submission's stream, shaders and fence:
+                                  the oracle record */
     /*
      * Buffer stores released while a frame is being built, freed once it has run.
      *
@@ -2576,15 +2578,15 @@ static inline uint32_t gl_f32_bits(float f) {
  * on a change whatever the ring says, because `TA_BC_BASE_ADDR` is a frame register
  * rather than something the slot carries.
  */
-/* Where a compiled GL 2.0 pixel shader sits: 512 words at 0x3800, running to 0x4000,
- * above the descriptor ring and below the GL 2.0 uniform ring.
+/* Where a compiled GL 2.0 pixel shader sits: 1024 words at 0xb000, running to 0xc000,
+ * above the attribute slots and within the 64 KiB payload.
  *
  * One slot, not one per program. A compiled shader lives in the program object and is
  * copied here when a draw needs it, the way a texture's descriptors are copied into
  * their slot; a frame that switches between two programs pays an upload and a cache
  * flush per switch (`hw_ps_resident`). */
-#define OOPS_GL_PS_GL2_OFFSET 0x3800u
-#define OOPS_GL_PS_GL2_WORDS 512u
+#define OOPS_GL_PS_GL2_OFFSET 0xb000u
+#define OOPS_GL_PS_GL2_WORDS 1024u
 
 /*
  * A ring of blocks for GL 2.0 draws, at 0x4000 to the end of the payload.
@@ -2688,19 +2690,19 @@ static inline uint32_t gl_hw_desc_slot_offset(uint32_t slot) {
  * shader, neither of which faults. */
 typedef char oops_gl_payload_map_closes
     [(OOPS_GL_DESC_RING_OFFSET + OOPS_GL_DESC_RING_SLOTS * OOPS_GL_DESC_SLOT_STRIDE <=
+          OOPS_GL_GL2_SLOT_OFFSET &&
+      OOPS_GL_GL2_SLOT_OFFSET + OOPS_GL_GL2_SLOTS * OOPS_GL_GL2_SLOT_STRIDE <=
+          OOPS_GL_VS_GL2_OFFSET &&
+      OOPS_GL_VS_GL2_OFFSET + OOPS_GL_VS_GL2_WORDS * 4u <= OOPS_GL_ATTRIB_SLOT_OFFSET &&
+      OOPS_GL_ATTRIB_SLOT_OFFSET + OOPS_GL_ATTRIB_SLOTS * OOPS_GL_ATTRIB_SLOT_STRIDE <=
           OOPS_GL_PS_GL2_OFFSET &&
+      OOPS_GL_PS_GL2_OFFSET + OOPS_GL_PS_GL2_WORDS * 4u <= OOPS_GL_PAYLOAD_BYTES &&
       /* `hw_desc_shadow` mirrors a whole slot and is sized by a literal, because the
        * struct is declared above these constants. The two have to stay the same size or
        * the shadow describes less of the slot than the copy writes. */
       OOPS_GL_DESC_SLOT_STRIDE == 32u * 4u &&
       /* And the two shader mirrors, sized by literals for the same reason. */
       OOPS_GL_PS_UNTEX_WORDS == 128u && OOPS_GL_PS_TEX_WORDS == 320u &&
-      OOPS_GL_PS_GL2_OFFSET + OOPS_GL_PS_GL2_WORDS * 4u <= OOPS_GL_GL2_SLOT_OFFSET &&
-      OOPS_GL_GL2_SLOT_OFFSET + OOPS_GL_GL2_SLOTS * OOPS_GL_GL2_SLOT_STRIDE <=
-          OOPS_GL_VS_GL2_OFFSET &&
-      OOPS_GL_VS_GL2_OFFSET + OOPS_GL_VS_GL2_WORDS * 4u <= OOPS_GL_ATTRIB_SLOT_OFFSET &&
-      OOPS_GL_ATTRIB_SLOT_OFFSET + OOPS_GL_ATTRIB_SLOTS * OOPS_GL_ATTRIB_SLOT_STRIDE <=
-          OOPS_GL_PAYLOAD_BYTES &&
       /* The uniform block has to start after every descriptor set and end inside the
          slot. */
       (uint32_t)OOPS_GL_GL2_TEX_SETS * OOPS_GL_DESC_UNIT_STRIDE <=
@@ -3311,6 +3313,9 @@ static inline uint32_t gl_compute_clip_cntl(const gl_context_t *ctx) {
     for (int i = 0; i < OOPS_GL_CLIP_PLANE_COUNT; i++) {
         if (ctx->clip_plane_enabled[i])
             v |= (1u << i);
+    }
+    if (ctx->cap_depth_clamp) {
+        v |= (1u << 26) | (1u << 27);
     }
     return v;
 }
@@ -4731,7 +4736,7 @@ uint64_t gl_hw_query_end(gl_context_t *ctx, GLboolean *counted);
 
 /* The most one triangle can add to the stream; the sum is itemised where it is used, in
  * gl_draw.c, and anything added per draw has to be added to it. */
-#define OOPS_GL_DCB_DRAW_MAX_DW 232u /* itemised in gl_draw.c */
+#define OOPS_GL_DCB_DRAW_MAX_DW 256u /* itemised in gl_draw.c */
 
 /*
  * The vertex ring, and the command stream, sized so a frame fits in one submit.

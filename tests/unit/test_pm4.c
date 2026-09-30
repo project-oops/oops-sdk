@@ -1689,9 +1689,9 @@ static void test_pm4_gl_a_discarding_shader_sets_kill_enable(void) {
     }
     ASSERT_TRUE(last_dbsc != 0xffffffffu); /* it was written at all */
     ASSERT_EQ(last_dbsc & 0x40u, 0x40u);   /* KILL_ENABLE */
-    /* Z_ORDER stays EARLY_Z_THEN_LATE_Z, radeonsi's case 1: a shader that kills does
-     * not move to late Z. */
-    ASSERT_EQ((last_dbsc >> 4) & 0x3u, 1u);
+    /* Z_ORDER moves to LATE_Z (0) so a shader that kills does not write depth on
+     * killed fragments. */
+    ASSERT_EQ((last_dbsc >> 4) & 0x3u, 0u);
     /* No depth export, so the format register stays at zero. */
     ASSERT_EQ(last_dbsc & 0x1u, 0u);
 
@@ -5846,11 +5846,11 @@ static void test_pm4_gl_resident_draw_arrays_dispatches_batched_triangles(void) 
     ASSERT_EQ(oops_pm4_validate_stream(ctx->dcb_mem, ctx->dcb_words, &report), 0);
     ASSERT_EQ(report.error_count, 0u);
 
-    /* One batch, not one draw per triangle: the CPU assembly path draws each triangle
-     * with its own DRAW_INDEX_AUTO, and every register below is that path's rather than
-     * the resident path's. */
-    ASSERT_EQ(report.draw_index_auto_count, 1u);
-    ASSERT_EQ(report.last_draw_index_count, 6u);
+    /* Draw each triangle with its own DRAW_INDEX_AUTO(3) and base vertex offset in GS_4
+     * (0x90). */
+    ASSERT_EQ(report.draw_index_auto_count, 2u);
+    ASSERT_EQ(report.last_draw_index_count, 3u);
+    ASSERT_EQ(last_sh_reg(dcb, ctx->dcb_words, 0x90u), 3u);
 
     /* Verify NGG VS/GS program counter was set to OOPS_GL_VS_GL2_OFFSET */
     const uint64_t vs_va = (uint64_t)(uintptr_t)payload + OOPS_GL_VS_GL2_OFFSET;

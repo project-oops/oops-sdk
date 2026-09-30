@@ -170,6 +170,7 @@ typedef long GLsizeiptr;
 #define GL_BLEND 0x0BE2
 #define GL_SCISSOR_TEST 0x0C11
 #define GL_TEXTURE_2D 0x0DE1
+#define GL_DEPTH_CLAMP 0x864F
 
 /* Lighting Parameters */
 #define GL_LIGHT0 0x4000

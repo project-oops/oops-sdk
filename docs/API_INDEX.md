@@ -1037,6 +1037,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_mem_free`
 - `oops_mem_free_direct`
 - `oops_mem_get_phys`
+- `oops_mem_is_gpu`
 - `oops_mem_map_direct`
 - `oops_mem_release_va`
 - `oops_mem_reserve_va`

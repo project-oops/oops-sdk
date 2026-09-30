@@ -37,11 +37,11 @@ typedef struct heap_block_header {
  * **Sized to a multiple of 16, and that is not cosmetic.**
  *
  * Every pointer this heap returns is `block + sizeof(*this)`, so the header's size *is*
- * malloc's alignment guarantee. x86-64 requires 16 for the aligned SSE moves the compiler
- * emits freely, and adding `physical` took the header from 32 bytes to 40 - which made
- * every allocation in the process 8-byte aligned and faulted the first aligned store into
- * one. It arrived as a general protection fault at address 0 immediately after entry,
- * long before anything that would point at the allocator.
+ * malloc's alignment guarantee. x86-64 requires 16 for the aligned SSE moves the
+ * compiler emits freely, and adding `physical` took the header from 32 bytes to 40 -
+ * which made every allocation in the process 8-byte aligned and faulted the first
+ * aligned store into one. It arrived as a general protection fault at address 0
+ * immediately after entry, long before anything that would point at the allocator.
  *
  * `aligned(16)` makes the compiler round the size up, so a field added later cannot
  * silently reintroduce this.
@@ -49,8 +49,9 @@ typedef struct heap_block_header {
 __attribute__((aligned(16))) heap_block_header_t;
 
 /* The guarantee above, as something the compiler refuses rather than something a reader
- * has to notice. A header that is not a multiple of 16 misaligns every pointer this heap
- * returns, and the first symptom is a general protection fault nowhere near here. */
+ * has to notice. A header that is not a multiple of 16 misaligns every pointer this
+ * heap returns, and the first symptom is a general protection fault nowhere near here.
+ */
 _Static_assert(sizeof(heap_block_header_t) % 16u == 0u,
                "heap block header must keep malloc's pointers 16-byte aligned");
 
@@ -106,17 +107,16 @@ static void *sys_vm_alloc(size_t size) {
  * that 448MB - and Ship of Harkinian converting a ROM reached 378MB of it before a 4MB
  * request was refused with no errno, which arrived at the player as `std::bad_alloc`.
  *
- * The large pool was sitting untouched apart from the display. So large blocks come from
- * there now, and small ones stay on flexible memory where the 2MB allocation granularity
- * below would be pure waste.
+ * The large pool was sitting untouched apart from the display. So large blocks come
+ * from there now, and small ones stay on flexible memory where the 2MB allocation
+ * granularity below would be pure waste.
  *
- * Declared weak: a payload that links no `sce*` imports still builds, and the fallback to
- * `mmap` keeps working where these do not bind.
+ * Declared weak: a payload that links no `sce*` imports still builds, and the fallback
+ * to `mmap` keeps working where these do not bind.
  */
-__attribute__((weak)) int sceKernelAllocateDirectMemory(int64_t searchStart,
-                                                        int64_t searchEnd, size_t len,
-                                                        size_t alignment, int memoryType,
-                                                        int64_t *physicalOut);
+__attribute__((weak)) int
+sceKernelAllocateDirectMemory(int64_t searchStart, int64_t searchEnd, size_t len,
+                              size_t alignment, int memoryType, int64_t *physicalOut);
 __attribute__((weak)) int sceKernelMapDirectMemory(void **addrInOut, size_t len,
                                                    int prot, int flags,
                                                    int64_t physicalAddr,
@@ -132,14 +132,16 @@ __attribute__((weak)) size_t sceKernelGetDirectMemorySize(void);
 /*
  * `memoryType` is the one value here not measured for this use. The display allocates
  * type 3, but that is memory a GPU reads; for CPU-visible heap memory the write-back
- * type is the documented choice. Rather than pick one and have a wrong guess look like a
- * missing pool, both are tried in turn and the one that answers is logged and remembered.
+ * type is the documented choice. Rather than pick one and have a wrong guess look like
+ * a missing pool, both are tried in turn and the one that answers is logged and
+ * remembered.
  */
 static int s_direct_type = -1;
 
 static void *sys_vm_alloc_direct(size_t size, uint64_t *physical_out) {
     static const int types[] = {0, 3};
-    const size_t len = (size + (OOPS_DIRECT_ALIGN - 1)) & ~(size_t)(OOPS_DIRECT_ALIGN - 1);
+    const size_t len =
+        (size + (OOPS_DIRECT_ALIGN - 1)) & ~(size_t)(OOPS_DIRECT_ALIGN - 1);
     size_t i;
 
     if (!sceKernelAllocateDirectMemory || !sceKernelMapDirectMemory ||
@@ -162,7 +164,8 @@ static void *sys_vm_alloc_direct(size_t size, uint64_t *physical_out) {
             continue;
         }
 
-        /* Read and write for the CPU; this is heap memory, not something a GPU reads. */
+        /* Read and write for the CPU; this is heap memory, not something a GPU reads.
+         */
         rc = sceKernelMapDirectMemory(&addr, len, 0x3, 0, physical, OOPS_DIRECT_ALIGN);
         if (rc != 0 || addr == NULL) {
             if (sceKernelReleaseDirectMemory) {
@@ -177,7 +180,8 @@ static void *sys_vm_alloc_direct(size_t size, uint64_t *physical_out) {
                           "large blocks are coming from direct memory (type %d, %lluMB "
                           "pool) - flexible memory is only 448MB on this platform",
                           types[i],
-                          (unsigned long long)sceKernelGetDirectMemorySize() / (1024u * 1024u));
+                          (unsigned long long)sceKernelGetDirectMemorySize() /
+                              (1024u * 1024u));
         }
         *physical_out = (uint64_t)physical;
         return addr;
@@ -225,28 +229,29 @@ static int replenish_class(int class_idx) {
     /*
      * Flexible memory first, direct memory when it runs out.
      *
-     * Small arenas belong in the flexible pool: direct memory is handed out in 2MB units,
-     * so backing a 64KB arena with it wastes most of the mapping. But "wasteful" beats
-     * "out of memory" by a distance - Ship of Harkinian converting a ROM reached file 538
-     * of 547 and then died here, with 12GB of direct memory untouched, because this path
-     * had no second choice.
+     * Small arenas belong in the flexible pool: direct memory is handed out in 2MB
+     * units, so backing a 64KB arena with it wastes most of the mapping. But "wasteful"
+     * beats "out of memory" by a distance - Ship of Harkinian converting a ROM reached
+     * file 538 of 547 and then died here, with 12GB of direct memory untouched, because
+     * this path had no second choice.
      *
      * The arena is rounded up to the granularity and the extra is carved into chunks
-     * rather than wasted, so a fallback arena yields more objects, not fewer. Arenas are
-     * never released, so unlike the large path there is no offset to keep.
+     * rather than wasted, so a fallback arena yields more objects, not fewer. Arenas
+     * are never released, so unlike the large path there is no offset to keep.
      */
     if (arena == NULL) {
         uint64_t physical = 0;
-        size_t direct_sz = (arena_sz + (OOPS_DIRECT_ALIGN - 1)) &
-                           ~(size_t)(OOPS_DIRECT_ALIGN - 1);
+        size_t direct_sz =
+            (arena_sz + (OOPS_DIRECT_ALIGN - 1)) & ~(size_t)(OOPS_DIRECT_ALIGN - 1);
 
         arena = (uint8_t *)sys_vm_alloc_direct(direct_sz, &physical);
         if (arena != NULL) {
             arena_sz = direct_sz;
-            oops_log_info("HEAP",
-                          "flexible memory is full; class %d arenas now come from direct "
-                          "memory (%zuKB)",
-                          class_idx, direct_sz / 1024u);
+            oops_log_info(
+                "HEAP",
+                "flexible memory is full; class %d arenas now come from direct "
+                "memory (%zuKB)",
+                class_idx, direct_sz / 1024u);
         }
     }
 #endif
@@ -320,11 +325,12 @@ void *oops_malloc(size_t size) {
     /*
      * Both pools, every time - only the order changes.
      *
-     * The threshold decides which is *preferred*, not which is *available*: above it the
-     * 2MB granularity of direct memory is worth paying, below it the flexible pool is the
-     * better fit. But either can be empty, and a size just under the threshold must not be
-     * refused while 12GB sits free. Measured: a 975,120-byte request failed with the
-     * flexible pool at its 448MB ceiling, purely because it was 73KB below the cutoff.
+     * The threshold decides which is *preferred*, not which is *available*: above it
+     * the 2MB granularity of direct memory is worth paying, below it the flexible pool
+     * is the better fit. But either can be empty, and a size just under the threshold
+     * must not be refused while 12GB sits free. Measured: a 975,120-byte request failed
+     * with the flexible pool at its 448MB ceiling, purely because it was 73KB below the
+     * cutoff.
      */
 #ifndef OOPS_HOST_BUILD
     if (page_aligned >= OOPS_DIRECT_MIN_BYTES) {
@@ -357,18 +363,21 @@ void *oops_malloc(size_t size) {
          *
          * "failed for N bytes" on its own names neither the reason nor the scale, and a
          * caller turns it straight into `std::bad_alloc` with the size lost. The three
-         * facts that separate the cases: `errno` from the kernel (a refused mapping and an
-         * exhausted budget are different faults), how much this heap is already holding,
-         * and its peak - a request for 4MB failing while the heap holds 40MB is a budget,
-         * while the same failure holding almost nothing is the mapping call itself.
+         * facts that separate the cases: `errno` from the kernel (a refused mapping and
+         * an exhausted budget are different faults), how much this heap is already
+         * holding, and its peak - a request for 4MB failing while the heap holds 40MB
+         * is a budget, while the same failure holding almost nothing is the mapping
+         * call itself.
          */
 #ifndef OOPS_HOST_BUILD
         const int err = sys_get_errno();
 #else
         const int err = errno;
 #endif
-        const unsigned long long held = (unsigned long long)s_stats.current_allocated_bytes;
-        const unsigned long long peak = (unsigned long long)s_stats.peak_allocated_bytes;
+        const unsigned long long held =
+            (unsigned long long)s_stats.current_allocated_bytes;
+        const unsigned long long peak =
+            (unsigned long long)s_stats.peak_allocated_bytes;
 
         heap_release();
         oops_log_warn("HEAP",
@@ -485,8 +494,8 @@ void oops_free(void *ptr) {
         uint64_t physical = hdr->physical;
         sys_vm_free(mmap_base, total_sz);
 #ifndef OOPS_HOST_BUILD
-        /* A direct block's address is unmapped above; the pool behind it is separate and
-         * has to be given back too, or 12GB drains one allocation at a time. */
+        /* A direct block's address is unmapped above; the pool behind it is separate
+         * and has to be given back too, or 12GB drains one allocation at a time. */
         if (physical != 0 && sceKernelReleaseDirectMemory) {
             (void)sceKernelReleaseDirectMemory((int64_t)physical, total_sz);
         }

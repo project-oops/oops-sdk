@@ -446,17 +446,18 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
     /*
      * The parent directory the last file went into.
      *
-     * `mkdir_recursive` stats every component of the path it is given, so calling it once
-     * per file costs a `stat` per directory level per file - for an archive of 7,700 XML
-     * files five levels deep, 38,500 syscalls of which about a hundred do anything. That is
-     * not a rounding error on this platform: it was the whole of the unpack time, and a
-     * title unpacking its asset definitions sat on a black screen long enough to look
-     * hung.
+     * `mkdir_recursive` stats every component of the path it is given, so calling it
+     * once per file costs a `stat` per directory level per file - for an archive of
+     * 7,700 XML files five levels deep, 38,500 syscalls of which about a hundred do
+     * anything. That is not a rounding error on this platform: it was the whole of the
+     * unpack time, and a title unpacking its asset definitions sat on a black screen
+     * long enough to look hung.
      *
      * Entries in an archive are written in directory order, so consecutive files almost
-     * always share a parent. Remembering the last one and skipping the walk when it has not
-     * changed leaves the directories still created exactly when first needed - out-of-order
-     * entries simply pay the walk again, which is correct rather than merely cheaper.
+     * always share a parent. Remembering the last one and skipping the walk when it has
+     * not changed leaves the directories still created exactly when first needed -
+     * out-of-order entries simply pay the walk again, which is correct rather than
+     * merely cheaper.
      */
     char last_parent[512];
     last_parent[0] = '\0';
@@ -626,15 +627,16 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
         /*
          * Say where it has got to, occasionally.
          *
-         * An archive of a few files extracts between two log lines and needs nothing. One
-         * of 7,700 takes long enough that the two lines are minutes apart, and in between
-         * there is no way to tell slow from hung - not from the log, and not from a screen
-         * that has nothing on it yet. A title unpacking its assets looked exactly like a
-         * title that had died, and was killed for it more than once.
+         * An archive of a few files extracts between two log lines and needs nothing.
+         * One of 7,700 takes long enough that the two lines are minutes apart, and in
+         * between there is no way to tell slow from hung - not from the log, and not
+         * from a screen that has nothing on it yet. A title unpacking its assets looked
+         * exactly like a title that had died, and was killed for it more than once.
          *
-         * Every 500 entries, so a large archive reports about fifteen times: enough to see
-         * it moving and to estimate the rest, few enough that it cannot swamp a log that
-         * drops bursts. Per-entry logging exists at debug and costs six times the run.
+         * Every 500 entries, so a large archive reports about fifteen times: enough to
+         * see it moving and to estimate the rest, few enough that it cannot swamp a log
+         * that drops bursts. Per-entry logging exists at debug and costs six times the
+         * run.
          */
         if (((entry + 1) % 500) == 0) {
             oops_log_info("ZIP", "%u/%u entries", entry + 1, total_entries);

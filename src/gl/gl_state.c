@@ -431,6 +431,10 @@ void glEnable(GLenum cap) {
     case GL_DEPTH_TEST:
         ctx->cap_depth_test = GL_TRUE;
         break;
+    case GL_DEPTH_CLAMP:
+        ctx->cap_depth_clamp = GL_TRUE;
+        ctx->hw_clip_dirty = GL_TRUE;
+        break;
     case GL_CULL_FACE:
         ctx->cap_cull_face = GL_TRUE;
         break;
@@ -582,6 +586,10 @@ void glDisable(GLenum cap) {
     case GL_DEPTH_TEST:
         ctx->cap_depth_test = GL_FALSE;
         break;
+    case GL_DEPTH_CLAMP:
+        ctx->cap_depth_clamp = GL_FALSE;
+        ctx->hw_clip_dirty = GL_TRUE;
+        break;
     case GL_CULL_FACE:
         ctx->cap_cull_face = GL_FALSE;
         break;
@@ -720,6 +728,8 @@ GLboolean glIsEnabled(GLenum cap) {
     switch (cap) {
     case GL_DEPTH_TEST:
         return ctx->cap_depth_test;
+    case GL_DEPTH_CLAMP:
+        return ctx->cap_depth_clamp;
     case GL_CULL_FACE:
         return ctx->cap_cull_face;
     case GL_BLEND:
@@ -8420,9 +8430,10 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width,
          * A colour renderbuffer stays linear: the colour block is told so, and the
          * rasteriser addresses it by width.
          */
-        const GLboolean is_depth = (GLboolean)(internalformat == GL_DEPTH_COMPONENT16_ARB ||
-                                               internalformat == GL_DEPTH_COMPONENT24 ||
-                                               internalformat == GL_DEPTH24_STENCIL8);
+        const GLboolean is_depth =
+            (GLboolean)(internalformat == GL_DEPTH_COMPONENT16_ARB ||
+                        internalformat == GL_DEPTH_COMPONENT24 ||
+                        internalformat == GL_DEPTH24_STENCIL8);
         const GLboolean is_packed = (GLboolean)(internalformat == GL_DEPTH24_STENCIL8);
         size_t px = (size_t)width * (size_t)height;
 #ifndef OOPS_HOST_BUILD
@@ -8454,7 +8465,8 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width,
         if (is_packed) {
             const size_t spx = (size_t)(((uint32_t)width + 255u) & ~255u) *
                                (size_t)(((uint32_t)height + 255u) & ~255u);
-            rb->stencil = (uint8_t *)oops_mem_alloc(spx, 64u * 1024u, OOPS_MEM_WC_GARLIC);
+            rb->stencil =
+                (uint8_t *)oops_mem_alloc(spx, 64u * 1024u, OOPS_MEM_WC_GARLIC);
             if (!rb->stencil) {
                 gl_renderbuffer_storage_release(rb);
                 rb->width = 0;

@@ -3443,7 +3443,7 @@ static void gl_hw_emit_param_count(gl_context_t *ctx, uint32_t **dw_ptr,
     if (ctx->hw_params == params)
         return;
     uint32_t *dw = *dw_ptr;
-    const uint64_t off = (params >= 4u)   ? OOPS_GL_VS_P4_OFFSET
+    const uint64_t off = (params == 4u)   ? OOPS_GL_VS_P4_OFFSET
                          : (params == 3u) ? OOPS_GL_VS_P3_OFFSET
                                           : 0u;
     const uint64_t vs_va = (uint64_t)(uintptr_t)ctx->gpu_payload + off;
@@ -3460,23 +3460,22 @@ static void gl_hw_emit_param_count(gl_context_t *ctx, uint32_t **dw_ptr,
     /* The measured counts: 0x4/0x3 for three parameters, 0x6/0x4 with
      * SPI_PS_INPUT_CNTL_3 0x3 for four. SPI_PS_INPUT_CNTL_3 is 0x194 (Mesa
      * src/amd/registers/gfx103.json:4203). */
-    const uint32_t out_config = (params >= 4u) ? 0x6u : (params == 3u) ? 0x4u : 0x2u;
-    /* PS_W32_EN rides along: the register is written whole (see GL_SPI_PS_W32_EN). */
-    const uint32_t in_control = GL_SPI_PS_W32_EN | ((params >= 4u)   ? 0x4u
-                                                    : (params == 3u) ? 0x3u
-                                                                     : 0x2u);
+    const uint32_t out_config = (params >= 1u) ? (params - 1u) * 2u : 0u;
+    const uint32_t in_control = GL_SPI_PS_W32_EN | ((params == 4u)   ? 4u
+                                                    : (params == 3u) ? 3u
+                                                                     : 2u);
     *dw++ = 0xc0016900u;
     *dw++ = 0x1b1u;
-    *dw++ = out_config; /* VS_OUT_CONFIG */
+    *dw++ = out_config;
     *dw++ = 0xc0016900u;
     *dw++ = 0x1b6u;
-    *dw++ = in_control; /* PS_IN_CONTROL */
+    *dw++ = in_control;
     *dw++ = 0xc0016900u;
     *dw++ = 0x193u;
-    *dw++ = (params >= 3u) ? 0x2u : 0x0u; /* PS_INPUT_CNTL_2 */
+    *dw++ = (params >= 3u) ? 2u : 0u;
     *dw++ = 0xc0016900u;
     *dw++ = 0x194u;
-    *dw++ = (params >= 4u) ? 0x3u : 0x0u; /* PS_INPUT_CNTL_3 */
+    *dw++ = (params >= 4u) ? 3u : 0u;
     ctx->hw_params = params;
     *dw_ptr = dw;
 }
@@ -4016,7 +4015,9 @@ static void gl_draw_triangle_near_clipped(gl_context_t *ctx, const gl_vertex_t *
             out[n++] = *in[i];
         }
         if (in_i != in_j) {
-            gl_vertex_lerp(&out[n++], in[i], in[j], d[i] / (d[i] - d[j]));
+            const float denom = d[i] - d[j];
+            const float t = (denom > 1e-6f || denom < -1e-6f) ? d[i] / denom : 0.0f;
+            gl_vertex_lerp(&out[n++], in[i], in[j], t);
         }
     }
     if (n < 3) {
@@ -4080,29 +4081,25 @@ static void gl_draw_triangle_pv_body(gl_context_t *ctx, const gl_vertex_t *v0,
         mat4_transform_vec4(c0, &ctx->mvp, in0);
         mat4_transform_vec4(c1, &ctx->mvp, in1);
         mat4_transform_vec4(c2, &ctx->mvp, in2);
-
-        /* A triangle crossing the near plane is cut at it, into the one or two
-         * triangles in front, and those are drawn instead. */
-        const float d[3] = {c0[2] + c0[3], c1[2] + c1[3], c2[2] + c2[3]};
-        if (!s_near_clipping && (d[0] < 0.0f || d[1] < 0.0f || d[2] < 0.0f)) {
-            gl_draw_triangle_near_clipped(ctx, v0, v1, v2, pv, d);
-            return;
-        }
     }
 
-    /* Simple near-plane guard: cull if completely behind camera */
-    if (c0[3] <= 0.001f && c1[3] <= 0.001f && c2[3] <= 0.001f) {
+    /* A triangle crossing the near plane is cut at it, into the one or two
+     * triangles in front, and those are drawn instead. */
+    const float d[3] = {c0[2] + c0[3], c1[2] + c1[3], c2[2] + c2[3]};
+    if (!s_near_clipping && (d[0] < -1e-4f || d[1] < -1e-4f || d[2] < -1e-4f ||
+                             c0[3] <= 0.001f || c1[3] <= 0.001f || c2[3] <= 0.001f)) {
+        gl_draw_triangle_near_clipped(ctx, v0, v1, v2, pv, d);
         return;
     }
-    /* If partially behind near plane, clamp w to prevent division by zero */
-    float w0 = (c0[3] > 0.001f) ? c0[3] : 0.001f;
-    float w1 = (c1[3] > 0.001f) ? c1[3] : 0.001f;
-    float w2 = (c2[3] > 0.001f) ? c2[3] : 0.001f;
+
+    if (c0[3] <= 0.001f || c1[3] <= 0.001f || c2[3] <= 0.001f) {
+        return; /* Cull any vertex behind camera to prevent exploded coordinates */
+    }
 
     /* 2. Perspective divide to NDC */
-    float inv_w0 = 1.0f / w0;
-    float inv_w1 = 1.0f / w1;
-    float inv_w2 = 1.0f / w2;
+    float inv_w0 = 1.0f / c0[3];
+    float inv_w1 = 1.0f / c1[3];
+    float inv_w2 = 1.0f / c2[3];
 
     float ndc0[3] = {c0[0] * inv_w0, c0[1] * inv_w0, c0[2] * inv_w0};
     float ndc1[3] = {c1[0] * inv_w1, c1[1] * inv_w1, c1[2] * inv_w1};
@@ -4584,7 +4581,8 @@ static void gl_draw_triangle_hw(gl_context_t *ctx, const gl_tri_t *tri) {
      * descriptors, and before anything referencing it is written. The vertices of this
      * path go through the ring, which is GPU memory by construction, so only the
      * textures can carry a stray address. */
-    if ((hw->gl2_block_used && !gl_hw_block_textures_gpu(ctx, tri->prog, hw->gl2_block)) ||
+    if ((hw->gl2_block_used &&
+         !gl_hw_block_textures_gpu(ctx, tri->prog, hw->gl2_block)) ||
         !gl_hw_texture_gpu(hw->eff_obj) || !gl_hw_texture_gpu(hw->unit1_obj)) {
         return;
     }
@@ -5240,11 +5238,12 @@ static void gl_hw_report_nongpu(const char *what, GLuint id, uint64_t va, size_t
     /* Every one of the first few, in full; after that, one line in 256 so a frame
      * loop cannot bury the log but a persisting fault is still visibly persisting. */
     if (s_nongpu_refusals <= 16u || (s_nongpu_refusals & 255u) == 0u) {
-        oops_log_warn("GL",
-                      "draw refused: %s %u points the GPU at 0x%llx (+%zu bytes), which "
-                      "is not GPU memory - %u refused so far",
-                      what, (unsigned)id, (unsigned long long)va, len,
-                      (unsigned)s_nongpu_refusals);
+        oops_log_warn(
+            "GL",
+            "draw refused: %s %u points the GPU at 0x%llx (+%zu bytes), which "
+            "is not GPU memory - %u refused so far",
+            what, (unsigned)id, (unsigned long long)va, len,
+            (unsigned)s_nongpu_refusals);
     }
 }
 
@@ -5290,15 +5289,19 @@ static GLboolean gl_hw_texture_gpu(const gl_texture_object_t *obj) {
 static GLboolean gl_hw_attribs_gpu(gl_context_t *ctx, const uint32_t *adst,
                                    GLsizei count) {
     for (uint32_t loc = 0; loc < OOPS_GL_MAX_VERTEX_ATTRIBS; loc++) {
-        const uint64_t va = (uint64_t)adst[loc * 4u + 0u] |
-                            ((uint64_t)adst[loc * 4u + 1u] << 32);
+        const uint64_t va =
+            (uint64_t)adst[loc * 4u + 0u] | ((uint64_t)adst[loc * 4u + 1u] << 32);
         if (va == 0u)
             continue;
         const size_t stride = adst[loc * 4u + 2u];
-        const size_t span = count > 0 ? (size_t)count * (stride ? stride : 4u) : 1u;
+        const size_t attr_bytes = (size_t)adst[loc * 4u + 3u] * sizeof(float);
+        const size_t eff_bytes = attr_bytes ? attr_bytes : sizeof(float);
+        const size_t eff_stride = stride ? stride : eff_bytes;
+        const size_t span =
+            count > 1 ? (size_t)(count - 1) * eff_stride + eff_bytes : eff_bytes;
         if (!oops_mem_is_gpu((const void *)(uintptr_t)va, span)) {
-            gl_hw_report_nongpu("vertex attribute buffer", ctx->vertex_attribs[loc].buffer,
-                                va, span);
+            gl_hw_report_nongpu("vertex attribute buffer",
+                                ctx->vertex_attribs[loc].buffer, va, span);
             return GL_FALSE;
         }
     }
@@ -5376,7 +5379,10 @@ static void gl_hw_tri_ring(gl_context_t *ctx, const gl_tri_t *tri, gl_hw_draw_t 
         (prog_vs && prog && prog->fs)
             ? prog->hw_params
             : ((unit1 || aa_p4 || poly_smooth) ? 4u : ((p3 || p3_needed) ? 3u : 2u));
-    const size_t vsz = (params >= 4u) ? 80u : (params == 3u) ? 64u : 48u;
+    const size_t vsz = (prog_vs && prog && prog->fs) ? (16u + (size_t)params * 16u)
+                                                     : ((params == 4u)   ? 80u
+                                                        : (params == 3u) ? 64u
+                                                                         : 48u);
     const uint32_t tri_bytes = (uint32_t)(vsz * 3u);
     if (ctx->hw_vbo_cursor + tri_bytes > gl_vbo_ring_bytes) {
         gl_hw_flush(ctx);
@@ -5982,8 +5988,9 @@ static void gl_hw_tri_emit_draw(gl_context_t *ctx, const gl_tri_t *tri,
         const GLboolean kill_ps =
             (GLboolean)(compiled_ps ? prog->hw_ps_kills : kill_ff);
         const uint32_t want_zfmt = depth_ps ? 1u : 0u;
+        const uint32_t z_order = (depth_ps || kill_ps) ? 0x00000000u : 0x00000010u;
         const uint32_t want_dbsc =
-            (depth_ps ? 0x00000001u : 0x00000010u) | (kill_ps ? 0x00000040u : 0u);
+            (depth_ps ? 0x00000001u : 0u) | z_order | (kill_ps ? 0x00000040u : 0u);
         if (want_zfmt != ctx->hw_z_format) {
             *dw++ = 0xc0016900u;
             *dw++ = 0x1c4u;
@@ -5993,6 +6000,14 @@ static void gl_hw_tri_emit_draw(gl_context_t *ctx, const gl_tri_t *tri,
         /* Its own comparison, not the format's: a program that discards without
          * writing depth moves this register alone. */
         if (want_dbsc != ctx->hw_db_shader_control) {
+            static GLboolean s_logged_discard = GL_FALSE;
+            if (kill_ps && !s_logged_discard) {
+                s_logged_discard = GL_TRUE;
+                oops_log_info("GL",
+                              "shader discard/alpha-test active: "
+                              "DB_SHADER_CONTROL=0x%08x (LATE_Z)",
+                              want_dbsc);
+            }
             *dw++ = 0xc0016900u;
             *dw++ = 0x203u;
             *dw++ = want_dbsc;
@@ -7869,6 +7884,30 @@ static void fetch_vertex(const gl_context_t *ctx, int idx, gl_vertex_t *out) {
         out->y = (n > 1) ? gl_array_comp(t, ptr, 1, GL_FALSE) : 0.0f;
         out->z = (n > 2) ? gl_array_comp(t, ptr, 2, GL_FALSE) : 0.0f;
         out->w = (n > 3) ? gl_array_comp(t, ptr, 3, GL_FALSE) : 1.0f;
+    } else if (ctx->gl2_used && ctx->vertex_attribs[0].enabled) {
+        const gl_vertex_attrib_t *a0 = &ctx->vertex_attribs[0];
+        gl_client_array_t as;
+        as.size = a0->size;
+        as.type = a0->type;
+        as.stride = a0->stride;
+        as.pointer = a0->pointer;
+        as.enabled = GL_TRUE;
+        as.buffer = a0->buffer;
+        const uint8_t *base_a0 = gl_array_base(ctx, &as);
+        if (base_a0) {
+            const uint8_t *ptr = base_a0 + (idx * gl_array_stride(&as));
+            const GLboolean norm = (GLboolean)(a0->normalized && a0->type != GL_FLOAT &&
+                                               a0->type != GL_DOUBLE);
+            out->x = gl_array_comp(a0->type, ptr, 0, norm);
+            out->y = (a0->size > 1) ? gl_array_comp(a0->type, ptr, 1, norm) : 0.0f;
+            out->z = (a0->size > 2) ? gl_array_comp(a0->type, ptr, 2, norm) : 0.0f;
+            out->w = (a0->size > 3) ? gl_array_comp(a0->type, ptr, 3, norm) : 1.0f;
+        } else {
+            out->x = a0->current[0];
+            out->y = a0->current[1];
+            out->z = a0->current[2];
+            out->w = a0->current[3];
+        }
     } else {
         out->x = 0.0f;
         out->y = 0.0f;
@@ -8127,27 +8166,90 @@ static GLboolean gl_hw_can_resident_draw(gl_context_t *ctx, GLenum mode,
     const gl_program_object_t *const prog = gl_active_program(ctx);
     if (!prog || !prog->linked)
         return GL_FALSE;
-    if (!prog->vs || prog->hw_vs_words == 0u || !prog->hw_vs)
+    if (!prog->vs || prog->hw_vs_words == 0u || !prog->hw_vs) {
+        static GLboolean s_vs_logged = GL_FALSE;
+        if (!s_vs_logged) {
+            s_vs_logged = GL_TRUE;
+            oops_log_warn("GL",
+                          "resident draw rejected: prog %u vs=%p hw_vs_words=%u "
+                          "log='%s'",
+                          prog ? prog->name : 0, prog ? (const void *)prog->vs : NULL,
+                          prog ? prog->hw_vs_words : 0, prog ? prog->hw_vs_log : "");
+        }
         return GL_FALSE;
-    if (!prog->fs || prog->hw_ps_words == 0u || !prog->hw_ps)
+    }
+    if (!prog->fs || prog->hw_ps_words == 0u || !prog->hw_ps) {
+        static GLboolean s_ps_logged = GL_FALSE;
+        if (!s_ps_logged) {
+            s_ps_logged = GL_TRUE;
+            oops_log_warn("GL",
+                          "resident draw rejected: prog %u fs=%p hw_ps_words=%u "
+                          "log='%s'",
+                          prog ? prog->name : 0, prog ? (const void *)prog->fs : NULL,
+                          prog ? prog->hw_ps_words : 0, prog ? prog->hw_ps_log : "");
+        }
         return GL_FALSE;
+    }
     for (int i = 0; i < prog->attrib_count; i++) {
         const int loc = prog->attribs[i].location;
-        if (loc < 0 || loc >= (int)OOPS_GL_MAX_VERTEX_ATTRIBS)
+        if (loc < 0 || loc >= (int)OOPS_GL_MAX_VERTEX_ATTRIBS) {
+            static GLboolean s_loc_logged = GL_FALSE;
+            if (!s_loc_logged) {
+                s_loc_logged = GL_TRUE;
+                oops_log_warn("GL",
+                              "resident draw rejected: attrib '%s' loc=%d out of range",
+                              prog->attribs[i].name, loc);
+            }
             return GL_FALSE;
+        }
         const gl_vertex_attrib_t *ca = &ctx->vertex_attribs[loc];
-        if (!ca->enabled)
+        if (!ca->enabled) {
+            static GLboolean s_attr_logged = GL_FALSE;
+            if (!s_attr_logged) {
+                s_attr_logged = GL_TRUE;
+                oops_log_warn("GL",
+                              "resident draw rejected: attrib '%s' loc=%d not enabled",
+                              prog->attribs[i].name, loc);
+            }
             return GL_FALSE;
+        }
         const gl_buffer_object_t *buf = gl_find_buffer(ctx, ca->buffer);
-        if (!buf || !buf->data)
+        if (!buf || !buf->data) {
+            static GLboolean s_buf_logged = GL_FALSE;
+            if (!s_buf_logged) {
+                s_buf_logged = GL_TRUE;
+                oops_log_warn("GL",
+                              "resident draw rejected: attrib '%s' loc=%d buf=%u has "
+                              "no data",
+                              prog->attribs[i].name, loc, ca->buffer);
+            }
             return GL_FALSE;
+        }
         /* The vertex stage fetches from this address itself, so a store the GPU has
          * not mapped is a page fault rather than a slow draw. A buffer whose GPU
          * allocation failed takes the path below, which reads it on the CPU. */
-        if (!buf->gpu_visible)
+        if (!buf->gpu_visible) {
+            static GLboolean s_gpu_logged = GL_FALSE;
+            if (!s_gpu_logged) {
+                s_gpu_logged = GL_TRUE;
+                oops_log_warn("GL",
+                              "resident draw rejected: attrib '%s' loc=%d buf=%u not "
+                              "gpu visible",
+                              prog->attribs[i].name, loc, ca->buffer);
+            }
             return GL_FALSE;
-        if (ca->type != GL_FLOAT)
+        }
+        if (ca->type != GL_FLOAT) {
+            static GLboolean s_type_logged = GL_FALSE;
+            if (!s_type_logged) {
+                s_type_logged = GL_TRUE;
+                oops_log_warn("GL",
+                              "resident draw rejected: attrib '%s' loc=%d type=0x%x "
+                              "not float",
+                              prog->attribs[i].name, loc, ca->type);
+            }
             return GL_FALSE;
+        }
     }
     return GL_TRUE;
 }
@@ -8162,8 +8264,9 @@ static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint fir
     if (!ctx->hw_frame_active) {
         gl_hw_begin_frame(ctx);
     }
-    if (ctx->dcb_words + OOPS_GL_DCB_DRAW_MAX_DW + OOPS_GL_DCB_TRAILER_DW >=
-        ctx->dcb_capacity_dw) {
+    const uint32_t needed_dw =
+        OOPS_GL_DCB_DRAW_MAX_DW + (uint32_t)(count / 3) * 8u + OOPS_GL_DCB_TRAILER_DW;
+    if (ctx->dcb_words + needed_dw >= ctx->dcb_capacity_dw) {
         gl_hw_flush(ctx);
         gl_hw_begin_frame(ctx);
     }
@@ -8293,8 +8396,8 @@ static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint fir
         return;
 #endif
     /* Counted like the ring path's. They were not, so a frame of nothing but resident
-     * draws - every frame of a port that keeps its vertices in buffer objects - reported
-     * zero draws of either kind, and read as a frame that drew nothing. */
+     * draws - every frame of a port that keeps its vertices in buffer objects -
+     * reported zero draws of either kind, and read as a frame that drew nothing. */
     if (prog->hw_tex_sets > 0)
         ctx->hw_draws_textured++;
     else
@@ -8355,8 +8458,9 @@ static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint fir
     const GLboolean depth_ps = prog->hw_ps_exports_depth;
     const GLboolean kill_ps = prog->hw_ps_kills;
     const uint32_t want_zfmt = depth_ps ? 1u : 0u;
+    const uint32_t z_order = (depth_ps || kill_ps) ? 0x00000000u : 0x00000010u;
     const uint32_t want_dbsc =
-        (depth_ps ? 0x00000001u : 0x00000010u) | (kill_ps ? 0x00000040u : 0u);
+        (depth_ps ? 0x00000001u : 0u) | z_order | (kill_ps ? 0x00000040u : 0u);
     if (want_zfmt != ctx->hw_z_format) {
         *dw++ = 0xc0016900u;
         *dw++ = 0x1c4u;
@@ -8391,7 +8495,7 @@ static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint fir
         *dw++ = (uint32_t)(vs_va >> 40);
     }
 
-    /* GS Resource Registers: RSRC1 (VGPRs) & RSRC2 (USER_SGPR=4, LDS_SIZE=1) */
+    /* GS Resource Registers: RSRC1 (VGPRs) & RSRC2 (USER_SGPR=5, LDS_SIZE=1) */
     const uint32_t vgpr_granule =
         (prog->hw_vs_vgprs > 0u) ? ((prog->hw_vs_vgprs + 7u) / 8u - 1u) : 6u;
     const uint32_t gs_rsrc1 = 0x622c0040u | (vgpr_granule & 0x3fu);
@@ -8400,7 +8504,7 @@ static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint fir
     *dw++ = gs_rsrc1;
     *dw++ = 0xc0017600u; /* mmSPI_SHADER_PGM_RSRC2_GS (0x8b) */
     *dw++ = 0x8bu;
-    *dw++ = 0x000b0008u; /* LDS_SIZE=1, USER_SGPR=4 */
+    *dw++ = 0x000b000au; /* LDS_SIZE=1, USER_SGPR=5 */
 
     /* GS User SGPRs: s[8:9] = desc_table_va, s[10:11] = attrib_table_va */
     *dw++ = 0xc0017600u; /* mmSPI_SHADER_USER_DATA_GS_0 = 0x8c */
@@ -8417,11 +8521,17 @@ static void gl_hw_draw_arrays_resident(gl_context_t *ctx, GLenum mode, GLint fir
     *dw++ = (uint32_t)(attrib_table_va >> 32);
 
     /* Draw */
-    *dw++ = 0xc0002f00u; /* PACKET3_NUM_INSTANCES */
-    *dw++ = 1u;
-    *dw++ = 0xc0012d00u; /* DRAW_INDEX_AUTO */
-    *dw++ = (uint32_t)count;
-    *dw++ = 2u;
+    for (GLsizei v = 0; v < count; v += 3) {
+        *dw++ = 0xc0017600u; /* mmSPI_SHADER_USER_DATA_GS_4 = 0x90 */
+        *dw++ = 0x90u;
+        *dw++ = (uint32_t)v;
+
+        *dw++ = 0xc0002f00u; /* PACKET3_NUM_INSTANCES */
+        *dw++ = 1u;
+        *dw++ = 0xc0012d00u; /* DRAW_INDEX_AUTO */
+        *dw++ = 3u;
+        *dw++ = 2u;
+    }
 
     ctx->dcb_words = (uint32_t)(dw - ctx->dcb_mem);
     ctx->triangles_drawn += (uint32_t)(count / 3);

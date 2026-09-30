@@ -393,15 +393,15 @@ static void test_zip_path_traversal_rejection(void) {
  * Nested directories, and an entry that goes back to one already used.
  *
  * The extractor remembers the parent directory of the last file so it does not walk and
- * stat every path component again for the next one - which for an archive of 7,700 files
- * five levels deep was 38,500 syscalls, of which about a hundred did anything, and was the
- * whole of the unpack time on hardware.
+ * stat every path component again for the next one - which for an archive of 7,700
+ * files five levels deep was 38,500 syscalls, of which about a hundred did anything,
+ * and was the whole of the unpack time on hardware.
  *
- * The thing that optimisation can break is a file whose parent is *not* the previous one,
- * so this archive is deliberately ordered to do that: two files sharing a parent (the case
- * the cache is for), then a file in a different tree, then a fourth file back in the first
- * tree. If the cache were ever wrong about what exists, that fourth file would be the one
- * written into a directory that is not there.
+ * The thing that optimisation can break is a file whose parent is *not* the previous
+ * one, so this archive is deliberately ordered to do that: two files sharing a parent
+ * (the case the cache is for), then a file in a different tree, then a fourth file back
+ * in the first tree. If the cache were ever wrong about what exists, that fourth file
+ * would be the one written into a directory that is not there.
  */
 static void test_zip_extract_nested_out_of_order(void) {
     static const char *const names[] = {

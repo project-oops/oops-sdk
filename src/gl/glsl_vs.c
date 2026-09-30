@@ -113,7 +113,7 @@ static int32_t find_main(const glsl_unit_t *u) {
 static void vs_emit_ngg_preamble(glsl_code_t *code) {
     /* NGG primitive allocation and export sequence (D005, D014). */
     glsl_code_put(code, 0xbfa00001u); /* s_inst_prefetch 0x1 */
-    glsl_code_put(code, 0xbe8c037eu); /* s_mov_b32 s12, exec_lo */
+    glsl_code_put(code, 0xbe8d037eu); /* s_mov_b32 s13, exec_lo */
     glsl_code_put(code, 0xbefc03ffu); /* s_mov_b32 m0, 0x1003 */
     glsl_code_put(code, 0x00001003u);
     glsl_code_put(code, 0xbf800000u); /* s_nop 0 */
@@ -128,12 +128,8 @@ static void vs_emit_ngg_preamble(glsl_code_t *code) {
     glsl_code_put(code, 0xd765000eu); /* v_mbcnt_lo_u32_b32 v14, -1, 0 */
     glsl_code_put(code, 0x000100c1u);
 
-    /* Ordered wave ID from s2 (gs_tg_info): v14 = (ordered_wave_id * 3) + lane */
-    glsl_code_put(code, 0x8704ff02u); /* s_and_b32 s4, s2, 0xfff */
-    glsl_code_put(code, 0x00000fffu);
-    glsl_code_put(code, 0x8f058104u); /* s_lshl_b32 s5, s4, 1 */
-    glsl_code_put(code, 0x80040504u); /* s_add_u32 s4, s4, s5 */
-    glsl_code_put(code, 0x4a1c1c04u); /* v_add_nc_u32 v14, s4, v14 */
+    /* Base vertex offset from s12 (SPI_SHADER_USER_DATA_GS_4): v14 = s12 + lane */
+    glsl_code_put(code, 0x4a1c1c0cu); /* v_add_nc_u32 v14, s12, v14 */
 
     glsl_code_put(code, 0x7e020280u); /* v_mov_b32 v1, 0 */
 }
@@ -435,7 +431,7 @@ static GLboolean vs_emit_epilogue(const gl_program_object_t *p, const glsl_unit_
                          GL_TRUE);
 
     glsl_emit_s_waitcnt_exp(code);
-    glsl_code_put(code, 0xbefe030cu); /* s_mov_b32 exec_lo, s12 */
+    glsl_code_put(code, 0xbefe030du); /* s_mov_b32 exec_lo, s13 */
     glsl_emit_endpgm(code);
 
     return GL_TRUE;
@@ -510,7 +506,7 @@ GLboolean gl_program_compile_vertex(const gl_program_object_t *p, uint32_t *word
     glsl_gen_init(gen, (glsl_ast_t *)&vs->ast, sema, code);
     glsl_gen_reserve(gen, GL_VS_FIRST_FREE_VGPR);
 
-    const uint32_t user_sgprs = 4u;
+    const uint32_t user_sgprs = 5u;
 
     if (ok)
         vs_emit_ngg_preamble(code);

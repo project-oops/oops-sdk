@@ -2945,9 +2945,8 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
              * the same dimension and comparison mode as the uniform behind it. */
             const int src = arg_samp[bound];
             if (src < 0) {
-                (void)gen_fail(g,
-                               "a sampler parameter has to be passed a sampler by name",
-                               node);
+                (void)gen_fail(
+                    g, "a sampler parameter has to be passed a sampler by name", node);
                 break;
             }
             if (g->sampler_count >=
@@ -3057,10 +3056,11 @@ static glsl_value_t gen_call_user(glsl_gen_t *g, int32_t fn_node, int32_t first_
             break;
         /*
          * A parameter whose argument is a constant is that constant, while the body
-         * leaves it alone - so an index through it is known when the shader is compiled.
-         * Fast3D's `hookTexture2D(0, ...)` reads `texture_filtering[id]`, and an array is
-         * a run of registers here that a value known only at run time cannot index; with
-         * the call inlined and `id` bound to 0, it is `texture_filtering[0]`.
+         * leaves it alone - so an index through it is known when the shader is
+         * compiled. Fast3D's `hookTexture2D(0, ...)` reads `texture_filtering[id]`, and
+         * an array is a run of registers here that a value known only at run time
+         * cannot index; with the call inlined and `id` bound to 0, it is
+         * `texture_filtering[0]`.
          *
          * Only a scalar `in` parameter the body never assigns: GLSL parameters are
          * writable copies, and a constant that was assigned is a constant no longer.
