@@ -1144,6 +1144,10 @@ int oops_system_sandbox_escape_allowed(void) { return s_sandbox_escape_allowed; 
 
 int oops_system_escape_sandbox(void) {
 #ifndef OOPS_HOST_BUILD
+  /* If /data is already accessible, the process is already unsandboxed (e.g. etaHEN auto-jailbreak). */
+  if (oops_fs_exists("/data")) {
+    return 0;
+  }
   /*
    * **This takes `/app0` with it. A title that reads its own package must not call this.**
    *
@@ -1262,6 +1266,41 @@ int oops_system_escape_sandbox(void) {
   /* On the host side there is no sandbox to escape. */
   (void)0;
   return 0;
+#endif
+}
+
+int oops_system_can_escape_sandbox(void) {
+#ifndef OOPS_HOST_BUILD
+  /* 1. Already escaped or unsandboxed (e.g. etaHEN auto-jailbreak has mounted /data). */
+  if (oops_fs_exists("/data")) {
+    return 1;
+  }
+
+  /* 2. Otherwise probe if sandbox-daemon is listening on 127.0.0.1:9069. */
+  int sock = (int)sys_call(SYS_socket, 2 /* AF_INET */,
+                           1 /* SOCK_STREAM */, 6 /* IPPROTO_TCP */, 0, 0, 0);
+  if (sock < 0) {
+    return 0;
+  }
+
+  char sockaddr[16];
+  sockaddr[0] = 16;   /* sin_len = sizeof(struct sockaddr_in) */
+  sockaddr[1] = 2;    /* sin_family = AF_INET (2) */
+  sockaddr[2] = 0x23; /* port 9069 high byte: 0x236D */
+  sockaddr[3] = 0x6D; /* port 9069 low byte */
+  sockaddr[4] = 127;  /* 127.0.0.1 */
+  sockaddr[5] = 0;
+  sockaddr[6] = 0;
+  sockaddr[7] = 1;
+  for (int i = 8; i < 16; i++) {
+    sockaddr[i] = 0;
+  }
+
+  long connect_rc = sys_call(SYS_connect, sock, (long)sockaddr, 16, 0, 0, 0);
+  sys_call(SYS_close, sock, 0, 0, 0, 0, 0);
+  return (connect_rc == 0) ? 1 : 0;
+#else
+  return 1;
 #endif
 }
 

@@ -275,6 +275,15 @@ int oops_system_init_namespace(const struct payload_args *args);
 int oops_system_escape_sandbox(void);
 
 /**
+ * Test whether the process has or can obtain sandbox escape privileges.
+ *
+ * Returns 1 if /data is already accessible (e.g. etaHEN auto-jailbreak has mounted
+ * it) or if sandbox-daemon is reachable on loopback TCP 127.0.0.1:9069.
+ * Returns 0 if neither is available.
+ */
+int oops_system_can_escape_sandbox(void);
+
+/**
  * Say that this title accepts losing `/app0` in exchange for reaching `/data`.
  *
  * `oops_fs_get_storage_dir` and `oops_savedata_mount` must leave the sandbox to reach internal
