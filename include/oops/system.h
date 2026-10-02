@@ -275,6 +275,16 @@ int oops_system_init_namespace(const struct payload_args *args);
 int oops_system_escape_sandbox(void);
 
 /**
+ * Restores the process to its original sandboxed state.
+ *
+ * Communicates with the resident sandbox-daemon via loopback TCP at 127.0.0.1:9069,
+ * requesting restoration of original directory vnodes and process credentials.
+ *
+ * Returns: 0 on success, -1 on timeout or if daemon is unavailable.
+ */
+int oops_system_unescape_sandbox(void);
+
+/**
  * Test whether the process has or can obtain sandbox escape privileges.
  *
  * Returns 1 if /data is already accessible (e.g. etaHEN auto-jailbreak has mounted

@@ -552,7 +552,12 @@ Low-level kernel credential escalation and filesystem jailbreak.
 
 ### `int oops_system_escape_sandbox(void)` (`<oops/system.h>`)
 * **When to use**: Explicit opt-in sandbox elevation for system launchers and file managers needing global filesystem access (`/user/app`, `/data/homebrew`, `/user/appmeta`).
-* **Mechanism**: Connects via loopback TCP (`127.0.0.1:9069`) to resident `sandbox-daemon`, passing the calling process PID and receiving an authorization ACK. Event-driven with zero polling.
+* **Mechanism**: Connects via loopback TCP (`127.0.0.1:9069`) to resident `sandbox-daemon`, passing command 1 (escape) and the calling process PID and receiving an authorization ACK. Event-driven with zero polling.
+* **Returns**: `0` on success; `-1` on error or if `sandbox-daemon` is unreachable.
+
+### `int oops_system_unescape_sandbox(void)` (`<oops/system.h>`)
+* **When to use**: Restores the process to its original sandboxed state after completing operations outside `/app0`, restoring access to `/app0` and enabling subsequent `libSceHttp` requests.
+* **Mechanism**: Connects via loopback TCP (`127.0.0.1:9069`) to resident `sandbox-daemon`, passing command 2 (restore) and the calling process PID, restoring original directory vnodes and credentials.
 * **Returns**: `0` on success; `-1` on error or if `sandbox-daemon` is unreachable.
 
 ### `int oops_escape_jail(void)`

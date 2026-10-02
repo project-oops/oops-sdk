@@ -1170,6 +1170,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_system_pump_events`
 - `oops_system_sandbox_escape_allowed`
 - `oops_system_set_suspend_drain`
+- `oops_system_unescape_sandbox`
 - `oops_test_get_last_klog`
 - `oops_user_get_initial_user_id`
 - `oops_user_get_logged_in_users`
