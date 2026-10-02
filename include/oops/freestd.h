@@ -16,6 +16,16 @@
     defined(OBSCENE_HOST_BUILD)
 #include <string.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#if !defined(_PID_T_DECLARED)
+typedef int32_t pid_t;
+#define _PID_T_DECLARED
+#endif
+#if !defined(_SSIZE_T_DECLARED)
+typedef int64_t ssize_t;
+#define _SSIZE_T_DECLARED
+#endif
+#endif
 #else
 #ifndef _PID_T_DECLARED
 typedef int32_t pid_t;
