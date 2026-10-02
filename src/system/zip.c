@@ -571,8 +571,8 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
                 }
                 /* 0777, not 0644: an installed homebrew title's eboot.bin (and its .prx
                  * modules) must carry the execute bit or the console refuses to spawn
-                 * the process (EACCES). Sandboxed titles run unprivileged and need write
-                 * permissions inside /app0. */
+                 * the process (EACCES). Sandboxed titles run unprivileged and need
+                 * write permissions inside /app0. */
                 int fd = oops_fs_open(
                     target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0777);
                 if (fd < 0)
