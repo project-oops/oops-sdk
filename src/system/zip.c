@@ -385,19 +385,27 @@ static int mkdir_recursive(const char *dir_path) {
     obs_strncpy(path, dir_path, sizeof(path) - 1);
     path[sizeof(path) - 1] = '\0';
 
+    while (len > 1 && (path[len - 1] == '/' || path[len - 1] == '\\')) {
+        path[--len] = '\0';
+    }
+
     for (size_t i = 1; i < len; i++) {
         if (path[i] == '/' || path[i] == '\\') {
             char sep = path[i];
             path[i] = '\0';
-            if (path[0] != '\0' && !oops_fs_exists(path)) {
-                (void)oops_fs_mkdir(path, 0755);
+            if (path[0] != '\0') {
+                if (!oops_fs_exists(path)) {
+                    (void)oops_fs_mkdir(path, 0777);
+                }
+                (void)oops_fs_chmod(path, 0777);
             }
             path[i] = sep;
         }
     }
     if (!oops_fs_exists(path)) {
-        (void)oops_fs_mkdir(path, 0755);
+        (void)oops_fs_mkdir(path, 0777);
     }
+    (void)oops_fs_chmod(path, 0777);
     return 0;
 }
 
@@ -520,6 +528,7 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
 
         if (is_dir) {
             mkdir_recursive(target_path);
+            (void)oops_fs_chmod(target_path, 0777);
         } else {
             /* Ensure parent directory exists */
             char parent[512];
@@ -560,13 +569,12 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
                 if (comp_size != uncomp_size) {
                     return OOPS_ZIP_ERR_BAD_HEADER;
                 }
-                /* 0755, not 0644: an installed homebrew title's eboot.bin (and its .prx
+                /* 0777, not 0644: an installed homebrew title's eboot.bin (and its .prx
                  * modules) must carry the execute bit or the console refuses to spawn
-                 * the process (EACCES). A title .zip stores its files 0644, so the
-                 * extractor grants execute here; the bit is harmless on the data files
-                 * that share the tree. */
+                 * the process (EACCES). Sandboxed titles run unprivileged and need write
+                 * permissions inside /app0. */
                 int fd = oops_fs_open(
-                    target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0755);
+                    target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0777);
                 if (fd < 0)
                     return OOPS_ZIP_ERR_WRITE;
                 if (comp_size > 0) {
@@ -595,10 +603,8 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
                     return OOPS_ZIP_ERR_DECOMPRESS;
                 }
 
-                /* 0755 for the same reason as the STORED branch above: the eboot must
-                 * be executable. */
                 int fd = oops_fs_open(
-                    target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0755);
+                    target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0777);
                 if (fd < 0) {
                     if (uncomp_buf)
                         zip_free(uncomp_buf);
@@ -616,10 +622,10 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
             } else {
                 return OOPS_ZIP_ERR_UNSUPPORTED;
             }
-            /* Belt to the 0755 passed at open, which the kernel ignores when the file
-             * already exists: enforce the execute bit so a re-installed title's eboot
-             * stays runnable. */
-            (void)oops_fs_chmod(target_path, 0755);
+            /* Belt to the 0777 passed at open, which the kernel ignores when the file
+             * already exists: enforce the execute and write bits so a re-installed
+             * title's eboot stays runnable and files remain writable. */
+            (void)oops_fs_chmod(target_path, 0777);
         }
 
         cd_ptr += 46 + fname_len + extra_len + comment_len;
