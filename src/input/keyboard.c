@@ -83,25 +83,34 @@ static uint32_t decode_keycode(uint16_t code) {
     case 26: /* W key */
         return OOPS_BUTTON_UP;
 
-    /* Cross (X / Confirm): Enter, Keypad Enter, Space */
+    /* Cross (X / Confirm): X key, Enter, Keypad Enter, '2' key */
+    case 27: /* X key (0x1B) */
+    case 31: /* '2' key (0x1F) */
+        return OOPS_BUTTON_CROSS;
     case 40: /* Return / Enter (0x28) */
     case 88: /* Keypad Enter (0x58) */
-        return OOPS_BUTTON_CROSS;
+        return OOPS_BUTTON_CROSS | OOPS_BUTTON_OPTIONS;
 
-    /* Circle (Back / Cancel): Escape and Backspace */
+    /* Circle (Back / Cancel): C key, Escape and Backspace */
+    case 6:  /* C key (0x06) */
     case 41: /* Escape (0x29) */
     case 42: /* Backspace (0x2A) */
         return OOPS_BUTTON_CIRCLE;
 
-    /* Triangle (Search): F1 */
+    /* Triangle (Search): V key, F1 */
+    case 25: /* V key (0x19) */
     case 58: /* F1 (0x3A) */
         return OOPS_BUTTON_TRIANGLE;
 
-    /* Square (Library): F2 */
+    /* Square (Library): Z key, F2 */
+    case 29: /* Z key (0x1D) */
     case 59: /* F2 (0x3B) */
         return OOPS_BUTTON_SQUARE;
 
-    /* Options: F3 */
+    /* Options / Start: Space, P key, F3, '1' key */
+    case 19: /* P key (0x13) */
+    case 30: /* '1' key (0x1E) */
+    case 44: /* Space (0x2C) */
     case 60: /* F3 (0x3C) */
         return OOPS_BUTTON_OPTIONS;
 
@@ -118,11 +127,9 @@ static uint32_t decode_keycode(uint16_t code) {
     case 8:  /* E key */
         return OOPS_BUTTON_R1;
 
-    /* L2 / R2: Tab / Space */
+    /* L2: Tab */
     case 43: /* Tab */
         return OOPS_BUTTON_L2;
-    case 44: /* Space */
-        return OOPS_BUTTON_R2;
 
     default:
         return 0u;
@@ -186,7 +193,10 @@ int oops_keyboard_init(void) {
         }
         if (sceUserServiceInitialize &&
             oops_symbol_is_resolved((const void *)sceUserServiceInitialize)) {
-            sceUserServiceInitialize(NULL);
+            struct {
+                int priority;
+            } params = {256};
+            sceUserServiceInitialize(&params);
         }
         if (sceKeyboardSetProcessPrivilege &&
             oops_symbol_is_resolved((const void *)sceKeyboardSetProcessPrivilege)) {
@@ -261,10 +271,23 @@ int oops_keyboard_init(void) {
         }
     }
 
-    /* Fallback defaults if no user service resolution */
+    /* Fallback defaults if no user service resolution or to ensure fallbacks are probed
+     */
     if (uid_count == 0) {
         uids[uid_count++] = 0x10000000;
         uids[uid_count++] = 0xFF;
+    } else {
+        int has_primary = 0, has_any = 0;
+        for (int i = 0; i < uid_count; i++) {
+            if (uids[i] == 0x10000000)
+                has_primary = 1;
+            if (uids[i] == 0xFF)
+                has_any = 1;
+        }
+        if (!has_primary && uid_count < 8)
+            uids[uid_count++] = 0x10000000;
+        if (!has_any && uid_count < 8)
+            uids[uid_count++] = 0xFF;
     }
 
     int opened = 0;
@@ -393,6 +416,18 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
         }
     }
     if (!any_valid) {
+        static int s_read_poll_tick = 0;
+        if ((++s_read_poll_tick % 60) == 0) {
+            (void)oops_keyboard_init();
+            for (int i = 0; i < OOPS_KEYBOARD_MAX_HANDLES; i++) {
+                if (s_kbd_handles[i] >= 0) {
+                    any_valid = 1;
+                    break;
+                }
+            }
+        }
+    }
+    if (!any_valid) {
         return OOPS_KEYBOARD_EUNAVAIL;
     }
 
@@ -493,7 +528,8 @@ int oops_keyboard_read(oops_key_event_t *out_events, unsigned int max_events) {
        invisible above the SDK. Off by default, as typing logs two lines a character. */
     for (unsigned int e = 0u; e < n; e++) {
         oops_log_debug(
-            "KBD", "event usage=0x%x %s mods=0x%x", (unsigned int)out_events[e].usage,
+            "KBD", "event usage=0x%02x (%u) %s mods=0x%x",
+            (unsigned int)out_events[e].usage, (unsigned int)out_events[e].usage,
             out_events[e].transition == (uint8_t)OOPS_KEY_DOWN ? "down" : "up",
             (unsigned int)out_events[e].modifiers);
     }
@@ -535,54 +571,27 @@ uint32_t oops_keyboard_poll_buttons(void) {
 
     uint32_t total_buttons = 0u;
 
-    for (int idx = 0; idx < OOPS_KEYBOARD_MAX_HANDLES; idx++) {
-        int handle = s_kbd_handles[idx];
-        if (handle < 0)
-            continue;
-
-        /* sceKeyboardReadState gives the instantaneous state: releases show on the next
-         * frame (so double-taps register) and held keys show every frame (so
-         * hold-to-repeat works). */
-        if (sceKeyboardReadState &&
-            oops_symbol_is_resolved((const void *)sceKeyboardReadState)) {
-            oops_kbd_hw_record_t record;
-            for (size_t s = 0; s < sizeof(record); s++) {
-                ((uint8_t *)&record)[s] = 0;
-            }
-            int rc = sceKeyboardReadState(handle, &record);
-            if (rc == 0) {
-                if (is_usable_sample(&record)) {
-                    total_buttons |=
-                        decode_keys_array(record.keycodes, OOPS_MAX_HW_KEYS);
-                }
-                continue;
+    /*
+     * Poll handle 0 (the primary keyboard handle) using kbd_read_record so we get
+     * instantaneous state via sceKeyboardReadState without stale queue artifacts,
+     * avoiding any phantom keys from secondary/virtual handles.
+     */
+    const int handle = s_kbd_handles[0];
+    if (handle >= 0) {
+        oops_kbd_hw_record_t record;
+        if (kbd_read_record(handle, &record)) {
+            if (is_usable_sample(&record)) {
+                total_buttons = decode_keys_array(record.keycodes, OOPS_MAX_HW_KEYS);
             }
         }
+    }
 
-        /* Fallback: the sceKeyboardRead event queue. */
-        if (sceKeyboardRead && oops_symbol_is_resolved((const void *)sceKeyboardRead)) {
-            oops_kbd_hw_record_t samples[16];
-            for (size_t s = 0; s < sizeof(samples); s++) {
-                ((uint8_t *)samples)[s] = 0;
-            }
-            int sample_count = sceKeyboardRead(handle, samples, 16);
-            if (sample_count > 0) {
-                int limit = (sample_count > 16) ? 16 : sample_count;
-                for (int s = 0; s < limit; s++) {
-                    const oops_kbd_hw_record_t *sample = &samples[s];
-                    if (!is_usable_sample(sample)) {
-                        for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
-                            s_kbd_previous_keys[idx][k] = 0;
-                        }
-                        continue;
-                    }
-                    for (int k = 0; k < OOPS_MAX_HW_KEYS; k++) {
-                        s_kbd_previous_keys[idx][k] = sample->keycodes[k];
-                    }
-                }
-            }
-            total_buttons |=
-                decode_keys_array(s_kbd_previous_keys[idx], OOPS_MAX_HW_KEYS);
+    if (total_buttons != 0) {
+        static uint32_t s_last_logged_btn = 0;
+        if (total_buttons != s_last_logged_btn) {
+            oops_log_debug("KBD", "keyboard_poll_buttons: buttons=0x%08x",
+                           (unsigned int)total_buttons);
+            s_last_logged_btn = total_buttons;
         }
     }
 

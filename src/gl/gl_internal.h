@@ -395,10 +395,10 @@ static inline gl_list_arg_t gl_la_e(GLenum v) {
          ? (int)((t) - GL_TEXTURE_CUBE_MAP_POSITIVE_X)                                 \
          : -1)
 
-/* The largest texture, and so the mip levels a texture can have: 2048 halves to 1 in
- * eleven steps, levels 0..11. */
-#define OOPS_GL_MAX_TEXTURE_SIZE 2048
-#define OOPS_GL_MAX_TEXTURE_LEVELS 12
+/* The largest texture, and so the mip levels a texture can have: 4096 halves to 1 in
+ * twelve steps, levels 0..12. */
+#define OOPS_GL_MAX_TEXTURE_SIZE 4096
+#define OOPS_GL_MAX_TEXTURE_LEVELS 13
 /* Samples per pixel, which is one. This rasterises one sample and the hardware path's
  * colour target is single-sampled, so `GL_MAX_SAMPLES` is 1 and
  * `glRenderbufferStorageMultisample` refuses more rather than quietly giving one. */
@@ -998,8 +998,8 @@ void gl_heap_free(void *p);
  * line and column. */
 #define OOPS_GL_INFO_LOG_SIZE 256
 
-#define OOPS_GL_MAX_SHADER_OBJECTS 64
-#define OOPS_GL_MAX_PROGRAM_OBJECTS 32
+#define OOPS_GL_MAX_SHADER_OBJECTS 1024
+#define OOPS_GL_MAX_PROGRAM_OBJECTS 512
 /* GL 2.0 allows several shaders of one type on a program; the linker refuses past this
  * rather than losing one quietly. */
 #define OOPS_GL_MAX_ATTACHED_SHADERS 8
@@ -1007,9 +1007,9 @@ void gl_heap_free(void *p);
 /* `OOPS_GL_MAX_VERTEX_ATTRIBS` is with the other capacities at the top of this file,
  * because `gl_vertex_t` carries one value per slot and is declared long before this
  * section. */
-/* Varyings between the stages: eight four-component slots, so GL_MAX_VARYING_FLOATS is
- * 32 - the specification's minimum, and what the interpolator carries per fragment. */
-#define OOPS_GL_MAX_PROGRAM_VARYINGS 8
+/* Varyings between the stages: sixteen four-component slots, so GL_MAX_VARYING_FLOATS
+ * is 64 - what the interpolator carries per fragment. */
+#define OOPS_GL_MAX_PROGRAM_VARYINGS 16
 #define OOPS_GL_MAX_VARYING_FLOATS (OOPS_GL_MAX_PROGRAM_VARYINGS * 4)
 
 /* One entry of a linked program's uniform table.

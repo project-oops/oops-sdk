@@ -2730,7 +2730,7 @@ static GLboolean gl_get_integer_program_fog(gl_context_t *ctx, GLenum pname,
     case GL_MAX_VARYING_FLOATS:
         if (!gl_require_version_enum(ctx, 2u, 0u))
             break;
-        params[0] = OOPS_GL_MAX_VARYING_FLOATS; /* 32, the minimum: eight vec4 slots */
+        params[0] = OOPS_GL_MAX_VARYING_FLOATS; /* 64: sixteen vec4 slots */
         break;
     /* The samplers a fragment shader may name, distinct from the fixed-function stage
      * count; see `OOPS_GL_MAX_TEXTURE_IMAGE_UNITS`. */
@@ -4329,14 +4329,10 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
     else if (tex->target == GL_TEXTURE_CUBE_MAP)
         img_type = 0xbu;
     tex->img_desc[3] = (img_type << 28) | 0xfacu;
-    /* WORD4. For a 2D image DEPTH holds the low 13 bits of the row pitch and PITCH_MSB
-     * bit 13 holds the top one, both as pitch - 1, and the hardware reads them only
-     * when the pitch exceeds the width - "1D, 2D, 2D_MSAA: the pitch if pitch > width,
-     * the low bits are in DEPTH", mesa/src/amd/registers/gfx10-rsrc.json:401-406 (type
-     * SQ_IMG_RSRC_WORD4_gfx103). Mesa encodes it the same way at
-     * ac_descriptors.c:711-712. Zero for a texture whose rows are exactly as wide as
-     * the image, which is every width that is a multiple of 64 pixels. */
-    const uint32_t pitch = tex->pitch ? tex->pitch : w;
+    /* WORD4. For a 3D image and a cube map DEPTH holds the slice count less one.
+     * For a 2D linear image WORD4 is 0: the hardware derives the 256-byte aligned
+     * row pitch from width directly without custom pitch. Writing pitch - 1 into
+     * DEPTH corrupts 2D sampling by advertising a non-zero volume depth. */
     if (tex->target == GL_TEXTURE_3D || tex->target == GL_TEXTURE_CUBE_MAP) {
         /* For a 3D image and a cube map the field is the last slice, not a pitch: DEPTH
          * is the slice count less one, `0x1` for a two-slice volume and `0x5` for a
@@ -4351,9 +4347,6 @@ static void gl_pack_descriptors(gl_texture_object_t *tex) {
         const uint32_t slices =
             (tex->target == GL_TEXTURE_CUBE_MAP) ? 6u : volume_slices;
         tex->img_desc[4] = (slices - 1u) & 0x1fffu;
-    } else if (pitch > w && !chain) {
-        const uint32_t p1 = pitch - 1u;
-        tex->img_desc[4] = (p1 & 0x1fffu) | (((p1 >> 13) & 1u) << 13);
     } else {
         tex->img_desc[4] = 0u;
     }
@@ -6812,7 +6805,7 @@ static void gl_copy_tex_sub_common(gl_context_t *ctx, GLenum target, GLint level
 
     /* A bounded scratch rather than an allocation, since render-to-texture runs every
      * frame; a rectangle wider than the scratch is refused, not truncated. */
-    enum { COPY_MAX_WIDTH = 2048 };
+    enum { COPY_MAX_WIDTH = OOPS_GL_MAX_TEXTURE_SIZE };
     static uint8_t row[COPY_MAX_WIDTH * 4];
     if (width > COPY_MAX_WIDTH) {
         gl_record_error(ctx, GL_INVALID_VALUE);
@@ -7299,11 +7292,8 @@ static void gl_tex_image_common(gl_context_t *ctx, GLenum target, GLint level,
 
     size_t num_pixels = (size_t)width * (size_t)height;
     /* A linear image's rows are stored at a pitch rounded up to 256 bytes, 64 pixels at
-     * four bytes each. Mesa aligns a linear pitch the same way and carries it
-     * explicitly when it exceeds the width (ac_descriptors.c:697-713, "GFX10.3+ can set
-     * a custom pitch for 1D and 2D non-array, but it must be a multiple of 256B");
-     * gl_pack_descriptors writes it. For a width that is a multiple of 64 the pitch is
-     * the width and the descriptor field stays zero. */
+     * four bytes each. On GFX10/GFX10.3, the hardware linear texture sampler AGU
+     * addresses linear rows at a 256-byte granularity. The memory layout must match. */
     size_t pitch_px = ((size_t)width + 63u) & ~(size_t)63u;
     /* A volume's slices follow one another, each `pitch_px * height` pixels. */
     const size_t slice_px = pitch_px * (size_t)height;
@@ -8430,13 +8420,13 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width,
          * A colour renderbuffer stays linear: the colour block is told so, and the
          * rasteriser addresses it by width.
          */
+        size_t px = (size_t)width * (size_t)height;
+#ifndef OOPS_HOST_BUILD
         const GLboolean is_depth =
             (GLboolean)(internalformat == GL_DEPTH_COMPONENT16_ARB ||
                         internalformat == GL_DEPTH_COMPONENT24 ||
                         internalformat == GL_DEPTH24_STENCIL8);
         const GLboolean is_packed = (GLboolean)(internalformat == GL_DEPTH24_STENCIL8);
-        size_t px = (size_t)width * (size_t)height;
-#ifndef OOPS_HOST_BUILD
         if (is_depth) {
             px = (size_t)(((uint32_t)width + 127u) & ~127u) *
                  (size_t)(((uint32_t)height + 127u) & ~127u);
@@ -8526,19 +8516,28 @@ typedef struct {
     GLsizei w, h;
     size_t pitch;    /* pixels per row; meaningless when `tiled` */
     GLboolean tiled; /* framebuffer 0 under the scanout swizzle, never an attachment */
+    gl_texture_object_t
+        *tex; /* attachment's texture object if texture, for descriptor repack */
 } gl_blit_surface_t;
 
-static GLboolean gl_blit_surface(gl_context_t *ctx, GLuint name,
+static GLboolean gl_blit_surface(gl_context_t *ctx, GLuint name, GLboolean is_read,
                                  gl_blit_surface_t *out) {
     memset(out, 0, sizeof(*out));
     if (name == 0u) {
         /* The window system's own buffer at its own size, which is not `ctx->width`
          * while a framebuffer object is bound. */
-        out->pixels = ctx->back_fb ? ctx->back_fb : ctx->framebuffer;
+        const uint32_t *target =
+            (is_read && (gl_color_buffer_bits(ctx->read_buffer) & GL_OCB_FRONT) &&
+             ctx->front_fb)
+                ? ctx->front_fb
+                : (ctx->back_fb ? ctx->back_fb : ctx->framebuffer);
+        out->pixels =
+            (uint32_t *)(uintptr_t)(is_read ? gl_color_read_source(ctx, target)
+                                            : target);
         out->w = (GLsizei)ctx->fb0_width;
         out->h = (GLsizei)ctx->fb0_height;
         out->pitch = (size_t)ctx->fb0_width;
-        out->tiled = ctx->color_tiled;
+        out->tiled = ctx->fb0_color_tiled;
         return (GLboolean)(out->pixels != (uint32_t *)0 && out->w > 0 && out->h > 0);
     }
     gl_framebuffer_object_t *fb = gl_find_framebuffer(ctx, name);
@@ -8552,6 +8551,9 @@ static GLboolean gl_blit_surface(gl_context_t *ctx, GLuint name,
     out->h = st.height;
     out->pitch = st.pitch;
     out->tiled = GL_FALSE;
+    if (fb->color0.kind == GL_FB_ATTACH_TEXTURE) {
+        out->tex = gl_texture_slot(ctx, fb->color0.name);
+    }
     return GL_TRUE;
 }
 
@@ -8605,9 +8607,11 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint
     if ((mask & GL_COLOR_BUFFER_BIT) == 0u)
         return;
 
+    glFlush();
+
     gl_blit_surface_t src, dst;
-    if (!gl_blit_surface(ctx, ctx->bound_read_framebuffer, &src) ||
-        !gl_blit_surface(ctx, ctx->bound_framebuffer, &dst)) {
+    if (!gl_blit_surface(ctx, ctx->bound_read_framebuffer, GL_TRUE, &src) ||
+        !gl_blit_surface(ctx, ctx->bound_framebuffer, GL_FALSE, &dst)) {
         /* An incomplete framebuffer on either side, as the specification answers it. */
         gl_record_error(ctx, GL_INVALID_FRAMEBUFFER_OPERATION);
         return;
@@ -8641,6 +8645,26 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint
             dst.pixels[gl_blit_index(&dst, dx, dy)] =
                 src.pixels[gl_blit_index(&src, sx, sy)];
         }
+    }
+#if !defined(OOPS_HOST_BUILD) && defined(__x86_64__)
+    if (dst.tex && dst.tex->garlic_data) {
+        const size_t bytes = (size_t)dst.w * (size_t)dst.h * 4u;
+        for (size_t p = 0; p < bytes; p += 64) {
+            __builtin_ia32_clflush(
+                (const void *)((const char *)dst.tex->garlic_data + p));
+        }
+    }
+    if (dst.tiled || dst.pixels == ctx->back_fb || dst.pixels == ctx->front_fb) {
+        const size_t bytes = (size_t)dst.w * (size_t)dst.h * 4u;
+        for (size_t p = 0; p < bytes; p += 64) {
+            __builtin_ia32_clflush((const void *)((const char *)dst.pixels + p));
+        }
+    }
+    __builtin_ia32_sfence();
+#endif
+    if (dst.tex) {
+        dst.tex->chain_dirty = GL_TRUE;
+        gl_pack_descriptors(dst.tex);
     }
     /* `GL_LINEAR` is sampled as nearest, which agrees when the rectangles are the same
      * size. A scaled linear blit differs, and a log line says so once. */

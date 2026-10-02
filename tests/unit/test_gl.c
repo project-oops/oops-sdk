@@ -9841,7 +9841,7 @@ static void test_gl_internal_formats_and_proxies(void) {
     ASSERT_EQ(iv, (GLint)GL_RGBA8);
     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &iv);
     ASSERT_EQ(iv, 1);
-    glTexImage2D(GL_PROXY_TEXTURE_2D, 0, GL_RGBA8, 4096, 4096, 0, GL_RGBA,
+    glTexImage2D(GL_PROXY_TEXTURE_2D, 0, GL_RGBA8, 8192, 8192, 0, GL_RGBA,
                  GL_UNSIGNED_BYTE, NULL);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     glGetTexLevelParameteriv(GL_PROXY_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &iv);
@@ -15470,14 +15470,9 @@ static void test_gl_texture_descriptor_describes_the_image_it_was_given(void) {
          * (`S_00A014_PERF_MOD(4)`, ac_descriptors.c:543). */
         ASSERT_EQ((stored->img_desc[5] >> 20) & 7u, 4u);
 
-        /* WORD4. Inert when the rows are exactly as wide as the image, the pitch
-         * otherwise. */
-        if (want_pitch > (uint32_t)w) {
-            const uint32_t p1 = want_pitch - 1u;
-            ASSERT_EQ(stored->img_desc[4], (p1 & 0x1fffu) | (((p1 >> 13) & 1u) << 13));
-        } else {
-            ASSERT_EQ(stored->img_desc[4], 0u);
-        }
+        /* WORD4 is 0 for 2D images: DEPTH is 0, and row pitch is derived by the
+         * hardware. */
+        ASSERT_EQ(stored->img_desc[4], 0u);
 
         /* The bytes are where the descriptor says: row y at `pitch` texels, not `w`. */
         const GLubyte *p = (const GLubyte *)stored->pixels;

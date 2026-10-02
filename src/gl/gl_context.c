@@ -2262,47 +2262,64 @@ void gl_draw_targets(gl_context_t *ctx) {
      */
     gl_fb_storage_t fbo;
     gl_fbo_depth_t zs;
+    uint32_t *target_color = NULL;
+    uint32_t *target_also = NULL;
+    uint32_t target_width = 0;
+    uint32_t target_height = 0;
+    float *target_depth = NULL;
+    uint8_t *target_stencil = NULL;
+    size_t target_depth_px = 0;
+    size_t target_stencil_px = 0;
+    GLboolean target_hw_rx = GL_FALSE;
+    GLboolean target_color_tiled = GL_FALSE;
+
     if (gl_fbo_bound_target(ctx, &fbo, &zs)) {
-        ctx->framebuffer = fbo.pixels;
-        ctx->fb_also = NULL;
-        ctx->width = (uint32_t)fbo.width;
-        ctx->height = (uint32_t)fbo.height;
-        ctx->depth_buffer = zs.depth;
+        target_color = fbo.pixels;
+        target_also = NULL;
+        target_width = (uint32_t)fbo.width;
+        target_height = (uint32_t)fbo.height;
+        target_depth = zs.depth;
         /* The attachment's stencil half, or none. A framebuffer object with depth and
          * no stencil leaves this NULL, which `gl_stencil_active` already reads as no
          * stencil test - the same way a NULL depth buffer reads as no depth test. */
-        ctx->stencil_buffer = zs.stencil;
+        target_stencil = zs.stencil;
         /* And their real extents, or a clear writes the display's surface size into an
          * attachment a fraction of it. */
-        ctx->depth_px = zs.depth_px;
-        ctx->stencil_px = zs.stencil_px;
+        target_depth_px = zs.depth_px;
+        target_stencil_px = zs.stencil_px;
         /* An attachment is linear, whatever swizzle the display's buffers are in. */
-        ctx->hw_rx = GL_FALSE;
-        ctx->color_tiled = GL_FALSE;
-        return;
-    }
-    /* Back to the display, from wherever the last call left it. */
-    ctx->width = ctx->fb0_width;
-    ctx->height = ctx->fb0_height;
-    ctx->depth_buffer = ctx->fb0_depth_buffer;
-    ctx->stencil_buffer = ctx->fb0_stencil_buffer;
-    ctx->depth_px = ctx->fb0_depth_px;
-    ctx->stencil_px = ctx->fb0_stencil_px;
-    ctx->hw_rx = ctx->fb0_hw_rx;
-    ctx->color_tiled = ctx->fb0_color_tiled;
+        target_hw_rx = GL_FALSE;
+        target_color_tiled = GL_FALSE;
+    } else {
+        /* Back to the display, from wherever the last call left it. */
+        target_width = ctx->fb0_width;
+        target_height = ctx->fb0_height;
+        target_depth = ctx->fb0_depth_buffer;
+        target_stencil = ctx->fb0_stencil_buffer;
+        target_depth_px = ctx->fb0_depth_px;
+        target_stencil_px = ctx->fb0_stencil_px;
+        target_hw_rx = ctx->fb0_hw_rx;
+        target_color_tiled = ctx->fb0_color_tiled;
 
-    const unsigned bits = gl_color_buffer_bits(ctx->draw_buffer);
-    uint32_t *primary = ctx->back_fb;
-    uint32_t *also = NULL;
-    if (bits == GL_OCB_FRONT && ctx->front_fb) {
-        primary = ctx->front_fb;
-    } else if (bits == (GL_OCB_FRONT | GL_OCB_BACK) && ctx->front_fb) {
-        also = ctx->front_fb;
+        const unsigned bits = gl_color_buffer_bits(ctx->draw_buffer);
+        target_color = ctx->back_fb;
+        if (bits == GL_OCB_FRONT && ctx->front_fb) {
+            target_color = ctx->front_fb;
+        } else if (bits == (GL_OCB_FRONT | GL_OCB_BACK) && ctx->front_fb) {
+            target_also = ctx->front_fb;
+        }
+        if (bits & GL_OCB_FRONT)
+            ctx->front_pending = GL_TRUE;
     }
-    if (bits & GL_OCB_FRONT)
-        ctx->front_pending = GL_TRUE;
+
 #ifndef OOPS_HOST_BUILD
-    if (primary != ctx->framebuffer && ctx->use_hardware && ctx->hw_frame_active) {
+    /* If the hardware frame is active and the target surface, extent, or depth buffer
+     * changes, flush the open frame now so the pending draws land in the previous
+     * target and the next draw opens a fresh frame with the new target registers. */
+    if (ctx->use_hardware && ctx->hw_frame_active &&
+        (target_color != ctx->framebuffer || target_also != ctx->fb_also ||
+         target_width != ctx->width || target_height != ctx->height ||
+         target_depth != ctx->depth_buffer || target_color_tiled != ctx->color_tiled)) {
         gl_hw_flush(ctx);
     }
     /* The second target's readback, allocated the first time there is a second target.
@@ -2310,15 +2327,24 @@ void gl_draw_targets(gl_context_t *ctx) {
      * display owns its front. Sized like `readback`: whole 128x128 blocks, because the
      * copy is of a tiled surface (gl_color_words). A failed allocation leaves the
      * pointer NULL and `gl_color_read_source` falls through to the buffer itself. */
-    if (also && ctx->readback && !ctx->readback_also) {
-        ctx->readback_also =
-            (uint32_t *)oops_mem_alloc((size_t)((ctx->width + 127u) & ~127u) *
-                                           (size_t)((ctx->height + 127u) & ~127u) * 4u,
-                                       0x1000, OOPS_MEM_WB_ONION);
+    if (target_also && ctx->readback && !ctx->readback_also) {
+        ctx->readback_also = (uint32_t *)oops_mem_alloc(
+            (size_t)((target_width + 127u) & ~127u) *
+                (size_t)((target_height + 127u) & ~127u) * 4u,
+            0x1000, OOPS_MEM_WB_ONION);
     }
 #endif
-    ctx->framebuffer = primary;
-    ctx->fb_also = also;
+
+    ctx->framebuffer = target_color;
+    ctx->fb_also = target_also;
+    ctx->width = target_width;
+    ctx->height = target_height;
+    ctx->depth_buffer = target_depth;
+    ctx->stencil_buffer = target_stencil;
+    ctx->depth_px = target_depth_px;
+    ctx->stencil_px = target_stencil_px;
+    ctx->hw_rx = target_hw_rx;
+    ctx->color_tiled = target_color_tiled;
 }
 
 /* The front on screen. Whatever has been drawn into the front since it was last

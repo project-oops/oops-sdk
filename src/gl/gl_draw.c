@@ -8563,7 +8563,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 
     /* Inside a display list, the draw compiles as what it is defined to be - glBegin,
      * one glArrayElement per index, glEnd - with the arrays read now. */
-    if (gl_list_recording()) {
+    if (ctx->list_compiling != 0u) {
         glBegin(mode);
         for (GLint i = 0; i < count; i++)
             gl_list_record_element(ctx, first + i);
@@ -8636,7 +8636,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     /* Inside a display list: glBegin, the indexed elements read now, glEnd - the
      * indices too, from the element buffer if one is bound, since a list keeps values
      * rather than names. */
-    if (gl_list_recording()) {
+    if (ctx->list_compiling != 0u) {
         glBegin(mode);
         for (GLsizei i = 0; i < count; i++)
             gl_list_record_element(ctx, gl_element_index(&src, i));

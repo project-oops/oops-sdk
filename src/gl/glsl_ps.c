@@ -22,8 +22,8 @@
 #define GL_PS_EXPORT_BASE 4u
 #define GL_PS_FIRST_FREE_VGPR 8u
 
-/* Four parameters of four components, which is what the vertex stage can export. */
-#define GL_PS_MAX_PARAM_FLOATS 16
+/* Eight parameters of four components, which is what the vertex stage can export. */
+#define GL_PS_MAX_PARAM_FLOATS 32
 
 /* What the frame's stage table allocates for the pixel stage.
  * `SPI_SHADER_PGM_RSRC1_PS` is 0x000c0010 in `gl_hw_begin_frame`'s table, and its VGPRS

@@ -3286,25 +3286,28 @@ static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
               GL_FALSE);
     ASSERT_TRUE(strstr(log, want) != NULL);
 
-    /* The varying limit, named with its number: four parameters, sixteen floats. A
-     * program needing a fifth is refused rather than compiled into a shader that reads
+    /* The varying limit, named with its number: eight parameters, thirty-two floats. A
+     * program needing a ninth is refused rather than compiled into a shader that reads
      * a parameter the vertex stage never exported. */
-    const GLuint wide =
-        linked_program("attribute vec4 pos;\n"
-                       "varying vec4 a;\nvarying vec4 b;\nvarying vec4 d;\nvarying "
-                       "vec4 e;\nvarying vec4 f;\n"
-                       "void main() {\n"
-                       "  a = pos; b = pos; d = pos; e = pos; f = pos;\n"
-                       "  gl_Position = pos;\n"
-                       "}\n",
-                       "varying vec4 a;\nvarying vec4 b;\nvarying vec4 d;\nvarying "
-                       "vec4 e;\nvarying vec4 f;\n"
-                       "void main() { gl_FragColor = a + b + d + e + f; }\n");
+    const GLuint wide = linked_program(
+        "attribute vec4 pos;\n"
+        "varying vec4 a;\nvarying vec4 b;\nvarying vec4 d;\nvarying "
+        "vec4 e;\nvarying vec4 f;\nvarying vec4 g;\nvarying vec4 h;\n"
+        "varying vec4 i;\nvarying vec4 j;\n"
+        "void main() {\n"
+        "  a = pos; b = pos; d = pos; e = pos; f = pos;\n"
+        "  g = pos; h = pos; i = pos; j = pos;\n"
+        "  gl_Position = pos;\n"
+        "}\n",
+        "varying vec4 a;\nvarying vec4 b;\nvarying vec4 d;\nvarying "
+        "vec4 e;\nvarying vec4 f;\nvarying vec4 g;\nvarying vec4 h;\n"
+        "varying vec4 i;\nvarying vec4 j;\n"
+        "void main() { gl_FragColor = a + b + d + e + f + g + h + i + j; }\n");
     memset(log, 0, sizeof(log));
     ASSERT_EQ(gl_program_compile_fragment(gl_find_program(c, wide), words, 256u, &count,
                                           &vgprs, NULL, NULL, log, sizeof(log)),
               GL_FALSE);
-    ASSERT_TRUE(strstr(log, "16") != NULL);
+    ASSERT_TRUE(strstr(log, "32") != NULL);
 
     glContextDestroy(ctx);
 }
@@ -4969,6 +4972,59 @@ static void test_gl2_the_fast3d_fragment_shader_compiles(void) {
                                          "}\n";
     ASSERT_TRUE(compiles(GL_VERTEX_SHADER, FAST3D_VS));
 
+    static const char *const FAST3D_VS_CLAMP = "#version 110\n"
+                                               "attribute vec4 aVtxPos;\n"
+                                               "attribute vec2 aTexCoord0;\n"
+                                               "varying vec2 vTexCoord0;\n"
+                                               "attribute float aTexClampS0;\n"
+                                               "varying float vTexClampS0;\n"
+                                               "attribute float aTexClampT0;\n"
+                                               "varying float vTexClampT0;\n"
+                                               "attribute vec4 aInput1;\n"
+                                               "varying vec4 vInput1;\n"
+                                               "void main() {\n"
+                                               "    vTexCoord0 = aTexCoord0;\n"
+                                               "    vTexClampS0 = aTexClampS0;\n"
+                                               "    vTexClampT0 = aTexClampT0;\n"
+                                               "    vInput1 = aInput1;\n"
+                                               "    gl_Position = aVtxPos;\n"
+                                               "}\n";
+    ASSERT_TRUE(compiles(GL_VERTEX_SHADER, FAST3D_VS_CLAMP));
+
+    static const char *const FAST3D_VS_FULL = "#version 110\n"
+                                              "attribute vec4 aVtxPos;\n"
+                                              "attribute vec2 aTexCoord0;\n"
+                                              "varying vec2 vTexCoord0;\n"
+                                              "attribute vec2 aTexCoord1;\n"
+                                              "varying vec2 vTexCoord1;\n"
+                                              "attribute float aTexClampS0;\n"
+                                              "varying float vTexClampS0;\n"
+                                              "attribute float aTexClampT0;\n"
+                                              "varying float vTexClampT0;\n"
+                                              "attribute float aTexClampS1;\n"
+                                              "varying float vTexClampS1;\n"
+                                              "attribute float aTexClampT1;\n"
+                                              "varying float vTexClampT1;\n"
+                                              "attribute vec4 aFog;\n"
+                                              "varying vec4 vFog;\n"
+                                              "attribute vec4 aGrayscaleColor;\n"
+                                              "varying vec4 vGrayscaleColor;\n"
+                                              "attribute vec4 aInput1;\n"
+                                              "varying vec4 vInput1;\n"
+                                              "void main() {\n"
+                                              "    vTexCoord0 = aTexCoord0;\n"
+                                              "    vTexCoord1 = aTexCoord1;\n"
+                                              "    vTexClampS0 = aTexClampS0;\n"
+                                              "    vTexClampT0 = aTexClampT0;\n"
+                                              "    vTexClampS1 = aTexClampS1;\n"
+                                              "    vTexClampT1 = aTexClampT1;\n"
+                                              "    vFog = aFog;\n"
+                                              "    vGrayscaleColor = aGrayscaleColor;\n"
+                                              "    vInput1 = aInput1;\n"
+                                              "    gl_Position = aVtxPos;\n"
+                                              "}\n";
+    ASSERT_TRUE(compiles(GL_VERTEX_SHADER, FAST3D_VS_FULL));
+
     /* And generated, not only accepted. The front end taking a shader says nothing
      * about the console: the code generator has its own, narrower, idea of what it can
      * build, and a program it cannot build is refused at every draw. On hardware this
@@ -4977,6 +5033,7 @@ static void test_gl2_the_fast3d_fragment_shader_compiles(void) {
     const float attr[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
     float o[4];
     compile_and_run(ctx, FAST3D_VS, FAST3D_FS, attr, o);
+    compile_and_run(ctx, FAST3D_VS_FULL, FAST3D_FS, attr, o);
 
     glContextDestroy(ctx);
 }
