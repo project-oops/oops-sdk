@@ -1143,6 +1143,7 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 - `oops_run_init_array`
 - `oops_symbol_is_resolved`
 - `oops_system_allow_sandbox_escape`
+- `oops_system_can_escape_sandbox`
 - `oops_system_check_pltauth`
 - `oops_system_close_requested`
 - `oops_system_escape_sandbox`
