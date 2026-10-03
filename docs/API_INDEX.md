@@ -1260,5 +1260,9 @@ For declarative subsystem capabilities used in application Makefiles, see [docs/
 ## oops/zip.h
 
 - `oops_zip_extract`
+- `oops_zip_extract_filter`
+- `oops_zip_extract_filter_progress`
 - `oops_zip_extract_mem`
+- `oops_zip_extract_mem_filter`
+- `oops_zip_extract_mem_filter_progress`
 

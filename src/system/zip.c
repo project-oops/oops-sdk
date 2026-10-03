@@ -395,17 +395,19 @@ static int mkdir_recursive(const char *dir_path) {
             path[i] = '\0';
             if (path[0] != '\0') {
                 if (!oops_fs_exists(path)) {
-                    (void)oops_fs_mkdir(path, 0777);
+                    if (oops_fs_mkdir(path, 0777) == 0) {
+                        (void)oops_fs_chmod(path, 0777);
+                    }
                 }
-                (void)oops_fs_chmod(path, 0777);
             }
             path[i] = sep;
         }
     }
     if (!oops_fs_exists(path)) {
-        (void)oops_fs_mkdir(path, 0777);
+        if (oops_fs_mkdir(path, 0777) == 0) {
+            (void)oops_fs_chmod(path, 0777);
+        }
     }
-    (void)oops_fs_chmod(path, 0777);
     return 0;
 }
 
@@ -413,7 +415,11 @@ static int mkdir_recursive(const char *dir_path) {
  * Public ZIP Extractor API
  * --------------------------------------------------------------------------- */
 
-int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest_dir) {
+int oops_zip_extract_mem_filter_progress(const void *zip_data, size_t zip_size,
+                                         const char *dest_dir,
+                                         oops_zip_filter_fn filter,
+                                         oops_zip_progress_fn progress,
+                                         void *userdata) {
     if (!zip_data || zip_size < 22 || !dest_dir || !*dest_dir) {
         return OOPS_ZIP_ERR_PARAM;
     }
@@ -439,6 +445,10 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
     uint16_t total_entries = read_u16_le(eocd + 10);
     uint32_t cd_size = read_u32_le(eocd + 12);
     uint32_t cd_offset = read_u32_le(eocd + 16);
+
+    if (progress != NULL) {
+        progress(0, total_entries, userdata);
+    }
 
     if ((size_t)cd_offset + (size_t)cd_size > zip_size) {
         return OOPS_ZIP_ERR_BAD_HEADER;
@@ -470,14 +480,21 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
     char last_parent[512];
     last_parent[0] = '\0';
 
+    uint8_t *uncomp_buf = NULL;
+    size_t uncomp_cap = 0;
+
     for (uint16_t entry = 0; entry < total_entries; entry++) {
         if (cd_ptr + 46 > data + zip_size) {
             oops_log_warn("ZIP", "entry %u exceeds archive boundary", entry);
+            if (uncomp_buf)
+                zip_free(uncomp_buf);
             return OOPS_ZIP_ERR_BAD_HEADER;
         }
         if (read_u32_le(cd_ptr) != 0x02014b50) {
             oops_log_warn("ZIP", "entry %u bad magic: 0x%08x", entry,
                           read_u32_le(cd_ptr));
+            if (uncomp_buf)
+                zip_free(uncomp_buf);
             return OOPS_ZIP_ERR_BAD_HEADER;
         }
 
@@ -490,11 +507,15 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
         uint32_t local_hdr_offset = read_u32_le(cd_ptr + 42);
 
         if (cd_ptr + 46 + fname_len + extra_len + comment_len > data + zip_size) {
+            if (uncomp_buf)
+                zip_free(uncomp_buf);
             return OOPS_ZIP_ERR_BAD_HEADER;
         }
 
         char fname[256];
         if (fname_len >= sizeof(fname)) {
+            if (uncomp_buf)
+                zip_free(uncomp_buf);
             return OOPS_ZIP_ERR_PARAM;
         }
         for (uint16_t i = 0; i < fname_len; i++) {
@@ -507,13 +528,32 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
         /* Sanitize filename: reject path traversal */
         if (fname[0] == '/' || fname[0] == '\\' || obs_strstr(fname, "../") ||
             obs_strstr(fname, "..\\")) {
+            if (uncomp_buf)
+                zip_free(uncomp_buf);
             return OOPS_ZIP_ERR_PARAM;
+        }
+
+        /* Filter entry if callback provided */
+        if (filter != NULL && !filter(fname, userdata)) {
+            cd_ptr += 46 + fname_len + extra_len + comment_len;
+            if (((entry + 1) % 100) == 0) {
+                (void)oops_system_pump_events();
+            }
+            if (((entry + 1) % 500) == 0) {
+                oops_log_info("ZIP", "%u/%u entries", entry + 1, total_entries);
+            }
+            if (progress != NULL) {
+                progress(entry + 1, total_entries, userdata);
+            }
+            continue;
         }
 
         /* Build target path */
         char target_path[512];
         size_t dlen = obs_strlen(dest_dir);
         if (dlen + 1 + (size_t)fname_len >= sizeof(target_path)) {
+            if (uncomp_buf)
+                zip_free(uncomp_buf);
             return OOPS_ZIP_ERR_PARAM;
         }
         obs_strncpy(target_path, dest_dir, sizeof(target_path) - 1);
@@ -550,10 +590,14 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
 
             /* Read local header */
             if ((size_t)local_hdr_offset + 30 > zip_size) {
+                if (uncomp_buf)
+                    zip_free(uncomp_buf);
                 return OOPS_ZIP_ERR_BAD_HEADER;
             }
             const uint8_t *loc = data + local_hdr_offset;
             if (read_u32_le(loc) != 0x04034b50) {
+                if (uncomp_buf)
+                    zip_free(uncomp_buf);
                 return OOPS_ZIP_ERR_BAD_HEADER;
             }
             uint16_t loc_fname_len = read_u16_le(loc + 26);
@@ -561,12 +605,16 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
             const uint8_t *payload = loc + 30 + loc_fname_len + loc_extra_len;
 
             if (payload + comp_size > data + zip_size) {
+                if (uncomp_buf)
+                    zip_free(uncomp_buf);
                 return OOPS_ZIP_ERR_BAD_HEADER;
             }
 
             if (method == 0) {
                 /* STORED */
                 if (comp_size != uncomp_size) {
+                    if (uncomp_buf)
+                        zip_free(uncomp_buf);
                     return OOPS_ZIP_ERR_BAD_HEADER;
                 }
                 /* 0777, not 0644: an installed homebrew title's eboot.bin (and its .prx
@@ -575,23 +623,38 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
                  * write permissions inside /app0. */
                 int fd = oops_fs_open(
                     target_path, OOPS_O_WRONLY | OOPS_O_CREAT | OOPS_O_TRUNC, 0777);
-                if (fd < 0)
+                if (fd < 0) {
+                    if (uncomp_buf)
+                        zip_free(uncomp_buf);
                     return OOPS_ZIP_ERR_WRITE;
+                }
                 if (comp_size > 0) {
                     int64_t w = oops_fs_write(fd, payload, comp_size);
                     oops_fs_close(fd);
-                    if (w != (int64_t)comp_size)
+                    if (w != (int64_t)comp_size) {
+                        if (uncomp_buf)
+                            zip_free(uncomp_buf);
                         return OOPS_ZIP_ERR_WRITE;
+                    }
                 } else {
                     oops_fs_close(fd);
                 }
             } else if (method == 8) {
-                /* DEFLATED */
-                uint8_t *uncomp_buf = NULL;
-                if (uncomp_size > 0) {
-                    uncomp_buf = (uint8_t *)zip_alloc(uncomp_size);
-                    if (!uncomp_buf)
+                /* DEFLATED: reuse or grow decompression buffer to avoid repeated mmap
+                 * churn */
+                if (uncomp_size > uncomp_cap) {
+                    size_t new_cap = uncomp_size < 65536 ? 65536 : (size_t)uncomp_size;
+                    uint8_t *new_buf = (uint8_t *)zip_alloc(new_cap);
+                    if (!new_buf) {
+                        if (uncomp_buf)
+                            zip_free(uncomp_buf);
                         return OOPS_ZIP_ERR_NOMEM;
+                    }
+                    if (uncomp_buf) {
+                        zip_free(uncomp_buf);
+                    }
+                    uncomp_buf = new_buf;
+                    uncomp_cap = new_cap;
                 }
 
                 unsigned long dest_len = uncomp_size;
@@ -613,13 +676,17 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
                 if (uncomp_size > 0) {
                     int64_t w = oops_fs_write(fd, uncomp_buf, uncomp_size);
                     oops_fs_close(fd);
-                    zip_free(uncomp_buf);
-                    if (w != (int64_t)uncomp_size)
+                    if (w != (int64_t)uncomp_size) {
+                        if (uncomp_buf)
+                            zip_free(uncomp_buf);
                         return OOPS_ZIP_ERR_WRITE;
+                    }
                 } else {
                     oops_fs_close(fd);
                 }
             } else {
+                if (uncomp_buf)
+                    zip_free(uncomp_buf);
                 return OOPS_ZIP_ERR_UNSUPPORTED;
             }
             /* Belt to the 0777 passed at open, which the kernel ignores when the file
@@ -629,6 +696,15 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
         }
 
         cd_ptr += 46 + fname_len + extra_len + comment_len;
+
+        if (progress != NULL) {
+            progress(entry + 1, total_entries, userdata);
+        }
+
+        /* Service system events periodically so long extractions remain responsive */
+        if (((entry + 1) % 100) == 0) {
+            (void)oops_system_pump_events();
+        }
 
         /*
          * Say where it has got to, occasionally.
@@ -649,10 +725,32 @@ int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest
         }
     }
 
+    if (uncomp_buf) {
+        zip_free(uncomp_buf);
+    }
+
+    if (progress != NULL) {
+        progress(total_entries, total_entries, userdata);
+    }
+
     return OOPS_ZIP_OK;
 }
 
-int oops_zip_extract(const char *zip_path, const char *dest_dir) {
+int oops_zip_extract_mem_filter(const void *zip_data, size_t zip_size,
+                                const char *dest_dir, oops_zip_filter_fn filter,
+                                void *userdata) {
+    return oops_zip_extract_mem_filter_progress(zip_data, zip_size, dest_dir, filter,
+                                                NULL, userdata);
+}
+
+int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest_dir) {
+    return oops_zip_extract_mem_filter_progress(zip_data, zip_size, dest_dir, NULL,
+                                                NULL, NULL);
+}
+
+int oops_zip_extract_filter_progress(const char *zip_path, const char *dest_dir,
+                                     oops_zip_filter_fn filter,
+                                     oops_zip_progress_fn progress, void *userdata) {
     if (!zip_path || !*zip_path || !dest_dir || !*dest_dir) {
         return OOPS_ZIP_ERR_PARAM;
     }
@@ -665,7 +763,8 @@ int oops_zip_extract(const char *zip_path, const char *dest_dir) {
         return OOPS_ZIP_ERR_NOT_FOUND;
     }
 
-    int rc = oops_zip_extract_mem(data, size, dest_dir);
+    int rc = oops_zip_extract_mem_filter_progress(data, size, dest_dir, filter,
+                                                  progress, userdata);
     oops_fs_free_data(data);
     if (rc == OOPS_ZIP_OK) {
         oops_log_info("ZIP", "extraction of '%s' completed successfully", zip_path);
@@ -673,4 +772,13 @@ int oops_zip_extract(const char *zip_path, const char *dest_dir) {
         oops_log_warn("ZIP", "extraction of '%s' failed rc=%d", zip_path, rc);
     }
     return rc;
+}
+
+int oops_zip_extract_filter(const char *zip_path, const char *dest_dir,
+                            oops_zip_filter_fn filter, void *userdata) {
+    return oops_zip_extract_filter_progress(zip_path, dest_dir, filter, NULL, userdata);
+}
+
+int oops_zip_extract(const char *zip_path, const char *dest_dir) {
+    return oops_zip_extract_filter_progress(zip_path, dest_dir, NULL, NULL, NULL);
 }

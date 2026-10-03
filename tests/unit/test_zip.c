@@ -521,6 +521,259 @@ static void test_zip_extract_nested_out_of_order(void) {
     }
 }
 
+static int filter_keep_prefix(const char *name, void *userdata) {
+    const char *prefix = (const char *)userdata;
+    return strncmp(name, prefix, strlen(prefix)) == 0;
+}
+
+/* Filtered extraction extracts only matching entries and skips others. */
+static void test_zip_extract_filter(void) {
+    static const char *const names[] = {
+        "keep/one.txt",
+        "drop/two.txt",
+        "keep/three.txt",
+    };
+    const size_t count = sizeof(names) / sizeof(names[0]);
+    const char *content = "z";
+    const uint32_t clen = 1;
+
+    uint8_t zip[1024];
+    size_t pos = 0;
+    size_t local_off[3];
+
+    for (size_t i = 0; i < count; i++) {
+        uint16_t nlen = (uint16_t)strlen(names[i]);
+        local_off[i] = pos;
+        put_u32(zip + pos, 0x04034b50);
+        pos += 4;
+        put_u16(zip + pos, 10);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2; /* STORED */
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u32(zip + pos, 0);
+        pos += 4;
+        put_u32(zip + pos, clen);
+        pos += 4;
+        put_u32(zip + pos, clen);
+        pos += 4;
+        put_u16(zip + pos, nlen);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        memcpy(zip + pos, names[i], nlen);
+        pos += nlen;
+        memcpy(zip + pos, content, clen);
+        pos += clen;
+    }
+
+    size_t cd_offset = pos;
+    for (size_t i = 0; i < count; i++) {
+        uint16_t nlen = (uint16_t)strlen(names[i]);
+        put_u32(zip + pos, 0x02014b50);
+        pos += 4;
+        put_u16(zip + pos, 20);
+        pos += 2;
+        put_u16(zip + pos, 10);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2; /* STORED */
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u32(zip + pos, 0);
+        pos += 4;
+        put_u32(zip + pos, clen);
+        pos += 4;
+        put_u32(zip + pos, clen);
+        pos += 4;
+        put_u16(zip + pos, nlen);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u16(zip + pos, 0);
+        pos += 2;
+        put_u32(zip + pos, 0);
+        pos += 4;
+        put_u32(zip + pos, (uint32_t)local_off[i]);
+        pos += 4;
+        memcpy(zip + pos, names[i], nlen);
+        pos += nlen;
+    }
+    size_t cd_size = pos - cd_offset;
+
+    put_u32(zip + pos, 0x06054b50);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, (uint16_t)count);
+    pos += 2;
+    put_u16(zip + pos, (uint16_t)count);
+    pos += 2;
+    put_u32(zip + pos, (uint32_t)cd_size);
+    pos += 4;
+    put_u32(zip + pos, (uint32_t)cd_offset);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
+
+    const char *out_dir = "/tmp/test_oops_zip_filter";
+    ASSERT_EQ(oops_zip_extract_mem_filter(zip, pos, out_dir, filter_keep_prefix,
+                                          (void *)"keep/"),
+              OOPS_ZIP_OK);
+
+    char path_keep1[256];
+    char path_drop2[256];
+    char path_keep3[256];
+    snprintf(path_keep1, sizeof(path_keep1), "%s/%s", out_dir, names[0]);
+    snprintf(path_drop2, sizeof(path_drop2), "%s/%s", out_dir, names[1]);
+    snprintf(path_keep3, sizeof(path_keep3), "%s/%s", out_dir, names[2]);
+
+    ASSERT_EQ(oops_fs_exists(path_keep1), 1);
+    ASSERT_EQ(oops_fs_exists(path_drop2), 0);
+    ASSERT_EQ(oops_fs_exists(path_keep3), 1);
+
+    (void)oops_fs_unlink(path_keep1);
+    (void)oops_fs_unlink(path_keep3);
+}
+
+struct test_progress_state {
+    int saw_zero;
+    int saw_total;
+    uint32_t calls;
+};
+
+static void test_progress_cb(uint32_t current, uint32_t total, void *userdata) {
+    struct test_progress_state *st = (struct test_progress_state *)userdata;
+    if (current == 0)
+        st->saw_zero = 1;
+    if (current == total && total > 0)
+        st->saw_total = 1;
+    st->calls++;
+}
+
+/* Progress callback is invoked from 0 through total entries during extraction. */
+static void test_zip_extract_progress(void) {
+    const char *fname = "prog.txt";
+    uint16_t fname_len = (uint16_t)strlen(fname);
+    const char *content = "progress_test";
+    uint32_t content_len = (uint32_t)strlen(content);
+
+    uint8_t zip[512];
+    size_t pos = 0;
+
+    put_u32(zip + pos, 0x04034b50);
+    pos += 4;
+    put_u16(zip + pos, 10);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, content_len);
+    pos += 4;
+    put_u32(zip + pos, content_len);
+    pos += 4;
+    put_u16(zip + pos, fname_len);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    memcpy(zip + pos, fname, fname_len);
+    pos += fname_len;
+    memcpy(zip + pos, content, content_len);
+    pos += content_len;
+
+    size_t cd_offset = pos;
+    put_u32(zip + pos, 0x02014b50);
+    pos += 4;
+    put_u16(zip + pos, 20);
+    pos += 2;
+    put_u16(zip + pos, 10);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, content_len);
+    pos += 4;
+    put_u32(zip + pos, content_len);
+    pos += 4;
+    put_u16(zip + pos, fname_len);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    put_u32(zip + pos, 0);
+    pos += 4;
+    memcpy(zip + pos, fname, fname_len);
+    pos += fname_len;
+
+    size_t cd_size = pos - cd_offset;
+    put_u32(zip + pos, 0x06054b50);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 0);
+    pos += 2;
+    put_u16(zip + pos, 1);
+    pos += 2;
+    put_u16(zip + pos, 1);
+    pos += 2;
+    put_u32(zip + pos, (uint32_t)cd_size);
+    pos += 4;
+    put_u32(zip + pos, (uint32_t)cd_offset);
+    pos += 4;
+    put_u16(zip + pos, 0);
+    pos += 2;
+
+    struct test_progress_state st = {0};
+    const char *out_dir = "/tmp/test_oops_zip_prog";
+    ASSERT_EQ(oops_zip_extract_mem_filter_progress(zip, pos, out_dir, NULL,
+                                                   test_progress_cb, &st),
+              OOPS_ZIP_OK);
+
+    ASSERT_EQ(st.saw_zero, 1);
+    ASSERT_EQ(st.saw_total, 1);
+    ASSERT_EQ((st.calls >= 2), 1);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", out_dir, fname);
+    (void)oops_fs_unlink(path);
+}
+
 void run_unit_tests_zip(void) {
     TEST_SUITE_BEGIN("Freestanding ZIP Archive Extractor & Deflate");
     RUN_TEST(test_zip_null_params);
@@ -529,4 +782,6 @@ void run_unit_tests_zip(void) {
     RUN_TEST(test_zip_extract_deflated);
     RUN_TEST(test_zip_path_traversal_rejection);
     RUN_TEST(test_zip_extract_nested_out_of_order);
+    RUN_TEST(test_zip_extract_filter);
+    RUN_TEST(test_zip_extract_progress);
 }
