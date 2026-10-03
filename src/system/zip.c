@@ -640,8 +640,7 @@ int oops_zip_extract_mem_filter_progress(const void *zip_data, size_t zip_size,
                     oops_fs_close(fd);
                 }
             } else if (method == 8) {
-                /* DEFLATED: reuse or grow decompression buffer to avoid repeated mmap
-                 * churn */
+                /* DEFLATED: reuse or grow decompression buffer to avoid repeated mmap churn */
                 if (uncomp_size > uncomp_cap) {
                     size_t new_cap = uncomp_size < 65536 ? 65536 : (size_t)uncomp_size;
                     uint8_t *new_buf = (uint8_t *)zip_alloc(new_cap);
@@ -739,18 +738,20 @@ int oops_zip_extract_mem_filter_progress(const void *zip_data, size_t zip_size,
 int oops_zip_extract_mem_filter(const void *zip_data, size_t zip_size,
                                 const char *dest_dir, oops_zip_filter_fn filter,
                                 void *userdata) {
-    return oops_zip_extract_mem_filter_progress(zip_data, zip_size, dest_dir, filter,
-                                                NULL, userdata);
+    return oops_zip_extract_mem_filter_progress(zip_data, zip_size, dest_dir,
+                                                filter, NULL, userdata);
 }
 
-int oops_zip_extract_mem(const void *zip_data, size_t zip_size, const char *dest_dir) {
-    return oops_zip_extract_mem_filter_progress(zip_data, zip_size, dest_dir, NULL,
-                                                NULL, NULL);
+int oops_zip_extract_mem(const void *zip_data, size_t zip_size,
+                         const char *dest_dir) {
+    return oops_zip_extract_mem_filter_progress(zip_data, zip_size, dest_dir,
+                                                NULL, NULL, NULL);
 }
 
 int oops_zip_extract_filter_progress(const char *zip_path, const char *dest_dir,
                                      oops_zip_filter_fn filter,
-                                     oops_zip_progress_fn progress, void *userdata) {
+                                     oops_zip_progress_fn progress,
+                                     void *userdata) {
     if (!zip_path || !*zip_path || !dest_dir || !*dest_dir) {
         return OOPS_ZIP_ERR_PARAM;
     }
@@ -764,7 +765,7 @@ int oops_zip_extract_filter_progress(const char *zip_path, const char *dest_dir,
     }
 
     int rc = oops_zip_extract_mem_filter_progress(data, size, dest_dir, filter,
-                                                  progress, userdata);
+                                                 progress, userdata);
     oops_fs_free_data(data);
     if (rc == OOPS_ZIP_OK) {
         oops_log_info("ZIP", "extraction of '%s' completed successfully", zip_path);
@@ -776,9 +777,11 @@ int oops_zip_extract_filter_progress(const char *zip_path, const char *dest_dir,
 
 int oops_zip_extract_filter(const char *zip_path, const char *dest_dir,
                             oops_zip_filter_fn filter, void *userdata) {
-    return oops_zip_extract_filter_progress(zip_path, dest_dir, filter, NULL, userdata);
+    return oops_zip_extract_filter_progress(zip_path, dest_dir, filter, NULL,
+                                            userdata);
 }
 
 int oops_zip_extract(const char *zip_path, const char *dest_dir) {
-    return oops_zip_extract_filter_progress(zip_path, dest_dir, NULL, NULL, NULL);
+    return oops_zip_extract_filter_progress(zip_path, dest_dir, NULL, NULL,
+                                            NULL);
 }
