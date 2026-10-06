@@ -47,6 +47,10 @@ sceVideoOutRegisterBuffers2(int handle, int startIndex, int unk,
                             const struct SceVideoOutBuffer *buffers,
                             int bufferCount, const void *attribute,
                             int category, void *reserved);
+/* Present in libSceVideoOut's import census (obscene/data/hardware/ps5-full.txt:706).
+ * The (handle, set index) prototype is a candidate from public reimplementations
+ * until a run returns 0 for it (oops-sdk REQ-20261006T0750Z-6a4e). */
+__attribute__((weak)) int sceVideoOutUnregisterBuffers(int handle, int setIndex);
 __attribute__((weak)) int sceVideoOutSubmitFlip(int handle, int index,
                                                 unsigned int flipMode,
                                                 int64_t flipArg);
@@ -349,10 +353,11 @@ agc_display_t *agc_display_open_adopting(unsigned int width,
    * `REQ-20260921T1202Z-9a4c`): a second `sceVideoOutRegisterBuffers2` on a
    * handle that already has buffers returns `0x80290010`
    * (`SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED`) whether it repeats the set, extends
-   * it, or starts at a different index; `sceVideoOutUnregisterBuffer(s)` are
-   * absent from `libSceVideoOut` altogether, so a set cannot be released; and a
-   * concurrent handle on the same output is refused. Nothing can be added
-   * later.
+   * it, or starts at a different index, and a concurrent handle on the same
+   * output is refused. Nothing can be added to a set. `-9a4c` also called
+   * `sceVideoOutUnregisterBuffers` absent, but its lookup by name returns 0 for
+   * `sceVideoOutOpen` too; the import census lists it present, and close()
+   * releases the set through it.
    *
    * So a renderer that wants its own buffer scanned out - drawing straight into
    * it instead of copying through this display's - has to hand it over here,
@@ -763,10 +768,9 @@ uint32_t *agc_display_scanout(agc_display_t *disp, int which) {
  * **There was an agc_display_adopt_buffer here until 2026-09-21, and it could
  * never have worked.** It re-registered the display's set with a foreign buffer
  * appended, after the display was already open. obSCEne `-9a4c` then measured
- * that VideoOut registration is single-shot and immutable: a second
- * registration returns `0x80290010` (`SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED`)
- * however it is shaped, unregistration is not exported at all, and a concurrent
- * handle is refused. So adoption has to happen *at open*, which is where it now
+ * that a registered set cannot be extended: a second registration returns
+ * `0x80290010` (`SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED`) however it is shaped, and
+ * a concurrent handle is refused. So adoption has to happen *at open*, which is where it now
  * happens, and the function that promised otherwise is gone rather than left to
  * be found and trusted.
  */
@@ -937,6 +941,17 @@ void agc_display_close(agc_display_t *disp) {
     disp->owns_scratch = 0;
   }
   disp->shader_obj = (void *)0;
+
+  /* Release the set before its memory goes, once nothing is still queued to
+   * scan out of it. Set 0: the open registers one set, and its 0 return is the
+   * set's index. */
+  if (disp->ready && disp->handle > 0 && sceVideoOutUnregisterBuffers) {
+    (void)agc_display_wait_scanout(disp);
+    const int urc = sceVideoOutUnregisterBuffers(disp->handle, 0);
+    oops_log_info("AGC", "UnregisterBuffers(set 0) rc=0x%08x", (unsigned)urc);
+  } else if (disp->ready) {
+    oops_log_info("AGC", "UnregisterBuffers is not linked; the set stays registered");
+  }
 
   if (disp->mapped_base) {
     (void)sceKernelMunmap(disp->mapped_base, AGC_TOTAL_ALLOC_BYTES);

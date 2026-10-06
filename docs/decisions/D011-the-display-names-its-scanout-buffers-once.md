@@ -22,11 +22,16 @@ Measured, obSCEne `REQ-20260921T1202Z-9a4c`:
 | register a larger set at index 0 | `0x80290010` |
 | register a set at index 1 | `0x80290010` |
 | register one buffer at index 2 | `0x80290001` |
-| `sceVideoOutUnregisterBuffer` / `sceVideoOutUnregisterBuffers` | **not exported by `libSceVideoOut`** |
 | open a second handle on the same output | refused, `0x80290001` |
 
-`0x80290010` is `SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED`. So a buffer set cannot be extended, replaced,
-or released. Whatever is named at open is what this display can ever show.
+`0x80290010` is `SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED`. So a buffer set cannot be extended. Whatever is
+named at open is what this display shows until the set is released.
+
+`-9a4c` also reported `sceVideoOutUnregisterBuffers` as not exported, but its by-name lookup returns
+0 for `sceVideoOutOpen` as well, so it could not have found it. The import census lists it present
+(`obscene/data/hardware/ps5-full.txt:706`). The display binds it as `(handle, set index)` and
+releases set 0 at close (oops-sdk `REQ-20261006T0750Z-6a4e`). Whether a released output then takes
+a different set is the measurement that decides replacement.
 
 That is why the entry point is an `open` variant rather than an `adopt` on a live display. An
 earlier version of this API was the latter - `agc_display_adopt_buffer`, added and removed the same
