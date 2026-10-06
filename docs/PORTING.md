@@ -42,7 +42,7 @@ When building or porting an application, choosing the correct graphics stack and
 | :--- | :--- | :--- | :--- | :--- |
 | **`oops-gl` (`gl1`)** | OpenGL 1.1–1.5 Fixed Function | Pure Freestanding (`-ffreestanding`) | ~100–300 KB | Retro 3D games (Quake, DOOM, Neverball), GLUT demos, lightweight tools, pure freestanding binaries. |
 | **`oops-gl` (`gl2`)** | OpenGL 2.0, GLSL 1.10 / 1.20 / ES 1.00 | Pure Freestanding (`-ffreestanding`) | ~300–600 KB | Custom vertex/fragment shaders, render-to-texture, procedural materials, programmable lighting, retro-indie games. |
-| **`oops-mesa` (`mesa`)** | OpenGL 3.3 Core, GLES 2/3, EGL | Hosted (`USE_MESA = 1`, FreeBSD libc sysroot) | ~15–30 MB | Modern desktop games, complex game engines, GLSL 330+, geometry/compute shaders, multisampled or depth-attached FBOs. |
+| **`oops-mesa` (`mesa`)** | OpenGL up to 4.6 (radeonsi), GLES 2/3, EGL | Hosted (`USE_MESA = 1`, FreeBSD libc sysroot) | ~15–30 MB | Modern desktop games, complex game engines, GLSL 330+, geometry/compute shaders, multisampled or depth-attached FBOs. |
 | **`oops-draw` (2D Canvas)** | 2D CPU Rasterizer (`<oops/draw.h>`) | Pure Freestanding | Zero extra | Console shells (SeaShell), HUDs, text overlays, simple 2D menus, diagnostics. Zero GPU overhead. |
 | **`oops-sdl` (SDL2)** | SDL 2.0.22 Windowing, Events, Audio | Either (Freestanding or Hosted) | ~500 KB | Cross-platform games, emulators, and engines already written against SDL2. Works with `oops-gl` and `oops-mesa`. |
 
@@ -63,7 +63,7 @@ Are you porting an existing codebase?
   │
   └─► Does it require modern OpenGL 3.x/4.x, GLSL 330+, or EGL?
         └─► USE: oops-mesa (OOPS_RENDERER = mesa)
-              (Hosted Mesa Gallium/Radv stack with FreeBSD C library sysroot)
+              (Hosted Mesa radeonsi Gallium driver with FreeBSD C library sysroot)
 ```
 
 ### Render-to-texture under `gl2`
@@ -326,8 +326,8 @@ pros.exe logs
    ```makefile
    OOPS_RENDERER := mesa
    ```
-2. Your application compiles as a hosted title against Mesa's Gallium/Radv driver and FreeBSD C library sysroot.
-3. Access standard OpenGL 3.3 Core Profile and GLSL 3.30 shaders.
+2. Your application compiles as a hosted title against Mesa's radeonsi Gallium driver and FreeBSD C library sysroot. No Vulkan driver is built.
+3. Use desktop OpenGL up to 4.6 and GLSL 3.30 and later. radeonsi reports `4.6 (Compatibility Profile)`; oops-mesa claims a feature once a conformance run or hardware test has measured it, and its `docs/GL_SURFACE.md` gives the order of work (oops-mesa D014).
 
 ---
 
