@@ -111,6 +111,7 @@ __attribute__((weak)) int sceAgcDriverCreateQueue(uint32_t type, void *queue_out
                                                   uint32_t flags);
 
 int gl_mipchain_enabled = 1;
+int gl_readback_eager = 0;
 uint32_t gl_vbo_ring_bytes = 65536u;
 
 /* One line in the kernel log, for the rest of the library. */
@@ -601,6 +602,11 @@ static void gl_hw_flush_body(gl_context_t *ctx) {
      * stores its draws named can go now. Held back on a timeout they would leak for
      * nothing: a GPU that has not finished in a second is not going to read them. */
     gl_vbo_retire_drain(ctx);
+
+    /* `readback=eager` in /app0/oops-gl pays the copy every submission, as before it
+     * was owed: the A/B that measures what owing it saved. */
+    if (gl_readback_eager)
+        gl_readback_settle(ctx);
 
     if (ctx->canary) {
 #if defined(__x86_64__)
@@ -1110,6 +1116,13 @@ void *glContextCreate(struct oops_display *disp) {
             if (n >= 4096u && n <= OOPS_GL_VBO_RING_BYTES)
                 gl_vbo_ring_bytes = n;
             gl_klog_val("vbo-ring-bytes", (uint64_t)gl_vbo_ring_bytes);
+        }
+        /* `readback=eager` - copy the colour target back after every submission
+         * rather than when something first reads it. A measurement knob only. */
+        char rb[16];
+        if (oops_config_value("/app0/oops-gl", "readback", rb, sizeof(rb)) == 0) {
+            gl_readback_eager = rb[0] == 'e';
+            oops_log_info("GL", "readback %s", gl_readback_eager ? "eager" : "owed");
         }
     }
 
