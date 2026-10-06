@@ -262,8 +262,8 @@ static GLboolean vs_load_attributes(const gl_program_object_t *p, const glsl_uni
              * vec3 */
             glsl_code_put(code, 0xbf068407u); /* s_cmp_eq_u32 s7, 4 */
             glsl_code_put(code, 0xbf850004u); /* s_cbranch_scc1 4 */
-            glsl_code_put(code, 0x7e0002f2u | (((home.base + 3u) & 0xffu)
-                                               << 8u)); /* v_mov_b32 v[w], 1.0 */
+            /* v_mov_b32 v[w], 1.0: one word, so the branch over it still counts 4 */
+            glsl_emit_mov_imm(code, home.base + 3u, 0x3f800000u);
             glsl_emit_global_load_dwordx3(code, home.base, 2u, 0u);
             glsl_code_put(code, 0xbf820002u); /* s_branch 2 */
             glsl_emit_global_load_dwordx4(code, home.base, 2u, 0u);

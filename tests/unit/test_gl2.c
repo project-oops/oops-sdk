@@ -3217,6 +3217,41 @@ static void test_gl2_compiles_a_whole_vertex_shader(void) {
     glContextDestroy(ctx);
 }
 
+/* A vec4 attribute fed from a three-component buffer gets w = 1.0 before its vec3
+ * load. The move was once hand-built with the register in bits 15:8, where VOP1 keeps
+ * its opcode and src0; LLVM called the word (0x7e0013f2 for v19) an invalid encoding,
+ * and w was whatever the register held. */
+static void test_gl2_a_vec3_fetch_sets_w_to_one(void) {
+    void *ctx = gl2_context();
+
+    const GLuint prog = linked_program("attribute vec4 pos;\n"
+                                       "void main() { gl_Position = pos; }\n",
+                                       "void main() { gl_FragColor = vec4(1.0); }\n");
+    const gl_program_object_t *p = gl_find_program((gl_context_t *)ctx, prog);
+    ASSERT_TRUE(p != NULL);
+
+    uint32_t words[1024];
+    uint32_t count = 0u, vgprs = 0u, user_sgprs = 0u;
+    char log[256] = {0};
+    ASSERT_EQ(gl_program_compile_vertex(p, words, 1024u, &count, &vgprs, &user_sgprs,
+                                        log, sizeof(log)),
+              GL_TRUE);
+
+    uint32_t at = 0u;
+    while (at + 6u < count && words[at] != 0xbf068407u) /* s_cmp_eq_u32 s7, 4 */
+        at++;
+    ASSERT_TRUE(at + 6u < count);
+    ASSERT_EQ(words[at + 1u], 0xbf850004u); /* s_cbranch_scc1 over the next 4 words */
+    ASSERT_EQ(words[at + 3u], 0xdc3c8000u); /* global_load_dwordx3 */
+    const uint32_t base = words[at + 4u] >> 24u;
+    /* v_mov_b32_e32 v[base + 3], 1.0: destination in bits 24:17, src0 = 0xf2 */
+    ASSERT_EQ(words[at + 2u], 0x7e0002f2u | ((base + 3u) << 17u));
+    ASSERT_EQ(words[at + 5u], 0xbf820002u); /* s_branch over the vec4 load */
+    ASSERT_EQ(words[at + 6u], 0xdc388000u); /* global_load_dwordx4 */
+
+    glContextDestroy(ctx);
+}
+
 /* The back end refuses, with the limit in the log, what exceeds the hardware's limits.
  */
 static void test_gl2_the_back_end_refuses_what_it_cannot_encode(void) {
@@ -9052,6 +9087,7 @@ void run_unit_tests_gl2(void) {
     RUN_TEST(test_gl2_the_back_end_refuses_the_calls_it_cannot_inline);
     RUN_TEST(test_gl2_compiles_a_whole_pixel_shader);
     RUN_TEST(test_gl2_compiles_a_whole_vertex_shader);
+    RUN_TEST(test_gl2_a_vec3_fetch_sets_w_to_one);
     RUN_TEST(test_gl2_link_refuses_a_null_context);
     RUN_TEST(test_gl2_the_back_end_refuses_what_it_cannot_encode);
     RUN_TEST(test_gl2_compiled_while_loops);
